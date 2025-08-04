@@ -1,10 +1,7 @@
 cmake-build-debug
 .idea
 MODULE.bazel.lock
-bazel-bin
-bazel-model-store
-bazel-out
-bazel-testlogs
+bazel-*
 
 
 scstore/_version.py

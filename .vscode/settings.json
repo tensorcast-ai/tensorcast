@@ -1,10 +1,15 @@
 {
     "files.exclude": {
         ".venv": true,
-        "bazel-bin": true,
-        "bazel-model-store": true,
-        "bazel-testlogs": true,
-        "build": true
+        "bazel-*": true,
+        "build": true,
+        "dist": true,
+        ".mypy_cache": true,
+        ".hypothesis": true,
+        ".pytest_cache": true,
+        ".ruff_cache": true,
+        "**/__pycache__": true,
+        "scstore.egg-info": true,
     },
     "bazel.enableCodeLens": true,
     "cursor.general.disableHttp2": true,
@@ -14,11 +19,15 @@
     ],
     "files.watcherExclude": {
         ".venv": true,
-        "bazel-bin": true,
-        "bazel-model-store": true,
-        "bazel-testlogs": true,
-        "build": true
+        "bazel-*": true,
+        "build": true,
+        "dist": true,
+        ".mypy_cache": true,
+        ".hypothesis": true,
+        ".pytest_cache": true,
+        ".ruff_cache": true,
     },
     "clang-format.executable": "${workspaceFolder}/.venv/bin/clang-format",
     "clangd.path": "${workspaceFolder}/external/toolchains_llvm++llvm+llvm_toolchain/bin/clangd",
+    "python.pythonPath": ".venv/bin/python3.10",
 }

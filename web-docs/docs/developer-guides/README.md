@@ -31,14 +31,12 @@ Deep-dive into the high-performance C++ core:
 ### Checkpoint Module
 - **[Overview](core/checkpoint/README.md)** - Introduction to the checkpoint system
 - **[Architecture](core/checkpoint/architecture.md)** - Detailed architecture design
-- **[API Reference](../reference/api/checkpoint.md)** - Complete C++ API documentation
 - **[Data Format](core/checkpoint/data-format.md)** - Binary data format specification
 - **[Verification Integration](core/checkpoint/verification-integration.md)** - Model integrity verification
 
 ### Store Module
 - **[Overview](core/store/overview.md)** - Introduction to the core store system
 - **[Architecture](core/store/architecture.md)** - Detailed architecture design
-- **[API Reference](../reference/api/core-store.md)** - Core Store API reference
 - **[Performance Guide](core/store/performance.md)** - Performance optimization guide
 - **[State Management](core/store/state-management.md)** - Memory state management
 

@@ -29,12 +29,6 @@ CompileFlags:
 Index:
   Background: Build                 # 启用后台索引
   StandardLibrary: true             # 索引标准库
-  FileFilter:                       # 文件过滤器
-    - -bazel-*                      # 排除 bazel 生成的文件
-    - -external/*                   # 排除外部依赖
-    - +core/*                       # 包含核心代码
-    - +scstore/*                    # 包含 scstore 代码
-    - +tests/*                      # 包含测试代码
 
 # 诊断配置
 Diagnostics:
@@ -61,7 +55,6 @@ Diagnostics:
       - misc-unused-*                      # 未使用的代码
       - abseil-*                           # Abseil 库相关检查
       - concurrency-*                      # 并发相关检查
-      - misc-const-correctness
 
     Remove:
       # 在编辑时禁用的检查（太慢或噪音太多）

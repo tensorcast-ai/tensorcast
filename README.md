@@ -1,7 +1,8 @@
 # StepCast Store
 
 ## Introduction
-https://wvixbzgc0u7.feishu.cn/docx/PltmdnqTzooaxfxhVv8csnbInsh
+
+[Developer Guide](web-docs/docs/developer-guides/README.md)
 
 ## Prerequisites
 
@@ -9,9 +10,11 @@ https://wvixbzgc0u7.feishu.cn/docx/PltmdnqTzooaxfxhVv8csnbInsh
 ./tools/install-bazel.sh
 
 sudo apt install libtinfo5
+
+pre-commit install
 ```
 
-## Python Environment
+### Python Environment
 
 ```bash
 # Install uv
@@ -20,11 +23,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Create virtual environment
 uv venv
 
+uv sync --all-extras --all-groups --verbose
+
 # Install dependencies
-BUILD_CORE=1 BUILD_EXTENSION=1 uv sync --all-extras --all-groups
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run setup.py develop
 
 # Activate virtual environment
 source /.venv/bin/activate
+```
+
+### Development Setup
+```bash
+# Create a symlink to external packages for header files
+# Run this on the root directory of the project
+ln -s $(bazel info output_base)/external external
 ```
 
 

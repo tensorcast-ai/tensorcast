@@ -23,6 +23,17 @@ cc_library(
 )
 
 cc_library(
+    name = "device_registry",
+    srcs = ["device_registry.cc"],
+    hdrs = ["device_registry.h"],
+    deps = [
+        ":device_types",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_library(
     name = "memory_types",
     hdrs = ["memory_types.h"],
     deps = [
@@ -62,6 +73,19 @@ cc_library(
     ],
 )
 
+# Loading spec header - needed by loader targets
+cc_library(
+    name = "loading_spec",
+    hdrs = ["loading/loading_spec.h"],
+    deps = [
+        ":communication_types",
+        ":device_types",
+        "//core/store/model:memory_state",
+        "@abseil-cpp//absl/hash",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
 config_setting(
     name = "use_pre_cxx11_abi",
     values = {
@@ -78,8 +102,20 @@ config_setting(
 # Single unified store target including all components
 cc_library(
     name = "store",
-    srcs = glob(["**/*.cc"]),
-    hdrs = glob(["**/*.h"]),
+    srcs = glob(
+        ["**/*.cc"],
+        exclude = [
+            "loader/**/*.cc",
+            "model/**/*.cc",
+        ],
+    ),
+    hdrs = glob(
+        ["**/*.h"],
+        exclude = [
+            "loader/**/*.h",
+            "model/**/*.h",
+        ],
+    ),
     includes = [
         ".",
         "..",
@@ -89,6 +125,10 @@ cc_library(
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",
+        "//core/store/loader",
+        "//core/store/loader:disk_loader",
+        "//core/store/loader:file_partition_reader",
+        "//core/store/loader:p2p_loader",
         "//core/store/model",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/base:core_headers",

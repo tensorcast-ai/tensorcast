@@ -246,7 +246,6 @@ max-complexity = 10
 include = [
     "scstore/**",
     "tests/python/**",
-    "tests/interaction/**",
 ]
 
 exclude = [
