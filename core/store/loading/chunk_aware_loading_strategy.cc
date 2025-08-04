@@ -1,0 +1,459 @@
+// Copyright (c) 2025, StepCast Team. All rights reserved.
+
+#include "core/store/loading/chunk_aware_loading_strategy.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <future>
+#include <optional>
+#include <ranges>
+#include <utility>
+
+#include "absl/log/log.h"
+#include "core/common/cuda_api.h"
+#include "core/store/components/global_store_client.h"
+#include "core/store/device_registry.h"
+#include "core/store/loader/disk_loader.h"
+#include "core/store/loader/p2p_loader.h"
+#include "core/store/model/memory_manager.h"
+#include "core/store/model/unified_model_memory.h"
+
+namespace stepcast::store {
+
+ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_plan(
+    const InstanceKey& key,
+    ModelLocation target,
+    const UnifiedModelMemory& memory,
+    GlobalStoreClient& global_store) {
+  LoadPlan plan;
+  plan.target = target;
+
+  // Get chunk availability across all locations
+  auto chunk_mappings = memory.get_chunk_mappings(key);
+  std::vector<uint32_t> missing_chunks;
+
+  const size_t chunk_size = memory.get_chunk_size();
+  // Retrieve total model size (may fail if not allocated yet)
+  size_t model_size = 0;
+  if (auto size_or = memory.get_model_size(key); size_or.ok()) {
+    model_size = *size_or;
+  }
+  plan.total_chunks = chunk_mappings.size();
+  plan.total_bytes = 0;
+
+  // Determine which chunks are missing at target
+  for (size_t i = 0; i < chunk_mappings.size(); ++i) {
+    const auto& mapping = chunk_mappings[i];
+    bool available_at_target = false;
+
+    if (target == ModelLocation::GPU) {
+      // For GPU target, check if chunk is already in the target GPU
+      // TODO: Get actual device ID from context
+      int device_id = 0; // TODO: Obtain real device id from context
+      DeviceKey dev_key = DeviceRegistry::instance().gpu_key(device_id);
+      auto it = mapping.gpu_state.find(dev_key);
+      available_at_target =
+          (it != mapping.gpu_state.end() && (it->second == ChunkState::HOT || it->second == ChunkState::COPIED_GPU));
+    } else if (target == ModelLocation::PAGEABLE_CPU) {
+      // For CPU target, check if chunk is resident
+      available_at_target = (mapping.cpu_state == ChunkState::HOT || mapping.cpu_state == ChunkState::COLD);
+    }
+
+    if (!available_at_target) {
+      missing_chunks.push_back(i);
+      if (model_size > 0) {
+        plan.total_bytes += std::min(chunk_size, model_size - i * chunk_size);
+      }
+    }
+  }
+
+  // Group chunks by best available source
+  std::map<ChunkSource, std::vector<uint32_t>> source_groups;
+
+  for (uint32_t chunk_idx : missing_chunks) {
+    const auto& mapping = chunk_mappings[chunk_idx];
+    bool chunk_assigned = false;
+
+    // Priority 1: Local copy (CPU→GPU or GPU→CPU)
+    if (target == ModelLocation::GPU &&
+        (mapping.cpu_state == ChunkState::HOT || mapping.cpu_state == ChunkState::COLD)) {
+      source_groups[ChunkSource::LOCAL_CPU].push_back(chunk_idx);
+      chunk_assigned = true;
+    } else if (target == ModelLocation::PAGEABLE_CPU) {
+      // Check if chunk is available on any local GPU
+      for (const auto& [device_key, state] : mapping.gpu_state) {
+        if (state == ChunkState::HOT || state == ChunkState::COPIED_GPU) {
+          source_groups[ChunkSource::LOCAL_GPU].push_back(chunk_idx);
+          chunk_assigned = true;
+          break;
+        }
+      }
+    }
+
+    if (!chunk_assigned) {
+      // Priority 2: P2P from remote replica
+      auto remote_status = global_store.query_chunk_locations(key.model_id, {chunk_idx});
+
+      if (remote_status.ok() && !remote_status->empty()) {
+        // Convert ChunkLocationInfo → P2PSource candidates (simplified)
+        std::vector<P2PSource> candidates;
+        for (const auto& loc : *remote_status) {
+          P2PSource src;
+          src.size_bytes = 0; // Unknown at this stage
+          src.ip = loc.node_address;
+          src.port = static_cast<uint16_t>(loc.p2p_port);
+          src.location.type = ModelLocation::PAGEABLE_CPU; // Assume CPU for now
+          candidates.push_back(std::move(src));
+        }
+
+        // Select best remote based on criteria
+        auto best_remote = select_best_remote(candidates);
+        source_groups[ChunkSource::REMOTE_P2P].push_back(chunk_idx);
+        plan.remote_sources[chunk_idx] = best_remote;
+        chunk_assigned = true;
+      }
+    }
+
+    if (!chunk_assigned) {
+      // Priority 3: Load from disk
+      source_groups[ChunkSource::DISK].push_back(chunk_idx);
+    }
+  }
+
+  // Build optimized plan with batched operations
+  for (const auto& [source, chunks] : source_groups) {
+    LoadOperation op;
+    op.source = source;
+    op.chunks = (source == ChunkSource::DISK) ? optimize_chunk_order(chunks) : chunks;
+    op.target = target;
+
+    // Set source-specific information
+    if (source == ChunkSource::REMOTE_P2P && !chunks.empty()) {
+      // For P2P, we'll handle per-chunk sources during execution
+      // since different chunks might come from different remotes
+    }
+
+    plan.operations.push_back(std::move(op));
+  }
+
+  LOG(INFO) << "ChunkAwareLoadingStrategy: Created plan with " << plan.operations.size() << " operations for "
+            << missing_chunks.size() << " missing chunks";
+
+  return plan;
+}
+
+std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
+    const LoadPlan& plan,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager) {
+  return std::async(std::launch::async, [plan, &memory, mem_manager]() {
+    return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {}); // No-op progress callback
+  });
+}
+
+absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
+    const LoadPlan& plan,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager,
+    const ProgressCallback& progress_cb) {
+  if (plan.operations.empty()) {
+    return absl::OkStatus(); // Nothing to do
+  }
+
+  size_t total_chunks = 0;
+  for (const auto& op : plan.operations) {
+    total_chunks += op.chunks.size();
+  }
+
+  size_t completed_chunks = 0;
+  absl::Status overall_status = absl::OkStatus();
+
+  // Execute operations sequentially for now
+  // TODO: Execute independent operations in parallel
+  for (const auto& op : plan.operations) {
+    absl::Status op_status = ChunkAwareLoadingStrategy::execute_operation(
+        op, memory, mem_manager, [&completed_chunks, total_chunks, progress_cb](size_t op_completed, size_t) {
+          completed_chunks += op_completed;
+          progress_cb(completed_chunks, total_chunks);
+        });
+
+    if (!op_status.ok()) {
+      LOG(ERROR) << "Failed to execute operation from " << static_cast<int>(op.source) << ": " << op_status;
+      overall_status = op_status;
+      break;
+    }
+  }
+
+  // Post-loading memory management
+  if (overall_status.ok()) {
+    const auto& instance_key = mem_manager->instance_key();
+
+    // Check if this was a DRAM load
+    if (plan.target == ModelLocation::PAGEABLE_CPU) {
+      // After initial DRAM load, mark configured ratio as preemptible
+      float preemptible_ratio = 0.5F; // TODO: Make configurable
+      auto preempt_status = mem_manager->mark_cpu_preemptible(preemptible_ratio);
+      if (!preempt_status.ok()) {
+        LOG(WARNING) << "Failed to mark CPU chunks as preemptible: " << preempt_status;
+      } else {
+        VLOG(1) << "Marked " << (preemptible_ratio * 100) << "% of CPU chunks as preemptible after DRAM load";
+      }
+    } else if (plan.target == ModelLocation::GPU) {
+      // Check if GPU loading is complete
+      int device_id = mem_manager->get_local_device_id();
+      if (device_id >= 0 && memory.is_gpu_loading_complete(instance_key, device_id)) {
+        // GPU loading complete, mark all DRAM chunks as preemptible
+        auto preempt_status = mem_manager->mark_cpu_preemptible(1.0F);
+        if (!preempt_status.ok()) {
+          LOG(WARNING) << "Failed to mark all CPU chunks as preemptible: " << preempt_status;
+        } else {
+          VLOG(1) << "Marked all CPU chunks as preemptible after GPU loading completion";
+        }
+      }
+    }
+  }
+
+  return overall_status;
+}
+
+absl::Status ChunkAwareLoadingStrategy::execute_operation(
+    const LoadOperation& op,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager,
+    const ProgressCallback& progress_cb) {
+  switch (op.source) {
+    case ChunkSource::LOCAL_CPU:
+      return execute_local_cpu_copy(op.chunks, op.target, memory, mem_manager, progress_cb);
+
+    case ChunkSource::LOCAL_GPU:
+      // TODO: Implement GPU->CPU copy
+      return absl::UnimplementedError("GPU to CPU copy not yet implemented");
+
+    case ChunkSource::REMOTE_P2P:
+      return execute_p2p_transfer(op, memory, mem_manager, progress_cb);
+
+    case ChunkSource::DISK:
+      return execute_disk_load(op.chunks, op.target, memory, mem_manager, progress_cb);
+
+    default:
+      return absl::InternalError("Unknown chunk source");
+  }
+}
+
+absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
+    const std::vector<uint32_t>& chunks,
+    ModelLocation target,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager,
+    const ProgressCallback& progress_cb) {
+  if (target != ModelLocation::GPU) {
+    return absl::InvalidArgumentError("Local CPU copy only supports GPU target");
+  }
+
+  // Get DVMP for locking
+  auto* dvmp = mem_manager->get_dvmp();
+  if (!dvmp) {
+    return absl::InternalError("DVMP not available");
+  }
+
+  // Lock chunks for transfer
+  absl::Status lock_status =
+      memory.lock_chunks_for_transfer(mem_manager->instance_key(), ModelLocation::PAGEABLE_CPU, target, chunks);
+  if (!lock_status.ok()) {
+    return lock_status;
+  }
+
+  // Get pointers
+  auto cpu_ptrs = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
+  auto gpu_ptrs = mem_manager->get_pointer(ModelLocation::GPU);
+
+  if (cpu_ptrs.empty() || gpu_ptrs.empty()) {
+    return absl::InternalError("Memory pointers not available");
+  }
+
+  void* cpu_base = cpu_ptrs[0];
+  void* gpu_base = gpu_ptrs[0];
+  const size_t chunk_size = memory.get_chunk_size();
+
+  // Get total model size
+  size_t model_size = 0;
+  if (auto size_or = memory.get_model_size(mem_manager->instance_key()); size_or.ok()) {
+    model_size = *size_or;
+  } else {
+    return size_or.status();
+  }
+
+  // Create CUDA stream for async transfers
+  cudaStream_t stream;
+  auto stream_status = stepcast::cuda::stream_create(&stream);
+  if (!stream_status.ok()) {
+    return stream_status;
+  }
+
+  // Copy each chunk
+  size_t completed = 0;
+  absl::Status copy_status = absl::OkStatus();
+
+  for (uint32_t chunk_idx : chunks) {
+    size_t offset = chunk_idx * chunk_size;
+    size_t size = std::min(chunk_size, model_size - offset);
+
+    void* src = static_cast<char*>(cpu_base) + offset;
+    void* dst = static_cast<char*>(gpu_base) + offset;
+
+    auto cuda_status = stepcast::cuda::memcpy_async(dst, src, size, cudaMemcpyHostToDevice, stream);
+
+    if (!cuda_status.ok()) {
+      copy_status = cuda_status;
+      LOG(ERROR) << "Failed to copy chunk " << chunk_idx << ": " << cuda_status;
+      break;
+    }
+
+    completed++;
+    progress_cb(completed, chunks.size());
+  }
+
+  // Synchronize stream
+  if (copy_status.ok()) {
+    auto sync_status = stepcast::cuda::stream_synchronize(stream);
+    if (!sync_status.ok()) {
+      copy_status = sync_status;
+    }
+  }
+
+  // Cleanup stream
+  auto destroy_status = stepcast::cuda::stream_destroy(stream);
+  if (!destroy_status.ok() && copy_status.ok()) {
+    copy_status = destroy_status;
+  }
+
+  // Update chunk states
+  auto state = copy_status.ok() ? ChunkState::COPIED_GPU : ChunkState::HOT;
+  // Update chunk states; ignore failure unless copy_status was ok
+  auto upd_status = memory.update_chunk_states(
+      mem_manager->instance_key(), target, chunks, state, std::optional<int>(mem_manager->get_local_device_id()));
+  if (!upd_status.ok() && copy_status.ok()) {
+    copy_status = upd_status;
+  }
+
+  return copy_status;
+}
+
+absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
+    const LoadOperation& op,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager,
+    const ProgressCallback& progress_cb) {
+  // Group chunks by remote source
+  std::map<std::string, std::vector<uint32_t>> chunks_by_source;
+
+  for (uint32_t chunk_idx : op.chunks) {
+    // This is a simplified version - in reality we'd look up
+    // the specific P2P source for each chunk
+    chunks_by_source["default"].push_back(chunk_idx);
+  }
+
+  size_t completed = 0;
+  absl::Status overall_status = absl::OkStatus();
+
+  // Execute P2P transfers
+  for (const auto& [source_key, chunks] : chunks_by_source) {
+    // Create P2P loader (placeholder using DiskLoader)
+    auto loader =
+        std::make_unique<DiskLoader>(DiskSource{.path = std::filesystem::path{}, .expected_size = std::nullopt});
+
+    // Initialize loader
+    absl::Status init_status = loader->initialize();
+    if (!init_status.ok()) {
+      overall_status = init_status;
+      break;
+    }
+
+    // Load chunks
+    auto future = loader->load_chunks_async(mem_manager, op.target, chunks, 4);
+
+    absl::Status load_status = future.get();
+    if (!load_status.ok()) {
+      overall_status = load_status;
+      break;
+    }
+
+    completed += chunks.size();
+    progress_cb(completed, op.chunks.size());
+
+    if (load_status.ok()) {
+      // Update chunk states after successful P2P transfer
+      auto state = (op.target == ModelLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
+      auto upd_status = memory.update_chunk_states(
+          mem_manager->instance_key(),
+          op.target,
+          chunks,
+          state,
+          (op.target == ModelLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
+      (void)upd_status; // ignore result for now
+    }
+  }
+
+  return overall_status;
+}
+
+absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
+    const std::vector<uint32_t>& chunks,
+    ModelLocation target,
+    UnifiedModelMemory& memory,
+    const std::shared_ptr<MemoryManager>& mem_manager,
+    const ProgressCallback& progress_cb) {
+  // Create disk loader
+  // Note: We'd need the actual disk source path from MemoryManager
+  // For now, use the instance key to construct the path
+  std::filesystem::path disk_path = mem_manager->instance_key().model_id;
+  auto loader = std::make_unique<DiskLoader>(DiskSource{.path = disk_path, .expected_size = std::nullopt});
+
+  // Initialize loader
+  absl::Status init_status = loader->initialize();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+
+  // Load chunks
+  auto future = loader->load_chunks_async(mem_manager, target, chunks, 4);
+
+  absl::Status load_status = future.get();
+
+  if (load_status.ok()) {
+    // Update chunk states
+    auto state = (target == ModelLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
+    auto upd_status = memory.update_chunk_states(
+        mem_manager->instance_key(),
+        target,
+        chunks,
+        state,
+        (target == ModelLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
+    (void)upd_status; // suppress unused warning
+    progress_cb(chunks.size(), chunks.size());
+  }
+
+  return load_status;
+}
+
+P2PSource ChunkAwareLoadingStrategy::select_best_remote(const std::vector<P2PSource>& candidates) {
+  if (candidates.empty()) {
+    return P2PSource{};
+  }
+
+  // Use C++20 ranges algorithm for clarity and modern style
+  auto best_it = std::ranges::min_element(candidates, [](const P2PSource& a, const P2PSource& b) {
+    // Placeholder comparison - would use actual load metrics
+    return a.size_bytes < b.size_bytes;
+  });
+
+  return (best_it != candidates.end()) ? *best_it : P2PSource{};
+}
+
+std::vector<uint32_t> ChunkAwareLoadingStrategy::optimize_chunk_order(const std::vector<uint32_t>& chunks) {
+  std::vector<uint32_t> sorted = chunks;
+  std::ranges::sort(sorted);
+  return sorted;
+}
+
+} // namespace stepcast::store

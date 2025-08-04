@@ -1,0 +1,136 @@
+---
+# Copyright © 2023-2025 Alexandre Coderre-Chabot
+#
+# This file is hosted at:
+#     https://github.com/acodcha/clang-format-tidy
+#
+# This file is licensed under the MIT License:
+#     https://mit-license.org
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+# associated documentation files (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge, publish, distribute,
+# sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#   - The above copyright notice and this permission notice shall be included in all copies or
+#     substantial portions of the Software.
+#   - THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+#     BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#     NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+#     DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM
+#     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# This is a configuration file for use with LLVM's Clang-Tidy automatic source code linter
+#     https://clang.llvm.org/extra/clang-tidy
+#
+# To run the linter on your source code files, copy this file to the root directory of your source
+# code repository, name it ".clang-tidy", and run:
+#     clang-tidy --extra-arg=-std=c++20 /path/to/source/code/files
+#
+Checks: '
+*,
+abseil-*,
+altera-*,
+-altera-struct-pack-align,
+-android-*,
+-altera-id-dependent-backward-branch,
+-altera-unroll-loops,
+-boost-*,
+bugprone-*,
+-bugprone-easily-swappable-parameters,
+-bugprone-pointer-arithmetic-on-polymorphic-object,
+-bugprone-narrowing-conversions,
+-bugprone-implicit-widening-of-multiplication-result,
+-bugprone-use-after-move,
+-bugprone-standalone-empty,
+cert-*,
+-cert-dcl21-cpp,
+-cert-err58-cpp,
+-cert-ctr56-cpp,
+-cert-err33-c,
+clang-analyzer-*,
+-clang-diagnostic-c++20-extensions,
+concurrency-*,
+cppcoreguidelines-*,
+-cppcoreguidelines-avoid-magic-numbers,
+-cppcoreguidelines-non-private-member-variables-in-classes,
+-cppcoreguidelines-owning-memory,
+-cppcoreguidelines-no-malloc,
+-cppcoreguidelines-special-member-functions,
+-cppcoreguidelines-prefer-member-initializer,
+-cppcoreguidelines-use-default-member-init,
+-cppcoreguidelines-pro-type-cstyle-cast,
+-cppcoreguidelines-pro-type-member-init,
+-cppcoreguidelines-pro-bounds-pointer-arithmetic,
+-cppcoreguidelines-narrowing-conversions,
+-cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+-cppcoreguidelines-init-variables,
+-cppcoreguidelines-pro-type-reinterpret-cast,
+-cppcoreguidelines-avoid-non-const-global-variables,
+-cppcoreguidelines-pro-type-vararg,
+-cppcoreguidelines-avoid-c-arrays,
+-cppcoreguidelines-pro-type-vararg,
+-cppcoreguidelines-macro-usage,
+-cppcoreguidelines-avoid-do-while,
+darwin-*,
+fuchsia-*,
+-fuchsia-default-arguments-calls,
+-fuchsia-default-arguments-declarations,
+-fuchsia-multiple-inheritance,
+-fuchsia-overloaded-operator,
+-fuchsia-trailing-return,
+-fuchsia-virtual-inheritance,
+google-*,
+-google-objc-avoid-throwing-exception,
+-google-objc-function-naming,
+-google-objc-global-variable-declaration,
+-google-readability-todo,
+-google-readability-casting,
+-google-build-using-namespace,
+-hicpp-*,
+-hicpp-no-assembler,
+linuxkernel-*,
+llvm-*
+-llvm-header-guard,
+-llvm-header-guard,
+-llvm-include-order,
+llvmlibc-*,
+-llvmlibc-callee-namespace,
+-llvmlibc-implementation-in-namespace,
+-llvmlibc-inline-function-decl,
+-llvmlibc-restrict-system-libc-headers,
+misc-*,
+-misc-include-cleaner,
+-misc-non-private-member-variables-in-classes,
+-misc-use-internal-linkage,
+-misc-const-correctness,
+modernize-*,
+-modernize-use-trailing-return-type,
+-modernize-use-default-member-init,
+-modernize-avoid-c-arrays,
+-modernize-use-std-numbers,
+mpi-*,
+objc-*,
+openmp-*,
+performance-*,
+-performance-avoid-endl,
+-performance-no-int-to-ptr,
+-performance-unnecessary-value-param,
+portability-*,
+-portability-restrict-system-includes,
+readability-*,
+-readability-function-cognitive-complexity,
+-readability-identifier-length,
+-readability-magic-numbers,
+-readability-implicit-bool-conversion,
+-readability-math-missing-parentheses,
+zircon-*,
+-zircon-temporary-objects,
+'
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/core/.*\.(h|hpp|hxx|cpp|cxx)$'
+CheckOptions:
+  - key: hicpp-signed-bitwise.IgnorePositiveIntegerLiterals
+    value: 'true'
+  - key: readability-redundant-member-init.IgnoreBaseInCopyConstructors
+    value: 'true'

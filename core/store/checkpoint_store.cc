@@ -1,0 +1,1004 @@
+// Copyright (c) 2025, StepCast Team. All rights reserved.
+
+#include "checkpoint_store.h"
+
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <future>
+#include <memory>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/time/time.h"
+#include "core/common/cuda_api.h"
+#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/trace/trace_macros.h"
+#include "core/store/loading/prepare_orchestrator.h"
+#include "core/store/model/memory_state.h"
+#include "core/store/model/model_config.h"
+#include "store/loading/loading_spec.h"
+
+namespace stepcast::store {
+// Forward declaration for GPU eviction helper defined later in this file.
+absl::Status try_evict_gpu_memory_impl(
+    ModelRegistry& registry,
+    DeviceManager& device_manager,
+    MetricsCollector* metrics,
+    int device_id,
+    size_t required_bytes);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Construction and Destruction
+// ═══════════════════════════════════════════════════════════════════════════
+
+// New unified constructor based on CheckpointStoreOptions (Phase-3+)
+CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
+    : storage_path_(opts.storage_path),
+      memory_pool_size_(opts.memory_pool_size),
+      num_thread_(opts.num_thread),
+      chunk_size_(opts.chunk_size),
+      pinned_memory_timeout_(opts.pinned_memory_timeout) {
+  VLOG(1) << "Initializing CheckpointStore with unified Options constructor";
+  VLOG(1) << "Storage path: "
+          << (storage_path_.empty() ? "<empty - model_identifier will be full path>" : storage_path_.string());
+  VLOG(1) << "Memory pool size: " << memory_pool_size_ / GB << "GB";
+  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / MB << "MB";
+
+  // ───── Component initialization ─────
+  device_manager_ = std::make_unique<DeviceManager>();
+  absl::Status status = device_manager_->initialize();
+  CHECK(status.ok()) << "Failed to initialize DeviceManager: " << status.message();
+
+  model_registry_ = std::make_unique<ModelRegistry>();
+  metrics_collector_ = std::make_unique<MetricsCollector>();
+
+  // ------------------------------------------------------------
+  // Global Store client (remote coordination).  If a non-empty
+  // global_store_address is provided via CheckpointStoreOptions, attempt to
+  // connect immediately so that PrepareOrchestrator can leverage it for remote
+  // replica discovery.
+  // ------------------------------------------------------------
+  if (!opts.global_store_address.empty()) {
+    GlobalStoreClientConfig gs_cfg;
+    gs_cfg.global_store_address = opts.global_store_address;
+
+    global_store_client_ = std::make_unique<GlobalStoreClient>(gs_cfg);
+    absl::Status st = global_store_client_->initialize();
+    if (!st.ok()) {
+      LOG(WARNING) << "CheckpointStore: GlobalStoreClient init failed: " << st;
+    } else {
+      LOG(INFO) << "CheckpointStore: connected to Global Store at " << gs_cfg.global_store_address;
+    }
+  }
+
+  memory_pool_ = std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_);
+
+  // CommunicationManager handling
+  if (opts.comm_manager) {
+    // Use externally supplied manager (already initialised by caller)
+    comm_manager_ = opts.comm_manager;
+  } else {
+    LOG(INFO) << "CommunicateEngine is not provided, will disable P2P loading/registration";
+  }
+
+  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+}
+
+CheckpointStore::~CheckpointStore() {
+  LOG(INFO) << "Shutting down CheckpointStore";
+  clear_mem();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Status Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+size_t CheckpointStore::get_available_memory() const {
+  return memory_pool_ ? memory_pool_->get_available_size() : 0;
+}
+
+void CheckpointStore::update_memory_pool_metrics() {
+  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+}
+
+std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() const {
+  std::vector<ModelInfo> result;
+
+  // Use LRU list to retrieve all known InstanceKeys. This covers every entry
+  // in the registry without exposing internal storage.
+  const auto instance_keys = model_registry_->get_lru_instances();
+
+  for (const auto& key : instance_keys) {
+    auto model_res = model_registry_->find(key);
+    if (!model_res.ok()) {
+      continue; // Instance may have been removed concurrently.
+    }
+
+    const auto& model = model_res.value();
+
+    ModelInfo info;
+    info.model_id = key.model_id;
+
+    auto size_result = model->get_model_size();
+    info.size_bytes = size_result.ok() ? size_result.value() : 0;
+
+    auto cpu_state = model->get_memory_state(ModelLocation::PAGEABLE_CPU);
+    auto gpu_state = model->get_memory_state(ModelLocation::GPU);
+
+    auto is_present = [](MemoryState st) {
+      return st == MemoryState::ALLOCATED || st == MemoryState::LOADING || st == MemoryState::LOADED;
+    };
+
+    info.cpu_state = is_present(cpu_state) ? ModelLocation::PAGEABLE_CPU : ModelLocation::NONE;
+    info.gpu_state = is_present(gpu_state) ? ModelLocation::GPU : ModelLocation::NONE;
+
+    info.gpu_device_id = -1;
+    info.gpu_device_uuid.clear();
+
+    if (key.device.type == DeviceType::GPU && is_present(gpu_state)) {
+      info.gpu_device_id = key.device.ordinal;
+      if (!key.device.uuid.empty()) {
+        info.gpu_device_uuid = key.device.uuid;
+      } else {
+        // Fallback: query via CUDA API if uuid not stored.
+        const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+        if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+          cudaPointerAttributes attrs;
+          auto attr_status = stepcast::cuda::pointer_get_attributes_full(gpu_ptrs[0], &attrs);
+          if (attr_status.ok() && attrs.type == cudaMemoryTypeDevice) {
+            auto gpu_info_result = device_manager_->get_gpu_info(attrs.device);
+            if (gpu_info_result.ok()) {
+              info.gpu_device_uuid = (*gpu_info_result)->uuid;
+            }
+          }
+        }
+      }
+    }
+
+    info.is_registered_for_comm = comm_manager_ && comm_manager_->is_enabled() &&
+        (cpu_state == MemoryState::LOADED || gpu_state == MemoryState::LOADED);
+
+    // Precise access / load timestamps are not tracked at this layer after the
+    // registry refactor.  We set them to the current time as a placeholder.
+    auto now = std::chrono::system_clock::now();
+    info.last_access_time = now;
+    info.load_time = now;
+
+    result.push_back(info);
+  }
+
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Internal Implementation - 使用新的统一类型
+// ═══════════════════════════════════════════════════════════════════════════
+
+absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
+    const std::string& model_identifier,
+    const DiskSource& source,
+    const ModelTarget& target,
+    const LoadingHints& hints) {
+  const auto start_time = std::chrono::steady_clock::now();
+  const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
+  SC_TRACE_INIT_GUARD(request_id, model_identifier, "load_from_disk_internal");
+
+  // 转换 Location 到旧的 ModelLocation
+  ModelLocation target_location = ModelLocation::PAGEABLE_CPU;
+  if (target.location.type == ModelLocation::GPU) {
+    target_location = ModelLocation::GPU;
+  }
+
+  // Resolve device ID if GPU target
+  int target_device_id = target.location.device_id;
+  if (target_location == ModelLocation::GPU && !target.location.device_uuid.empty()) {
+    auto device_result = device_manager_->find_device_by_uuid(target.location.device_uuid);
+    if (!device_result.ok()) {
+      return device_result.status();
+    }
+    target_device_id = device_result.value();
+  }
+
+  // If CheckpointStore was initialised with a non-empty storage_path_ and the
+  // incoming DiskSource path is *not* absolute, we interpret it as a
+  // sub-directory under the configured storage root (the behaviour expected by
+  // unit-tests).  This mirrors the semantics of the legacy Python
+  // implementation and avoids surprises when the current working directory is
+  // different from storage_path_.
+  DiskSource resolved_source = source;
+  if (!storage_path_.empty() && !source.path.is_absolute()) {
+    resolved_source.path = storage_path_ / source.path;
+  }
+
+  // Get or create model
+  ModelConfig config;
+  config.source = resolved_source;
+  config.model_identifier = model_identifier;
+  config.pinned_memory_pool = memory_pool_;
+  config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
+  config.max_buffer_bytes = hints.max_buffer_bytes;
+  config.auto_release_cpu_after_gpu_copy = target.auto_release_cpu_after_gpu_copy;
+  if (target_location == ModelLocation::GPU) {
+    config.local_device_id = target_device_id;
+  }
+  config.device_type = (target_location == ModelLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
+
+  auto model = get_or_create_model(model_identifier, config);
+  if (!model) {
+    return absl::InternalError("Failed to create model");
+  }
+
+  // Start async loading
+  std::optional<int> opt_dev;
+  if (target_location == ModelLocation::GPU) {
+    opt_dev = target_device_id;
+  }
+
+  auto load_future = model->ensure_loaded_async(target_location, num_thread_, opt_dev);
+
+  // Wait for allocation
+  const auto allocation_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
+  // Treat a timeout of 0 (the default used by many tests) as "wait indefinitely" rather than
+  // returning immediately.  Mapping to `absl::InfiniteDuration()` avoids spurious
+  // `DEADLINE_EXCEEDED` errors during unit-tests that intentionally rely on the default.
+  absl::Duration wait_duration =
+      (allocation_timeout.count() > 0) ? absl::Milliseconds(allocation_timeout.count()) : absl::InfiniteDuration();
+
+  auto wait_status = model->get_memory_manager().wait_for_state(target_location, MemoryState::LOADED, wait_duration);
+
+  // ------------------------------------------------------------------
+  // NEW (Phase 3.2-3): On GPU allocation failure attempt eviction + retry
+  // ------------------------------------------------------------------
+  if (!wait_status.ok() && target_location == ModelLocation::GPU) {
+    // Approximate bytes we need = model size (may be 0 if unknown)
+    size_t required_bytes = 0;
+    if (auto sz_or = model->get_model_size(); sz_or.ok()) {
+      required_bytes = *sz_or;
+    }
+
+    LOG(WARNING) << "load_from_disk_internal(): initial GPU allocation failed (" << wait_status
+                 << "). Attempting GPU eviction on device " << target_device_id << " for ~" << required_bytes
+                 << " bytes.";
+
+    auto evict_st = try_evict_gpu_memory_impl(
+        *model_registry_, *device_manager_, metrics_collector_.get(), target_device_id, required_bytes);
+
+    if (evict_st.ok()) {
+      // Reset model GPU memory state then retry loading.
+      (void)model->release_memory(ModelLocation::GPU, /*safe_release=*/true);
+
+      // Trigger load again.
+      load_future = model->ensure_loaded_async(target_location, num_thread_, opt_dev);
+
+      wait_status = model->get_memory_manager().wait_for_state(target_location, MemoryState::LOADED, wait_duration);
+
+      if (!wait_status.ok()) {
+        LOG(WARNING) << "load_from_disk_internal(): Retry after eviction still failed: " << wait_status;
+      }
+    } else {
+      LOG(WARNING) << "load_from_disk_internal(): GPU eviction did not free enough memory: " << evict_st;
+    }
+  }
+
+  if (!wait_status.ok()) {
+    return wait_status;
+  }
+
+  // Build result using new ModelHandle structure
+  ModelHandle handle;
+
+  // Compose InstanceKey
+  DeviceKey dev_key;
+  if (target_location == ModelLocation::GPU) {
+    dev_key = DeviceKey{DeviceType::GPU, target_device_id, ""};
+  } else {
+    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+  }
+  handle.instance_key = InstanceKey{model_identifier, dev_key, /*replica=*/0};
+
+  // Loading future and states
+  handle.ready_future = load_future;
+  handle.cpu_state = model->get_memory_state(ModelLocation::PAGEABLE_CPU);
+  handle.gpu_state = model->get_memory_state(ModelLocation::GPU);
+
+  if (target_location == ModelLocation::GPU) {
+    const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+    handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+
+    // Attempt to obtain CUDA IPC handle bytes for the allocated GPU buffer.
+    auto ipc_or = model->get_memory_manager().get_cuda_ipc_handle();
+    if (ipc_or.ok()) {
+      std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+    }
+  }
+
+  // Update metrics
+  const auto duration = std::chrono::steady_clock::now() - start_time;
+  metrics_collector_->record_operation("load_from_disk", std::chrono::duration<double>(duration).count());
+  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+
+  return handle;
+}
+
+absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
+    const std::string& model_identifier,
+    const P2PSource& source,
+    const ModelTarget& target,
+    const LoadingHints& hints) {
+  const auto start_time = std::chrono::steady_clock::now();
+  const std::string request_id = absl::StrCat("p2p_", absl::ToUnixNanos(absl::Now()));
+  SC_TRACE_INIT_GUARD(request_id, model_identifier, "load_from_p2p_internal");
+
+  if (!comm_manager_ || !comm_manager_->is_enabled()) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
+
+  ModelLocation target_location = ModelLocation::PAGEABLE_CPU;
+  if (target.location.type == ModelLocation::GPU) {
+    target_location = ModelLocation::GPU;
+  }
+
+  // Create model with P2P source
+  ModelConfig config;
+  auto p2p_source = source;
+  p2p_source.comm_engine = comm_manager_->get_shared_engine();
+  config.source = p2p_source;
+  config.model_identifier = model_identifier;
+  config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
+  config.pinned_memory_pool = memory_pool_;
+  config.local_device_id = target.location.device_id;
+  config.max_buffer_bytes = hints.max_buffer_bytes;
+  config.auto_release_cpu_after_gpu_copy = target.auto_release_cpu_after_gpu_copy;
+  config.p2p_comm_enabled = true;
+  config.device_type = (target_location == ModelLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
+
+  auto model = get_or_create_model(model_identifier, config);
+  if (!model) {
+    return absl::InternalError("Failed to create model");
+  }
+
+  // Load synchronously for remote (maintain existing behavior)
+  auto load_future =
+      model->ensure_loaded_async(target_location, num_thread_, std::optional<int>(target.location.device_id));
+  auto status = load_future.get();
+
+  if (!status.ok()) {
+    if (absl::IsResourceExhausted(status)) {
+      // Try to evict memory
+      LOG(WARNING) << "Resource exhausted, attempting memory eviction";
+      auto evict_status = try_evict_memory_for_model(source.size_bytes);
+      if (evict_status.ok()) {
+        // Retry
+        load_future =
+            model->ensure_loaded_async(target_location, num_thread_, std::optional<int>(target.location.device_id));
+        status = load_future.get();
+      }
+    }
+
+    if (!status.ok()) {
+      metrics_collector_->record_p2p_transfer(0, false);
+      return status;
+    }
+  }
+
+  // Build result using new ModelHandle structure
+  ModelHandle handle;
+
+  DeviceKey dev_key;
+  if (target_location == ModelLocation::GPU) {
+    dev_key = DeviceKey{DeviceType::GPU, target.location.device_id, ""};
+  } else {
+    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+  }
+  handle.instance_key = InstanceKey{model_identifier, dev_key, /*replica=*/0};
+
+  // Ready future is already resolved (synchronous path)
+  std::promise<absl::Status> promise;
+  promise.set_value(absl::OkStatus());
+  handle.ready_future = promise.get_future().share();
+
+  handle.cpu_state = model->get_memory_state(ModelLocation::PAGEABLE_CPU);
+  handle.gpu_state = model->get_memory_state(ModelLocation::GPU);
+
+  if (target_location == ModelLocation::GPU) {
+    const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+    handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+
+    auto ipc_or = model->get_memory_manager().get_cuda_ipc_handle();
+    if (ipc_or.ok()) {
+      std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+    }
+  }
+
+  // Update metrics
+  metrics_collector_->record_p2p_transfer(source.size_bytes, true);
+  const auto duration = std::chrono::steady_clock::now() - start_time;
+  metrics_collector_->record_operation("load_from_p2p", std::chrono::duration<double>(duration).count());
+  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+
+  return handle;
+}
+
+absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
+    const std::string& model_identifier,
+    const InlineBufferSource& source,
+    const ModelTarget& target,
+    const LoadingHints& hints) {
+  // InlineBufferSource 是新增的类型，暂时返回未实现错误
+  // 未来可以实现直接从内存缓冲区加载模型的功能
+  return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
+}
+
+std::shared_ptr<Model> CheckpointStore::get_or_create_model(
+    const std::string& model_identifier,
+    const ModelConfig& config) {
+  // Build InstanceKey for the requested device (CPU when local_device_id < 0)
+  DeviceKey dev_key;
+  if (config.device_type == DeviceType::GPU) {
+    dev_key = DeviceKey{DeviceType::GPU, (config.local_device_id >= 0 ? config.local_device_id : 0), ""};
+  } else {
+    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+  }
+  InstanceKey inst_key{model_identifier, dev_key, /*replica=*/0};
+
+  // Fast-path: already present in registry
+  if (auto existing_or = model_registry_->find(inst_key); existing_or.ok()) {
+    return existing_or.value();
+  }
+
+  // Create new model instance
+  auto model_status = Model::create(config);
+  if (!model_status.ok()) {
+    LOG(ERROR) << "Failed to create model: " << model_status.status().message();
+    return nullptr;
+  }
+  auto model = std::shared_ptr<Model>(std::move(model_status.value()));
+
+  // Register in multi-device registry (best effort)
+  absl::Status emplace_status = model_registry_->emplace(inst_key, model);
+
+  if (absl::IsAlreadyExists(emplace_status)) {
+    // Another thread inserted the instance concurrently. Reuse the existing
+    // entry to avoid duplicate model objects and double-loading.
+    if (auto existing_or = model_registry_->find(inst_key); existing_or.ok()) {
+      return existing_or.value();
+    }
+    // Fall through on error – treat as internal failure.
+  } else if (!emplace_status.ok()) {
+    // Unexpected error while registering – propagate as failure.
+    LOG(ERROR) << "Failed to register model: " << emplace_status.message();
+    return nullptr;
+  }
+
+  return model;
+}
+
+absl::Status CheckpointStore::try_evict_memory_for_model(size_t required_size) {
+  // Prefer the new multi-device LRU ordering.
+  auto lru_instances = model_registry_->get_lru_instances();
+
+  for (const auto& inst_key : lru_instances) {
+    auto model_result = model_registry_->find(inst_key);
+    if (!model_result.ok()) {
+      continue;
+    }
+
+    auto model = model_result.value();
+
+    // Only attempt to free CPU memory for now – GPU eviction will be handled
+    // in a future iteration.
+    auto free_status = model->release_memory(ModelLocation::PAGEABLE_CPU, /*safe_release=*/true);
+    if (free_status.ok()) {
+      metrics_collector_->record_memory_eviction();
+      LOG(INFO) << "Evicted model " << inst_key.model_id
+                << " (device=" << (inst_key.device.type == DeviceType::CPU ? "CPU" : "GPU") << ":"
+                << inst_key.device.ordinal << ") from CPU memory";
+
+      // Check if we have freed enough memory.
+      if (memory_pool_->get_available_size() >= required_size) {
+        return absl::OkStatus();
+      }
+    }
+  }
+
+  // No further legacy fallbacks – the new multi-device registry covers all
+  // cases.  If eviction above fails to free enough memory, report resource
+  // exhaustion.
+
+  return absl::ResourceExhaustedError("Could not free enough memory");
+}
+
+size_t CheckpointStore::get_num_chunk_from_tensor_size(size_t tensor_size) const {
+  return (tensor_size + chunk_size_ - 1) / chunk_size_;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-Device Binding – Public API Implementation (Phase-1 bridge)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ------------ ModelHandle helpers -------------------------
+
+MemoryState ModelHandle::state(DeviceType type) const {
+  return type == DeviceType::CPU ? cpu_state : gpu_state;
+}
+
+absl::Status ModelHandle::wait_ready(std::chrono::milliseconds timeout) {
+  if (!ready_future.valid()) {
+    // Nothing to wait for – treat as OK.
+    return absl::OkStatus();
+  }
+  const auto status = ready_future.wait_for(timeout);
+  if (status == std::future_status::timeout) {
+    return absl::DeadlineExceededError("Timeout while waiting for model to become ready");
+  }
+  // Future is ready – propagate underlying status value.
+  return ready_future.get();
+}
+
+// ---------------------------------------------------------------------------
+// Bridge implementation of prepare() that internally maps to the legacy load()
+// interface.  The new implementation first checks if a model instance already
+// exists on the requested device.  If not, it tries COPY_ONLY (GPU peer copy),
+// LOAD_ONLY (disk), or AUTO (orchestrator → disk) according to the requested
+// mode.  All duplicate fallback branches and GPU-eviction heuristics have been
+// removed to keep the codebase lean – PrepareOrchestrator now owns almost all
+// decision complexity.
+// ---------------------------------------------------------------------------
+absl::StatusOr<ModelHandle> CheckpointStore::prepare(
+    std::string_view model_id,
+    const DeviceKey& target_device,
+    PrepareMode mode,
+    const LoadingHints& hints) {
+  // ────────────────────────────────────────────────────────────────────
+  // Fast-path: instance already present on the requested device.
+  // ────────────────────────────────────────────────────────────────────
+  const InstanceKey dst_key{std::string(model_id), target_device, /*replica=*/0};
+  if (auto existing_or = model_registry_->find(dst_key); existing_or.ok()) {
+    auto model = existing_or.value();
+
+    ModelLocation dst_loc = (target_device.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
+    std::optional<int> opt_dev;
+    if (dst_loc == ModelLocation::GPU) {
+      opt_dev = target_device.ordinal;
+    }
+
+    auto fut = model->ensure_loaded_async(dst_loc, num_thread_, opt_dev);
+
+    ModelHandle handle;
+    handle.instance_key = dst_key;
+    handle.ready_future = fut;
+    handle.cpu_state = model->get_memory_state(ModelLocation::PAGEABLE_CPU);
+    handle.gpu_state = model->get_memory_state(ModelLocation::GPU);
+
+    if (dst_loc == ModelLocation::GPU) {
+      const auto gpu_ptrs = model->get_data_pointer(ModelLocation::GPU);
+      handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+
+      auto ipc_or = model->get_memory_manager().get_cuda_ipc_handle();
+      if (ipc_or.ok()) {
+        std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+      }
+    }
+    return handle;
+  }
+
+  // Helper lambda: minimal disk-loading path.
+  auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<ModelHandle> {
+    DiskSource disk_src;
+    disk_src.path = std::filesystem::path(std::string(model_id));
+
+    ModelTarget target;
+    target.location.type = (dev_key.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
+    target.location.device_id = dev_key.ordinal;
+    target.auto_release_cpu_after_gpu_copy = true;
+
+    return load_from_disk_internal(std::string(model_id), disk_src, target, hints);
+  };
+
+  // ────────────────────────────────────────────────────────────────────
+  // Mode-specific handling
+  // ────────────────────────────────────────────────────────────────────
+  switch (mode) {
+    case PrepareMode::COPY_ONLY: {
+      // COPY_ONLY is only meaningful for GPU targets – perform a local GPU→GPU copy.
+      if (target_device.type != DeviceType::GPU) {
+        return absl::InvalidArgumentError("COPY_ONLY mode requires a GPU target device");
+      }
+
+      const auto candidates = model_registry_->find_by_model(model_id);
+      for (const auto& cand_key : candidates) {
+        if (cand_key.device.type != DeviceType::GPU) {
+          continue;
+        }
+
+        auto src_or = model_registry_->find(cand_key);
+        if (!src_or.ok()) {
+          continue;
+        }
+        auto src_model = src_or.value();
+        if (src_model->get_memory_state(ModelLocation::GPU) != MemoryState::LOADED) {
+          continue;
+        }
+
+        // Create destination model configuration.
+        ModelConfig cfg;
+        cfg.model_identifier = std::string(model_id);
+        cfg.device_type = DeviceType::GPU;
+        cfg.local_device_id = target_device.ordinal;
+        cfg.source = DiskSource{}; // Placeholder – actual data comes from copy.
+        cfg.pinned_memory_pool = memory_pool_;
+        cfg.pinned_memory_timeout = pinned_memory_timeout_;
+
+        auto dst_or = Model::create(cfg);
+        if (!dst_or.ok()) {
+          return dst_or.status();
+        }
+        auto dst_model = std::shared_ptr<Model>(std::move(dst_or.value()));
+        (void)model_registry_->emplace(dst_key, dst_model);
+
+        absl::Status copy_st = dst_model->copy_from(*src_model);
+
+        std::promise<absl::Status> p;
+        p.set_value(copy_st);
+
+        ModelHandle handle;
+        handle.instance_key = dst_key;
+        handle.ready_future = p.get_future().share();
+        handle.cpu_state = dst_model->get_memory_state(ModelLocation::PAGEABLE_CPU);
+        handle.gpu_state = dst_model->get_memory_state(ModelLocation::GPU);
+        if (handle.gpu_state == MemoryState::LOADED) {
+          const auto gpu_ptrs = dst_model->get_data_pointer(ModelLocation::GPU);
+          handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+
+          auto ipc_or = dst_model->get_memory_manager().get_cuda_ipc_handle();
+          if (ipc_or.ok()) {
+            std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+          }
+        }
+        return handle;
+      }
+      return absl::FailedPreconditionError("No suitable source instance for COPY_ONLY mode");
+    }
+
+    case PrepareMode::LOAD_ONLY: {
+      return load_from_disk(target_device);
+    }
+
+    case PrepareMode::AUTO: {
+      if (global_store_client_ && global_store_client_->is_connected()) {
+        PrepareOrchestrator orchestrator(
+            this, global_store_client_.get(), model_registry_.get(), device_manager_.get());
+        auto orchestrated_or = orchestrator.run(model_id, target_device, hints);
+        if (orchestrated_or.ok()) {
+          return *orchestrated_or;
+        }
+        LOG(WARNING) << "PrepareOrchestrator failed: " << orchestrated_or.status() << "; falling back to disk load";
+      }
+      // Fallback: disk load.
+      return load_from_disk(target_device);
+    }
+  }
+
+  // Should be unreachable.
+  return absl::InternalError("Invalid PrepareMode");
+}
+
+// ---------------------------------------------------------------------------
+// Query helpers
+// ---------------------------------------------------------------------------
+std::vector<DeviceKey> CheckpointStore::get_loaded_devices(std::string_view model_id) const {
+  // Implementation: leverage the modern multi-device registry exclusively. Models loaded via
+  // ModelRegistry::emplace are visible to this helper; no backward-compatibility fallbacks remain.
+  absl::flat_hash_set<DeviceKey, DeviceKeyHash> unique_devices;
+  std::vector<DeviceKey> devices;
+
+  // ──────────────────────────────────────────────────────────────────
+  // 1. Multi-device path – gather all instances whose model_id matches
+  // ──────────────────────────────────────────────────────────────────
+  const auto instance_keys = model_registry_->find_by_model(model_id);
+  for (const auto& key : instance_keys) {
+    auto model_res = model_registry_->find(key);
+    if (!model_res.ok()) {
+      continue;
+    }
+    const auto& model = model_res.value();
+
+    auto is_present = [](MemoryState st) {
+      return st == MemoryState::ALLOCATED || st == MemoryState::LOADING || st == MemoryState::LOADED;
+    };
+
+    if (key.device.type == DeviceType::CPU) {
+      if (is_present(model->get_memory_state(ModelLocation::PAGEABLE_CPU))) {
+        unique_devices.insert(DeviceKey{DeviceType::CPU, -1, ""});
+      }
+    } else if (key.device.type == DeviceType::GPU) {
+      if (is_present(model->get_memory_state(ModelLocation::GPU))) {
+        unique_devices.insert(DeviceKey{DeviceType::GPU, key.device.ordinal, key.device.uuid});
+      }
+    }
+  }
+
+  // Legacy fallback removed – we no longer support the deprecated single-map
+  // registry.  All look-ups are served exclusively through the multi-device
+  // registry interfaces above.
+
+  // Convert set → vector for return value.
+  devices.assign(unique_devices.begin(), unique_devices.end());
+  return devices;
+}
+
+std::vector<InstanceKey> CheckpointStore::list_device_models(const DeviceKey& device) const {
+  // Implementation that relies solely on the new multi-index registry (InstanceKey-based). No
+  // legacy fallback remains.
+  std::vector<InstanceKey> list;
+
+  // ------------------------------------------------------------------
+  // 1. Multi-device registry path
+  // ------------------------------------------------------------------
+  const auto inst_keys = model_registry_->find_by_device(device);
+  for (const auto& key : inst_keys) {
+    auto model_res = model_registry_->find(key);
+    if (!model_res.ok()) {
+      continue;
+    }
+    const auto& model = model_res.value();
+
+    auto is_present = [](MemoryState st) {
+      return st == MemoryState::ALLOCATED || st == MemoryState::LOADING || st == MemoryState::LOADED;
+    };
+
+    if (device.type == DeviceType::CPU) {
+      if (is_present(model->get_memory_state(ModelLocation::PAGEABLE_CPU))) {
+        list.push_back(key);
+      }
+    } else if (device.type == DeviceType::GPU) {
+      if (is_present(model->get_memory_state(ModelLocation::GPU))) {
+        list.push_back(key);
+      }
+    }
+  }
+
+  // Legacy fallback path removed – only multi-device registry results are
+  // returned.  If no instances match, the list will be empty.
+
+  return list;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Device Binding – GPU-aware memory eviction (NEW in Phase 3.2)
+// ---------------------------------------------------------------------------
+
+// NOTE: This helper is intentionally kept internal to this translation unit;
+// once the call-sites migrate we can promote it to the public header.
+absl::Status try_evict_gpu_memory_impl(
+    ModelRegistry& registry,
+    DeviceManager& device_manager,
+    MetricsCollector* metrics,
+    int device_id,
+    size_t required_bytes) {
+  using ::stepcast::DeviceType;
+  using stepcast::store::MemoryState;
+  using stepcast::store::ModelLocation;
+
+  // Query initial free memory so we can track progress.
+  auto free_before_or = device_manager.get_free_memory(device_id);
+  if (!free_before_or.ok()) {
+    return free_before_or.status();
+  }
+  size_t free_before = free_before_or.value();
+
+  // Helper to check whether we have reclaimed enough GPU memory.
+  auto has_freed_enough = [&](size_t free_now) { return (free_now - free_before) >= required_bytes; };
+
+  // Iterate LRU instances – GPU only.
+  auto lru_instances = registry.get_lru_instances();
+  for (const auto& key : lru_instances) {
+    if (key.device.type != DeviceType::GPU || key.device.ordinal != device_id) {
+      continue; // Different device or CPU instance.
+    }
+
+    auto model_res = registry.find(key);
+    if (!model_res.ok()) {
+      continue;
+    }
+    auto model = model_res.value();
+
+    if (model->get_memory_state(ModelLocation::GPU) != MemoryState::LOADED) {
+      continue; // Nothing to free.
+    }
+
+    // Attempt to release GPU memory (safe mode to avoid mid-transfer memory).
+    auto st = model->release_memory(ModelLocation::GPU, /*safe_release=*/true);
+    if (!st.ok()) {
+      continue; // Couldn't free – maybe busy.
+    }
+
+    if (metrics) {
+      metrics->record_memory_eviction();
+    }
+
+    // Update free memory reading.
+    auto free_now_or = device_manager.get_free_memory(device_id);
+    if (!free_now_or.ok()) {
+      // Non-fatal – continue trying.
+      continue;
+    }
+    size_t free_now = free_now_or.value();
+
+    if (has_freed_enough(free_now)) {
+      return absl::OkStatus();
+    }
+  }
+
+  return absl::ResourceExhaustedError("Could not free enough GPU memory for device " + std::to_string(device_id));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// New InstanceKey-centric API wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+
+int CheckpointStore::wait_instance_ready(const InstanceKey& key) {
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return 1; // Not found
+  }
+  auto model = model_res.value();
+  ModelLocation loc = (key.device.type == DeviceType::CPU) ? ModelLocation::PAGEABLE_CPU : ModelLocation::GPU;
+  absl::Status st = model->wait_until_loaded(loc, absl::InfiniteDuration());
+  return st.ok() ? 0 : 1;
+}
+
+int CheckpointStore::unload_instance(const InstanceKey& key) {
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return 1; // Instance not found.
+  }
+
+  auto model = model_res.value();
+  ModelLocation loc = (key.device.type == DeviceType::CPU) ? ModelLocation::PAGEABLE_CPU : ModelLocation::GPU;
+
+  // Inspect current state *before* attempting the release so we can tell if
+  // there was anything to unload.  This avoids treating a no-op release as a
+  // success – a scenario that would allow multiple threads to report success
+  // when only the first one actually freed memory.
+  stepcast::store::MemoryState before_state = model->get_memory_state(loc);
+
+  if (before_state <= MemoryState::UNALLOCATED) {
+    // Nothing to release – another thread has already unloaded this instance.
+    return -1;
+  }
+
+  absl::Status st = model->release_memory(loc);
+  return st.ok() ? 0 : -1;
+}
+
+MemoryState CheckpointStore::get_instance_state(const InstanceKey& key, DeviceType memory_type) const {
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return MemoryState::UNINITIALIZED;
+  }
+  ModelLocation loc = (memory_type == DeviceType::CPU) ? ModelLocation::PAGEABLE_CPU : ModelLocation::GPU;
+  return model_res.value()->get_memory_state(loc);
+}
+
+absl::StatusOr<uint64_t> CheckpointStore::get_instance_gpu_ptr(const InstanceKey& key) {
+  if (key.device.type != DeviceType::GPU) {
+    return absl::InvalidArgumentError("InstanceKey does not reference a GPU device");
+  }
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError("Model instance not found");
+  }
+  const auto ptrs = model_res.value()->get_memory_manager().get_pointer(ModelLocation::GPU);
+  if (ptrs.empty() || ptrs[0] == nullptr) {
+    return absl::FailedPreconditionError("GPU memory not available");
+  }
+  return reinterpret_cast<uint64_t>(ptrs[0]);
+}
+
+absl::StatusOr<CommRegistrationInfo> CheckpointStore::enable_remote_instance_access(
+    const InstanceKey& key,
+    ModelLocation location) {
+  if (!comm_manager_ || !comm_manager_->is_enabled()) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError("Model instance not found");
+  }
+  return model_res.value()->enable_remote_memory_access(location, comm_manager_->get_engine());
+}
+
+absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& key, ModelLocation location) {
+  if (!comm_manager_ || !comm_manager_->is_enabled()) {
+    return absl::FailedPreconditionError("Communication not enabled");
+  }
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError("Model instance not found");
+  }
+  return model_res.value()->disable_remote_memory_access(location, comm_manager_->get_engine());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Memory cleanup
+// ═══════════════════════════════════════════════════════════════════════════
+
+int CheckpointStore::clear_mem() {
+  auto models = model_registry_->clear_all();
+  int fail_count = 0;
+
+  for (const auto& [inst_key, model] : models) {
+    auto cpu_status = model->release_memory(ModelLocation::PAGEABLE_CPU);
+    if (!cpu_status.ok()) {
+      LOG(WARNING) << "Failed to release CPU memory: " << cpu_status.message();
+      fail_count++;
+    }
+
+    auto gpu_status = model->release_memory(ModelLocation::GPU);
+    if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
+      LOG(WARNING) << "Failed to release GPU memory: " << gpu_status.message();
+      fail_count++;
+    }
+  }
+
+  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+
+  return fail_count > 0 ? -1 : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Distributed Memory Pool (DVMP) chunk locking API
+// ═══════════════════════════════════════════════════════════════════════════
+
+absl::Status CheckpointStore::lock_chunks(const InstanceKey& instance_key, absl::Span<const uint32_t> chunk_indices) {
+  SC_TRACE_SCOPE("CheckpointStore::lock_chunks");
+
+  // Locate the exact model instance based on InstanceKey (device-specific).
+  auto model_res = model_registry_->find(instance_key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError(
+        absl::StrCat("Model instance not found: ", instance_key.model_id, " @ ", instance_key.device.to_string()));
+  }
+
+  const auto& model = model_res.value();
+
+  // Get the DVMP instance via MemoryManager.
+  auto* dvmp = model->get_memory_manager().get_dvmp();
+  if (!dvmp) {
+    return absl::InternalError(absl::StrCat("DVMP not available for model instance: ", instance_key.model_id));
+  }
+
+  // Forward the call to DVMP – DVMP is still keyed by model_id (shared CPU VA).
+  return dvmp->lock_chunks(instance_key.model_id, chunk_indices);
+}
+
+absl::Status CheckpointStore::unlock_chunks(
+    const InstanceKey& instance_key,
+    absl::Span<const uint32_t> chunk_indices,
+    bool copied_gpu) {
+  SC_TRACE_SCOPE("CheckpointStore::unlock_chunks");
+
+  // Locate the exact model instance.
+  auto model_res = model_registry_->find(instance_key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError(
+        absl::StrCat("Model instance not found: ", instance_key.model_id, " @ ", instance_key.device.to_string()));
+  }
+
+  const auto& model = model_res.value();
+
+  // Get the DVMP instance via MemoryManager.
+  auto* dvmp = model->get_memory_manager().get_dvmp();
+  if (!dvmp) {
+    return absl::InternalError(absl::StrCat("DVMP not available for model instance: ", instance_key.model_id));
+  }
+
+  // Forward the call to DVMP.
+  return dvmp->unlock_chunks(instance_key.model_id, chunk_indices, copied_gpu);
+}
+
+} // namespace stepcast::store

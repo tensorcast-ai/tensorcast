@@ -1,0 +1,57 @@
+---
+description: Technical design guidelines
+alwaysApply: false
+---
+# Technical Design Document Guidelines
+
+## Document Naming & Location
+- **Path**: `web-docs/docs/developer-guides/ai-solutions/`
+- **Format**: `YYMMDD-feature-name.md` (e.g., `250708-p2p-optimization.md`)
+
+## Document Structure
+
+### 1. Title
+```markdown
+# YYMMDD-Feature Technical Design
+```
+
+### 2. Overview
+- Problem statement
+- Goals and success criteria
+- High-level solution summary
+
+### 3. Current Architecture Analysis
+- Existing components and pain points
+- Performance bottlenecks
+- Files and modules affected
+
+### 4. Proposed Solution
+- Core architectural changes
+- Implementation approach
+- Trade-offs and alternatives considered
+
+### 5. Implementation Plan
+- Phased approach with milestones
+- File modification table
+- API changes (internal vs external)
+
+### 6. Progress Tracking
+```markdown
+| Phase | Task | Status | Notes |
+|-------|------|--------|-------|
+| 1 | Core refactor | ✅ Done | PR #123 |
+| 2 | API migration | 🚧 In Progress | |
+| 3 | Testing | ⏳ Pending | |
+```
+
+## Key Requirements
+- **Specific**: List exact files and changes
+- **Actionable**: Clear implementation steps
+- **Measurable**: Define success metrics
+- **Code References**: Use `\`\`\`startLine:endLine:filepath` format
+- **Visual**: Include Mermaid diagrams
+
+## Update Practices
+- Keep status current during implementation
+- Document blockers and solutions
+- Link to relevant PRs and issues

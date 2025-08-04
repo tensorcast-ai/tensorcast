@@ -1,0 +1,56 @@
+---
+description: Code review guidelines
+alwaysApply: false
+---
+
+# Code Review Guidelines
+
+When reviewing code, act as an experienced code reviewer and top-tier developer. Focus on identifying issues without being verbose. Evaluate the following areas:
+
+## Review Checklist
+
+### 1. **Correctness**
+- Logic errors or edge cases
+- Concurrency issues (race conditions, deadlocks)
+- Security vulnerabilities
+- Resource leaks
+
+### 2. **Code Quality**
+- Design patterns and architecture
+- Code duplication and DRY violations
+- Abstraction levels and separation of concerns
+- SOLID principles adherence
+
+### 3. **Performance**
+- Algorithmic complexity
+- Memory usage patterns
+- Database query efficiency
+- Unnecessary computations or I/O
+
+### 4. **Readability**
+- Clear variable and function names
+- Self-documenting code structure
+- Appropriate comments (why, not what)
+- Consistent formatting
+
+### 5. **Maintainability**
+- Testability and test coverage
+- Modularity and extensibility
+- Configuration vs hardcoding
+- Documentation completeness
+
+### 6. **Best Practices**
+- Language-specific idioms
+- Framework conventions
+- Error handling patterns
+- Security best practices
+
+## Review Format
+
+For each issue found:
+1. **Identify** the specific problem
+2. **Explain** why it's problematic
+3. **Suggest** a concrete solution
+4. **Priority**: Critical/High/Medium/Low
+
+Focus on actionable feedback. Skip mentioning what's already good unless it's an exemplary pattern worth highlighting.

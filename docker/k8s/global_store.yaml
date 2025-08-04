@@ -1,0 +1,236 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-store
+  namespace: stepcast
+  labels:
+    app: global-store
+spec:
+  type: ClusterIP
+  selector:
+    app: global-store
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+    - name: metrics
+      port: 8001
+      targetPort: 8001
+      protocol: TCP
+    - name: webui
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: global-store
+  namespace: stepcast
+  labels:
+    app: global-store
+spec:
+  serviceName: global-store-headless
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: global-store
+  template:
+    metadata:
+      labels:
+        app: global-store
+      annotations:
+        monitoring.basemind.com/scrape: "true"
+        monitoring.basemind.com/scrape_port: "8001"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: usedfor
+                operator: In
+                values:
+                - router
+      tolerations:
+      - key: usedfor
+        operator: Equal
+        value: router
+        effect: NoSchedule
+      containers:
+      - name: global-store
+        image: hub.i.basemind.com/stepcast/global-model-store:2025.07.08-61f0f
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "scstore.global_store"]
+        env:
+        # Database configuration
+        - name: GLOBAL_STORE_DB_PATH
+          value: "/data/models.db"
+        # Server configuration
+        - name: GLOBAL_STORE_PORT
+          value: "50051"
+        - name: GLOBAL_STORE_MAX_WORKERS
+          value: "20"
+        # Worker management configuration
+        - name: GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS
+          value: "40000"
+        - name: GLOBAL_STORE_CLEANUP_INTERVAL_MS
+          value: "40000"
+        - name: GLOBAL_STORE_HEARTBEAT_INTERVAL_MS
+          value: "20000"
+        # Performance configuration
+        - name: GLOBAL_STORE_OPTIMIZE_INTERVAL_MS
+          value: "1800000"  # 30 minutes
+        # Monitoring configuration
+        - name: GLOBAL_STORE_METRICS_PORT
+          value: "8001"
+        - name: GLOBAL_STORE_UI_PORT
+          value: "9000"
+        - name: GLOBAL_STORE_UI_HOST
+          value: "0.0.0.0"
+        - name: GLOBAL_STORE_UI_ENABLED
+          value: "true"
+        - name: GLOBAL_STORE_UI_LOG_FILE
+          value: "/data/logs/webui.log"
+        # Logging configuration
+        - name: LOG_LEVEL
+          value: "INFO"
+        ports:
+        - name: grpc
+          containerPort: 50051
+          protocol: TCP
+        - name: metrics
+          containerPort: 8001
+          protocol: TCP
+        - name: webui
+          containerPort: 9000
+          protocol: TCP
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: logs
+          mountPath: /data/logs
+        livenessProbe:
+          tcpSocket:
+            port: 50051
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 50051
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+          limits:
+            cpu: "4"
+            memory: "16Gi"
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+      imagePullSecrets:
+      - name: lml-key-pull-image
+      terminationGracePeriodSeconds: 30
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: ebs-ssd
+      resources:
+        requests:
+          storage: 50Gi
+  - metadata:
+      name: logs
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: ebs-ssd
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: global-store-backup-script
+  namespace: stepcast
+data:
+  backup.sh: |
+    #!/bin/bash
+    set -e
+
+    # Configuration
+    DB_PATH="/data/models.db"
+    BACKUP_DIR="/data/backups"
+    RETENTION_DAYS=7
+
+    # Create backup directory if it doesn't exist
+    mkdir -p "${BACKUP_DIR}"
+
+    # Create backup with timestamp
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    BACKUP_FILE="${BACKUP_DIR}/models_${TIMESTAMP}.db"
+
+    # Perform backup
+    echo "Starting backup at $(date)"
+    cp "${DB_PATH}" "${BACKUP_FILE}"
+
+    # Compress backup
+    gzip "${BACKUP_FILE}"
+    echo "Backup completed: ${BACKUP_FILE}.gz"
+
+    # Remove old backups
+    find "${BACKUP_DIR}" -name "models_*.db.gz" -mtime +${RETENTION_DAYS} -delete
+    echo "Cleanup completed at $(date)"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: global-store-backup
+  namespace: stepcast
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          containers:
+          - name: backup
+            image: hub.i.basemind.com/stepcast/global-model-store:latest
+            command: ["/bin/bash", "/scripts/backup.sh"]
+            volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: backup-script
+              mountPath: /scripts
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "256Mi"
+              limits:
+                cpu: "500m"
+                memory: "1Gi"
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-global-store-0
+          - name: backup-script
+            configMap:
+              name: global-store-backup-script
+              defaultMode: 0755

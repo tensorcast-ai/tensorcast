@@ -1,0 +1,386 @@
+syntax = "proto3";
+
+package global_store;
+
+service GlobalModelStore {
+  rpc RegisterModelReplica(RegisterModelReplicaRequest) returns (RegisterModelReplicaResponse) {}
+
+  rpc UpdateModelReplica(UpdateModelReplicaRequest) returns (UpdateModelReplicaResponse) {}
+
+  rpc UnregisterModelReplica(UnregisterModelReplicaRequest)
+      returns (UnregisterModelReplicaResponse) {}
+
+  rpc RequestModelReplicaTransport(RequestModelReplicaTransportRequest) returns (RequestModelReplicaTransportResponse) {}
+
+  rpc CompleteModelReplicaTransport(CompleteModelReplicaTransportRequest) returns (CompleteModelReplicaTransportResponse) {}
+
+  rpc ListModelReplicas(ListModelReplicasRequest) returns (ListModelReplicasResponse) {}
+
+  // Get model metadata information
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse) {}
+
+  // Worker management
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
+  rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse) {}
+  rpc UnregisterWorker(UnregisterWorkerRequest) returns (UnregisterWorkerResponse) {}
+  rpc ListActiveWorkers(ListActiveWorkersRequest) returns (ListActiveWorkersResponse) {}
+
+  // High Availability and State Synchronization
+  rpc SynchronizeWorkerState(SynchronizeWorkerStateRequest) returns (SynchronizeWorkerStateResponse) {}
+  rpc RequestFullStateSync(RequestFullStateSyncRequest) returns (RequestFullStateSyncResponse) {}
+
+  // Health check endpoint
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {}
+
+  // ========== Chunk Directory Operations ==========
+  // Query chunk locations for distributed memory pool
+  rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
+
+  // Update chunk states (called by StoreDaemon periodically)
+  rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
+}
+
+enum Status {
+  OK = 0;
+  NOT_FOUND = 1;
+  TIMED_OUT = 2;
+  TOO_MANY_REQUESTS = 3;
+  STATE_SYNC_REQUIRED = 4;
+  ERROR = 5;
+}
+
+enum ConnectionStatus {
+  CONNECTED = 0;
+  RECONNECTING = 1;
+  DISCONNECTED = 2;
+}
+
+// ========== Worker管理相关消息 ==========
+
+// Worker注册请求
+message RegisterWorkerRequest {
+  string node_id = 1;                     // 节点主机名
+  string node_address = 2;                // IP地址
+  uint32 grpc_port = 3;                  // gRPC 服务端口
+  uint32 p2p_port = 4;                  // COMM 端口
+  uint64 mem_pool_total_size = 5;        // 内存池总大小（字节）
+  uint64 mem_pool_available_size = 6;    // 内存池可用大小（字节）
+
+  // HA fields
+  bool is_recovery_registration = 7;      // 是否为恢复注册
+  string previous_worker_id = 8;          // 上一个 Worker ID (用于恢复)
+}
+
+message RegisterWorkerResponse {
+  Status status = 1;
+  string worker_id = 2;                   // 系统分配的 Worker ID
+  uint32 heartbeat_interval_ms = 3;      // 建议的心跳间隔（毫秒）
+
+  // HA fields
+  bool state_sync_required = 4;          // 是否需要状态同步
+  uint64 expected_state_version = 5;     // 期望的状态版本
+}
+
+// Enhanced Worker心跳
+message WorkerHeartbeatRequest {
+  string worker_id = 1;
+  uint64 mem_pool_available_size = 2;    // 当前内存池可用大小（字节）
+  bool accepting_new_requests = 3;       // 是否接受新请求（用于优雅退出）
+
+  // Enhanced fields for HA
+  uint64 state_version = 4;              // 增量状态版本
+  string state_checksum = 5;             // 当前状态校验和
+  repeated string registered_models = 6; // 本地注册的模型列表
+  int64 last_successful_sync = 7;        // 最后成功同步时间戳
+  ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
+}
+
+message WorkerHeartbeatResponse {
+  Status status = 1;                     // OK 或 NOT_FOUND
+
+  // Enhanced fields for HA
+  bool state_sync_required = 2;          // 触发状态同步
+  uint64 expected_state_version = 3;     // 期望状态版本
+  repeated string obsolete_models = 4;   // 应该取消注册的模型
+  int64 server_timestamp = 5;            // 服务器时间戳
+}
+
+// Worker注销
+message UnregisterWorkerRequest {
+  string worker_id = 1;
+  bool is_graceful_shutdown = 2;         // 是否为优雅关闭
+}
+
+message UnregisterWorkerResponse {
+  Status status = 1;
+}
+
+// 查询活跃Worker
+message ListActiveWorkersRequest {
+  bool include_unavailable = 1;          // 是否包含不接受新请求的 Worker
+}
+
+message ListActiveWorkersResponse {
+  message WorkerInfo {
+    string worker_id = 1;
+    string node_id = 2;
+    string node_address = 3;
+    uint32 grpc_port = 4;
+    uint32 p2p_port = 5;
+    uint64 mem_pool_total_size = 6;
+    uint64 mem_pool_available_size = 7;
+    bool accepting_new_requests = 8;
+    int64 last_heartbeat_timestamp = 9;  // Unix 时间戳（秒）
+
+    // HA fields
+    uint64 state_version = 10;           // 当前状态版本
+    ConnectionStatus status = 11;        // 连接状态
+  }
+  repeated WorkerInfo workers = 1;
+}
+
+// ========== State Synchronization Messages ==========
+
+message WorkerLocalState {
+  string worker_id = 1;
+  uint64 state_version = 2;
+  string state_checksum = 3;
+  repeated ModelReplicaInfo local_replicas = 4;
+  int64 last_update_timestamp = 5;
+}
+
+message ModelReplicaInfo {
+  string model_name = 1;
+  string replica_id = 2;
+  MemoryInfo memory_info = 3;
+  uint32 max_concurrency = 4;
+  uint32 current_requests = 5;
+  bool is_available = 6;
+  int64 registered_timestamp = 7;
+}
+
+message SynchronizeWorkerStateRequest {
+  string worker_id = 1;
+  WorkerLocalState local_state = 2;
+  bool force_full_sync = 3;              // 强制完整同步
+}
+
+message SynchronizeWorkerStateResponse {
+  Status status = 1;
+  uint64 new_state_version = 2;
+  repeated StateChange state_changes = 3;
+  string new_state_checksum = 4;
+}
+
+message StateChange {
+  enum ChangeType {
+    ADD_REPLICA = 0;
+    REMOVE_REPLICA = 1;
+    UPDATE_REPLICA = 2;
+  }
+
+  ChangeType type = 1;
+  ModelReplicaInfo replica_info = 2;
+  string reason = 3;
+}
+
+message RequestFullStateSyncRequest {
+  string worker_id = 1;
+  uint64 current_state_version = 2;
+}
+
+message RequestFullStateSyncResponse {
+  Status status = 1;
+  uint64 new_state_version = 2;
+  repeated ModelReplicaInfo expected_replicas = 3;
+  string new_state_checksum = 4;
+}
+
+// Model information message
+message ModelInfo {
+  string model_name = 1;
+  repeated MemoryInfo available_replicas = 2;
+}
+
+message GetModelInfoRequest {
+  string model_name = 1;
+}
+
+message GetModelInfoResponse {
+  Status status = 1;
+  ModelInfo model_info = 2;
+}
+
+message ListModelReplicasRequest {
+  optional string model_name = 1;
+  optional string node_id = 2;
+  optional string node_address = 3;
+  optional string node_port = 4;
+  optional MemoryType memory_type = 6;
+  optional uint32 device_id = 7;
+}
+
+message ListModelReplicasResponse {
+  map<string, MemoryInfoList> model_replicas = 1;
+}
+
+message RegisterModelReplicaRequest {
+  string model_name = 1;
+  MemoryInfo mem_info = 2;
+  uint32 max_concurrency = 3;
+  string worker_id = 4;
+}
+
+message RegisterModelReplicaResponse {
+  Status status = 1;
+
+  string model_name = 2;
+  string replica_id = 3;
+}
+
+message UpdateModelReplicaRequest {
+  string model_name = 1;
+  string replica_id = 2;
+}
+
+message UpdateModelReplicaResponse {
+  Status status = 1;
+
+  string model_name = 2;
+  string replica_id = 3;
+}
+
+message UnregisterModelReplicaRequest {
+  string model_name = 1;
+  string replica_id = 2;
+}
+
+message UnregisterModelReplicaResponse {
+  Status status = 1;
+}
+
+enum MemoryType {
+  GPU = 0;
+  RAM = 1;
+  DISK = 2;
+}
+
+message MemoryInfo {
+  string node_id = 1;
+  string node_address = 2;
+  uint32 node_port = 3;
+
+  uint64 memory_size = 5;
+
+  MemoryType memory_type = 6;
+  uint32 device_id = 7;
+
+  repeated string remote_memory_keys = 8;
+  repeated uint64 buffer_sizes = 9;
+}
+
+message MemoryInfoList {
+  repeated MemoryInfo list = 1;
+}
+
+message RequestModelReplicaTransportRequest {
+  string model_name = 1;
+  MemoryInfo local_memory_info = 2;
+  uint32 wait_timeout_ms = 3;
+  string source_node_id = 4;
+  string source_address = 5;
+  uint32 source_port = 6;
+}
+
+message RequestModelReplicaTransportResponse {
+  Status status = 1;
+  MemoryInfo remote_memory_info = 2;
+  string transport_id = 3;
+}
+
+message CompleteModelReplicaTransportRequest {
+  string transport_id = 1;
+}
+
+message CompleteModelReplicaTransportResponse {
+  Status status = 1;
+}
+
+message GetModelReplicaRequest {
+  string model_name = 1;
+  MemoryInfo local_memory_info = 2;
+  optional string replica_id = 3;
+}
+
+message GetModelReplicaResponse {
+  Status status = 1;
+  MemoryInfo remote_memory_info = 2;
+  string replica_id = 3;
+}
+
+// ========== Health Check ==========
+
+// Simple ping request to verify connectivity.
+message HealthCheckRequest {}
+
+// Health check response returns OK if the server is reachable.
+message HealthCheckResponse {
+  Status status = 1;
+}
+
+// ========== Chunk Directory Messages ==========
+
+// Chunk state enum (matches DVMP ChunkState)
+enum ChunkState {
+  CHUNK_HOT = 0;         // Resident, not yet transferred
+  CHUNK_LOCKED_TX = 1;   // Being transferred
+  CHUNK_COPIED_GPU = 2;  // Fully copied to GPU
+  CHUNK_COLD = 3;        // Resident but evictable
+  CHUNK_EVICTED = 4;     // Evicted from memory
+}
+
+// Query chunk locations request
+message QueryChunkLocationsRequest {
+  string model_id = 1;
+  repeated uint32 chunk_indices = 2;  // Specific chunks to query
+}
+
+// Information about a chunk location
+message ChunkLocation {
+  uint32 chunk_idx = 1;
+  string node_id = 2;
+  string node_address = 3;
+  uint32 p2p_port = 4;
+  ChunkState state = 5;
+  float node_load_ratio = 6;
+  string device_uuid = 7;
+  uint32 replica = 8;
+}
+
+// Query chunk locations response
+message QueryChunkLocationsResponse {
+  Status status = 1;
+  repeated ChunkLocation locations = 2;
+}
+
+// Chunk state update
+message ChunkStateUpdate {
+  string model_id = 1;
+  uint32 chunk_idx = 2;
+  ChunkState state = 3;
+  string device_uuid = 4;
+  uint32 replica = 5;
+}
+
+// Batch update chunk states request
+message BatchUpdateChunkStatesRequest {
+  string worker_id = 1;
+  string node_id = 2;
+  repeated ChunkStateUpdate updates = 3;
+}
+
+// Batch update chunk states response
+message BatchUpdateChunkStatesResponse {
+  Status status = 1;
+  uint32 updates_applied = 2;
+}

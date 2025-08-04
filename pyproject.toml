@@ -1,0 +1,259 @@
+[build-system]
+# Note: The torch version here is the default. When building releases,
+# use tools/release.sh with --torch-version to specify different versions
+requires = ["setuptools>=68.0.0", "pyyaml>=6.0", "torch==2.6.0", "toml"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scstore"
+description = "StepCast Store"
+readme = "README.md"
+requires-python = ">=3.10"
+# Note: Runtime torch version should match the build-time version
+# The package name will include the torch version suffix (e.g., scstore-0.0.2+torch26)
+dependencies = [
+    "click>=8.1.8",
+    "grpcio>=1.56.0,<2",
+    "pandas>=2.2.3",
+    "prometheus-client>=0.21.1",
+    "py-grpc-prometheus>=0.8.0",
+    "torch==2.6.0",
+    "protobuf<5.0",
+]
+
+dynamic = ["version"]
+
+[dependency-groups]
+dev = [
+    "accelerate>=1.6.0",
+    "clang-format>=20.1.0",
+    "clang-tidy>=20.1.0",
+    "einops>=0.8.1",
+    "grpcio-tools<=1.73.1",
+    "httpx>=0.28.1",
+    "hypothesis>=6.135.26",
+    "ipdb>=0.13.13",
+    "ipynb>=0.5.1",
+    "mypy>=1.15.0",
+    "peft>=0.15.2",
+    "pre-commit>=4.2.0",
+    "pyright>=1.1.403",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-xdist>=3.8.0",
+    "rich-click>=1.8.9",
+    "ruff>=0.11.2",
+    "tiktoken>=0.9.0",
+    "toml>=0.10.2",
+    "transformers>=4.51.3",
+    "transformers-stream-generator>=0.0.5",
+    "types-protobuf==5.28.3.20241203",
+]
+
+[project.scripts]
+scstore-cli = "scstore.cli:main"
+
+[project.optional-dependencies]
+build = ["setuptools", "cython"]
+global = [
+    "duckdb>=1.2.1",
+    "fastapi>=0.115.13",
+    "uvicorn[standard]>=0.34.3",
+]
+ui = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.0.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+]
+
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+disable_error_code = [
+    "import-untyped",
+    "attr-defined",
+    "no-untyped-def",
+    "arg-type",
+    "no-untyped-call",
+    "type-arg",
+    "var-annotated",
+    "no-any-return",
+    "misc"
+]
+show_error_codes = true
+check_untyped_defs = true
+no_implicit_optional = true
+python_version = "3.11"
+follow_imports = "skip"
+
+exclude = [
+    "tests",
+    "setup.py",
+]
+
+[tool.ruff]
+target-version = "py310"
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "_build",
+    "build",
+    "dist",
+    ".github",
+    "tools",
+    "tests",
+    "setup.py",
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+    "*.pyi"
+]
+
+[tool.ruff.lint]
+ignore = [
+    # # these ignores are from flake8-bugbear; please fix!
+    # "B007",
+    # "B008",
+    # "B017",
+    # "B018",   # Useless expression
+    # "B019",
+    # "B020",
+    # "B023",
+    # "B024",
+    # "B026",
+    # "B028",   # No explicit `stacklevel` keyword argument found
+    # "B904",
+    # "B905",
+    # "E402",
+    # "C408",   # C408 ignored because we like the dict keyword argument syntax
+    "E501",   # E501 is not flexible enough, we're using B950 instead
+    # "E721",
+    # "E731",   # Assign lambda expression
+    # "E741",
+    # "EXE001",
+    # "F405",
+    # "F821",
+    # "F841",
+    # # these ignores are from flake8-logging-format; please fix!
+    # "G101",
+    # "G201",
+    # "G202",
+    # "G003",
+    "G004",
+    # # these ignores are from RUFF perf; please fix!
+    "PERF203",
+    # "PERF4",
+    # "SIM102",
+    # "SIM103",
+    # "SIM112",  # flake8-simplify code styles
+    # "SIM105",  # these ignores are from flake8-simplify. please fix or ignore with commented reason
+    # "SIM108",
+    # "SIM110",
+    # "SIM114",  # Combine `if` branches using logical `or` operator
+    # "SIM115",
+    # "SIM116",  # Disable Use a dictionary instead of consecutive `if` statements
+    # "SIM117",
+    # "SIM118",
+]
+select = [
+    "B",
+    "C4",
+    "G",
+    "E",
+    "F",
+    "SIM1",
+    "W",
+    # Not included in flake8
+    "PERF",
+    "PLE",
+]
+extend-select = [
+    "I",
+]
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# Allow autofix for all enabled rules (when `--fix`) is provided.
+fixable = [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "N",
+    "Q",
+    "S",
+    "T",
+    "W",
+    "ANN",
+    "ARG",
+    "BLE",
+    "COM",
+    "DJ",
+    "DTZ",
+    "EM",
+    "ERA",
+    "EXE",
+    "FBT",
+    "ICN",
+    "INP",
+    "ISC",
+    "NPY",
+    "PD",
+    "PGH",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "PYI",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+    "SLF",
+    "TCH",
+    "TID",
+    "TRY",
+    "UP",
+    "YTT",
+]
+unfixable = []
+
+
+[tool.ruff.lint.mccabe]
+# Unlike Flake8, default to a complexity level of 10.
+max-complexity = 10
+
+
+[tool.pyright]
+include = [
+    "scstore/**",
+    "tests/python/**",
+    "tests/interaction/**",
+]
+
+exclude = [
+    "scstore/transformers_util.py" # TODO: remove this
+]
+
+typeCheckingMode = "standard"
+reportMissingImports = "error"
+pythonVersion = "3.10"
+reportAttributeAccessIssue = "none"

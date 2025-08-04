@@ -1,0 +1,487 @@
+#  Copyright (c) 2025, StepCast Team.
+
+"""
+Recovery service for Global Store high availability.
+
+Handles state recovery after failures, worker rediscovery, and state synchronization.
+"""
+
+import hashlib
+import time
+from uuid import UUID, uuid4
+
+from scstore.global_store.exceptions import NotFoundError
+from scstore.global_store.metrics import observe_state_sync
+from scstore.global_store.models import ModelReplica, Worker
+from scstore.global_store.repositories import (
+    ModelReplicaRepository,
+    WorkerRepository,
+)
+from scstore.logger import init_logger
+from scstore.proto import global_store_pb2
+
+logger = init_logger(__name__)
+
+
+class RecoveryService:
+    """Service for handling Global Store recovery and state synchronization."""
+
+    def __init__(
+        self,
+        worker_repository: WorkerRepository,
+        model_replica_repository: ModelReplicaRepository,
+    ):
+        self.worker_repository = worker_repository
+        self.model_replica_repository = model_replica_repository
+
+        # Recovery state tracking
+        self.recovery_in_progress = False
+        self.last_recovery_time = 0
+        self.worker_state_versions: dict[str, int] = {}
+
+    def initiate_recovery(self) -> bool:
+        """
+        Initiate Global Store recovery after restart.
+
+        Returns:
+            True if recovery was successful, False otherwise
+        """
+        if self.recovery_in_progress:
+            logger.warning("Recovery already in progress")
+            return False
+
+        try:
+            self.recovery_in_progress = True
+            logger.info("Starting Global Store recovery")
+
+            # Step 1: Validate database state
+            self._validate_database_state()
+
+            # Step 2: Mark all workers as potentially stale
+            self._mark_workers_as_stale()
+
+            # Step 3: Mark all replicas as potentially unavailable
+            self._mark_replicas_as_stale()
+
+            # Step 4: Reset state versions
+            self.worker_state_versions.clear()
+
+            self.last_recovery_time = int(time.time())
+            logger.info("Global Store recovery completed successfully")
+            return True
+
+        except Exception as e:
+            logger.exception(f"Recovery failed: {e}")
+            return False
+        finally:
+            self.recovery_in_progress = False
+
+    def _validate_database_state(self) -> None:
+        """Validate database integrity and clean up inconsistent state."""
+        # Check for orphaned replicas (replicas without valid workers)
+        orphaned_replicas = self.model_replica_repository.find_orphaned_replicas()
+        if orphaned_replicas:
+            logger.warning(
+                f"Found {len(orphaned_replicas)} orphaned replicas, marking as unavailable"
+            )
+            for replica in orphaned_replicas:
+                self.model_replica_repository.mark_unavailable(replica.replica_id)
+
+    def _mark_workers_as_stale(self) -> None:
+        """Mark all workers as potentially stale until they re-register or heartbeat."""
+        workers = self.worker_repository.list_all_workers()
+        logger.info(f"Marking {len(workers)} workers as stale")
+
+        for worker in workers:
+            self.worker_repository.mark_as_stale(worker.worker_id)
+
+    def _mark_replicas_as_stale(self) -> None:
+        """Mark all replicas as potentially stale until confirmed by workers."""
+        replicas = self.model_replica_repository.list_all_replicas()
+        logger.info(f"Marking {len(replicas)} replicas as stale")
+
+        for replica in replicas:
+            self.model_replica_repository.mark_as_stale(replica.replica_id)
+
+    def handle_worker_recovery_registration(
+        self, worker: Worker, previous_worker_id: str | None = None
+    ) -> tuple[bool, bool]:
+        """
+        Handle worker registration during recovery.
+
+        Args:
+            worker: New worker registration
+            previous_worker_id: Previous worker ID if this is a recovery
+
+        Returns:
+            Tuple of (registration_success, state_sync_required)
+        """
+        try:
+            # If previous worker ID provided, set worker_id and clean up old state
+            if previous_worker_id:
+                worker.worker_id = previous_worker_id
+                self._cleanup_previous_worker_state(
+                    previous_worker_id, worker.worker_id
+                )
+
+            # Register new worker
+            registered_worker = self.worker_repository.create_or_update(worker)
+
+            # Set initial state version
+            self.worker_state_versions[registered_worker.worker_id] = 1
+
+            # Always require state sync during recovery
+            state_sync_required = True
+
+            logger.info(
+                f"Worker recovery registration successful: {registered_worker.worker_id}"
+                f"{' (replaced ' + previous_worker_id + ')' if previous_worker_id else ''}"
+            )
+
+            return True, state_sync_required
+
+        except Exception as e:
+            logger.exception(f"Worker recovery registration failed: {e}")
+            return False, False
+
+    def _cleanup_previous_worker_state(
+        self, previous_worker_id: str, new_worker_id: str
+    ) -> None:
+        """Clean up state from previous worker instance."""
+        logger.info(f"Cleaning up state for previous worker {previous_worker_id}")
+
+        # Mark old worker as inactive
+        try:
+            self.worker_repository.mark_inactive(previous_worker_id)
+        except NotFoundError:
+            logger.warning(
+                f"Previous worker {previous_worker_id} not found in database"
+            )
+
+        # Transfer or mark replicas as unavailable
+        replicas = self.model_replica_repository.get_replicas_by_worker(
+            previous_worker_id
+        )
+        for replica in replicas:
+            # Update worker_id to new one if it's the same physical node
+            try:
+                self.model_replica_repository.update_worker_id(
+                    replica.replica_id, new_worker_id
+                )
+                logger.debug(
+                    f"Transferred replica {replica.replica_id} to new worker {new_worker_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to transfer replica {replica.replica_id}: {e}")
+                self.model_replica_repository.mark_unavailable(replica.replica_id)
+
+    def synchronize_worker_state(
+        self, worker_id: str, local_state: global_store_pb2.WorkerLocalState
+    ) -> tuple[bool, list[global_store_pb2.StateChange], int, str]:
+        """
+        Synchronize worker state with global state.
+
+        Args:
+            worker_id: Worker ID
+            local_state: Worker's local state
+
+        Returns:
+            Tuple of (success, state_changes, new_version, new_checksum)
+        """
+        _start = time.time()
+        try:
+            # Get current global state for this worker
+            global_replicas = self.model_replica_repository.get_replicas_by_worker(
+                worker_id
+            )
+
+            # Compare states and generate changes
+            state_changes = self._compute_state_changes(local_state, global_replicas)
+
+            # Apply state changes
+            self._apply_state_changes(worker_id, state_changes)
+
+            # Update state version
+            new_version = self.worker_state_versions.get(worker_id, 0) + 1
+            self.worker_state_versions[worker_id] = new_version
+
+            # Compute new state checksum
+            updated_replicas = self.model_replica_repository.get_replicas_by_worker(
+                worker_id
+            )
+            new_checksum = self._compute_state_checksum(updated_replicas)
+
+            duration = time.time() - _start
+            observe_state_sync(duration, success=True)
+
+            logger.info(
+                f"State synchronization completed for worker {worker_id}: "
+                f"{len(state_changes)} changes, version {new_version}"
+            )
+
+            return True, state_changes, new_version, new_checksum
+
+        except Exception as e:
+            duration = time.time() - _start if "_start" in locals() else 0.0
+            observe_state_sync(duration, success=False)
+
+            logger.exception(
+                f"State synchronization failed for worker {worker_id}: {e}"
+            )
+            return False, [], 0, ""
+
+    def _compute_state_changes(
+        self,
+        local_state: global_store_pb2.WorkerLocalState,
+        global_replicas: list[ModelReplica],
+    ) -> list[global_store_pb2.StateChange]:
+        """Compute differences between local and global state."""
+        state_changes = []
+
+        # Convert to sets for comparison
+        local_replica_keys = {
+            (r.model_name, str(r.memory_info.memory_type), r.memory_info.device_id)
+            for r in local_state.local_replicas
+        }
+
+        global_replica_keys = {
+            (r.model_name, str(r.memory_type.value), r.device_id)
+            for r in global_replicas
+        }
+
+        # Find replicas to add (in local but not in global)
+        to_add = local_replica_keys - global_replica_keys
+        for model_name, memory_type, device_id in to_add:
+            # Find the local replica info
+            local_replica = next(
+                r
+                for r in local_state.local_replicas
+                if (
+                    r.model_name == model_name
+                    and str(r.memory_info.memory_type) == memory_type
+                    and r.memory_info.device_id == device_id
+                )
+            )
+
+            change = global_store_pb2.StateChange(
+                type=global_store_pb2.StateChange.ADD_REPLICA,
+                replica_info=local_replica,
+                reason="Local replica not found in global state",
+            )
+            state_changes.append(change)
+
+        # Safe-removal semantics --------------------------------------------------
+        # Only consider *removals* when the worker explicitly provides a non-empty
+        # inventory.  An empty ``local_replicas`` list is treated as *unknown* –
+        # we assume the worker could not (or chose not to) send its inventory
+        # and therefore suppress destructive REMOVE_REPLICA operations.
+
+        to_remove: set[tuple[str, str, int]]
+        if local_state.local_replicas:
+            # Worker supplied an inventory – compute genuine removals.
+            to_remove = global_replica_keys - local_replica_keys
+        else:
+            # No inventory → do **not** remove anything.
+            to_remove = set()
+
+        for model_name, memory_type, device_id in to_remove:
+            # Find the global replica
+            global_replica = next(
+                r
+                for r in global_replicas
+                if (
+                    r.model_name == model_name
+                    and str(r.memory_type.value) == memory_type
+                    and r.device_id == device_id
+                )
+            )
+
+            # Convert to proto format
+            replica_info = self._convert_replica_to_proto(global_replica)
+
+            change = global_store_pb2.StateChange(
+                type=global_store_pb2.StateChange.REMOVE_REPLICA,
+                replica_info=replica_info,
+                reason="Global replica not found in local state",
+            )
+            state_changes.append(change)
+
+        return state_changes
+
+    def _apply_state_changes(
+        self, worker_id: str, state_changes: list[global_store_pb2.StateChange]
+    ) -> None:
+        """Apply state changes to global state."""
+        for change in state_changes:
+            try:
+                if change.type == global_store_pb2.StateChange.ADD_REPLICA:
+                    # Register new replica
+                    replica = self._convert_proto_to_replica(
+                        change.replica_info, worker_id
+                    )
+                    self.model_replica_repository.create_or_update(replica)
+                    logger.debug(f"Added replica: {replica.model_name}")
+
+                elif change.type == global_store_pb2.StateChange.REMOVE_REPLICA:
+                    # Remove replica
+                    if change.replica_info.replica_id:
+                        replica_id = UUID(change.replica_info.replica_id)
+                        self.model_replica_repository.delete(replica_id)
+                        logger.debug(
+                            f"Removed replica: {change.replica_info.model_name}"
+                        )
+
+                elif change.type == global_store_pb2.StateChange.UPDATE_REPLICA:
+                    # Update replica
+                    replica = self._convert_proto_to_replica(
+                        change.replica_info, worker_id
+                    )
+                    self.model_replica_repository.create_or_update(replica)
+                    logger.debug(f"Updated replica: {replica.model_name}")
+
+            except Exception as e:
+                logger.error(f"Failed to apply state change {change.type}: {e}")
+
+    def _convert_replica_to_proto(
+        self, replica: ModelReplica
+    ) -> global_store_pb2.ModelReplicaInfo:
+        """Convert ModelReplica to proto format."""
+        memory_info = global_store_pb2.MemoryInfo(
+            node_id=replica.node_id,
+            node_address=replica.node_address,
+            node_port=replica.node_port,
+            memory_size=replica.memory_size,
+            memory_type=global_store_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
+            device_id=replica.device_id,
+            remote_memory_keys=replica.remote_memory_keys,
+            buffer_sizes=replica.buffer_sizes,
+        )
+
+        return global_store_pb2.ModelReplicaInfo(
+            model_name=replica.model_name,
+            replica_id=str(replica.replica_id),
+            memory_info=memory_info,
+            max_concurrency=replica.max_concurrency,
+            current_requests=replica.current_requests,
+            is_available=replica.is_available,
+            registered_timestamp=int(replica.created_at.timestamp())
+            if replica.created_at
+            else 0,
+        )
+
+    def _convert_proto_to_replica(
+        self, proto_replica: global_store_pb2.ModelReplicaInfo, worker_id: str
+    ) -> ModelReplica:
+        """Convert proto format to ModelReplica."""
+        from scstore.global_store.models import MemoryType
+
+        return ModelReplica(
+            replica_id=UUID(proto_replica.replica_id)
+            if proto_replica.replica_id
+            else uuid4(),
+            model_name=proto_replica.model_name,
+            node_id=proto_replica.memory_info.node_id,
+            node_address=proto_replica.memory_info.node_address,
+            node_port=proto_replica.memory_info.node_port,
+            memory_size=proto_replica.memory_info.memory_size,
+            memory_type=MemoryType(
+                global_store_pb2.MemoryType.Name(proto_replica.memory_info.memory_type)
+            ),
+            device_id=proto_replica.memory_info.device_id,
+            max_concurrency=proto_replica.max_concurrency,
+            current_requests=proto_replica.current_requests,
+            is_available=proto_replica.is_available,
+            remote_memory_keys=list(proto_replica.memory_info.remote_memory_keys),
+            buffer_sizes=list(proto_replica.memory_info.buffer_sizes),
+            worker_id=worker_id,
+        )
+
+    def _compute_state_checksum(self, replicas: list[ModelReplica]) -> str:
+        """Compute checksum of replica state for consistency checking."""
+        # Sort replicas by a stable key for consistent checksum
+        sorted_replicas = sorted(
+            replicas, key=lambda r: (r.model_name, r.node_id, r.device_id)
+        )
+
+        # Create string representation of state
+        state_str = ""
+        for replica in sorted_replicas:
+            state_str += f"{replica.model_name}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
+
+        # Compute MD5 hash
+        return hashlib.md5(state_str.encode()).hexdigest()
+
+    def get_worker_state_version(self, worker_id: str) -> int:
+        """Get current state version for a worker."""
+        return self.worker_state_versions.get(worker_id, 0)
+
+    def request_full_state_sync(
+        self, worker_id: str
+    ) -> tuple[bool, list[global_store_pb2.ModelReplicaInfo], int, str]:
+        """
+        Request full state synchronization for a worker.
+
+        Returns:
+            Tuple of (success, expected_replicas, new_version, new_checksum)
+        """
+        _start = time.time()
+        try:
+            # Get all replicas for this worker
+            replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
+
+            # Convert to proto format
+            proto_replicas = [
+                self._convert_replica_to_proto(replica) for replica in replicas
+            ]
+
+            # Update state version
+            new_version = self.worker_state_versions.get(worker_id, 0) + 1
+            self.worker_state_versions[worker_id] = new_version
+
+            # Compute checksum
+            new_checksum = self._compute_state_checksum(replicas)
+
+            duration = time.time() - _start
+            observe_state_sync(duration, success=True)
+
+            logger.info(
+                f"Full state sync requested for worker {worker_id}: {len(replicas)} replicas"
+            )
+
+            return True, proto_replicas, new_version, new_checksum
+
+        except Exception as e:
+            duration = time.time() - _start if "_start" in locals() else 0.0
+            observe_state_sync(duration, success=False)
+
+            logger.exception(f"Full state sync failed for worker {worker_id}: {e}")
+            return False, [], 0, ""
+
+    def is_recovery_complete(self) -> bool:
+        """Check if recovery process is complete."""
+        return not self.recovery_in_progress and self.last_recovery_time > 0
+
+    def get_worker_state_checksum(self, worker_id: str) -> str:
+        """Get checksum for the given worker's replica state."""
+        replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
+        return self._compute_state_checksum(replicas)
+
+    def get_obsolete_models(
+        self, worker_id: str, registered_models: list[str] | tuple[str, ...]
+    ) -> list[str]:
+        """Determine models that exist on the worker but not in the global state.
+
+        Args:
+            worker_id: Worker identifier.
+            registered_models: Models currently reported by the worker.
+
+        Returns:
+            List of model names that should be removed from the worker.
+        """
+        try:
+            replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
+            global_models = {replica.model_name for replica in replicas}
+            return [m for m in registered_models if m not in global_models]
+        except Exception as e:
+            logger.error(f"Failed to compute obsolete models for {worker_id}: {e}")
+            return []

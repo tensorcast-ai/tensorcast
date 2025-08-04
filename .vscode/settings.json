@@ -1,0 +1,24 @@
+{
+    "files.exclude": {
+        ".venv": true,
+        "bazel-bin": true,
+        "bazel-model-store": true,
+        "bazel-testlogs": true,
+        "build": true
+    },
+    "bazel.enableCodeLens": true,
+    "cursor.general.disableHttp2": true,
+    "ruff.configuration": "${workspaceFolder}/pyproject.toml",
+    "ruff.interpreter": [
+        "${workspaceFolder}/.venv/bin/python"
+    ],
+    "files.watcherExclude": {
+        ".venv": true,
+        "bazel-bin": true,
+        "bazel-model-store": true,
+        "bazel-testlogs": true,
+        "build": true
+    },
+    "clang-format.executable": "${workspaceFolder}/.venv/bin/clang-format",
+    "clangd.path": "${workspaceFolder}/external/toolchains_llvm++llvm+llvm_toolchain/bin/clangd",
+}

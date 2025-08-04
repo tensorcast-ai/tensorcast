@@ -1,0 +1,411 @@
+#  Copyright (c) 2025, StepCast Team.
+
+"""
+Tests for the model transport functionality of the GlobalModelStoreServicer.
+"""
+
+import concurrent.futures
+import time
+import uuid
+
+import pytest
+
+from scstore.global_store.grpc_service import GlobalModelStoreServicer
+from scstore.proto import global_store_pb2
+
+
+class _MockContext:
+    """Mock gRPC ServicerContext for testing"""
+
+    def __init__(self):
+        self.code = None
+        self.details = None
+
+    def set_code(self, code):
+        self.code = code
+
+    def set_details(self, details):
+        self.details = details
+
+
+@pytest.fixture
+def servicer():
+    """Create an in-memory GlobalModelStoreServicer for testing"""
+    return GlobalModelStoreServicer()
+
+
+@pytest.fixture
+def test_context():
+    """Create a mock gRPC ServicerContext"""
+    return _MockContext()
+
+
+@pytest.fixture
+def memory_info():
+    """Create a sample memory info for testing"""
+    return global_store_pb2.MemoryInfo(
+        node_id=str(uuid.uuid4()),
+        node_address="192.168.1.1",
+        node_port=8000,
+        remote_memory_keys=["test_key"],
+        memory_size=1000000000,
+        memory_type=global_store_pb2.MemoryType.GPU,
+        device_id=0,
+    )
+
+
+def test_transport_concurrency(servicer, test_context, memory_info):
+    """Test that the transport functionality respects the max_concurrency limit"""
+    # First, register a worker
+    worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=memory_info.node_id,
+        node_address=memory_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    worker_response = servicer.RegisterWorker(worker_request, test_context)
+    assert worker_response.status == global_store_pb2.Status.OK
+    worker_id = worker_response.worker_id
+
+    # Register a model replica with max_concurrency of 2
+    model_name = "concurrency_test_model"
+    max_concurrency = 2
+
+    register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=memory_info, max_concurrency=max_concurrency,
+        worker_id=worker_id
+    )
+    servicer.RegisterModelReplica(register_request, test_context)
+
+    # Request transports up to max_concurrency
+    transports = []
+    for i in range(max_concurrency):
+        transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+            model_name=model_name,
+            local_memory_info=memory_info,
+            source_node_id=f"source_node_{i}",
+            source_address="192.168.1.2",
+            source_port=9000,
+        )
+        response = servicer.RequestModelReplicaTransport(
+            transport_request, test_context
+        )
+        assert response.status == global_store_pb2.Status.OK
+        transports.append(response.transport_id)
+
+    # Try to request another transport, which should fail or time out
+    transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=memory_info,
+        wait_timeout_ms=100,
+        source_node_id="source_node_overflow",
+        source_address="192.168.1.2",
+        source_port=9000,
+    )
+
+    response = servicer.RequestModelReplicaTransport(transport_request, test_context)
+    assert response.status == global_store_pb2.Status.TIMED_OUT
+
+    # Complete one transport
+    complete_request = global_store_pb2.CompleteModelReplicaTransportRequest(
+        transport_id=transports[0]
+    )
+    complete_response = servicer.CompleteModelReplicaTransport(
+        complete_request, test_context
+    )
+    assert complete_response.status == global_store_pb2.Status.OK
+
+    # Now we should be able to request another transport
+    transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=memory_info,
+        source_node_id="source_node_new",
+        source_address="192.168.1.2",
+        source_port=9000,
+    )
+
+    response = servicer.RequestModelReplicaTransport(transport_request, test_context)
+    assert response.status == global_store_pb2.Status.OK
+
+
+def test_transport_wait_timeout(servicer, test_context, memory_info):
+    """Test that the transport request respects the wait_timeout parameter"""
+    # First, register a worker
+    worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=memory_info.node_id,
+        node_address=memory_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    worker_response = servicer.RegisterWorker(worker_request, test_context)
+    assert worker_response.status == global_store_pb2.Status.OK
+    worker_id = worker_response.worker_id
+
+    # Register a model replica with max_concurrency of 1
+    model_name = "timeout_test_model"
+
+    register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=memory_info, max_concurrency=1,
+        worker_id=worker_id
+    )
+    servicer.RegisterModelReplica(register_request, test_context)
+
+    # Request the first transport
+    transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=memory_info,
+        source_node_id="source_node_1",
+        source_address="192.168.1.2",
+        source_port=9000,
+    )
+
+    response = servicer.RequestModelReplicaTransport(transport_request, test_context)
+    assert response.status == global_store_pb2.Status.OK
+    transport_id = response.transport_id
+
+    # Try to request another transport with a very short timeout
+    start_time = time.time()
+
+    transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=memory_info,
+        wait_timeout_ms=100,  # 100ms timeout
+        source_node_id="source_node_2",
+        source_address="192.168.1.2",
+        source_port=9000,
+    )
+
+    response = servicer.RequestModelReplicaTransport(transport_request, test_context)
+
+    end_time = time.time()
+    elapsed_ms = (end_time - start_time) * 1000
+
+    assert response.status == global_store_pb2.Status.TIMED_OUT
+    assert elapsed_ms >= 100  # Should have waited at least the timeout period
+
+    # Complete the first transport
+    complete_request = global_store_pb2.CompleteModelReplicaTransportRequest(
+        transport_id=transport_id
+    )
+    servicer.CompleteModelReplicaTransport(complete_request, test_context)
+
+
+def test_concurrent_transport_requests(servicer, test_context, memory_info):
+    """Test handling multiple concurrent transport requests"""
+    # First, register a worker
+    worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=memory_info.node_id,
+        node_address=memory_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    worker_response = servicer.RegisterWorker(worker_request, test_context)
+    assert worker_response.status == global_store_pb2.Status.OK
+    worker_id = worker_response.worker_id
+
+    # Register a model replica with max_concurrency of 3
+    model_name = "concurrent_test_model"
+    max_concurrency = 3
+
+    register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=memory_info, max_concurrency=max_concurrency,
+        worker_id=worker_id
+    )
+    servicer.RegisterModelReplica(register_request, test_context)
+
+    # Function to request a transport
+    def request_transport(i):
+        local_context = _MockContext()
+        transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+            model_name=model_name,
+            local_memory_info=memory_info,
+            wait_timeout_ms=5000,  # 5 second timeout
+            source_node_id=f"source_node_{i}",
+            source_address="192.168.1.2",
+            source_port=9000,
+        )
+
+        response = servicer.RequestModelReplicaTransport(
+            transport_request, local_context
+        )
+        return response
+
+    # Request transports concurrently with a thread pool
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(request_transport, i) for i in range(5)]
+        responses = [
+            future.result() for future in concurrent.futures.as_completed(futures)
+        ]
+
+    # Verify that we got exactly max_concurrency successful responses
+    successful = [r for r in responses if r.status == global_store_pb2.Status.OK]
+    timed_out = [r for r in responses if r.status == global_store_pb2.Status.TIMED_OUT]
+
+    assert len(successful) == max_concurrency
+    assert len(timed_out) == 5 - max_concurrency
+
+
+def test_transport_memory_type_priority(servicer, test_context):
+    """Test that transport requests prioritize memory types in order: GPU > RAM > DISK"""
+    model_name = "priority_test_model"
+
+    # Create memory infos with different types
+    gpu_info = global_store_pb2.MemoryInfo(
+        node_id=str(uuid.uuid4()),
+        node_address="192.168.1.1",
+        node_port=8000,
+        remote_memory_keys=["gpu_key"],
+        memory_size=1000000000,
+        memory_type=global_store_pb2.MemoryType.GPU,
+        device_id=0,
+    )
+
+    ram_info = global_store_pb2.MemoryInfo(
+        node_id=str(uuid.uuid4()),
+        node_address="192.168.1.2",
+        node_port=8000,
+        remote_memory_keys=["ram_key"],
+        memory_size=1000000000,
+        memory_type=global_store_pb2.MemoryType.RAM,
+        device_id=0,
+    )
+
+    disk_info = global_store_pb2.MemoryInfo(
+        node_id=str(uuid.uuid4()),
+        node_address="192.168.1.3",
+        node_port=8000,
+        remote_memory_keys=["disk_key"],
+        memory_size=1000000000,
+        memory_type=global_store_pb2.MemoryType.DISK,
+        device_id=0,
+    )
+
+    # Register workers first
+    gpu_worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=gpu_info.node_id,
+        node_address=gpu_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    gpu_worker_response = servicer.RegisterWorker(gpu_worker_request, test_context)
+    assert gpu_worker_response.status == global_store_pb2.Status.OK
+    gpu_worker_id = gpu_worker_response.worker_id
+
+    ram_worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=ram_info.node_id,
+        node_address=ram_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    ram_worker_response = servicer.RegisterWorker(ram_worker_request, test_context)
+    assert ram_worker_response.status == global_store_pb2.Status.OK
+    ram_worker_id = ram_worker_response.worker_id
+
+    disk_worker_request = global_store_pb2.RegisterWorkerRequest(
+        node_id=disk_info.node_id,
+        node_address=disk_info.node_address,
+        grpc_port=8000,
+        p2p_port=8001,
+        mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
+        mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+    )
+    disk_worker_response = servicer.RegisterWorker(disk_worker_request, test_context)
+    assert disk_worker_response.status == global_store_pb2.Status.OK
+    disk_worker_id = disk_worker_response.worker_id
+
+    # Register replicas with different memory types
+    gpu_register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=gpu_info, max_concurrency=1,
+        worker_id=gpu_worker_id
+    )
+    servicer.RegisterModelReplica(gpu_register_request, test_context)
+
+    ram_register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=ram_info, max_concurrency=1,
+        worker_id=ram_worker_id
+    )
+    servicer.RegisterModelReplica(ram_register_request, test_context)
+
+    disk_register_request = global_store_pb2.RegisterModelReplicaRequest(
+        model_name=model_name, mem_info=disk_info, max_concurrency=1,
+        worker_id=disk_worker_id
+    )
+    servicer.RegisterModelReplica(disk_register_request, test_context)
+
+    # Test 1: Request using DISK memory type should still get GPU (highest priority)
+    disk_transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=disk_info,
+        source_node_id="source_node_disk",
+        source_address="192.168.1.4",
+        source_port=9000,
+    )
+
+    disk_response = servicer.RequestModelReplicaTransport(
+        disk_transport_request, test_context
+    )
+    assert disk_response.status == global_store_pb2.Status.OK
+    assert disk_response.remote_memory_info.remote_memory_keys == ["gpu_key"]
+
+    # Complete the transport to release the GPU replica
+    complete_request = global_store_pb2.CompleteModelReplicaTransportRequest(
+        transport_id=disk_response.transport_id
+    )
+    servicer.CompleteModelReplicaTransport(complete_request, test_context)
+
+    # Test 2: Request using RAM memory type should also get GPU
+    ram_transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=ram_info,
+        source_node_id="source_node_ram",
+        source_address="192.168.1.4",
+        source_port=9000,
+    )
+
+    ram_response = servicer.RequestModelReplicaTransport(
+        ram_transport_request, test_context
+    )
+    assert ram_response.status == global_store_pb2.Status.OK
+    assert ram_response.remote_memory_info.remote_memory_keys == ["gpu_key"]
+
+    # Complete the transport to release the GPU replica
+    complete_request = global_store_pb2.CompleteModelReplicaTransportRequest(
+        transport_id=ram_response.transport_id
+    )
+    servicer.CompleteModelReplicaTransport(complete_request, test_context)
+
+    # Test 3: Let's make GPU unavailable and see if RAM is selected next
+    # Update the GPU replica to be unavailable
+    servicer.connection.execute(
+        """
+        UPDATE model_replicas
+        SET is_available = FALSE
+        WHERE memory_type = 'GPU' AND model_name = ?
+        """,
+        [model_name],
+    )
+
+    # Now try to request with any memory type, should get RAM (next priority)
+    gpu_transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
+        model_name=model_name,
+        local_memory_info=gpu_info,
+        source_node_id="source_node_gpu",
+        source_address="192.168.1.4",
+        source_port=9000,
+    )
+
+    response = servicer.RequestModelReplicaTransport(
+        gpu_transport_request, test_context
+    )
+    assert response.status == global_store_pb2.Status.OK
+    assert response.remote_memory_info.remote_memory_keys == ["ram_key"]

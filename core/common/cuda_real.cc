@@ -1,0 +1,274 @@
+// Copyright (c) 2025, StepCast Team. All rights reserved.
+
+#include "core/common/cuda_api.h"
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <iomanip>
+#include <sstream>
+
+#include "core/common/error_handling.h"
+
+namespace stepcast::cuda {
+
+absl::Status set_device(int device_id) {
+  SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(device_id));
+  return absl::OkStatus();
+}
+
+absl::Status get_device(int* device_id) {
+  SC_RETURN_IF_CUDA_ERROR(cudaGetDevice(device_id));
+  return absl::OkStatus();
+}
+
+absl::Status malloc(void** ptr, size_t bytes) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMalloc(ptr, bytes));
+  return absl::OkStatus();
+}
+
+absl::Status malloc_host(void** ptr, size_t bytes) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMallocHost(ptr, bytes));
+  return absl::OkStatus();
+}
+
+absl::Status free(void* ptr) {
+  if (ptr == nullptr) {
+    return absl::OkStatus();
+  }
+  SC_RETURN_IF_CUDA_ERROR(cudaFree(ptr));
+  return absl::OkStatus();
+}
+
+absl::Status free_host(void* ptr) {
+  if (ptr == nullptr) {
+    return absl::OkStatus();
+  }
+  SC_RETURN_IF_CUDA_ERROR(cudaFreeHost(ptr));
+  return absl::OkStatus();
+}
+
+absl::Status memcpy(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMemcpy(dst, src, bytes, kind));
+  return absl::OkStatus();
+}
+
+absl::Status memcpy_async(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind, cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMemcpyAsync(dst, src, bytes, kind, stream));
+  return absl::OkStatus();
+}
+
+absl::Status memset(void* ptr, int value, size_t bytes) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMemset(ptr, value, bytes));
+  return absl::OkStatus();
+}
+
+absl::Status get_device_count(int* count) {
+  SC_RETURN_IF_CUDA_ERROR(cudaGetDeviceCount(count));
+  return absl::OkStatus();
+}
+
+absl::Status get_memory_info(size_t* free_bytes, size_t* total_bytes, int device_id) {
+  int current_device;
+  SC_RETURN_IF_CUDA_ERROR(cudaGetDevice(&current_device));
+
+  SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(device_id));
+  SC_RETURN_IF_CUDA_ERROR(cudaMemGetInfo(free_bytes, total_bytes));
+  SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(current_device));
+
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> get_device_name(int device_id) {
+  cudaDeviceProp prop;
+  SC_RETURN_IF_CUDA_ERROR(cudaGetDeviceProperties(&prop, device_id));
+  return std::string(prop.name);
+}
+
+absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
+  cudaIpcMemHandle_t cuda_handle;
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcGetMemHandle(&cuda_handle, const_cast<void*>(ptr)));
+
+  // Convert handle to string representation
+  std::stringstream ss;
+  for (int i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
+    ss << std::hex << std::setw(2) << std::setfill('0')
+       << static_cast<int>(reinterpret_cast<const unsigned char*>(&cuda_handle)[i]);
+  }
+  *handle = ss.str();
+  return absl::OkStatus();
+}
+
+absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
+  if (handle.size() != sizeof(cudaIpcMemHandle_t) * 2) {
+    return absl::InvalidArgumentError("Invalid IPC handle size");
+  }
+
+  cudaIpcMemHandle_t cuda_handle;
+  // Convert string back to handle
+  for (size_t i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
+    std::string byte_str = handle.substr(i * 2, 2);
+    reinterpret_cast<unsigned char*>(&cuda_handle)[i] = static_cast<unsigned char>(std::stoi(byte_str, nullptr, 16));
+  }
+
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(ptr, cuda_handle, cudaIpcMemLazyEnablePeerAccess));
+  return absl::OkStatus();
+}
+
+absl::Status close_ipc_handle(void* ptr) {
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcCloseMemHandle(ptr));
+  return absl::OkStatus();
+}
+
+absl::Status device_synchronize() {
+  SC_RETURN_IF_CUDA_ERROR(cudaDeviceSynchronize());
+  return absl::OkStatus();
+}
+
+absl::Status memset_async(void* ptr, int value, size_t bytes, cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaMemsetAsync(ptr, value, bytes, stream));
+  return absl::OkStatus();
+}
+
+absl::Status get_device_properties(int device_id, void* prop) {
+  SC_RETURN_IF_CUDA_ERROR(cudaGetDeviceProperties(static_cast<cudaDeviceProp*>(prop), device_id));
+  return absl::OkStatus();
+}
+
+absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr) {
+  cudaPointerAttributes attrs;
+  SC_RETURN_IF_CUDA_ERROR(cudaPointerGetAttributes(&attrs, ptr));
+  if (device)
+    *device = attrs.device;
+  if (device_ptr)
+    *device_ptr = attrs.devicePointer;
+  return absl::OkStatus();
+}
+
+absl::Status pointer_get_attributes_full(void* ptr, cudaPointerAttributes* attrs) {
+  SC_RETURN_IF_CUDA_ERROR(cudaPointerGetAttributes(attrs, ptr));
+  return absl::OkStatus();
+}
+
+// Stream management
+absl::Status stream_create(cudaStream_t* stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamCreate(stream));
+  return absl::OkStatus();
+}
+
+absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int flags) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamCreateWithFlags(stream, flags));
+  return absl::OkStatus();
+}
+
+absl::Status stream_destroy(cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamDestroy(stream));
+  return absl::OkStatus();
+}
+
+absl::Status stream_synchronize(cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamSynchronize(stream));
+  return absl::OkStatus();
+}
+
+absl::Status stream_wait_event(cudaStream_t stream, cudaEvent_t event) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamWaitEvent(stream, event, 0));
+  return absl::OkStatus();
+}
+
+absl::Status stream_add_callback(
+    cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*),
+    void* user_data,
+    unsigned int flags) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamAddCallback(stream, callback, user_data, flags));
+  return absl::OkStatus();
+}
+
+absl::Status launch_host_func(cudaStream_t stream, void (*func)(void*), void* user_data) {
+#if CUDART_VERSION >= 10010
+  SC_RETURN_IF_CUDA_ERROR(cudaLaunchHostFunc(stream, func, user_data));
+  return absl::OkStatus();
+#else
+  return absl::UnimplementedError("cudaLaunchHostFunc requires CUDA 10.1 or later");
+#endif
+}
+
+// Event management
+absl::Status event_create(cudaEvent_t* event) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventCreate(event));
+  return absl::OkStatus();
+}
+
+absl::Status event_create_with_flags(cudaEvent_t* event, unsigned int flags) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventCreateWithFlags(event, flags));
+  return absl::OkStatus();
+}
+
+absl::Status event_destroy(cudaEvent_t event) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventDestroy(event));
+  return absl::OkStatus();
+}
+
+absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventRecord(event, stream));
+  return absl::OkStatus();
+}
+
+absl::Status event_synchronize(cudaEvent_t event) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventSynchronize(event));
+  return absl::OkStatus();
+}
+
+absl::Status event_elapsed_time(float* ms, cudaEvent_t start, cudaEvent_t end) {
+  SC_RETURN_IF_CUDA_ERROR(cudaEventElapsedTime(ms, start, end));
+  return absl::OkStatus();
+}
+
+// Error handling
+absl::Status get_last_error() {
+  SC_RETURN_IF_CUDA_ERROR(cudaGetLastError());
+  return absl::OkStatus();
+}
+
+absl::Status peek_last_error() {
+  SC_RETURN_IF_CUDA_ERROR(cudaPeekAtLastError());
+  return absl::OkStatus();
+}
+
+bool is_fake() {
+  return false;
+}
+
+bool is_available() {
+  int count = 0;
+  cudaError_t err = cudaGetDeviceCount(&count);
+  return err == cudaSuccess && count > 0;
+}
+
+// IPC handle operations (native CUDA handle type)
+absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcGetMemHandle(handle, dev_ptr));
+  return absl::OkStatus();
+}
+
+absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsigned int flags) {
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(dev_ptr, handle, flags));
+  return absl::OkStatus();
+}
+
+absl::Status close_ipc_mem_handle(void* dev_ptr) {
+  SC_RETURN_IF_CUDA_ERROR(cudaIpcCloseMemHandle(dev_ptr));
+  return absl::OkStatus();
+}
+
+absl::Status host_register(void* ptr, size_t size, unsigned int flags) {
+  SC_RETURN_IF_CUDA_ERROR(cudaHostRegister(ptr, size, flags));
+  return absl::OkStatus();
+}
+
+absl::Status host_unregister(void* ptr) {
+  SC_RETURN_IF_CUDA_ERROR(cudaHostUnregister(ptr));
+  return absl::OkStatus();
+}
+
+} // namespace stepcast::cuda

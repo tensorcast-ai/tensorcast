@@ -1,0 +1,125 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "save_vllm_model",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "examples/save_vllm_model.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--model-name=DeepSeek-R1-0528",
+                "--local-model-path=/mnt/DeepSeek-R1-0528",
+                "--storage-path=/mnt/host0/scstore",
+                "--tensor-parallel-size=8"
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "local daemon",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scstore/cli.py",
+            "console": "integratedTerminal",
+            "args": [
+                "start",
+                // "--global-store-address=100.96.104.39:50051",
+                // "--enable-p2p-engine",
+                // "--enable-p2p-access",
+                // "--enable-worker-management"
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "global store",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scstore/global_store/__main__.py",
+            "console": "integratedTerminal",
+            "args": [],
+            "justMyCode": false
+        },
+        {
+            "name": "(lldb) python local daemon",
+            "type": "lldb",
+            "request": "launch",
+            "program": "/${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "scstore/cli.py",
+                "start",
+                // "--global-store-address=100.96.104.39:50051",
+                // "--enable-p2p-engine",
+                // "--enable-p2p-access",
+                "--config=examples/config/store_daemon_config.yaml"
+            ],
+            "cwd": "${workspaceFolder}",
+            "sourceMap": {
+                "/proc/self/cwd": "${workspaceFolder}"
+            },
+            "breakpointMode": "file",
+            "sourceLanguages": [
+                "cpp"
+            ],
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "(lldb) server: model-rdma-transfer-test",
+            "program": "${workspaceFolder}/bazel-bin/tests/cpp/model_rdma_transfer_test",
+            "args": [
+                "--mode=server",
+                "--server_port=50061",
+                "--register_location=cpu",
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "STEPCAST_COMM_ENABLE_RDMA": "false"
+            },
+            "sourceLanguages": [
+                "cpp"
+            ],
+            "sourceMap": {
+                "/proc/self/cwd": "${workspaceFolder}"
+            },
+            "breakpointMode": "file"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "(lldb) client: model-rdma-transfer-test",
+            "program": "/${workspaceFolder}/bazel-bin/tests/cpp/model_rdma_transfer_test",
+            "args": [
+                "--mode=client",
+                "--server_ip=100.108.194.25",
+                "--server_port=50061",
+                "--server_register_location=cpu",
+                "--client_target_location=cpu",
+            ],
+            "cwd": "/${workspaceFolder}",
+            "env": {
+                "STEPCAST_COMM_ENABLE_RDMA": "false"
+            },
+            "sourceLanguages": [
+                "cpp"
+            ],
+            "sourceMap": {
+                "/proc/self/cwd": "${workspaceFolder}"
+            },
+            "breakpointMode": "file"
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "HF_HUB_OFFLINE": "1"
+            }
+        },
+    ]
+}

@@ -1,0 +1,103 @@
+// Copyright (c) 2025, StepCast Team. All rights reserved.
+
+// All rights reserved.
+#pragma once
+
+#include <functional>
+#include <string>
+#include <utility>
+
+#include "absl/status/status.h"
+#include "core/common/cuda_api.h"
+#include "core/common/trace/trace_manager.h"
+
+namespace stepcast::store {
+namespace detail {
+
+// Internal payload passed to the CUDA host callback.
+struct CudaTracePayload {
+  std::string model_id;
+  std::string request_id;
+  TraceManager::SpanId span_id;
+  std::function<void()> on_complete;
+};
+
+inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* payload) {
+#if CUDART_VERSION >= 10010
+  auto status = stepcast::cuda::launch_host_func(
+      stream,
+      [](void* user_data) {
+        auto* p = static_cast<CudaTracePayload*>(user_data);
+        TraceManager::instance().end_span(p->model_id, p->request_id, p->span_id);
+        if (p->on_complete) {
+          p->on_complete();
+        }
+        delete p;
+      },
+      payload);
+#else
+  auto status = stepcast::cuda::stream_add_callback(
+      stream,
+      [](cudaStream_t /*unused*/, cudaError_t /*status*/, void* user_data) {
+        auto* p = static_cast<CudaTracePayload*>(user_data);
+        TraceManager::instance().end_span(p->model_id, p->request_id, p->span_id);
+        if (p->on_complete) {
+          p->on_complete();
+        }
+        delete p;
+      },
+      payload,
+      /*flags=*/0);
+#endif
+  if (!status.ok()) {
+    // Fallback: end span immediately to avoid leaks and execute on_complete.
+    TraceManager::instance().end_span(payload->model_id, payload->request_id, payload->span_id);
+    if (payload->on_complete) {
+      payload->on_complete();
+    }
+    delete payload;
+  }
+}
+
+} // namespace detail
+
+// ---------------------------------------------------------------------------
+// trace_cuda_async
+// ---------------------------------------------------------------------------
+// Helper that executes a CUDA asynchronous operation (op) on the given stream,
+// starts a Trace span (stage) when called, and automatically ends the span once
+// the operation and all prior work in the stream completes.  An optional
+// on_complete callback is run inside the same host callback right after the
+// span ends, typically for resource cleanup.
+//
+// Usage:
+//   SC_RETURN_IF_ERROR(trace_cuda_async("h2d_copy", stream,
+//       [&]{ return stepcast::cuda::memcpy_async(dst, src, n, cudaMemcpyHostToDevice, stream); },
+//       [&]{ pool->return_slot(slot); }));
+// ---------------------------------------------------------------------------
+template <typename Op, typename Done = std::function<void()>>
+inline absl::Status trace_cuda_async(
+    const std::string& stage,
+    cudaStream_t stream,
+    Op&& op,
+    Done&& on_complete = Done{}) {
+  const std::string& model_id = TraceManager::current_model_id();
+  const std::string& request_id = TraceManager::current_request_id();
+  // Pass the CUDA stream to begin_span for better Chrome Trace visualization
+  auto span_id = TraceManager::instance().begin_span(model_id, request_id, stage, static_cast<void*>(stream));
+
+  // Execute the user-supplied CUDA operation.
+  absl::Status status = std::forward<Op>(op)();
+  if (!status.ok()) {
+    TraceManager::instance().end_span(model_id, request_id, span_id);
+    return status;
+  }
+
+  // Schedule host callback to end the span when the stream finishes work.
+  auto* payload = new detail::CudaTracePayload{model_id, request_id, span_id, std::forward<Done>(on_complete)};
+  detail::sc_schedule_trace_host_cb(stream, payload);
+
+  return absl::OkStatus();
+}
+
+} // namespace stepcast::store

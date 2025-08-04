@@ -1,0 +1,65 @@
+---
+description: C++ development guidelines
+globs: **/*.cc,Makefile,BUILD,**/*.h
+alwaysApply: false
+---
+# C++ Development Guidelines
+
+## Language Standards
+- **C++20**: Use modern C++ features freely (no compatibility shims)
+- **Build System**: Bazel with Clang18
+- **Common Dependencies**: absl, catch2, nlohmann_json
+
+## Naming Conventions
+- **Variables/Functions**: `snake_case`
+- **Classes/Structs**: `PascalCase`
+- **Constants/Macros**: `ALL_CAPS`
+- **Files**: `snake_case` (e.g., `checkpoint_store.cc`)
+
+## Code Style
+- **Headers**: Use `#pragma once` for header guards
+- **Includes**: Group in order: own headers, standard library, third-party, project headers
+- **Namespaces**: Use nested namespace declarations (C++17 style)
+- **Auto**: Use `auto` for complex types, explicit types for primitives
+- **Const**: Prefer `const` and `constexpr` wherever possible
+
+## Functions & Methods
+- Start function names with a verb
+- Use structs for multiple parameters/returns
+- Prefer default parameters over overloading
+- Use trailing return types for template functions
+
+## Classes & Objects
+- Follow Rule of Five or Rule of Zero
+- Make member variables private with getters/setters as needed
+- Use `= default` and `= delete` explicitly
+- Prefer composition over inheritance
+- Declare interfaces as abstract classes or concepts
+- Avoid using forward declarations for classes
+
+## Error Handling
+- Use `absl::Status` or `absl::StatusOr<T>` for error handling
+- Never use exceptions in core library code
+- Check status values immediately after calls
+- Provide meaningful error messages
+
+## Memory Management
+- Always use RAII principles
+- Avoid manual memory allocation
+
+## Concurrency
+- Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
+- Prefer task-based parallelism over thread-based
+- Use `std::atomic` for lock-free programming
+- Document thread safety guarantees
+
+## Testing
+- Use Catch2 framework
+- Follow Arrange-Act-Assert pattern
+- One test per behavior
+- Use `SECTION` for test variations
+
+## Documentation
+- Use Doxygen style for public APIs
+- Document preconditions and postconditions
+- Include usage examples in header comments

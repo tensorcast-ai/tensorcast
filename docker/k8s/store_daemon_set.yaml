@@ -1,0 +1,205 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: store-daemon-config
+  namespace: stepcast
+  labels:
+    app: store-daemon
+  annotations:
+    kubernetes.io/description: StoreDaemon default configuration
+data:
+  store-daemon.yaml: |
+    # Basic server settings
+    server:
+      host: "0.0.0.0"
+      port: 61052
+      storage_path: "/mnt/stepcloud/prod/"
+      num_threads: 16
+      chunk_size: 256MB
+      mem_pool_size: 8GB
+      enable_p2p_engine: true
+      enable_p2p_access: true
+      pinned_memory_timeout_ms: 30000
+
+    global_store_address: "10.148.40.11:50051"
+
+    # High-availability behaviour
+    high_availability:
+      enabled: true
+      heartbeat_interval_ms: 30000
+      registration_retry_delay_ms: 5000
+      max_retries: -1
+
+    # Network ports
+    network:
+      p2p_port: 65090
+      metrics_port: 65091
+      health_check_port: 62080
+
+    # Lifecycle & eviction
+    lifecycle:
+      gpu_memory_limit_fraction: 0.1
+      global_cache_fraction: 0.1
+      proc_check_interval_s: 5.0
+      eviction_check_interval_s: 15.0
+
+    # Graceful shutdown window
+    shutdown:
+      grace_period_ms: 30000
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: store-daemon-set
+  namespace: stepcast
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: store-daemon
+  template:
+    metadata:
+      annotations:
+        monitoring.basemind.com/metrics_path: /
+        monitoring.basemind.com/scrape: 'true'
+        monitoring.basemind.com/scrape_interval: 30s
+        monitoring.basemind.com/scrape_port: '65091'
+        monitoring.basemind.com/scrape_timeout: 30s
+      labels:
+        app: store-daemon
+        logs.monitoring.basemind.com/collect: 'true'
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nodeGroup
+                    operator: NotIn
+                    values:
+                      - aliyun-juicefs
+                      - aliyun-juicefs-shanghai
+                  - key: step.com/cloud-provider
+                    operator: In
+                    values:
+                      - ali
+      containers:
+        - name: store-daemon
+          image: 'hub.i.basemind.com/stepcast/scstore:2025.07.11-3d8ec'
+          imagePullPolicy: IfNotPresent
+          command: ["python"]
+          args:
+            - -m
+            - scstore.cli
+            - start
+            - "--config"
+            - /etc/stepcast/store-daemon.yaml
+            - "--blocking"
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "all"
+          ports:
+            - containerPort: 61052
+              name: grpc
+              protocol: TCP
+            - containerPort: 65090
+              name: p2p
+              protocol: TCP
+            - containerPort: 65091
+              name: metrics
+              protocol: TCP
+            - containerPort: 62080
+              name: health
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 61052
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 61052
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: '12'
+              memory: 48Gi
+            requests:
+              cpu: '4'
+              memory: 16Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - name: config
+              mountPath: /etc/stepcast/store-daemon.yaml
+              subPath: store-daemon.yaml
+            - mountPath: /mnt/stepcloud
+              mountPropagation: HostToContainer
+              name: stepcloud-sh-aliyun-juicefs-pvc
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: nvidia-driver
+              mountPath: /usr/local/nvidia
+            - name: dev
+              mountPath: /dev
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      hostPID: true
+      hostIPC: true
+      securityContext:
+        privileged: true
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+        - effect: NoSchedule
+          key: node.kubernetes.io/disk-pressure
+          operator: Exists
+        - effect: NoSchedule
+          key: node.kubernetes.io/memory-pressure
+          operator: Exists
+        - effect: NoSchedule
+          key: node.kubernetes.io/pid-pressure
+          operator: Exists
+        - effect: NoSchedule
+          key: node.kubernetes.io/unschedulable
+          operator: Exists
+      volumes:
+        - emptyDir: {}
+          name: tmp
+        - name: config
+          configMap:
+            name: store-daemon-config
+        - name: stepcloud-sh-aliyun-juicefs-pvc
+          persistentVolumeClaim:
+            claimName: stepcloud-sh-aliyun-juicefs-pvc
+        - name: nvidia-driver
+          hostPath:
+            path: /usr/local/nvidia
+        - name: dev
+          hostPath:
+            path: /dev
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: "100%"
+
+
+

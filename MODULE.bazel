@@ -1,0 +1,60 @@
+module(name = "stepcast_store")
+
+bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "toolchains_llvm", version = "1.4.0")
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    llvm_version = "18.1.8",
+)
+use_repo(llvm, "llvm_toolchain")
+
+register_toolchains("@llvm_toolchain//:all")
+
+bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.0")
+bazel_dep(name = "abseil-cpp", version = "20250127.0")
+bazel_dep(name = "catch2", version = "3.8.1")
+bazel_dep(name = "nlohmann_json", version = "3.12.0")
+bazel_dep(name = "google_benchmark", version = "1.9.4")
+bazel_dep(name = "rules_proto_grpc_cpp", version = "5.5.0")
+bazel_dep(name = "toolchains_protoc", version = "0.4.3")
+bazel_dep(name = "protobuf", version = "31.1")
+
+protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
+protoc.toolchain(
+    google_protobuf = "com_google_protobuf",
+    version = "v31.1",
+)
+
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+new_local_repository(
+    name = "cuda",
+    build_file = "@//third_party/cuda:BUILD",
+    path = "/data/cuda/cuda-12.4",
+)
+
+new_local_repository(
+    name = "cudnn",
+    build_file = "@//third_party/cudnn/archive:BUILD",
+    path = ".venv/lib/python3.10/site-packages/nvidia/cudnn",
+)
+
+new_local_repository(
+    name = "nccl",
+    build_file = "@//third_party/nccl:BUILD",
+    path = ".venv/lib/python3.10/site-packages/nvidia/nccl",
+)
+
+new_local_repository(
+    name = "libtorch",
+    build_file = "@//third_party/libtorch:BUILD",
+    path = ".venv/lib/python3.10/site-packages/torch",
+)
+
+new_local_repository(
+    name = "cuparselt",
+    build_file = "@//third_party/cusparselt:BUILD",
+    path = ".venv/lib/python3.10/site-packages/cusparselt",
+)

@@ -1,0 +1,6 @@
+# Ignore all cached lock files
+*.lock.*
+
+# Keep this directory in git
+!.gitignore
+!README.md

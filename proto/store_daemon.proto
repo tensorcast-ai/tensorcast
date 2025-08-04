@@ -1,0 +1,290 @@
+syntax = "proto3";
+
+package store_daemon;
+
+service StoreDaemon {
+  rpc LoadModel(LoadModelRequest) returns (LoadModelResponse) {}
+  rpc ConfirmModel(ConfirmModelRequest) returns (ConfirmModelResponse) {}
+  rpc UnloadModel(UnloadModelRequest) returns (UnloadModelResponse) {}
+
+  rpc ClearMem(ClearMemRequest) returns (ClearMemResponse) {}
+
+  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse) {}
+
+  // Worker健康检测
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse) {}
+
+  // ------------------------------------------------------------------
+  // Asynchronous model integrity verification support.  Each LoadModel
+  // request triggers a background verification task on the daemon side.
+  // Clients can poll/wait for the outcome via this RPC.
+  // ------------------------------------------------------------------
+
+  // Wait until the daemon finishes verifying the specified model replica
+  // (identified by the <model_identifier, replica_uuid> tuple) or the
+  // provided timeout elapses.  The call returns the current verification
+  // status so that clients can decide whether to retry or abort.
+  rpc WaitModelVerification(VerificationRequest) returns (VerificationResponse) {}
+
+  // 获取详细状态信息
+  rpc GetDetailedStatus(GetDetailedStatusRequest) returns (GetDetailedStatusResponse) {}
+
+  // Get reference information for all loaded models
+  rpc GetLoadedModels(GetLoadedModelsRequest) returns (GetLoadedModelsResponse) {}
+
+  // ========== Distributed chunk locking ==========
+  // Dual-end locking mechanism for P2P transfers
+  rpc LockTransportChunks(LockChunksRequest) returns (LockChunksResponse) {}
+  rpc UnlockTransportChunks(UnlockChunksRequest) returns (UnlockChunksResponse) {}
+}
+
+message GetServerConfigRequest {}
+
+message GetServerConfigResponse {
+  int64 mem_pool_size = 1;
+  int64 chunk_size = 2;
+}
+
+message RegisterModelRequest {
+  string model_path = 1;
+}
+
+message RegisterModelResponse {
+  string model_path = 1;
+  int64 model_size = 2;
+}
+
+enum DeviceType {
+  DEVICE_TYPE_DISK = 0;
+  DEVICE_TYPE_CPU = 1;
+  DEVICE_TYPE_GPU = 2;
+}
+
+message MemCopyHandle {
+  bytes cuda_ipc_handle = 1;
+}
+
+message LoadModelRequest {
+  string model_path = 1;
+  string replica_uuid = 2;
+  string device_uuid = 3;
+  DeviceType target_device_type = 4;
+  int32 pinned_allocation_timeout_ms = 5;
+  int32 pid = 6;  // Process ID for reference tracking
+  bool keep_for_global = 7;  // Keep in cache for global access
+  int64 size_bytes = 8;  // Model size in bytes (for reference tracking)
+}
+
+// LoadModel now returns immediately after memory allocation succeeds.
+// The actual data loading continues in the background.
+enum LoadModelStatus {
+  LOAD_MODEL_STATUS_ALLOCATED = 0;  // Memory allocated, loading in progress
+  LOAD_MODEL_STATUS_FAILED = 1;     // Allocation or initial setup failed
+}
+
+message LoadModelResponse {
+  string model_path = 1;
+
+  optional MemCopyHandle mem_handle = 2;
+
+  // Status of the load operation. ALLOCATED means memory is ready
+  // but data transfer is still in progress. Client must call
+  // ConfirmModel to verify completion before using the model.
+  LoadModelStatus status = 3;
+}
+
+message ConfirmModelRequest {
+  string model_path = 1;
+  string replica_uuid = 2;
+  DeviceType target_device_type = 3;
+}
+
+message ConfirmModelResponse {
+  string model_path = 1;
+  int32 code = 2;
+}
+
+message UnloadModelRequest {
+  string model_path = 1;
+  string replica_uuid = 2;
+  DeviceType target_device_type = 3;
+  optional int32 pid = 4;  // Process ID for reference tracking
+  optional string version = 5;  // Model version
+}
+
+message UnloadModelResponse {
+  string model_path = 1;
+  int32 code = 2;
+}
+
+message ClearMemRequest {}
+
+message ClearMemResponse {}
+
+// 获取Worker状态
+message GetWorkerStatusRequest {}
+
+message GetWorkerStatusResponse {
+  bool is_registered = 1;                // 是否已注册到Global Store
+  bool is_healthy = 2;                   // 是否健康运行
+  bool is_shutting_down = 3;            // 是否正在关闭
+  uint64 mem_pool_total_size = 4;       // 内存池总大小（字节）
+  uint64 mem_pool_available_size = 5;    // 内存池可用大小（字节）
+  int64 uptime_seconds = 6;              // 运行时间（秒）
+  string worker_id = 7;                  // Worker ID（如已注册）
+}
+
+// ----------------------------------------------------------------------
+// Verification related definitions
+// ----------------------------------------------------------------------
+
+enum VerificationStatus {
+  VERIFICATION_STATUS_UNKNOWN = 0;
+  VERIFICATION_STATUS_IN_PROGRESS = 1;
+  VERIFICATION_STATUS_PASSED = 2;
+  VERIFICATION_STATUS_FAILED = 3;
+}
+
+message VerificationRequest {
+  string model_identifier = 1;
+  string replica_uuid = 2;
+  uint32 timeout_ms = 3;
+}
+
+message VerificationResponse {
+  VerificationStatus status = 1;
+  string err_msg = 2;
+}
+
+// ========== 详细状态查询相关定义 ==========
+
+// 模型位置枚举
+enum ModelLocation {
+  MODEL_LOCATION_NONE = 0;
+  MODEL_LOCATION_DISK = 1;
+  MODEL_LOCATION_CPU = 2;
+  MODEL_LOCATION_GPU = 3;
+  MODEL_LOCATION_REMOTE = 4;
+}
+
+// 模型信息
+message ModelInfo {
+  string model_identifier = 1;             // 模型标识符
+  int64 model_size_bytes = 2;              // 模型大小（字节）
+  ModelLocation location = 3;              // 当前位置（CPU/GPU）
+  int64 loaded_timestamp = 4;              // 加载时间戳
+  int64 last_access_timestamp = 5;         // 最后访问时间戳
+  repeated string replica_uuids = 6;       // 关联的副本UUIDs
+  bool is_registered_for_comm = 7;         // 是否已注册用于RDMA通信
+}
+
+// GPU设备信息
+message GpuDeviceInfo {
+  int32 device_id = 1;                     // GPU设备ID
+  string device_uuid = 2;                  // GPU设备UUID
+  int64 total_memory_bytes = 3;            // 总显存（字节）
+  int64 free_memory_bytes = 4;             // 可用显存（字节）
+  int64 used_memory_bytes = 5;             // 已使用显存（字节）
+  repeated ModelInfo loaded_models = 6;     // 该GPU上加载的模型列表
+}
+
+// 内存池信息
+message MemoryPoolInfo {
+  int64 total_size_bytes = 1;              // 内存池总大小
+  int64 available_bytes = 2;               // 可用大小
+  int64 allocated_bytes = 3;               // 已分配大小
+  int32 allocated_chunks_count = 4;        // 已分配的块数
+  int64 chunk_size_bytes = 5;              // 块大小
+}
+
+// RDMA通信信息
+message CommunicationInfo {
+  bool enabled = 1;                        // 是否启用RDMA
+  int64 total_transfers = 2;               // 总传输次数
+  int64 total_bytes_transferred = 3;       // 总传输字节数
+  int64 total_transfer_errors = 4;         // 传输错误次数
+}
+
+// 详细状态请求
+message GetDetailedStatusRequest {}
+
+// 详细状态响应
+message GetDetailedStatusResponse {
+  // 基础状态信息（与GetWorkerStatusResponse相同的字段）
+  bool is_registered = 1;
+  bool is_healthy = 2;
+  bool is_shutting_down = 3;
+  int64 uptime_seconds = 4;
+  string worker_id = 5;
+
+  // 内存池详细信息
+  MemoryPoolInfo memory_pool_info = 6;
+
+  // GPU设备列表及其上的模型
+  repeated GpuDeviceInfo gpu_devices = 7;
+
+  // CPU内存中的模型列表
+  repeated ModelInfo cpu_models = 8;
+
+  // RDMA/通信信息
+  CommunicationInfo communication_info = 9;
+
+  // 聚合统计信息
+  int32 total_models_loaded = 10;           // 总加载模型数
+  int64 total_model_size_bytes = 11;        // 所有模型总大小
+
+  // 配置信息
+  string storage_path = 12;                 // 存储路径
+  int32 num_worker_threads = 13;            // 工作线程数
+}
+
+// ========== 模型引用信息查询 ==========
+
+// 单个模型的引用信息
+message LoadedModelInfo {
+  string model_id = 1;                      // 模型ID
+  string version = 2;                       // 模型版本
+  int32 device_id = 3;                      // 设备ID (-1 表示CPU)
+  int32 ref_count = 4;                      // 引用计数
+  repeated int32 pids = 5;                  // 持有引用的进程ID列表
+  int64 size_bytes = 6;                     // 模型大小（字节）
+  bool keep_for_global = 7;                 // 是否保留为全局缓存
+  int64 last_access_timestamp = 8;          // 最后访问时间戳
+}
+
+// 获取已加载模型请求
+message GetLoadedModelsRequest {
+  // 可选过滤条件
+  optional string model_id_filter = 1;      // 按模型ID过滤
+  optional int32 device_id_filter = 2;      // 按设备ID过滤
+}
+
+// 获取已加载模型响应
+message GetLoadedModelsResponse {
+  repeated LoadedModelInfo models = 1;      // 已加载模型列表
+  int32 total_models = 2;                   // 总模型数
+  int64 total_size_bytes = 3;               // 总大小（字节）
+}
+
+// ========== Chunk locking message definitions ==========
+
+// Lock chunks request
+message LockChunksRequest {
+  string model_id = 1;                     // Model ID
+  repeated uint32 chunk_indices = 2;       // List of chunk indices to lock
+}
+
+// Lock chunks response
+message LockChunksResponse {
+  string lock_token = 1;                   // Lock token (UUID)
+}
+
+// Unlock chunks request
+message UnlockChunksRequest {
+  string lock_token = 1;                   // Lock token
+}
+
+// Unlock chunks response
+message UnlockChunksResponse {
+  // Empty response, returns empty message on success
+}

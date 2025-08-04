@@ -1,0 +1,144 @@
+CompileFlags:
+  # 基本编译选项
+  Add:
+    - -xc++                          # 将所有文件视为 C++
+    - -std=c++20                     # 使用 C++20 标准
+    - -Wall                          # 启用所有常见警告
+    - -Wextra                        # 额外的警告
+    - -Wthread-safety                # 线程安全分析（项目使用多线程）
+    - -Wself-assign                  # 自赋值警告
+    - -Wunused-result                # 未使用结果警告
+    - -fcolor-diagnostics            # 彩色诊断输出
+    - -ferror-limit=100              # 错误限制，避免过多错误淹没有用信息
+
+  # 移除可能冲突的选项
+  Remove:
+    - -W*                           # 移除所有其他警告相关标志
+    - -stdlib=libc++                # 移除 libc++ 相关标志，避免与系统库冲突
+    - -Xclang                       # 移除 clang 特定标志
+    - -fno-cxx-modules              # 移除模块相关标志
+    - --gcc-toolchain=*             # 移除 GCC 工具链路径
+
+  # 指定编译器
+  Compiler: ./external/toolchains_llvm++llvm+llvm_toolchain_llvm/bin/clang++  # 使用项目内的 clang++
+
+  # 编译数据库搜索策略
+  CompilationDatabase: Ancestors    # 在父目录中搜索 compile_commands.json
+
+# 索引配置
+Index:
+  Background: Build                 # 启用后台索引
+  StandardLibrary: true             # 索引标准库
+  FileFilter:                       # 文件过滤器
+    - -bazel-*                      # 排除 bazel 生成的文件
+    - -external/*                   # 排除外部依赖
+    - +core/*                       # 包含核心代码
+    - +scstore/*                    # 包含 scstore 代码
+    - +tests/*                      # 包含测试代码
+
+# 诊断配置
+Diagnostics:
+  # 抑制特定的诊断
+  Suppress:
+    - bugprone-easily-swappable-parameters  # 避免过多的参数交换警告
+    - bugprone-narrowing-conversions        # GPU 代码中常见的类型转换
+    - cert-err58-cpp                        # 静态对象构造函数可能抛出异常
+    - cppcoreguidelines-pro-type-vararg     # C 风格可变参数（日志宏可能使用）
+
+  # Clang-Tidy 配置（优化的性能子集）
+  ClangTidy:
+    Add:
+      # 关键检查类别
+      - bugprone-*                          # Bug 倾向检查
+      - performance-*                       # 性能检查（重要）
+      - readability-identifier-naming       # 命名规范
+      - readability-redundant-*             # 冗余代码
+      - modernize-use-nullptr              # 使用 nullptr
+      - modernize-use-override             # 使用 override
+      - modernize-use-using                # 使用 using 替代 typedef
+      - modernize-deprecated-headers       # 弃用的头文件
+      - google-runtime-int                 # 整数类型检查
+      - misc-unused-*                      # 未使用的代码
+      - abseil-*                           # Abseil 库相关检查
+      - concurrency-*                      # 并发相关检查
+      - misc-const-correctness
+
+    Remove:
+      # 在编辑时禁用的检查（太慢或噪音太多）
+      - bugprone-easily-swappable-parameters
+      - bugprone-implicit-widening-of-multiplication-result
+      - performance-no-int-to-ptr          # CUDA 代码中常见
+      - readability-magic-numbers          # 不强制魔数检查
+      - readability-function-cognitive-complexity  # 复杂度检查太慢
+      - abseil-string-find-startswith      # 可能有误报
+      - modernize-use-trailing-return-type # 不强制尾置返回类型
+      - modernize-avoid-c-arrays           # C 数组在 CUDA 代码中常见
+      - cppcoreguidelines-*                # 太严格，使用特定规则代替
+      - fuchsia-statically-constructed-objects
+
+    CheckOptions:
+      # 命名规范（与项目风格一致）
+      readability-identifier-naming.VariableCase: lower_case
+      readability-identifier-naming.FunctionCase: lower_case
+      readability-identifier-naming.ClassCase: PascalCase
+      readability-identifier-naming.StructCase: PascalCase
+      readability-identifier-naming.EnumCase: PascalCase
+      readability-identifier-naming.NamespaceCase: lower_case
+      readability-identifier-naming.MacroCase: UPPER_CASE
+      readability-identifier-naming.ParameterCase: lower_case
+      readability-identifier-naming.MemberCase: lower_case
+      readability-identifier-naming.PrivateMemberSuffix: _
+
+      # Constexpr 和常量命名规范（Google 风格）
+      readability-identifier-naming.ConstexprVariableCase: CamelCase
+      readability-identifier-naming.ConstexprVariablePrefix: k
+      readability-identifier-naming.StaticConstantCase: CamelCase
+      readability-identifier-naming.StaticConstantPrefix: k
+      readability-identifier-naming.GlobalConstantCase: CamelCase
+      readability-identifier-naming.GlobalConstantPrefix: k
+
+      # 性能相关选项
+      performance-move-const-arg.CheckTriviallyCopyableMove: false
+      performance-unnecessary-value-param.IncludeStyle: google
+
+      # Abseil 相关选项
+      abseil-string-find-str-contains.StringLikeClasses: "std::string;std::string_view;absl::string_view"
+
+    # 快速检查过滤器 - 只运行快速检查
+    FastCheckFilter: None
+
+  # Include Cleaner 配置
+  UnusedIncludes: Strict           # 严格检查未使用的包含
+  MissingIncludes: None            # 暂时不检查缺失的包含（可能产生误报）
+
+# 代码补全配置
+Completion:
+  AllScopes: true                  # 包含所有作用域的补全
+
+# 内联提示配置
+InlayHints:
+  Enabled: true
+  ParameterNames: true             # 显示参数名称
+  DeducedTypes: true               # 显示推导类型
+  Designators: true                # 显示指定初始化器
+  BlockEnd: false                  # 不显示块结束注释（避免视觉混乱）
+
+# Hover 配置
+Hover:
+  ShowAKA: true                    # 显示类型别名
+
+# 条件配置 - 测试文件特定配置
+---
+If:
+  PathMatch: ".*test.*\\.(cc|cpp)" # 匹配测试文件
+CompileFlags:
+  Add:
+    - -DUNIT_TEST                  # 定义单元测试宏
+    - -DDEBUG                      # 启用调试
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - readability-identifier-naming              # 测试中命名可以更灵活
+      - readability-function-cognitive-complexity
+    CheckOptions:
+      readability-function-cognitive-complexity: 50

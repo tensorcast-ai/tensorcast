@@ -1,0 +1,37 @@
+# Basic server settings
+server:
+  host: "0.0.0.0"
+  port: 61052
+  storage_path: "/mnt/stepcloud/prod/"
+  num_threads: 16
+  chunk_size: 64MiB
+  mem_pool_size: 2GiB
+  enable_p2p_engine: true
+  enable_p2p_access: true
+  pinned_memory_timeout_ms: 30000
+
+global_store_address: "10.148.40.11:50051"
+
+# High-availability behaviour
+high_availability:
+  enabled: true
+  heartbeat_interval_ms: 30000
+  registration_retry_delay_ms: 5000
+  max_retries: -1
+
+# Network ports
+network:
+  p2p_port: 65090
+  metrics_port: 65091
+  health_check_port: 62080
+
+# Lifecycle & eviction
+lifecycle:
+  gpu_memory_limit_fraction: 0.1
+  global_cache_fraction: 0.1
+  proc_check_interval_s: 5.0
+  eviction_check_interval_s: 15.0
+
+# Graceful shutdown window
+shutdown:
+  grace_period_ms: 30000

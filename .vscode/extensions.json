@@ -1,0 +1,21 @@
+{
+    "recommendations": [
+        "bungcip.better-toml",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "xaver.clang-format",
+        "BazelBuild.vscode-bazel",
+        "Anthropic.claude-code",
+        "vadimcn.vscode-lldb",
+        "yzhang.markdown-all-in-one",
+        "bierner.markdown-mermaid",
+        "anysphere.cursorpyright",
+        "ms-python.python",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "zxh404.vscode-proto3",
+        "phgn.vscode-starlark"
+    ],
+    "unwantedRecommendations": [
+        "ms-vscode.cpptools-extension-pack"
+    ]
+}
