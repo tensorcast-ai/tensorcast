@@ -250,34 +250,19 @@ Example sidebar update:
 - **Developer Guides** (`web-docs/docs/developer-guides/`): Technical implementation details, architecture, and development workflows
 - **Reference** (`web-docs/docs/reference/`): API documentation, troubleshooting, and reference materials
 
-### Documentation Naming Convention
+### Technical Design and RFCs
 
-For files in the AI Solutions directory (`web-docs/docs/developer-guides/ai-solutions/`), use the following standardized naming convention:
+Technical design documents and RFCs are now unified in the `rfcs/` directory using the same naming convention.
 
-**Format**: `YYMMDD-title.md`
+**Filename Format**: `NNNN-feature-name.md` (e.g., `0001-distributed-virtual-memory-pool.md`)
 
-- **YYMMDD**: Creation date in YYMMDD format (e.g., 250630 for June 30, 2025)
-- **title**: Descriptive filename using kebab-case
-- Both the filename and document title should follow this convention
-
-**Examples**:
-- `250625-direct-io-optimization.md` with title `# 250625-DIRECT_IO Optimization for Large Model Loading`
-- `250630-unified-memory-offloading-engine.md` with title `# 250630-Unified Memory & Offloading Engine for Large Models`
-
-This convention ensures chronological organization and easy identification of when documents were created.
-
-### Technical Design Documents
-
-When creating technical design documents, follow the standardized format:
-
-1. **Filename**: `YYMMDD-feature-name.md` (e.g., `250718-distributed-memory-pool.md`)
-2. **Required Sections**:
-   - Problem Statement
-   - Solution Overview
-   - Technical Details (Implementation steps)
-   - Testing Strategy
-   - Rollout Plan
-   - Progress Tracking (using standardized table format)
+**Required Sections**:
+- Problem Statement
+- Solution Overview
+- Technical Details (Implementation steps)
+- Testing Strategy
+- Rollout Plan
+- Progress Tracking (using standardized table format)
 
 For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 
