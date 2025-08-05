@@ -46,13 +46,15 @@ class MemoryManager {
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
+   * @param require_dvmp_lock_success Whether to fail transfer if DVMP chunk locking fails.
    */
   MemoryManager(
       std::string model_identifier,
       int local_device_id,
       std::shared_ptr<PinnedMemoryPool> pinned_pool,
       size_t max_buffer_bytes,
-      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero());
+      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
+      bool require_dvmp_lock_success = true);
 
   ~MemoryManager();
 
@@ -408,6 +410,9 @@ class MemoryManager {
 
   // Pinned memory allocation timeout
   const std::chrono::milliseconds pinned_memory_timeout_;
+
+  // Whether to fail transfer if DVMP chunk locking fails
+  const bool require_dvmp_lock_success_;
 
   std::unique_ptr<stepcast::memory::DistributedMemoryPool> dvmp_ ABSL_GUARDED_BY(mutex_);
   // Base CPU virtual address reserved by DVMP for this model (PAGEABLE_CPU path).

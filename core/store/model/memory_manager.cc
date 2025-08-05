@@ -25,7 +25,8 @@ MemoryManager::MemoryManager(
     int local_device_id,
     std::shared_ptr<PinnedMemoryPool> pinned_pool,
     size_t max_buffer_bytes,
-    std::chrono::milliseconds pinned_memory_timeout)
+    std::chrono::milliseconds pinned_memory_timeout,
+    bool require_dvmp_lock_success)
     : pinned_pool_(std::move(pinned_pool)),
       pageable_cpu_state_(MemoryState::UNALLOCATED),
       gpu_state_(MemoryState::UNALLOCATED),
@@ -33,7 +34,11 @@ MemoryManager::MemoryManager(
       stream_initialized_(false),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
+      require_dvmp_lock_success_(require_dvmp_lock_success),
       dvmp_(std::make_unique<memory::DistributedMemoryPool>()) {
+  // DVMP is always available in this codebase (per review requirement)
+  ABSL_CHECK(dvmp_ != nullptr) << "MemoryManager: DVMP allocation failed, which should not happen";
+  
   // Populate instance_key_ using constructor inputs
   instance_key_.model_id = std::move(model_identifier);
   instance_key_.device.type = (local_device_id >= 0) ? stepcast::DeviceType::GPU : stepcast::DeviceType::CPU;
@@ -752,25 +757,8 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
     device_id_capture = local_device_id_;
     model_id_capture = model_identifier_; // Copy string
 
-    // --- Lock chunks with DVMP before H2D transfer (RFC 0001 requirement) ---
-    if (src_is_host && !dst_is_host && dvmp_ && dvmp_cpu_base_ != nullptr) {
-      // Calculate number of chunks
-      size_t num_chunks = (model_size_ + memory::DistributedMemoryPool::kChunk - 1) / 
-                         memory::DistributedMemoryPool::kChunk;
-      std::vector<uint32_t> all_chunks;
-      all_chunks.reserve(num_chunks);
-      for (uint32_t i = 0; i < num_chunks; ++i) {
-        all_chunks.push_back(i);
-      }
-      
-      // Lock chunks before transfer
-      absl::Status lock_status = dvmp_->lock_chunks(model_identifier_, all_chunks);
-      if (!lock_status.ok()) {
-        LOG(WARNING) << "MemoryManager(" << model_identifier_ 
-                    << "): Failed to lock chunks before H2D transfer: " << lock_status;
-        // Continue with transfer even if lock fails, but log the warning
-      }
-    }
+    // Note: lock_chunks/unlock_chunks calls removed per review feedback
+    // DVMP chunk locking is handled at a higher layer if needed
 
     // --- Mark Destination as Loading ---
     absl::Status state_status = set_state_locked(destination, MemoryState::LOADING);
@@ -843,25 +831,9 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
           LOG(INFO) << "MemoryManager(" << this->model_identifier_
                     << "): Releasing host pinned memory after successful H→D copy (mandatory per RFC 0001).";
           
-          // Integrate with DVMP for proper chunk state management
+          // DVMP eviction for physical page reclamation
           if (this->dvmp_ && this->dvmp_cpu_base_ != nullptr) {
-            // Get all chunk indices for the model
-            size_t num_chunks = (this->model_size_ + memory::DistributedMemoryPool::kChunk - 1) / 
-                               memory::DistributedMemoryPool::kChunk;
-            std::vector<uint32_t> all_chunks;
-            all_chunks.reserve(num_chunks);
-            for (uint32_t i = 0; i < num_chunks; ++i) {
-              all_chunks.push_back(i);
-            }
-            
-            // Unlock chunks with copied_gpu=true to mark them as COPIED_GPU
-            absl::Status unlock_status = this->dvmp_->unlock_chunks(this->model_identifier_, all_chunks, true);
-            if (!unlock_status.ok()) {
-              LOG(WARNING) << "MemoryManager(" << this->model_identifier_
-                          << "): Failed to unlock chunks after GPU copy: " << unlock_status;
-            }
-            
-            // Trigger eviction to reclaim physical pages
+            // Trigger eviction to reclaim physical pages while retaining virtual mapping
             size_t evicted = this->dvmp_->evict_tail_bytes(this->model_identifier_, this->model_size_);
             LOG(INFO) << "MemoryManager(" << this->model_identifier_
                       << "): Evicted " << evicted << " bytes from DVMP after GPU copy.";

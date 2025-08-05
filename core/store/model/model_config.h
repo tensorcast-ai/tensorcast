@@ -55,6 +55,9 @@ struct ModelConfig {
   // Whether to enable P2P communication for this model
   bool p2p_comm_enabled = false;
 
+  // Whether to fail transfer if DVMP chunk locking fails (default: true for strict safety)
+  bool require_dvmp_lock_success = true;
+
   // Future runtime configurations can be added here:
   // - Tensor compression strategies
   // - Quantization settings
