@@ -44,9 +44,6 @@ struct ModelConfig {
   // Optional: Explicitly provide model size if known.
   std::optional<uint64_t> expected_model_size;
 
-  // If true, CPU pinned memory will be automatically released once the model has been successfully copied to GPU.
-  // This helps keep peak host memory usage low when the primary serving location is GPU.
-  bool auto_release_cpu_after_gpu_copy = false;
 
   // Streaming transfer configuration
   // Maximum buffer size in bytes for streaming transfers. Defaults to 256 MB.

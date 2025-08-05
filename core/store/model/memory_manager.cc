@@ -25,14 +25,12 @@ MemoryManager::MemoryManager(
     int local_device_id,
     std::shared_ptr<PinnedMemoryPool> pinned_pool,
     size_t max_buffer_bytes,
-    bool auto_release_cpu_after_gpu_copy,
     std::chrono::milliseconds pinned_memory_timeout)
     : pinned_pool_(std::move(pinned_pool)),
       pageable_cpu_state_(MemoryState::UNALLOCATED),
       gpu_state_(MemoryState::UNALLOCATED),
       copy_stream_(nullptr),
       stream_initialized_(false),
-      auto_release_cpu_after_gpu_copy_(auto_release_cpu_after_gpu_copy),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       dvmp_(std::make_unique<memory::DistributedMemoryPool>()) {
@@ -754,6 +752,26 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
     device_id_capture = local_device_id_;
     model_id_capture = model_identifier_; // Copy string
 
+    // --- Lock chunks with DVMP before H2D transfer (RFC 0001 requirement) ---
+    if (src_is_host && !dst_is_host && dvmp_ && dvmp_cpu_base_ != nullptr) {
+      // Calculate number of chunks
+      size_t num_chunks = (model_size_ + memory::DistributedMemoryPool::kChunk - 1) / 
+                         memory::DistributedMemoryPool::kChunk;
+      std::vector<uint32_t> all_chunks;
+      all_chunks.reserve(num_chunks);
+      for (uint32_t i = 0; i < num_chunks; ++i) {
+        all_chunks.push_back(i);
+      }
+      
+      // Lock chunks before transfer
+      absl::Status lock_status = dvmp_->lock_chunks(model_identifier_, all_chunks);
+      if (!lock_status.ok()) {
+        LOG(WARNING) << "MemoryManager(" << model_identifier_ 
+                    << "): Failed to lock chunks before H2D transfer: " << lock_status;
+        // Continue with transfer even if lock fails, but log the warning
+      }
+    }
+
     // --- Mark Destination as Loading ---
     absl::Status state_status = set_state_locked(destination, MemoryState::LOADING);
     if (!state_status.ok()) {
@@ -819,17 +837,45 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
                          << "). Final state not updated. Copy operation status was: " << copy_status;
           }
         }
-        // Auto-release CPU pinned memory after successful CPU→GPU copy (lock not held)
+        // Mandatory CPU memory release after successful CPU→GPU copy (per RFC 0001 §4.3)
         bool src_host_release = (source == ModelLocation::PAGEABLE_CPU);
-        if (copy_status.ok() && src_host_release && destination == ModelLocation::GPU &&
-            this->auto_release_cpu_after_gpu_copy_) {
+        if (copy_status.ok() && src_host_release && destination == ModelLocation::GPU) {
           LOG(INFO) << "MemoryManager(" << this->model_identifier_
-                    << "): Auto-releasing host pinned memory after successful H→D copy.";
-          absl::Status rel_st = this->release_memory(ModelLocation::PAGEABLE_CPU, false);
-          if (!rel_st.ok()) {
-            LOG(WARNING) << "MemoryManager(" << this->model_identifier_
-                         << "): Auto-release of CPU memory returned status: " << rel_st;
+                    << "): Releasing host pinned memory after successful H→D copy (mandatory per RFC 0001).";
+          
+          // Integrate with DVMP for proper chunk state management
+          if (this->dvmp_ && this->dvmp_cpu_base_ != nullptr) {
+            // Get all chunk indices for the model
+            size_t num_chunks = (this->model_size_ + memory::DistributedMemoryPool::kChunk - 1) / 
+                               memory::DistributedMemoryPool::kChunk;
+            std::vector<uint32_t> all_chunks;
+            all_chunks.reserve(num_chunks);
+            for (uint32_t i = 0; i < num_chunks; ++i) {
+              all_chunks.push_back(i);
+            }
+            
+            // Unlock chunks with copied_gpu=true to mark them as COPIED_GPU
+            absl::Status unlock_status = this->dvmp_->unlock_chunks(this->model_identifier_, all_chunks, true);
+            if (!unlock_status.ok()) {
+              LOG(WARNING) << "MemoryManager(" << this->model_identifier_
+                          << "): Failed to unlock chunks after GPU copy: " << unlock_status;
+            }
+            
+            // Trigger eviction to reclaim physical pages
+            size_t evicted = this->dvmp_->evict_tail_bytes(this->model_identifier_, this->model_size_);
+            LOG(INFO) << "MemoryManager(" << this->model_identifier_
+                      << "): Evicted " << evicted << " bytes from DVMP after GPU copy.";
           }
+          
+          // Release CPU resources and mark state as UNALLOCATED
+          {
+            absl::MutexLock release_lock(&this->mutex_);
+            this->release_cpu_resources_locked();
+            ABSL_CHECK_OK(this->set_state_locked(ModelLocation::PAGEABLE_CPU, MemoryState::UNALLOCATED));
+          }
+          
+          LOG(INFO) << "MemoryManager(" << this->model_identifier_
+                    << "): CPU memory release completed.";
         }
 
         return copy_status; // Return the status of the copy operation itself
