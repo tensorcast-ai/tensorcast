@@ -58,7 +58,6 @@ using ModelSource = std::variant<
  */
 struct ModelTarget {
   Location location;
-  bool auto_release_cpu_after_gpu_copy = true;
 };
 
 // ══════════════════════════════════════════════════════════════════════════

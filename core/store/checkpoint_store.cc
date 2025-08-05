@@ -220,7 +220,6 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   config.pinned_memory_pool = memory_pool_;
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
-  config.auto_release_cpu_after_gpu_copy = target.auto_release_cpu_after_gpu_copy;
   if (target_location == ModelLocation::GPU) {
     config.local_device_id = target_device_id;
   }
@@ -351,7 +350,6 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   config.pinned_memory_pool = memory_pool_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
-  config.auto_release_cpu_after_gpu_copy = target.auto_release_cpu_after_gpu_copy;
   config.p2p_comm_enabled = true;
   config.device_type = (target_location == ModelLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
 
@@ -593,7 +591,6 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
     ModelTarget target;
     target.location.type = (dev_key.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
     target.location.device_id = dev_key.ordinal;
-    target.auto_release_cpu_after_gpu_copy = true;
 
     return load_from_disk_internal(std::string(model_id), disk_src, target, hints);
   };

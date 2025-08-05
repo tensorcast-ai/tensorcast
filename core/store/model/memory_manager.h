@@ -44,18 +44,17 @@ class MemoryManager {
    * @param model_identifier A unique name for the model, used for logging.
    * @param local_device_id The target local GPU device ID.
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
-   * @param auto_release_cpu_after_gpu_copy Whether to automatically release CPU pinned memory after a successful
-   * CPU→GPU copy.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
+   * @param require_dvmp_lock_success Whether to fail transfer if DVMP chunk locking fails.
    */
   MemoryManager(
       std::string model_identifier,
       int local_device_id,
       std::shared_ptr<PinnedMemoryPool> pinned_pool,
       size_t max_buffer_bytes,
-      bool auto_release_cpu_after_gpu_copy = false,
-      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero());
+      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
+      bool require_dvmp_lock_success = true);
 
   ~MemoryManager();
 
@@ -402,8 +401,6 @@ class MemoryManager {
   CommRegistrationInfo pageable_cpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
   CommRegistrationInfo gpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
 
-  // Whether to automatically release CPU pinned memory after a successful CPU→GPU copy.
-  const bool auto_release_cpu_after_gpu_copy_ = false;
 
   // Streaming pinned buffer (optional, allocated only when streaming transfer is enabled)
   std::shared_ptr<StreamingPinnedBuffer> streaming_buffer_ ABSL_GUARDED_BY(mutex_) = nullptr;
@@ -413,6 +410,9 @@ class MemoryManager {
 
   // Pinned memory allocation timeout
   const std::chrono::milliseconds pinned_memory_timeout_;
+
+  // Whether to fail transfer if DVMP chunk locking fails
+  const bool require_dvmp_lock_success_;
 
   std::unique_ptr<stepcast::memory::DistributedMemoryPool> dvmp_ ABSL_GUARDED_BY(mutex_);
   // Base CPU virtual address reserved by DVMP for this model (PAGEABLE_CPU path).

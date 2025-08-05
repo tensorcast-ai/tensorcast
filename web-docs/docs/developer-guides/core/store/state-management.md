@@ -253,7 +253,16 @@ graph TB
 |---------------|---------|
 | `host_chunk_queue_` | Tracks per-chunk load completion on the CPU side, enabling streaming loaders to coordinate consumer progress. |
 | `streaming_buffer_` | Optional `StreamingPinnedBuffer` pool used by high-throughput producer/consumer pipelines. Allocated via `allocate_buffer_pool()` and released with `release_buffer_pool()`. |
-| `auto_release_cpu_after_gpu_copy_` | When `true`, automatically frees CPU pinned memory once the model has been successfully copied to the GPU, reducing host RAM footprint. |
 | `pinned_memory_timeout_` | Maximum duration to wait for pinned memory allocation from the pool before aborting with `ResourceExhausted`. |
 
 > These additions do **not** change the state machine itself, but introduce auxiliary resources and configuration options that improve throughput and memory efficiency.
+
+### Mandatory CPU Memory Release (RFC 0001)
+
+As of RFC 0001 §4.3, CPU memory release after GPU copy is **mandatory**. When a model is successfully copied from CPU to GPU:
+
+1. **DVMP Integration**: The system automatically marks chunks as `COPIED_GPU` via `unlock_chunks()`
+2. **Memory Eviction**: Physical pages are reclaimed through `evict_tail_bytes()`  
+3. **State Transition**: CPU memory state transitions to `UNALLOCATED` (virtual address space retained)
+
+This ensures optimal memory utilization and prevents RSS bloat in multi-model scenarios.

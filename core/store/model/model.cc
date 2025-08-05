@@ -37,8 +37,8 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
       config.local_device_id,
       config.pinned_memory_pool,
       config.max_buffer_bytes,
-      config.auto_release_cpu_after_gpu_copy,
-      config.pinned_memory_timeout);
+      config.pinned_memory_timeout,
+      config.require_dvmp_lock_success);
 
   // --- Create Loader based on Source ---
   std::unique_ptr<IModelLoader> loader;

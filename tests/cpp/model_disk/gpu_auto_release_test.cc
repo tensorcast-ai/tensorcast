@@ -19,7 +19,7 @@ namespace fs = std::filesystem;
 using namespace stepcast::store;
 using namespace stepcast::tests;
 
-TEST_CASE("GPU auto-release with auto_release_cpu_after_gpu_copy", "[model][gpu][release]") {
+TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][release]") {
   if (!is_cuda_available()) {
     SKIP("CUDA not available. Skipping GPU auto-release test.");
   }
@@ -58,7 +58,7 @@ TEST_CASE("GPU auto-release with auto_release_cpu_after_gpu_copy", "[model][gpu]
 
     cfg.pinned_memory_pool = pool;
     cfg.local_device_id = 0;
-    cfg.auto_release_cpu_after_gpu_copy = true; // Enable auto-release
+    // Auto-release is now mandatory per RFC 0001
 
     auto mstatus = Model::create(cfg);
     REQUIRE(mstatus.ok());
@@ -108,55 +108,16 @@ TEST_CASE("GPU auto-release with auto_release_cpu_after_gpu_copy", "[model][gpu]
     // Expect that at least the first byte matches the expected pattern.
     REQUIRE(host_buf[0] == 'A');
 
-    LOG(INFO) << "Successfully verified GPU auto-release: CPU memory released after GPU copy";
+    LOG(INFO) << "Successfully verified mandatory CPU memory release after GPU copy";
   }
 
-  SECTION("Load to CPU then GPU with auto-release disabled") {
-    ModelConfig cfg;
-    cfg.model_identifier = model_id + "_no_release";
-
-    DiskSource disk_src;
-    disk_src.path = base / model_subdir;
-    cfg.source = disk_src;
-
-    cfg.pinned_memory_pool = pool;
-    cfg.local_device_id = 0;
-    cfg.auto_release_cpu_after_gpu_copy = false; // Disable auto-release
-
-    auto mstatus = Model::create(cfg);
-    REQUIRE(mstatus.ok());
-    auto model = std::move(*mstatus);
-
-    // Load to CPU
-    auto cpu_fut = model->ensure_loaded_async(ModelLocation::PAGEABLE_CPU);
-    REQUIRE(cpu_fut.valid());
-    REQUIRE(model->wait_until_loaded(ModelLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
-    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::LOADED);
-
-    // Copy to GPU
-    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
-    REQUIRE(set_dev.ok());
-    auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
-    REQUIRE(gpu_fut.valid());
-    REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
-    REQUIRE(model->get_memory_state(ModelLocation::GPU) == MemoryState::LOADED);
-
-    // With auto-release disabled, CPU memory should still be LOADED
-    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::LOADED);
-
-    // CPU pointers should still be accessible
-    auto cpu_ptrs_after = model->get_data_pointer(ModelLocation::PAGEABLE_CPU);
-    REQUIRE(!cpu_ptrs_after.empty());
-    REQUIRE(cpu_ptrs_after[0] != nullptr);
-
-    LOG(INFO) << "Successfully verified no auto-release: CPU memory retained after GPU copy";
-  }
+  // Section for disabled auto-release removed - auto-release is now mandatory per RFC 0001
 
   // Teardown
   fs::remove_all(base);
 }
 
-TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
+TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][multi]") {
   if (!is_cuda_available()) {
     SKIP("CUDA not available. Skipping multi-GPU test.");
   }
@@ -197,7 +158,7 @@ TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
 
       cfg.pinned_memory_pool = pool;
       cfg.local_device_id = 0;
-      cfg.auto_release_cpu_after_gpu_copy = true;
+      // Auto-release is now mandatory per RFC 0001
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -212,7 +173,7 @@ TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
 
       auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
       REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
-      // Wait for async copy task to finish and auto-release to take effect.
+      // Wait for async copy task to finish and mandatory CPU release to take effect.
       REQUIRE(gpu_fut.get().ok());
 
       // Verify CPU was released
@@ -231,7 +192,7 @@ TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
 
       cfg.pinned_memory_pool = pool;
       cfg.local_device_id = 1;
-      cfg.auto_release_cpu_after_gpu_copy = true;
+      // Auto-release is now mandatory per RFC 0001
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -246,7 +207,7 @@ TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
 
       auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
       REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
-      // Wait for async copy task to finish and auto-release to take effect.
+      // Wait for async copy task to finish and mandatory CPU release to take effect.
       REQUIRE(gpu_fut.get().ok());
 
       // Verify CPU was released
@@ -254,7 +215,146 @@ TEST_CASE("Multi-GPU model loading with auto-release", "[model][gpu][multi]") {
       REQUIRE(model->get_memory_state(ModelLocation::GPU) == MemoryState::LOADED);
     }
 
-    LOG(INFO) << "Multi-GPU test passed: CPU memory auto-released for both GPU loads";
+    LOG(INFO) << "Multi-GPU test passed: CPU memory released for both GPU loads (mandatory per RFC 0001)";
+  }
+
+  // Cleanup
+  fs::remove_all(base);
+}
+
+TEST_CASE("GPU auto-release with very small models (boundary condition)", "[model][gpu][release][boundary]") {
+  if (!is_cuda_available()) {
+    SKIP("CUDA not available. Skipping small model test.");
+  }
+
+  const std::string model_subdir = "small_model_files";
+  fs::path base = fs::temp_directory_path() / "small_model_test";
+  if (fs::exists(base))
+    fs::remove_all(base);
+  fs::create_directories(base / model_subdir);
+
+  // Setup pinned pool
+  const size_t pool_total = 128 * 1024 * 1024; // 128MB
+  const size_t pool_chunk = 1024 * 1024; // 1MB chunks
+  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  REQUIRE(pool != nullptr);
+
+  SECTION("Model smaller than one chunk") {
+    const std::string model_id = "tiny_model";
+    const size_t model_size = 512 * 1024; // 512KB - smaller than 1MB chunk
+
+    fs::path model_file = base / model_subdir / "tiny.data";
+    REQUIRE(create_dummy_file(model_file, model_size, 'T'));
+
+    ModelConfig cfg;
+    cfg.model_identifier = model_id;
+    
+    DiskSource disk_src;
+    disk_src.path = base / model_subdir;
+    cfg.source = disk_src;
+    
+    cfg.pinned_memory_pool = pool;
+    cfg.local_device_id = 0;
+
+    auto mstatus = Model::create(cfg);
+    REQUIRE(mstatus.ok());
+    auto model = std::move(*mstatus);
+
+    // Load to CPU
+    auto cpu_fut = model->ensure_loaded_async(ModelLocation::PAGEABLE_CPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+
+    // Copy to GPU
+    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    REQUIRE(set_dev.ok());
+    auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
+    REQUIRE(gpu_fut.get().ok());
+
+    // Verify CPU was released even for tiny model
+    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(model->get_memory_state(ModelLocation::GPU) == MemoryState::LOADED);
+
+    LOG(INFO) << "Successfully verified CPU release for model smaller than chunk size";
+  }
+
+  SECTION("Model exactly one chunk size") {
+    const std::string model_id = "one_chunk_model";
+    const size_t model_size = 1024 * 1024; // Exactly 1MB
+
+    fs::path model_file = base / model_subdir / "one_chunk.data";
+    REQUIRE(create_dummy_file(model_file, model_size, 'C'));
+
+    ModelConfig cfg;
+    cfg.model_identifier = model_id;
+    
+    DiskSource disk_src;
+    disk_src.path = base / model_subdir;
+    cfg.source = disk_src;
+    
+    cfg.pinned_memory_pool = pool;
+    cfg.local_device_id = 0;
+
+    auto mstatus = Model::create(cfg);
+    REQUIRE(mstatus.ok());
+    auto model = std::move(*mstatus);
+
+    // Load to CPU then GPU
+    auto cpu_fut = model->ensure_loaded_async(ModelLocation::PAGEABLE_CPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+
+    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    REQUIRE(set_dev.ok());
+    
+    auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
+    REQUIRE(gpu_fut.get().ok());
+
+    // Verify CPU was released
+    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(model->get_memory_state(ModelLocation::GPU) == MemoryState::LOADED);
+
+    LOG(INFO) << "Successfully verified CPU release for model exactly one chunk size";
+  }
+
+  SECTION("Model just over one chunk") {
+    const std::string model_id = "slightly_over_chunk_model";
+    const size_t model_size = 1024 * 1024 + 1024; // 1MB + 1KB
+
+    fs::path model_file = base / model_subdir / "over_chunk.data";
+    REQUIRE(create_dummy_file(model_file, model_size, 'O'));
+
+    ModelConfig cfg;
+    cfg.model_identifier = model_id;
+    
+    DiskSource disk_src;
+    disk_src.path = base / model_subdir;
+    cfg.source = disk_src;
+    
+    cfg.pinned_memory_pool = pool;
+    cfg.local_device_id = 0;
+
+    auto mstatus = Model::create(cfg);
+    REQUIRE(mstatus.ok());
+    auto model = std::move(*mstatus);
+
+    // Load to CPU then GPU
+    auto cpu_fut = model->ensure_loaded_async(ModelLocation::PAGEABLE_CPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+
+    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    REQUIRE(set_dev.ok());
+    
+    auto gpu_fut = model->ensure_loaded_async(ModelLocation::GPU);
+    REQUIRE(model->wait_until_loaded(ModelLocation::GPU, absl::Seconds(30)).ok());
+    REQUIRE(gpu_fut.get().ok());
+
+    // Verify CPU was released
+    REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(model->get_memory_state(ModelLocation::GPU) == MemoryState::LOADED);
+
+    LOG(INFO) << "Successfully verified CPU release for model just over one chunk";
   }
 
   // Cleanup
