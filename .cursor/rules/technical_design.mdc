@@ -5,14 +5,14 @@ alwaysApply: false
 # Technical Design Document Guidelines
 
 ## Document Naming & Location
-- **Path**: `web-docs/docs/developer-guides/ai-solutions/`
-- **Format**: `YYMMDD-feature-name.md` (e.g., `250708-p2p-optimization.md`)
+- **Path**: `rfcs/`
+- **Format**: `NNNN-feature-name.md` (e.g., `0001-p2p-optimization.md`)
 
 ## Document Structure
 
 ### 1. Title
 ```markdown
-# YYMMDD-Feature Technical Design
+# NNNN-Feature Technical Design
 ```
 
 ### 2. Overview
