@@ -11,13 +11,14 @@
 -Icore
 -Iscstore
 -Itests/cpp
--Iexternal/catch2+/src
+-Ibazel-bin/external/catch2+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
 -Ibazel-bin/proto/global_store_grpc_cpp_pb
 -Iexternal/protobuf+/src
 -Iexternal/grpc+/include
+-Iexternal/catch2+/src
 
 -I.venv/lib/python3.10/site-packages/torch/include
 -I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include

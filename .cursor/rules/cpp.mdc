@@ -22,6 +22,7 @@ alwaysApply: false
 - **Namespaces**: Use nested namespace declarations (C++17 style)
 - **Auto**: Use `auto` for complex types, explicit types for primitives
 - **Const**: Prefer `const` and `constexpr` wherever possible
+- **Logging**: Use `LOG` for non-error messages, `PLOG` for error messages with `errno`, `VLOG` for verbose messages
 
 ## Functions & Methods
 - Start function names with a verb

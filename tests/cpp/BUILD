@@ -54,6 +54,7 @@ cc_library(
 cc_test(
     name = "model_disk_test",
     srcs = [
+        "model_disk/aligned_cpu_test.cc",
         "model_disk/basic_cpu_test.cc",
         "model_disk/cpu_to_gpu_test.cc",
         "model_disk/disk_loader_streaming_buffer_test.cc",

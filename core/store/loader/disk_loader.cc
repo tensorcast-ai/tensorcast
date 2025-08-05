@@ -481,108 +481,150 @@ std::future<absl::Status> DiskLoader::load_async(
         });
   }
 
-  // -------- PAGEABLE_CPU Path (Zero-copy mmap into DVMP) ----------------------
+  // -------- PAGEABLE_CPU Path -------------------------------------------------
+  // We attempt a zero-copy mmap into DistributedVirtualMemoryPool (DVMP) **only**
+  // when every partition meets strict alignment requirements.  Otherwise we
+  // either (a) fall back to buffered copy for *small* partitions (< page size),
+  // or (b) abort early for large but misaligned partitions (to avoid undefined
+  // MAP_FIXED behaviour).
+
   if (target_location == ModelLocation::PAGEABLE_CPU) {
-    // Capture partition metadata under loader mutex for thread-safety.
-    std::vector<std::filesystem::path> paths_copy;
-    std::vector<size_t> sizes_copy;
-    uint64_t model_size_copy;
+    // ---------------------------------------------------------
+    // Step-1: Examine partition sizes / alignment requirements
+    // ---------------------------------------------------------
+    const long page_sz_long = ::sysconf(_SC_PAGESIZE);
+    const size_t page_sz = page_sz_long > 0 ? static_cast<size_t>(page_sz_long) : 4096UL;
+
+    bool has_small_partition = false; // < page size → copy
+    bool has_misaligned_partition = false; // >= page size but not page-aligned → error
+
     {
       absl::MutexLock lock(&mutex_);
-      paths_copy = partition_paths_;
-      sizes_copy = partition_sizes_;
-      model_size_copy = model_size_;
+      for (size_t sz : partition_sizes_) {
+        if (sz < page_sz) {
+          has_small_partition = true;
+        } else if (sz % page_sz != 0) {
+          has_misaligned_partition = true;
+          break;
+        }
+      }
     }
 
-    return SC_TRACE_ASYNC(
-        std::launch::async,
-        [mem_manager, paths = std::move(paths_copy), part_sizes = std::move(sizes_copy), model_size = model_size_copy]()
-            -> absl::Status {
-          // Helper lambda for consistent finalisation.
-          auto finish = [&](const absl::Status& st) -> absl::Status {
-            absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
-            return finalize_status.ok() ? st : finalize_status;
-          };
+    // Case (b): large but misaligned → immediate error (caller will surface)
+    if (has_misaligned_partition && !has_small_partition) {
+      return std::async(std::launch::deferred, [page_sz] {
+        return absl::InvalidArgumentError(
+            absl::StrFormat(
+                "Partition size not page-aligned (page size = %zu). Zero-copy mmap path aborted.", page_sz));
+      });
+    }
 
-          // Reserve a pageable CPU VA region via MemoryManager. This wraps DVMP allocation
-          // and centralises resource management within MemoryManager.
+    // Case (a): contains at least one small partition → fall through to
+    // buffered read logic further below.
+    if (has_small_partition) {
+      VLOG(1)
+          << "DiskLoader: Falling back to buffered read path because at least one partition is smaller than system page size ("
+          << page_sz << ")";
+    } else {
+      // All partitions are page-aligned and large enough – safe to mmap.
 
-          const std::string model_id = mem_manager->instance_key().model_id;
+      // Capture partition metadata under loader mutex for thread-safety.
+      std::vector<std::filesystem::path> paths_copy;
+      std::vector<size_t> sizes_copy;
+      uint64_t model_size_copy;
+      {
+        absl::MutexLock lock(&mutex_);
+        paths_copy = partition_paths_;
+        sizes_copy = partition_sizes_;
+        model_size_copy = model_size_;
+      }
 
-          absl::StatusOr<stepcast::memory::DistributedMemoryPool::VirtualRegion> region_or =
-              mem_manager->allocate_pageable_cpu_region();
+      return SC_TRACE_ASYNC(
+          std::launch::async,
+          [mem_manager,
+           paths = std::move(paths_copy),
+           part_sizes = std::move(sizes_copy),
+           model_size = model_size_copy]() -> absl::Status {
+            // Helper lambda for consistent finalisation.
+            auto finish = [&](const absl::Status& st) -> absl::Status {
+              absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
+              return finalize_status.ok() ? st : finalize_status;
+            };
 
-          void* base_addr = nullptr;
-          if (region_or.ok()) {
-            base_addr = region_or->cpu_base;
-          } else if (region_or.status().code() == absl::StatusCode::kAlreadyExists) {
-            // Region already exists; assume a previous loader populated it. In this case, we can safely
-            // skip the mmap steps and simply mark the MemoryManager state as LOADED.
+            // ----------------------------------------------------------------------
+            // DVMP region handling
+            // ----------------------------------------------------------------------
+            // The MemoryManager::allocate_memory() call that precedes DiskLoader
+            // invocation in Model::ensure_loaded_async has already r
+            // eserved the
+            // DVMP virtual region.  Therefore we must reuse that reservation
+            // instead of calling allocate_pageable_cpu_region() again (which would
+            // race and immediately return kAlreadyExists).
+
+            const std::string model_id = mem_manager->instance_key().model_id;
+
+            void* base_addr = mem_manager->get_dvmp_cpu_base();
+
+            // Fallback: In the unlikely event the region has not been allocated
+            // yet (e.g., future refactor touches call-order) we attempt to
+            // allocate it here.
+            CHECK(base_addr != nullptr);
+
+            // Obtain DVMP instance (guaranteed to exist after the allocation helper).
+            auto dvmp = mem_manager->get_dvmp();
+            if (!dvmp) {
+              return finish(absl::InternalError("DVMP instance unexpectedly null after region allocation."));
+            }
+
+            // Allocate memory state in MemoryManager if not yet done.
+            CHECK(mem_manager->get_state(ModelLocation::PAGEABLE_CPU) != MemoryState::UNALLOCATED);
+
+            // Transition to LOADING.
+            ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
+
+            // Map each partition file into the reserved VA region using MAP_FIXED.
+            size_t offset = 0;
+            for (size_t idx = 0; idx < paths.size(); ++idx) {
+              const auto& path = paths[idx];
+              size_t part_size = part_sizes[idx];
+
+              int fd = ::open(path.c_str(), O_RDONLY);
+              if (fd < 0) {
+                return finish(
+                    absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open partition %s", path.string())));
+              }
+
+              int mmap_flags = MAP_PRIVATE | MAP_FIXED;
+              mmap_flags |= MAP_POPULATE;
+
+              void* target_addr = static_cast<char*>(base_addr) + offset;
+              void* mapped = ::mmap(target_addr, part_size, PROT_READ, mmap_flags, fd, 0);
+              int saved_errno = errno; // capture before close
+              ::close(fd);
+
+              if (mapped == MAP_FAILED) {
+                return finish(absl::ErrnoToStatus(saved_errno, absl::StrFormat("mmap failed for %s", path.string())));
+              }
+
+              if (mapped != target_addr) {
+                return finish(absl::InternalError("mmap did not map at the expected fixed address."));
+              }
+
+              // Advance offset
+              offset += part_size;
+            }
+
+            // After successful mapping, mark all chunks as HOT via lock/unlock dance.
+            size_t num_chunks = (model_size + stepcast::memory::DistributedMemoryPool::kChunk - 1) /
+                stepcast::memory::DistributedMemoryPool::kChunk;
+            std::vector<uint32_t> idx(num_chunks);
+            std::iota(idx.begin(), idx.end(), 0U);
+
+            ABSL_CHECK_OK(dvmp->lock_chunks(model_id, idx));
+            ABSL_CHECK_OK(dvmp->unlock_chunks(model_id, idx, /*copied_gpu=*/false));
             return finish(absl::OkStatus());
-          } else {
-            return finish(region_or.status());
-          }
-
-          CHECK(base_addr != nullptr);
-
-          // Obtain DVMP instance (guaranteed to exist after the allocation helper).
-          auto dvmp = mem_manager->get_dvmp();
-          if (!dvmp) {
-            return finish(absl::InternalError("DVMP instance unexpectedly null after region allocation."));
-          }
-
-          // Allocate memory state in MemoryManager if not yet done.
-          if (mem_manager->get_state(ModelLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED) {
-            absl::Status st = mem_manager->allocate_memory(ModelLocation::PAGEABLE_CPU);
-            if (!st.ok() && st.code() != absl::StatusCode::kAlreadyExists) {
-              return finish(st);
-            }
-          }
-
-          // Transition to LOADING.
-          ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
-
-          // Map each partition file into the reserved VA region using MAP_FIXED.
-          size_t offset = 0;
-          for (size_t idx = 0; idx < paths.size(); ++idx) {
-            const auto& path = paths[idx];
-            size_t part_size = part_sizes[idx];
-
-            int fd = ::open(path.c_str(), O_RDONLY);
-            if (fd < 0) {
-              return finish(absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open partition %s", path.string())));
-            }
-
-            int mmap_flags = MAP_PRIVATE | MAP_FIXED;
-            mmap_flags |= MAP_POPULATE;
-
-            void* target_addr = static_cast<char*>(base_addr) + offset;
-            void* mapped = ::mmap(target_addr, part_size, PROT_READ, mmap_flags, fd, 0);
-            int saved_errno = errno; // capture before close
-            ::close(fd);
-
-            if (mapped == MAP_FAILED) {
-              return finish(absl::ErrnoToStatus(saved_errno, absl::StrFormat("mmap failed for %s", path.string())));
-            }
-
-            if (mapped != target_addr) {
-              return finish(absl::InternalError("mmap did not map at the expected fixed address."));
-            }
-
-            // Advance offset
-            offset += part_size;
-          }
-
-          // After successful mapping, mark all chunks as HOT via lock/unlock dance.
-          size_t num_chunks = (model_size + stepcast::memory::DistributedMemoryPool::kChunk - 1) /
-              stepcast::memory::DistributedMemoryPool::kChunk;
-          std::vector<uint32_t> idx(num_chunks);
-          std::iota(idx.begin(), idx.end(), 0U);
-
-          ABSL_CHECK_OK(dvmp->lock_chunks(model_id, idx));
-          ABSL_CHECK_OK(dvmp->unlock_chunks(model_id, idx, /*copied_gpu=*/false));
-          return finish(absl::OkStatus());
-        });
+          });
+    }
   }
 
   // Non-streaming path (original): only support loading into CPU

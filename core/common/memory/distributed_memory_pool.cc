@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <optional>
 #include <utility>
 
 #include "absl/log/log.h"
@@ -85,18 +86,35 @@ absl::Status DistributedMemoryPool::lock_chunks(std::string_view model_id, absl:
     return absl::NotFoundError("Model not found in DVMP");
   }
   ModelInfo& info = it->second;
+
+  if (idx.empty()) {
+    LOG(WARNING) << "lock_chunks called with empty index span for model " << key;
+    return absl::InvalidArgumentError("idx span is empty");
+  }
   // Track successfully locked indices and their previous states for rollback if needed.
   std::vector<std::pair<uint32_t, store::ChunkState>> locked;
   locked.reserve(idx.size());
+
+  // Convenience lambda to roll back any chunks that were already transitioned to
+  // LOCKED_TX and to emit a warning with contextual information.
+  auto rollback_and_log = [&](const absl::Status& status, std::optional<uint32_t> fail_idx) -> absl::Status {
+    if (fail_idx.has_value()) {
+      LOG(WARNING) << "lock_chunks rollback for model " << key << ", chunk " << *fail_idx << ": " << status.message();
+    } else {
+      LOG(WARNING) << "lock_chunks rollback for model " << key << ": " << status.message();
+    }
+    for (const auto& [j_idx, prev] : locked) {
+      info.metadata[j_idx].state.store(prev, std::memory_order_release);
+      void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * kChunk;
+      if (::munlock(j_addr, kChunk) != 0) {
+        PLOG(WARNING) << "munlock failed during rollback for chunk " << j_idx;
+      }
+    }
+    return status;
+  };
   for (uint32_t i : idx) {
     if (i >= info.chunk_count) {
-      // Rollback.
-      for (const auto& [j_idx, prev] : locked) {
-        info.metadata[j_idx].state.store(prev, std::memory_order_release);
-        void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * kChunk;
-        ::munlock(j_addr, kChunk); // best-effort
-      }
-      return absl::OutOfRangeError("Chunk index out of range");
+      return rollback_and_log(absl::OutOfRangeError("Chunk index out of range"), i);
     }
     auto& meta = info.metadata[i];
     store::ChunkState expected = meta.state.load(std::memory_order_acquire);
@@ -115,26 +133,26 @@ absl::Status DistributedMemoryPool::lock_chunks(std::string_view model_id, absl:
       }
     }
     if (!ok) {
-      // Rollback previously locked.
-      for (const auto& [j_idx, prev] : locked) {
-        info.metadata[j_idx].state.store(prev, std::memory_order_release);
-        void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * kChunk;
-        ::munlock(j_addr, kChunk);
-      }
-      return absl::ResourceExhaustedError("Failed to lock chunks – one or more are busy");
+      return rollback_and_log(absl::ResourceExhaustedError("Failed to lock chunks – one or more are busy"), i);
     }
 
     // Attempt to lock the corresponding memory pages so they cannot be reclaimed.
     void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
     if (::mlock(addr, kChunk) != 0) {
-      // Failed to lock pages, rollback this chunk and any previously locked ones.
-      meta.state.store(expected, std::memory_order_release); // revert to previous state
-      for (const auto& [j_idx, prev] : locked) {
-        info.metadata[j_idx].state.store(prev, std::memory_order_release);
-        void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * kChunk;
-        ::munlock(j_addr, kChunk);
+      const int err = errno;
+      // If the failure is due to insufficient mlock limit or permissions, degrade
+      // gracefully instead of aborting the entire load. In such cases we keep the
+      // chunk state as LOCKED_TX so that the caller can still proceed. The pages
+      // are not physically pinned, but the higher-level logic will still mark
+      // them HOT after the unlock dance, allowing the system to reclaim them if
+      // necessary. For other error types we still perform a full rollback.
+      if (err == ENOMEM || err == EPERM) {
+        PLOG(ERROR) << "mlock failed for chunk " << i << " — proceeding without page lock";
+      } else {
+        // Failed to lock pages, rollback this chunk and any previously locked ones.
+        meta.state.store(expected, std::memory_order_release); // revert to previous state for this chunk
+        return rollback_and_log(absl::ErrnoToStatus(err, "mlock failed while locking chunk memory"), i);
       }
-      return absl::ErrnoToStatus(errno, "mlock failed while locking chunk memory");
     }
 
     meta.last_touch_s.store(now_s(), std::memory_order_relaxed);

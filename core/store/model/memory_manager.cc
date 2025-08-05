@@ -5,6 +5,7 @@
 #include "core/store/model/model_location.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
@@ -12,7 +13,11 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "core/common/cuda_api.h"
+#include "core/common/device_types.h"
 #include "core/communicator/engine/engine.h"
+
+#define model_identifier_ instance_key_.model_id
+#define local_device_id_ instance_key_.device.ordinal
 
 namespace stepcast::store {
 MemoryManager::MemoryManager(
@@ -22,9 +27,7 @@ MemoryManager::MemoryManager(
     size_t max_buffer_bytes,
     bool auto_release_cpu_after_gpu_copy,
     std::chrono::milliseconds pinned_memory_timeout)
-    : model_identifier_(std::move(model_identifier)),
-      local_device_id_(local_device_id),
-      pinned_pool_(std::move(pinned_pool)),
+    : pinned_pool_(std::move(pinned_pool)),
       pageable_cpu_state_(MemoryState::UNALLOCATED),
       gpu_state_(MemoryState::UNALLOCATED),
       copy_stream_(nullptr),
@@ -33,6 +36,11 @@ MemoryManager::MemoryManager(
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       dvmp_(std::make_unique<memory::DistributedMemoryPool>()) {
+  // Populate instance_key_ using constructor inputs
+  instance_key_.model_id = std::move(model_identifier);
+  instance_key_.device.type = (local_device_id >= 0) ? stepcast::DeviceType::GPU : stepcast::DeviceType::CPU;
+  instance_key_.device.ordinal = local_device_id;
+
   {
     absl::MutexLock lock(&mutex_);
     // Initialize states properly based on whether pools are provided
@@ -120,7 +128,7 @@ uint64_t MemoryManager::get_model_size() const {
 }
 
 int MemoryManager::get_local_device_id() const {
-  return local_device_id_;
+  return instance_key_.device.ordinal;
 }
 
 absl::Status MemoryManager::allocate_memory(ModelLocation location) {
@@ -1394,6 +1402,11 @@ memory::DistributedMemoryPool* stepcast::store::MemoryManager::get_dvmp() const 
   return dvmp_.get();
 }
 
+void* MemoryManager::get_dvmp_cpu_base() const {
+  absl::MutexLock lock(&mutex_);
+  return dvmp_cpu_base_;
+}
+
 // --- NEW: Unified Memory Management implementations ---
 
 std::shared_ptr<UnifiedModelMemory> MemoryManager::get_unified_memory() const {
@@ -1463,7 +1476,7 @@ absl::Status MemoryManager::mark_cpu_preemptible(float ratio) {
   std::vector<std::pair<uint32_t, uint64_t>> chunk_access_times;
   chunk_access_times.reserve(mappings.size());
 
-  const bool mark_all = fabs(ratio - 1.0F) < 1e-6F;
+  const bool mark_all = std::fabs(ratio - 1.0F) < 1e-6F;
 
   // Collect candidate chunks if we need to sort; otherwise we'll push directly.
   std::vector<uint32_t> chunks_to_mark;

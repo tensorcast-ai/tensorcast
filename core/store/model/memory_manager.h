@@ -286,7 +286,7 @@ class MemoryManager {
    * @return The model identifier used by this MemoryManager.
    */
   const std::string& get_model_id() const {
-    return model_identifier_;
+    return instance_key_.model_id;
   }
 
   /**
@@ -334,6 +334,9 @@ class MemoryManager {
   std::vector<uint32_t> get_missing_chunks(ModelLocation target, std::optional<int> device_id = std::nullopt) const
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // NEW: Expose base address of DVMP region reserved for PAGEABLE_CPU. Returns nullptr if region not allocated.
+  void* get_dvmp_cpu_base() const ABSL_LOCKS_EXCLUDED(mutex_);
+
  private:
   /**
    * @brief Helper to perform the asynchronous CPU -> GPU copy.
@@ -370,8 +373,6 @@ class MemoryManager {
 
   mutable absl::Mutex mutex_; // Protects all member variables below
 
-  const std::string model_identifier_;
-  int local_device_id_ = -1; // -1 means not yet initialised
   uint64_t model_size_ = 0;
 
   // Memory Pools

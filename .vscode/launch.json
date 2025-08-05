@@ -89,6 +89,24 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "(lldb) model_disk_test",
+            "program": "${workspaceFolder}/bazel-bin/tests/cpp/model_disk_test",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "STEPCAST_COMM_ENABLE_RDMA": "false"
+            },
+            "sourceLanguages": [
+                "cpp"
+            ],
+            "sourceMap": {
+                "/proc/self/cwd": "${workspaceFolder}"
+            },
+            "breakpointMode": "file"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "(lldb) client: model-rdma-transfer-test",
             "program": "/${workspaceFolder}/bazel-bin/tests/cpp/model_rdma_transfer_test",
             "args": [

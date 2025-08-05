@@ -321,7 +321,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     void* addr = ::mmap(nullptr, bytes_to_map, PROT_READ, MAP_PRIVATE, fd, 0 /*offset*/);
     if (addr == MAP_FAILED) {
       ::close(fd);
-      LOG(FATAL) << "mmap failed for file: " << partition_file_path.string() << ": " << std::strerror(errno);
+      PLOG(FATAL) << "mmap failed for file: " << partition_file_path.string();
     }
 
     // Advise the kernel that we will access the mapping sequentially so it can
