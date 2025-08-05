@@ -4,6 +4,8 @@
 
 This RFC describes the design and implementation of a Distributed Virtual Memory Pool (DVMP) system for StepCast Store. DVMP provides a unified virtual memory abstraction that enables transparent memory management across distributed nodes, supporting models up to 670GB+ with efficient loading, sharing, and eviction mechanisms.
 
+> **Overall Status (2025-08-05)**: **Complete** – All P0/P1 features have been implemented, integrated, and validated on staging and production clusters. DVMP is the default memory backend for models up to 1 TiB and is running in production with zero critical issues.
+
 ## 1. Introduction
 
 ### 1.1 Design Goals
@@ -227,14 +229,13 @@ On accessing evicted chunks:
 
 ## 5. Implementation Status
 
-### 5.1 Completed Components
-
-- **DVMP Core** (P0-A): Full implementation with 670GB+ VA support ✅
+- **DVMP Core** (P0-A): Full implementation with 1 TiB VA support ✅
 - **MemoryManager Integration** (P0-B): DVMP integration with auto-release ✅
 - **DiskLoader Zero-Copy** (P1-A): mmap-based loading to DVMP ✅
 - **P2PLoader Extension** (P1-B): PAGEABLE_CPU support with pull_chunk() ✅
 - **Global Chunk Directory** (P1-C): Database schema and query service ✅
 - **Store Daemon Integration** (P1-D): Chunk state synchronization ✅
+- **Eviction & Preemption API** (P1-E): Tail-first eviction & MADV_FREE preemption ✅
 
 ## 6. Configuration
 
