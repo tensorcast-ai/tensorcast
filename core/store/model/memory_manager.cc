@@ -416,15 +416,9 @@ std::vector<void*> MemoryManager::get_pointer(ModelLocation location) const {
       // Return pointer to first chunk if loaded, otherwise null.
       // Documentation should clarify this behaviour.
       if (pageable_cpu_state_ == MemoryState::LOADED || pageable_cpu_state_ == MemoryState::ALLOCATED) {
-        // Check for buffered loading path (pinned memory)
-        if (pinned_mem_ != nullptr && !pinned_mem_->get().empty()) {
-          const auto vec = pinned_mem_->get(); // Pointer to first chunk data
-          return std::vector<void*>(vec.begin(), vec.end());
-        }
-        // Check for mmap/zero-copy path (DVMP memory)
-        if (dvmp_cpu_base_ != nullptr) {
-          return std::vector<void*>({dvmp_cpu_base_});
-        }
+        // For mmap/zero-copy path (DVMP memory)
+        assert(dvmp_cpu_base_ != nullptr);
+        return std::vector<void*>({dvmp_cpu_base_});
       }
       VLOG(2) << "MemoryManager(" << model_identifier_
               << "): get_pointer(PAGEABLE_CPU) returning null. State: " << state_to_string(pageable_cpu_state_)
