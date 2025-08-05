@@ -24,6 +24,7 @@ MemoryManager::MemoryManager(
     std::string model_identifier,
     int local_device_id,
     std::shared_ptr<PinnedMemoryPool> pinned_pool,
+    std::shared_ptr<memory::DistributedMemoryPool> dvmp,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
     bool require_dvmp_lock_success)
@@ -35,10 +36,7 @@ MemoryManager::MemoryManager(
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       require_dvmp_lock_success_(require_dvmp_lock_success),
-      dvmp_(std::make_unique<memory::DistributedMemoryPool>()) {
-  // DVMP is always available in this codebase (per review requirement)
-  ABSL_CHECK(dvmp_ != nullptr) << "MemoryManager: DVMP allocation failed, which should not happen";
-  
+      dvmp_(std::move(dvmp)) {
   // Populate instance_key_ using constructor inputs
   instance_key_.model_id = std::move(model_identifier);
   instance_key_.device.type = (local_device_id >= 0) ? stepcast::DeviceType::GPU : stepcast::DeviceType::CPU;
@@ -47,7 +45,7 @@ MemoryManager::MemoryManager(
   {
     absl::MutexLock lock(&mutex_);
     // Initialize states properly based on whether pools are provided
-    pageable_cpu_state_ = pinned_pool_ ? MemoryState::UNALLOCATED : MemoryState::UNINITIALIZED;
+    pageable_cpu_state_ = MemoryState::UNALLOCATED;
     // GPU state depends on pool or potential borrowing later
     gpu_state_ = MemoryState::UNALLOCATED; // Assume potential for allocation/borrowing
   }
@@ -180,15 +178,6 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         return region_or.status();
       }
 
-      // -------------------------------------------------------------------
-      // Allocate pinned memory so that H2D/D2H transfers can still leverage
-      // fast host buffers exactly the same way the historical CPU path did.
-      // -------------------------------------------------------------------
-      if (!pinned_pool_) {
-        return absl::FailedPreconditionError(
-            absl::StrFormat(
-                "MemoryManager(%s): No PinnedMemoryPool provided for PAGEABLE_CPU allocation.", model_identifier_));
-      }
       pinned_mem_ = std::make_shared<PinnedMemory>();
       int ret = pinned_mem_->allocate(model_size_, pinned_pool_, pinned_memory_timeout_);
       if (ret != 0) {
@@ -830,24 +819,24 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
         if (copy_status.ok() && src_host_release && destination == ModelLocation::GPU) {
           LOG(INFO) << "MemoryManager(" << this->model_identifier_
                     << "): Releasing host pinned memory after successful H→D copy (mandatory per RFC 0001).";
-          
-          // DVMP eviction for physical page reclamation
-          if (this->dvmp_ && this->dvmp_cpu_base_ != nullptr) {
-            // Trigger eviction to reclaim physical pages while retaining virtual mapping
-            size_t evicted = this->dvmp_->evict_tail_bytes(this->model_identifier_, this->model_size_);
-            LOG(INFO) << "MemoryManager(" << this->model_identifier_
-                      << "): Evicted " << evicted << " bytes from DVMP after GPU copy.";
-          }
-          
+
           // Release CPU resources and mark state as UNALLOCATED
           {
             absl::MutexLock release_lock(&this->mutex_);
+
+            // DVMP eviction for physical page reclamation
+            if (this->dvmp_cpu_base_ != nullptr) {
+              // Trigger eviction to reclaim physical pages while retaining virtual mapping
+              size_t evicted = this->dvmp_->evict_tail_bytes(this->model_identifier_, this->model_size_);
+              LOG(INFO) << "MemoryManager(" << this->model_identifier_ << "): Evicted " << evicted
+                        << " bytes from DVMP after GPU copy.";
+            }
+
             this->release_cpu_resources_locked();
             ABSL_CHECK_OK(this->set_state_locked(ModelLocation::PAGEABLE_CPU, MemoryState::UNALLOCATED));
           }
-          
-          LOG(INFO) << "MemoryManager(" << this->model_identifier_
-                    << "): CPU memory release completed.";
+
+          LOG(INFO) << "MemoryManager(" << this->model_identifier_ << "): CPU memory release completed.";
         }
 
         return copy_status; // Return the status of the copy operation itself
@@ -1193,9 +1182,6 @@ bool MemoryManager::is_comm_registered(ModelLocation location) const {
 // ---------------------------------------------------------------------------
 absl::Status MemoryManager::allocate_buffer_pool(size_t num_chunks) {
   absl::MutexLock lock(&mutex_);
-  if (!pinned_pool_) {
-    return absl::FailedPreconditionError("No pinned memory pool available in MemoryManager");
-  }
   if (streaming_buffer_) {
     return absl::AlreadyExistsError("Streaming buffer already allocated");
   }
@@ -1236,10 +1222,7 @@ size_t MemoryManager::get_max_buffer_bytes() const {
 
 size_t MemoryManager::get_pool_chunk_size() const {
   absl::MutexLock lock(&mutex_);
-  if (pinned_pool_) {
-    return pinned_pool_->chunk_size();
-  }
-  return 0;
+  return pinned_pool_->chunk_size();
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,9 +1398,9 @@ absl::Status MemoryManager::disable_remote_memory_access(
 }
 
 // --- DVMP accessor implementation ---
-memory::DistributedMemoryPool* stepcast::store::MemoryManager::get_dvmp() const {
+memory::DistributedMemoryPool* stepcast::store::MemoryManager::get_dvmp() {
   absl::MutexLock lock(&mutex_);
-  return dvmp_.get();
+  return dvmp_.get().get();
 }
 
 void* MemoryManager::get_dvmp_cpu_base() const {
@@ -1443,13 +1426,8 @@ absl::Status MemoryManager::allocate_unified() {
     return absl::FailedPreconditionError("Model size must be set before unified allocation");
   }
 
-  // Create shared pointer to DVMP with a non-owning deleter
-  // This allows sharing between MemoryManager and UnifiedModelMemory
-  auto shared_dvmp = std::shared_ptr<memory::DistributedMemoryPool>(dvmp_.get(), [](memory::DistributedMemoryPool*) {
-    // Non-owning deleter - MemoryManager retains ownership
-  });
-
-  unified_memory_ = std::make_shared<UnifiedModelMemory>(shared_dvmp);
+  // Pass the shared DVMP instance directly to UnifiedModelMemory
+  unified_memory_ = std::make_shared<UnifiedModelMemory>(dvmp_);
 
   // Allocate via unified memory (which will use DVMP internally)
   auto status = unified_memory_->allocate(instance_key_, model_size_);

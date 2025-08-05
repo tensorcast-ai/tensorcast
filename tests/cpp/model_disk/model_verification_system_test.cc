@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/time/time.h"
+#include "core/common/memory/distributed_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/model_verification.h"
 #include "core/store/loading/loading_spec.h"
@@ -46,16 +47,21 @@ TEST_CASE("Model Verification System", "[model][verification]") {
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  ModelConfig cfg;
-  cfg.model_identifier = model_id;
+  // Create DVMP
+  auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
 
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / model_subdir;
-  cfg.source = disk_src;
 
-  cfg.pinned_memory_pool = pool;
-  cfg.local_device_id = 0;
+  // Use aggregate initialization for ModelConfig
+  ModelConfig cfg{
+      .source = disk_src,
+      .model_identifier = model_id,
+      .device_type = ::stepcast::DeviceType::CPU,
+      .local_device_id = 0,
+      .pinned_memory_pool = pool,
+      .dvmp = dvmp};
 
   auto mstatus = Model::create(cfg);
   REQUIRE(mstatus.ok());

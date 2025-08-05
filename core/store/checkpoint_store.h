@@ -19,13 +19,14 @@
 #pragma once
 
 #include <filesystem>
-#include <future>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <string_view>
 #include "absl/status/statusor.h"
+#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
@@ -33,7 +34,6 @@
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/model_registry.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/memory_types.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model.h"
 
@@ -184,6 +184,7 @@ class CheckpointStore {
   std::unique_ptr<GlobalStoreClient> global_store_client_;
   std::shared_ptr<CommunicationManager> comm_manager_;
   std::shared_ptr<PinnedMemoryPool> memory_pool_;
+  std::shared_ptr<memory::DistributedMemoryPool> dvmp_; // NEW: System-wide DVMP instance
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Configuration

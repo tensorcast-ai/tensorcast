@@ -10,6 +10,8 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
+#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
 #include "core/store/model/model_config.h"
@@ -64,16 +66,21 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[model][disk][multi_gpu]") {
     auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
     REQUIRE(pool != nullptr);
 
-    ModelConfig cfg;
-    cfg.model_identifier = model_id + std::to_string(dev);
+    // Create DVMP
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / model_subdir;
-    cfg.source = disk_src;
 
-    cfg.pinned_memory_pool = pool;
-    cfg.local_device_id = dev;
+    // Use aggregate initialization for ModelConfig
+    ModelConfig cfg{
+        .source = disk_src,
+        .model_identifier = model_id + std::to_string(dev),
+        .device_type = ::stepcast::DeviceType::CPU,
+        .local_device_id = dev,
+        .pinned_memory_pool = pool,
+        .dvmp = dvmp};
 
     auto mstat = Model::create(cfg);
     REQUIRE(mstat.ok());

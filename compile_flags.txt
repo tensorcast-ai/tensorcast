@@ -19,6 +19,7 @@
 -Iexternal/protobuf+/src
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src
+-Iexternal/gsl+
 
 -I.venv/lib/python3.10/site-packages/torch/include
 -I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include

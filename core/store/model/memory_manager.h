@@ -13,6 +13,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/distributed_memory_pool.h"
@@ -44,6 +45,7 @@ class MemoryManager {
    * @param model_identifier A unique name for the model, used for logging.
    * @param local_device_id The target local GPU device ID.
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
+   * @param dvmp Shared Distributed Virtual Memory Pool.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
    * @param require_dvmp_lock_success Whether to fail transfer if DVMP chunk locking fails.
@@ -52,6 +54,7 @@ class MemoryManager {
       std::string model_identifier,
       int local_device_id,
       std::shared_ptr<PinnedMemoryPool> pinned_pool,
+      std::shared_ptr<memory::DistributedMemoryPool> dvmp,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
       bool require_dvmp_lock_success = true);
@@ -278,7 +281,7 @@ class MemoryManager {
    * @brief Exposes the underlying DistributedMemoryPool instance used by this
    *        MemoryManager. Loaders can use this to allocate or lock chunks.
    */
-  memory::DistributedMemoryPool* get_dvmp() const ABSL_LOCKS_EXCLUDED(mutex_);
+  memory::DistributedMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Get the model identifier string.
@@ -375,7 +378,7 @@ class MemoryManager {
   uint64_t model_size_ = 0;
 
   // Memory Pools
-  std::shared_ptr<PinnedMemoryPool> pinned_pool_ ABSL_GUARDED_BY(mutex_);
+  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_pool_ ABSL_GUARDED_BY(mutex_);
 
   // PAGEABLE_CPU Memory State
   MemoryState pageable_cpu_state_ ABSL_GUARDED_BY(mutex_) = MemoryState::UNINITIALIZED;
@@ -401,7 +404,6 @@ class MemoryManager {
   CommRegistrationInfo pageable_cpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
   CommRegistrationInfo gpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
 
-
   // Streaming pinned buffer (optional, allocated only when streaming transfer is enabled)
   std::shared_ptr<StreamingPinnedBuffer> streaming_buffer_ ABSL_GUARDED_BY(mutex_) = nullptr;
 
@@ -414,7 +416,7 @@ class MemoryManager {
   // Whether to fail transfer if DVMP chunk locking fails
   const bool require_dvmp_lock_success_;
 
-  std::unique_ptr<stepcast::memory::DistributedMemoryPool> dvmp_ ABSL_GUARDED_BY(mutex_);
+  gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
   // Base CPU virtual address reserved by DVMP for this model (PAGEABLE_CPU path).
   void* dvmp_cpu_base_ ABSL_GUARDED_BY(mutex_) = nullptr;
   size_t dvmp_cpu_bytes_ ABSL_GUARDED_BY(mutex_) = 0;

@@ -7,6 +7,7 @@
 #include <filesystem>
 
 #include "absl/status/status.h"
+#include "core/common/memory/distributed_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
@@ -29,17 +30,22 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  SECTION("Non-existent subdirectory") {
-    ModelConfig cfg;
-    cfg.model_identifier = model_id;
+  // Create DVMP
+  auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
 
+  SECTION("Non-existent subdirectory") {
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / "no_such_dir";
-    cfg.source = disk_src;
 
-    cfg.pinned_memory_pool = pool;
-    cfg.local_device_id = 0;
+    // Use aggregate initialization for ModelConfig
+    ModelConfig cfg{
+        .source = disk_src,
+        .model_identifier = model_id,
+        .device_type = ::stepcast::DeviceType::CPU,
+        .local_device_id = 0,
+        .pinned_memory_pool = pool,
+        .dvmp = dvmp};
 
     auto mstatus = Model::create(cfg);
     REQUIRE(!mstatus.ok());
@@ -53,17 +59,20 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
     // Create a file larger than the 1 KiB minimum to pass DiskLoader's size validation.
     REQUIRE(create_dummy_file(file0, 2048, 'Z'));
 
-    ModelConfig cfg;
-    cfg.model_identifier = model_id;
-
     // Use new DiskSource with empty directory
     DiskSource disk_src;
     disk_src.path = base / subdir;
-    cfg.source = disk_src;
 
-    cfg.pinned_memory_pool = pool;
-    cfg.local_device_id = 0;
-    cfg.expected_model_size = 1024; // wrong expected size
+    // Use aggregate initialization for ModelConfig
+    ModelConfig cfg{
+        .source = disk_src,
+        .model_identifier = model_id,
+        .device_type = ::stepcast::DeviceType::CPU,
+        .local_device_id = 0,
+        .pinned_memory_pool = pool,
+        .dvmp = dvmp,
+        .expected_model_size = 1024 // wrong expected size
+    };
 
     auto mstatus = Model::create(cfg);
     REQUIRE(!mstatus.ok());

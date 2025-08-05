@@ -26,9 +26,6 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
   if (config.model_identifier.empty()) {
     return absl::InvalidArgumentError("Model identifier cannot be empty.");
   }
-  if (!config.pinned_memory_pool) {
-    return absl::InvalidArgumentError("PinnedMemoryPool must be provided in ModelConfig.");
-  }
 
   // --- Create MemoryManager ---
   // Pass the obtained communicator engine (can be nullptr if not needed/initialized)
@@ -36,6 +33,7 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
       config.model_identifier,
       config.local_device_id,
       config.pinned_memory_pool,
+      config.dvmp,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
       config.require_dvmp_lock_success);

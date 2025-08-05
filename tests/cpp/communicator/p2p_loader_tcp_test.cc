@@ -7,6 +7,10 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
+#include "absl/strings/str_format.h"
+#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/pinned_memory_pool.h"
+
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/p2p_loader.h"
 #include "core/store/model/memory_manager.h"
@@ -65,10 +69,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 64 * 1024 * 1024; // 64MB chunks for streaming
     const std::size_t pool_size = 128 * 1024 * 1024; // 128MB pool (2 chunks)
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
+    auto dvmp = std::make_shared<stepcast::memory::DistributedMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_model", // model_identifier
         0, // local_device_id (GPU device 0)
         pinned_pool, // pinned_pool (needed for streaming buffer)
+        dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024 // max_buffer_bytes (1GB)
     );
     mem_manager->set_model_size(model_size);
@@ -135,10 +141,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
     const std::size_t total_pool_size = model_size; // Allocate enough for the full model
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
+    auto dvmp = std::make_shared<stepcast::memory::DistributedMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_model", // model_identifier
         -1, // local_device_id (-1 for CPU)
         pinned_pool, // pinned_pool
+        dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024 // max_buffer_bytes (1GB)
     );
     mem_manager->set_model_size(model_size);

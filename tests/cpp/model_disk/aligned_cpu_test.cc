@@ -16,12 +16,13 @@
 namespace fs = std::filesystem;
 using namespace stepcast::store;
 using namespace stepcast::tests;
+using namespace stepcast::memory;
 
 TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mmap]") {
   // System page size
   const long page_sz_long = ::sysconf(_SC_PAGESIZE);
   REQUIRE(page_sz_long > 0);
-  const size_t page_sz = static_cast<size_t>(page_sz_long);
+  const auto page_sz = static_cast<size_t>(page_sz_long);
 
   // Partition sizes (page aligned and > page size)
   const size_t size0 = page_sz * 2;
@@ -57,13 +58,21 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  ModelConfig cfg;
-  cfg.model_identifier = model_id;
+  // Create DVMP
+  auto dvmp = std::make_shared<DistributedMemoryPool>();
+
+  // Create DiskSource
   DiskSource disk_src;
   disk_src.path = base / model_subdir;
-  cfg.source = disk_src;
-  cfg.pinned_memory_pool = pool;
-  cfg.local_device_id = 0;
+
+  // Use aggregate initialization for ModelConfig
+  ModelConfig cfg{
+      .source = disk_src,
+      .model_identifier = model_id,
+      .device_type = ::stepcast::DeviceType::CPU,
+      .local_device_id = 0,
+      .pinned_memory_pool = pool,
+      .dvmp = dvmp};
 
   auto mstatus = Model::create(cfg);
   REQUIRE(mstatus.ok());

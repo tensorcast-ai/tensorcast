@@ -13,6 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/distributed_memory_pool.h"
@@ -61,7 +62,7 @@ class UnifiedModelMemory {
     std::string remote_node; // For REMOTE_P2P sources
   };
 
-  explicit UnifiedModelMemory(std::shared_ptr<stepcast::memory::DistributedMemoryPool> dvmp);
+  explicit UnifiedModelMemory(gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp);
   ~UnifiedModelMemory() = default;
 
   // Disable copy/move
@@ -272,7 +273,7 @@ class UnifiedModelMemory {
   };
 
   mutable std::mutex mutex_;
-  std::shared_ptr<stepcast::memory::DistributedMemoryPool> dvmp_;
+  gsl::not_null<std::shared_ptr<stepcast::memory::DistributedMemoryPool>> dvmp_;
   std::unordered_map<InstanceKey, ModelAllocation, InstanceKeyHash> allocations_;
 
   // Helper to sync chunk states with DVMP

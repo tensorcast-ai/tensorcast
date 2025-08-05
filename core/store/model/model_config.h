@@ -3,13 +3,14 @@
 #pragma once
 
 #include <chrono>
-#include <memory>
 #include <optional>
 #include <string>
 
 #include "core/common/device_types.h"
+#include "core/common/memory/distributed_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
+#include "gsl/pointers"
 
 namespace stepcast::communicator {
 class CommunicateEngine;
@@ -39,11 +40,12 @@ struct ModelConfig {
   int local_device_id = -1; // -1 means unspecified; runtime will decide
 
   // Memory pools for allocation (can be shared across models).
-  std::shared_ptr<PinnedMemoryPool> pinned_memory_pool;
+  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_memory_pool;
+  // Shared Distributed Virtual Memory Pool for managing virtual address spaces
+  gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp;
 
   // Optional: Explicitly provide model size if known.
   std::optional<uint64_t> expected_model_size;
-
 
   // Streaming transfer configuration
   // Maximum buffer size in bytes for streaming transfers. Defaults to 256 MB.

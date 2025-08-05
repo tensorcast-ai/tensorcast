@@ -13,7 +13,7 @@
 
 namespace stepcast::store {
 
-UnifiedModelMemory::UnifiedModelMemory(std::shared_ptr<stepcast::memory::DistributedMemoryPool> dvmp)
+UnifiedModelMemory::UnifiedModelMemory(gsl::not_null<std::shared_ptr<stepcast::memory::DistributedMemoryPool>> dvmp)
     : dvmp_(std::move(dvmp)) {}
 
 absl::Status UnifiedModelMemory::allocate(const InstanceKey& key, size_t bytes) {

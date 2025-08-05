@@ -76,6 +76,9 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
 
   memory_pool_ = std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_);
 
+  // Initialize system-wide DVMP instance
+  dvmp_ = std::make_shared<memory::DistributedMemoryPool>();
+
   // CommunicationManager handling
   if (opts.comm_manager) {
     // Use externally supplied manager (already initialised by caller)
@@ -214,10 +217,11 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   }
 
   // Get or create model
-  ModelConfig config;
-  config.source = resolved_source;
-  config.model_identifier = model_identifier;
-  config.pinned_memory_pool = memory_pool_;
+  ModelConfig config{
+      .source = resolved_source,
+      .model_identifier = model_identifier,
+      .pinned_memory_pool = memory_pool_,
+      .dvmp = dvmp_};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   if (target_location == ModelLocation::GPU) {
@@ -341,13 +345,11 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   }
 
   // Create model with P2P source
-  ModelConfig config;
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
-  config.source = p2p_source;
-  config.model_identifier = model_identifier;
+  ModelConfig config{
+      .source = p2p_source, .model_identifier = model_identifier, .pinned_memory_pool = memory_pool_, .dvmp = dvmp_};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
-  config.pinned_memory_pool = memory_pool_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   config.p2p_comm_enabled = true;
@@ -621,12 +623,13 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
         }
 
         // Create destination model configuration.
-        ModelConfig cfg;
-        cfg.model_identifier = std::string(model_id);
-        cfg.device_type = DeviceType::GPU;
-        cfg.local_device_id = target_device.ordinal;
-        cfg.source = DiskSource{}; // Placeholder – actual data comes from copy.
-        cfg.pinned_memory_pool = memory_pool_;
+        ModelConfig cfg{
+            .source = DiskSource{}, // Placeholder – actual data comes from copy.
+            .model_identifier = std::string(model_id),
+            .device_type = DeviceType::GPU,
+            .local_device_id = target_device.ordinal,
+            .pinned_memory_pool = memory_pool_,
+            .dvmp = dvmp_};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
         auto dst_or = Model::create(cfg);

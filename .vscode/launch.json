@@ -91,7 +91,7 @@
             "request": "launch",
             "name": "(lldb) model_disk_test",
             "program": "${workspaceFolder}/bazel-bin/tests/cpp/model_disk_test",
-            "args": [],
+            "args": ["DiskModel page-aligned load to CPU via mmap"],
             "cwd": "${workspaceFolder}",
             "env": {
                 "STEPCAST_COMM_ENABLE_RDMA": "false"
