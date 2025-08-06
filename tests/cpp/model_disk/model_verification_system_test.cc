@@ -24,8 +24,10 @@ TEST_CASE("Model Verification System", "[model][verification]") {
   const std::string model_subdir = "verification_files";
   const std::string p0 = "tensor.data_0";
   const std::string p1 = "tensor.data_1";
-  const size_t size0 = 1024 * 3;
-  const size_t size1 = 1024 * 2;
+  // Use page-aligned sizes to trigger DVMP mmap path
+  const size_t page_size = 4096; // Common page size
+  const size_t size0 = page_size * 3; // 12288 bytes
+  const size_t size1 = page_size * 2; // 8192 bytes
   const size_t total_size = size0 + size1;
 
   fs::path base = fs::temp_directory_path() / "verification_test";

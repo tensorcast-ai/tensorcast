@@ -4,6 +4,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "tests/cpp/common.h"
 
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -25,8 +26,10 @@ TEST_CASE("DiskModel get size and load to CPU", "[model][disk][cpu]") {
   const std::string model_subdir = "basic_cpu_model_files";
   const std::string p0 = "tensor.data_0";
   const std::string p1 = "tensor.data_1";
-  const size_t size0 = 1024 * 2;
-  const size_t size1 = 1024 * 3;
+  // Use page-aligned sizes to trigger DVMP mmap path
+  const size_t page_size = 4096; // Common page size
+  const size_t size0 = page_size * 2; // 8192 bytes
+  const size_t size1 = page_size * 3; // 12288 bytes
   const size_t total_size = size0 + size1;
 
   fs::path base = fs::temp_directory_path() / "basic_cpu_test";
@@ -88,23 +91,23 @@ TEST_CASE("DiskModel get size and load to CPU", "[model][disk][cpu]") {
     REQUIRE(wait_status.ok());
     REQUIRE(model->get_memory_state(ModelLocation::PAGEABLE_CPU) == MemoryState::LOADED);
 
+    // With DVMP, get_data_pointer returns a single pointer to the contiguous memory block
     auto ptrs = model->get_data_pointer(ModelLocation::PAGEABLE_CPU);
-    size_t expected_chunks = (total_size + pool_chunk - 1) / pool_chunk;
-    REQUIRE(ptrs.size() == expected_chunks);
+    REQUIRE(ptrs.size() == 1);
+    REQUIRE(ptrs[0] != nullptr);
 
-    std::vector<char> loaded;
-    loaded.reserve(total_size);
-    auto& mm = model->get_memory_manager();
-    auto pinned_mem = mm.get_pinned_memory();
-    REQUIRE(pinned_mem != nullptr);
-    size_t chunk_size = pinned_mem->chunk_size();
-    size_t bytes_copied = 0;
-    for (size_t i = 0; i < ptrs.size(); ++i) {
-      char* chunk_ptr = static_cast<char*>(ptrs[i]);
-      size_t to_copy = std::min(chunk_size, total_size - bytes_copied);
-      loaded.insert(loaded.end(), chunk_ptr, chunk_ptr + to_copy);
-      bytes_copied += to_copy;
-    }
+    // The entire model is now in a single contiguous memory block
+    // Note: With DVMP and mmap-based loading, we need to be careful about accessing memory
+    // that might be lazily mapped. Let's verify the content safely.
+    char* model_data = static_cast<char*>(ptrs[0]);
+
+    // Create a buffer to read into to avoid potential page faults
+    std::vector<char> loaded(total_size);
+
+    // Copy data from DVMP memory to our buffer
+    // This ensures we trigger any page faults in a controlled manner
+    std::memcpy(loaded.data(), model_data, total_size);
+
     REQUIRE(loaded == combined);
   }
 

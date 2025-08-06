@@ -18,7 +18,6 @@
 #include <vector>
 #include "core/common/cuda_api.h"
 #include "core/store/model/memory_manager.h"
-#include "core/store/model/unified_model_memory.h"
 
 #include "absl/log/absl_check.h"
 #include "absl/log/check.h"

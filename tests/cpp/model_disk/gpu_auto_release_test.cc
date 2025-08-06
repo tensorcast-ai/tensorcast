@@ -259,7 +259,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     const std::string model_id = "tiny_model";
     const size_t model_size = 512 * 1024; // 512KB - smaller than 1MB chunk
 
-    fs::path model_file = base / model_subdir / "tiny.data";
+    fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'T'));
 
     // Create DVMP
@@ -305,7 +305,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     const std::string model_id = "one_chunk_model";
     const size_t model_size = 1024 * 1024; // Exactly 1MB
 
-    fs::path model_file = base / model_subdir / "one_chunk.data";
+    fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'C'));
 
     // Create DVMP
@@ -350,7 +350,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     const std::string model_id = "slightly_over_chunk_model";
     const size_t model_size = 1024 * 1024 + 1024; // 1MB + 1KB
 
-    fs::path model_file = base / model_subdir / "over_chunk.data";
+    fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'O'));
 
     // Create DVMP

@@ -561,14 +561,9 @@ absl::StatusOr<ModelVerificationInfo> Model::generate_verification_info(ModelLoc
     // GPU has single contiguous buffer
     data_sizes.push_back(model_size);
   } else {
-    // CPU has chunked memory
-    size_t chunk_size = memory_manager_->get_cpu_chunk_size();
-    size_t remaining_size = model_size;
-    for (size_t i = 0; i < data_ptrs.size() && remaining_size > 0; ++i) {
-      size_t current_chunk_size = std::min(chunk_size, remaining_size);
-      data_sizes.push_back(current_chunk_size);
-      remaining_size -= current_chunk_size;
-    }
+    // With DVMP, CPU also has a single contiguous buffer
+    // The old chunked memory approach is no longer used
+    data_sizes.push_back(model_size);
   }
 
   // Determine device ID for verification
@@ -612,14 +607,9 @@ absl::Status Model::verify_model_data(
     // GPU has single contiguous buffer
     data_sizes.push_back(model_size);
   } else {
-    // CPU has chunked memory
-    size_t chunk_size = memory_manager_->get_cpu_chunk_size();
-    size_t remaining_size = model_size;
-    for (size_t i = 0; i < data_ptrs.size() && remaining_size > 0; ++i) {
-      size_t current_chunk_size = std::min(chunk_size, remaining_size);
-      data_sizes.push_back(current_chunk_size);
-      remaining_size -= current_chunk_size;
-    }
+    // With DVMP, CPU also has a single contiguous buffer
+    // The old chunked memory approach is no longer used
+    data_sizes.push_back(model_size);
   }
 
   // Determine device ID for verification
@@ -660,14 +650,9 @@ absl::Status Model::verify_key_points(ModelLocation location, const ModelVerific
     // GPU has single contiguous buffer
     data_sizes.push_back(model_size);
   } else {
-    // CPU has chunked memory
-    size_t chunk_size = memory_manager_->get_cpu_chunk_size();
-    size_t remaining_size = model_size;
-    for (size_t i = 0; i < data_ptrs.size() && remaining_size > 0; ++i) {
-      size_t current_chunk_size = std::min(chunk_size, remaining_size);
-      data_sizes.push_back(current_chunk_size);
-      remaining_size -= current_chunk_size;
-    }
+    // With DVMP, CPU also has a single contiguous buffer
+    // The old chunked memory approach is no longer used
+    data_sizes.push_back(model_size);
   }
 
   // Determine device ID for verification
