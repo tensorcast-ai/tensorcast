@@ -30,6 +30,7 @@ from setuptools import find_packages, setup
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
 from setuptools.command.install import install
+from setuptools.command.build_ext import build_ext
 from wheel.bdist_wheel import bdist_wheel
 
 # Import torch version validation utilities
@@ -276,6 +277,11 @@ def copy_libscstore(debug: bool):
             target
     )
 
+def copy_extensions():
+    files = glob.glob(dir_path + "/build/lib/scstore/*.so")
+    for file in files:
+        print(f"Copying {file} to {dir_path}/scstore/")
+        copyfile(file, dir_path + "/scstore/" + os.path.basename(file))
 
 class DevelopCommand(develop):
     description = "Builds the package and symlinks it into the PYTHONPATH"
@@ -293,6 +299,19 @@ class DevelopCommand(develop):
 
         gen_version_file()
         develop.run(self)
+
+class BuildExtensionCommand(build_ext):
+    description = "Builds the package extension"
+    def initialize_options(self):
+        build_ext.initialize_options(self)
+    def finalize_options(self):
+        build_ext.finalize_options(self)
+    def run(self):
+        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
+        copy_libscstore(debug=True)
+        build_ext.run(self)
+        copy_extensions()
 
 
 class InstallCommand(install):
@@ -446,7 +465,11 @@ if BUILD_EXTENSION:
                         dir_path,
                         dir_path + "/scstore/csrc",
                         CUDA_DIR + "/include",
-                        dir_path + "/bazel-model-store/external/abseil-cpp+",
+                        dir_path + "/external/abseil-cpp+",
+                        dir_path + "/external/grpc+/include",
+                        dir_path + "/bazel-bin/proto/global_store_grpc_cpp_pb",
+                        dir_path + "/external/protobuf+/src",
+                        dir_path + "/external/gsl+",
                     ]
                 ),
                 extra_compile_args=(

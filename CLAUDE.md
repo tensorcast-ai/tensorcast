@@ -20,11 +20,10 @@ StepCast Store is a high-performance, distributed model storage and loading syst
 #  BUILD_EXTENSION means cxx files in scstore/csrc
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
-BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Build and run tests, xxx is the target in tests/cpp/BUILD
 bazel test //tests/cpp:xxxx
-
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
@@ -32,7 +31,7 @@ The project supports a fake CUDA backend for development and testing without GPU
 
 ```bash
 # Build with fake CUDA using environment variable
-BUILD_CORE=1 BUILD_EXTENSION=1 USE_FAKE_CUDA=1 python setup.py develop
+USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
 bazel test //tests/cpp:xxxx --define use_fake_cuda=true
@@ -50,20 +49,17 @@ bazel test //tests/cpp:xxxx --define use_fake_cuda=true
 
 #### C++ Code Formatting
 ```bash
-clang-tidy FILE
+uv run clang-tidy ./core/xxx.cc
 ```
 
 #### Python Code Quality
 ```bash
-# Always activate virtual environment first
-source .venv/bin/activate
-
 # Run Python linting (After you write code, run this command to check if your code is correct)
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 
 # Type checking
-mypy .
+uv run mypy ./scstore
 ```
 
 ### Protocol Buffer Code Generation
@@ -73,18 +69,6 @@ mypy .
 bash tools/build_proto_python.sh
 ```
 This updates generated Python code in `./scstore/proto/` directory.
-
-### Testing
-
-#### Python Tests
-```bash
-python -m pytest tests/python/xxxx
-```
-
-#### C++ Tests
-```bash
-bazel test //tests/cpp:xxxx
-```
 
 ### Common Build Issues
 
@@ -288,6 +272,7 @@ For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 - **Parameters**: Use structs for multiple params/returns
 - **Immutability**: Prefer `const` and `constexpr`
 - **RAII**: Always use for resource management
+- **Logging**: Use `LOG` for logging, `CHECK` for assertions, `VLOG` for verbose logging, `PLOG` for error messages with `errno`
 
 #### Best Practices
 - **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`
@@ -296,6 +281,11 @@ For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 - **Documentation**: Doxygen style for public APIs
 
 ### Python Guidelines
+
+#### Development Environment
+- use `uv run xxx.py` to run python scripts
+- use `uv run pytest tests/python/xxxx` to run python tests
+- use `bazel test //tests/cpp:xxxx` to run cxx tests
 
 #### Core Principles
 - **Functional programming**: Prefer functional, declarative style over classes where possible

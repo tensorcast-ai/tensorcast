@@ -18,6 +18,8 @@ jobs:
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    env:
+      UV_CACHE_DIR: /tmp/.uv-cache
     permissions:
       contents: read
       pull-requests: read
@@ -36,6 +38,24 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
           bazelisk-version: 1.16.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version-file: ".python-version"
+      - name: Set up Python
+        run: uv python install
+      - name: Restore uv cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.uv-cache
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+            uv-${{ runner.os }}
+      - name: Install the project
+        run: uv sync --locked --all-extras --dev
+      - name: Minimize uv cache
+        run: uv cache prune --ci
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@beta
@@ -47,7 +67,7 @@ jobs:
             actions: read
 
           # Optional: Specify model (defaults to Claude Sonnet 4, uncomment for Claude Opus 4)
-          model: "claude-opus-4-20250514"
+          model: "claude-opus-4-1-20250805"
 
           # Optional: Customize the trigger phrase (default: @claude)
           # trigger_phrase: "/claude"
@@ -57,7 +77,7 @@ jobs:
 
           # Optional: Allow Claude to run specific commands
           # allowed_tools: "Bash(npm install),Bash(npm run build),Bash(npm run test:*),Bash(npm run lint:*)"
-          allowed_tools: "Bash(bazel:*),Bash(BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop)"
+          allowed_tools: "Bash(bazel:*),Bash(USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext),Bash(uv run clang-tidy:*),Bash(uv run mypy:*),Bash(uv run ruff:*),Bash(uv run pytest:*)"
 
           # Optional: Add custom instructions for Claude to customize its behavior for your project
           # custom_instructions: |

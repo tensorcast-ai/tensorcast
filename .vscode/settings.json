@@ -10,6 +10,8 @@
         ".ruff_cache": true,
         "**/__pycache__": true,
         "scstore.egg-info": true,
+        ".*.txt": true,
+        "*.lock": true,
     },
     "bazel.enableCodeLens": true,
     "cursor.general.disableHttp2": true,

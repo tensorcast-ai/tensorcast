@@ -26,10 +26,18 @@ uv venv
 uv sync --all-extras --all-groups --verbose
 
 # Install dependencies
-BUILD_CORE=1 BUILD_EXTENSION=1 uv run setup.py develop
+#   - BUILD_CORE means cxx files in core/
+#   - BUILD_EXTENSION means cxx files in scstore/csrc
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
-# Activate virtual environment
-source /.venv/bin/activate
+# Run tests
+uv run pytest tests/python/**.py
+
+# Run cli target
+uv run scstore-cli --help
+
+# Run specific file
+uv run xxx/xxx.py
 ```
 
 ### Development Setup
@@ -104,8 +112,8 @@ $ ./bazel-bin/tests/cpp/model_p2p_transfer_test --mode=client --server_ip=127.0.
 ### Python
 ```bash
 ## For meta service (global store)
-python -m pytest tests/python/test_transport.py
-python -m pytest tests/python/test_global_model_store.py
+uv run pytest tests/python/test_transport.py
+uv run pytest tests/python/test_global_model_store.py
 ```
 
 ### Unit Tests
@@ -132,7 +140,7 @@ Note that currently, P2P unit tests fail when being called by bazel test, and ne
 # It listens for gRPC requests on the specified port.
 # Default port: 50051
 # Default workers: 10
-python -m scstore.global_store.global_store --port 50051 --workers 10
+uv run -m scstore.global_store --port 50051 --workers 10
 
 # Run the Global Store Server in Docker
 sudo docker run -d --name global-model-store -p 50051:50051 hub.i.basemind.com/stepcast/global-model-store:2025.04.27-55f24
