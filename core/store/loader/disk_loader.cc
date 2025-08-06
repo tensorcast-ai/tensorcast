@@ -481,11 +481,10 @@ std::future<absl::Status> DiskLoader::load_async(
   }
 
   // -------- PAGEABLE_CPU Path -------------------------------------------------
-  // We attempt a zero-copy mmap into DistributedVirtualMemoryPool (DVMP) **only**
-  // when every partition meets strict alignment requirements.  Otherwise we
-  // either (a) fall back to buffered copy for *small* partitions (< page size),
-  // or (b) abort early for large but misaligned partitions (to avoid undefined
-  // MAP_FIXED behaviour).
+  // We attempt a zero-copy mmap into DistributedVirtualMemoryPool (DVMP) for all
+  // partitions that are >= page size. The kernel automatically handles non-page-aligned
+  // files by rounding up to the next page boundary and zero-filling the extra bytes.
+  // We only fall back to buffered copy for *small* partitions (< page size).
 
   if (target_location == ModelLocation::PAGEABLE_CPU) {
     // ---------------------------------------------------------
@@ -495,37 +494,26 @@ std::future<absl::Status> DiskLoader::load_async(
     const size_t page_sz = page_sz_long > 0 ? static_cast<size_t>(page_sz_long) : 4096UL;
 
     bool has_small_partition = false; // < page size → copy
-    bool has_misaligned_partition = false; // >= page size but not page-aligned → error
 
     {
       absl::MutexLock lock(&mutex_);
       for (size_t sz : partition_sizes_) {
         if (sz < page_sz) {
           has_small_partition = true;
-        } else if (sz % page_sz != 0) {
-          has_misaligned_partition = true;
           break;
         }
       }
     }
 
-    // Case (b): large but misaligned → immediate error (caller will surface)
-    if (has_misaligned_partition && !has_small_partition) {
-      return std::async(std::launch::deferred, [page_sz] {
-        return absl::InvalidArgumentError(
-            absl::StrFormat(
-                "Partition size not page-aligned (page size = %zu). Zero-copy mmap path aborted.", page_sz));
-      });
-    }
-
-    // Case (a): contains at least one small partition → fall through to
-    // buffered read logic further below.
+    // Only fall back to buffered read for truly small partitions (< page size).
+    // For non-page-aligned files >= page size, mmap can handle them directly
+    // by mapping to the next page boundary with zero-fill.
     if (has_small_partition) {
       VLOG(1)
           << "DiskLoader: Falling back to buffered read path because at least one partition is smaller than system page size ("
           << page_sz << ")";
     } else {
-      // All partitions are page-aligned and large enough – safe to mmap.
+      // All partitions are >= page size – safe to mmap (kernel handles non-aligned sizes).
 
       // Capture partition metadata under loader mutex for thread-safety.
       std::vector<std::filesystem::path> paths_copy;
