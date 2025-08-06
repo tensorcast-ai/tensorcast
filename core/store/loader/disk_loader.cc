@@ -484,8 +484,7 @@ std::future<absl::Status> DiskLoader::load_async(
   // We attempt a zero-copy mmap into DistributedVirtualMemoryPool (DVMP) **only**
   // when every partition meets strict alignment requirements.  Otherwise we
   // either (a) fall back to buffered copy for *small* partitions (< page size),
-  // or (b) abort early for large but misaligned partitions (to avoid undefined
-  // MAP_FIXED behaviour).
+  // or (b) use a hybrid approach for large but misaligned partitions.
 
   if (target_location == ModelLocation::PAGEABLE_CPU) {
     // ---------------------------------------------------------
@@ -495,7 +494,7 @@ std::future<absl::Status> DiskLoader::load_async(
     const size_t page_sz = page_sz_long > 0 ? static_cast<size_t>(page_sz_long) : 4096UL;
 
     bool has_small_partition = false; // < page size → copy
-    bool has_misaligned_partition = false; // >= page size but not page-aligned → error
+    bool has_misaligned_partition = false; // >= page size but not page-aligned → hybrid
 
     {
       absl::MutexLock lock(&mutex_);
@@ -509,13 +508,125 @@ std::future<absl::Status> DiskLoader::load_async(
       }
     }
 
-    // Case (b): large but misaligned → immediate error (caller will surface)
+    // Case (b): large but misaligned → use hybrid mmap+read approach
     if (has_misaligned_partition && !has_small_partition) {
-      return std::async(std::launch::deferred, [page_sz] {
-        return absl::InvalidArgumentError(
-            absl::StrFormat(
-                "Partition size not page-aligned (page size = %zu). Zero-copy mmap path aborted.", page_sz));
-      });
+      // Capture partition metadata for hybrid approach
+      std::vector<std::filesystem::path> paths_copy;
+      std::vector<size_t> sizes_copy;
+      uint64_t model_size_copy;
+      {
+        absl::MutexLock lock(&mutex_);
+        paths_copy = partition_paths_;
+        sizes_copy = partition_sizes_;
+        model_size_copy = model_size_;
+      }
+
+      return SC_TRACE_ASYNC(
+          std::launch::async,
+          [mem_manager,
+           paths = std::move(paths_copy),
+           part_sizes = std::move(sizes_copy),
+           model_size = model_size_copy,
+           page_sz]() -> absl::Status {
+            // Helper lambda for consistent finalisation
+            auto finish = [&](const absl::Status& st) -> absl::Status {
+              absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
+              return finalize_status.ok() ? st : finalize_status;
+            };
+
+            const std::string model_id = mem_manager->instance_key().model_id;
+            void* base_addr = mem_manager->get_dvmp_cpu_base();
+            CHECK(base_addr != nullptr);
+
+            auto dvmp = mem_manager->get_dvmp();
+            if (!dvmp) {
+              return finish(absl::InternalError("DVMP instance unexpectedly null after region allocation."));
+            }
+
+            CHECK(mem_manager->get_state(ModelLocation::PAGEABLE_CPU) != MemoryState::UNALLOCATED);
+            ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
+
+            // Hybrid approach: mmap page-aligned portions, read the remainder
+            size_t offset = 0;
+            for (size_t idx = 0; idx < paths.size(); ++idx) {
+              const auto& path = paths[idx];
+              size_t part_size = part_sizes[idx];
+
+              int fd = ::open(path.c_str(), O_RDONLY);
+              if (fd < 0) {
+                return finish(
+                    absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open partition %s", path.string())));
+              }
+
+              // Calculate page-aligned portion and remainder
+              size_t aligned_size = (part_size / page_sz) * page_sz;
+              size_t remainder_size = part_size % page_sz;
+
+              // Map the page-aligned portion if it exists
+              if (aligned_size > 0) {
+                int mmap_flags = MAP_PRIVATE | MAP_FIXED;
+                mmap_flags |= MAP_POPULATE;
+
+                void* target_addr = static_cast<char*>(base_addr) + offset;
+                void* mapped = ::mmap(target_addr, aligned_size, PROT_READ, mmap_flags, fd, 0);
+                int saved_errno = errno;
+
+                if (mapped == MAP_FAILED) {
+                  ::close(fd);
+                  return finish(absl::ErrnoToStatus(saved_errno, 
+                      absl::StrFormat("mmap failed for aligned portion of %s", path.string())));
+                }
+
+                if (mapped != target_addr) {
+                  ::close(fd);
+                  return finish(absl::InternalError("mmap did not map at the expected fixed address."));
+                }
+
+                VLOG(2) << "Mapped " << aligned_size << " bytes of " << path.string() << " via mmap";
+              }
+
+              // Read the remainder using buffered I/O
+              if (remainder_size > 0) {
+                char* remainder_addr = static_cast<char*>(base_addr) + offset + aligned_size;
+                size_t bytes_read = 0;
+                
+                while (bytes_read < remainder_size) {
+                  ssize_t ret = pread(fd, remainder_addr + bytes_read, 
+                                    remainder_size - bytes_read, 
+                                    aligned_size + bytes_read);
+                  if (ret < 0) {
+                    int saved_errno = errno;
+                    ::close(fd);
+                    return finish(absl::ErrnoToStatus(saved_errno,
+                        absl::StrFormat("pread failed for remainder of %s", path.string())));
+                  }
+                  if (ret == 0) {
+                    ::close(fd);
+                    return finish(absl::InternalError(
+                        absl::StrFormat("Unexpected EOF reading remainder of %s", path.string())));
+                  }
+                  bytes_read += static_cast<size_t>(ret);
+                }
+
+                VLOG(2) << "Read " << remainder_size << " bytes remainder of " << path.string() << " via buffered I/O";
+              }
+
+              ::close(fd);
+              offset += part_size;
+            }
+
+            // Mark all chunks as HOT
+            size_t num_chunks = (model_size + stepcast::memory::DistributedMemoryPool::kChunk - 1) /
+                              stepcast::memory::DistributedMemoryPool::kChunk;
+            std::vector<uint32_t> idx(num_chunks);
+            std::iota(idx.begin(), idx.end(), 0U);
+
+            ABSL_CHECK_OK(dvmp->lock_chunks(model_id, idx));
+            ABSL_CHECK_OK(dvmp->unlock_chunks(model_id, idx, /*copied_gpu=*/false));
+            
+            LOG(INFO) << "DiskLoader: Successfully loaded model using hybrid mmap+read approach";
+            return finish(absl::OkStatus());
+          });
     }
 
     // Case (a): contains at least one small partition → fall through to
@@ -524,7 +635,7 @@ std::future<absl::Status> DiskLoader::load_async(
       VLOG(1)
           << "DiskLoader: Falling back to buffered read path because at least one partition is smaller than system page size ("
           << page_sz << ")";
-    } else {
+    } else if (!has_misaligned_partition) {
       // All partitions are page-aligned and large enough – safe to mmap.
 
       // Capture partition metadata under loader mutex for thread-safety.
