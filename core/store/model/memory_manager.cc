@@ -214,10 +214,20 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
       size_t chunk_size = pinned_pool_->chunk_size();
       // Compute number of chunks so total pinned bytes <= max_buffer_bytes_
       size_t max_chunks = std::max<size_t>(1, max_buffer_bytes_ / chunk_size);
+      
+      // Validate that the actual allocation won't exceed max_buffer_bytes_
+      size_t actual_buffer_bytes = max_chunks * chunk_size;
+      if (actual_buffer_bytes > max_buffer_bytes_ && max_chunks > 1) {
+        // Adjust down to stay within limit (only if we have more than 1 chunk)
+        max_chunks = max_buffer_bytes_ / chunk_size;
+        actual_buffer_bytes = max_chunks * chunk_size;
+      }
+      
       ABSL_CHECK_OK(allocate_buffer_pool(max_chunks));
 
       LOG(INFO) << "MemoryManager(" << model_identifier_ << "): Allocated streaming pinned buffer with " << max_chunks
-                << " chunks (chunk_size=" << chunk_size << ") for PAGEABLE_CPU staging.";
+                << " chunks (chunk_size=" << chunk_size << ", total=" << actual_buffer_bytes 
+                << " bytes) for PAGEABLE_CPU staging.";
       break;
     }
     case ModelLocation::GPU: {
@@ -461,7 +471,7 @@ std::vector<void*> MemoryManager::get_pointer(ModelLocation location) const {
         return std::vector<void*>({ptr});
       }
       VLOG(2) << "MemoryManager(" << model_identifier_
-              << "): get_pointer(GPU) return`ing null. State: " << state_to_string(gpu_state_)
+              << "): get_pointer(GPU) returning null. State: " << state_to_string(gpu_state_)
               << ", CudaMem valid: " << (cuda_mem_ != nullptr);
       return {};
     default:
@@ -632,7 +642,8 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
        total_size = size_capture,
        stream = stream_capture,
        device_id = device_id_capture,
-       model_id = std::move(model_id_capture)]() -> absl::Status {
+       model_id = std::move(model_id_capture),
+       streaming_buffer_capture = streaming_buffer_]() -> absl::Status {
         absl::Status copy_status;
         std::string dst_str_async = location_to_string(destination); // For logging inside lambda
 
@@ -645,7 +656,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
           copy_status = perform_copy_cpu_to_gpu_streaming(
               model_id,
               device_id,
-              this->streaming_buffer_,
+              streaming_buffer_capture,
               cuda_mem_copy ? cuda_mem_copy->get() : nullptr,
               total_size,
               stream,
@@ -656,7 +667,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
           copy_status = perform_copy_gpu_to_cpu_streaming(
               model_id,
               device_id,
-              this->streaming_buffer_,
+              streaming_buffer_capture,
               cuda_mem_copy ? cuda_mem_copy->get() : nullptr,
               total_size,
               stream,
