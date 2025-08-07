@@ -5,6 +5,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,12 +13,12 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/distributed_memory_pool.h"
-#include "core/common/memory/pinned_memory.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
@@ -53,8 +54,8 @@ class MemoryManager {
   MemoryManager(
       std::string model_identifier,
       int local_device_id,
-      std::shared_ptr<PinnedMemoryPool> pinned_pool,
-      std::shared_ptr<memory::DistributedMemoryPool> dvmp,
+      const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
+      const gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>>& dvmp,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
       bool require_dvmp_lock_success = true);
@@ -141,13 +142,6 @@ class MemoryManager {
   std::vector<void*> get_pointer(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Gets direct access to the CPU pinned memory chunks (if allocated).
-   * Use this if external code needs to interact with individual chunks.
-   * @return std::shared_ptr<PinnedMemory> Shared pointer to the PinnedMemory object, or nullptr.
-   */
-  std::shared_ptr<PinnedMemory> get_pinned_memory() const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
    * @brief Gets access to the BatchVector used for CPU chunk status tracking during loading.
    * Primarily used internally by Loaders.
    * @return std::shared_ptr<BatchVector> Shared pointer to the BatchVector, or nullptr.
@@ -211,6 +205,8 @@ class MemoryManager {
    * @brief Gets the size of individual chunks used for CPU pinned memory.
    * Returns 0 if CPU memory is not allocated or managed in chunks.
    */
+  // Updated: If full pinned memory is not allocated, falls back to streaming
+  // buffer chunk size. Returns 0 if neither is available.
   size_t get_cpu_chunk_size() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
@@ -230,7 +226,7 @@ class MemoryManager {
    * @brief Allocate a streaming buffer pool with a fixed number of chunks.
    *        This is used by loaders implementing producer/consumer pipelines.
    */
-  absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   /**
    * @brief Release the streaming buffer pool (if allocated).
@@ -359,6 +355,7 @@ class MemoryManager {
   /**
    * @brief Releases CPU resources (pinned memory, batch vector).
    */
+  // Updated: Also releases streaming buffer pool if allocated.
   void release_cpu_resources_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   /**
@@ -382,7 +379,6 @@ class MemoryManager {
 
   // PAGEABLE_CPU Memory State
   MemoryState pageable_cpu_state_ ABSL_GUARDED_BY(mutex_) = MemoryState::UNINITIALIZED;
-  std::shared_ptr<PinnedMemory> pinned_mem_ ABSL_GUARDED_BY(mutex_) = nullptr;
   std::shared_ptr<BatchVector> host_chunk_queue_ ABSL_GUARDED_BY(mutex_) =
       nullptr; // Tracks loaded chunks for PAGEABLE_CPU
 
