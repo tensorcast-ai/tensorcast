@@ -82,6 +82,13 @@ absl::Status GPUMemorySink::close() {
     return absl::OkStatus();
   }
 
+  // Validate that all expected data was written
+  if (current_offset_ != options_.total_size) {
+    LOG(WARNING) << "GPU memory sink closed with incomplete transfer. "
+                 << "Expected " << options_.total_size << " bytes, "
+                 << "but only " << current_offset_ << " bytes were written.";
+  }
+
   // Set device context
   common::DeviceGuard guard(options_.device_id);
   if (!guard.status().ok()) {

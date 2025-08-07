@@ -25,8 +25,14 @@ class FilePartitionSource : public SeekableSource {
   explicit FilePartitionSource(Options options);
   ~FilePartitionSource() override;
 
+  // Sequential read using internal offset (thread-safe via mutex).
+  // Multiple threads can call this method concurrently; the internal
+  // offset is protected by offset_mutex_ to ensure thread safety.
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
 
+  // Stateless read at specific offset (inherently thread-safe).
+  // Multiple threads can call this method concurrently without any
+  // synchronization as it doesn't modify any internal state.
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
   uint64_t total_size() const {
@@ -52,7 +58,9 @@ class FilePartitionSource : public SeekableSource {
   Options options_;
   std::vector<FileHandle> file_handles_;
 
-  // Protected by mutex for thread-safe access
+  // Internal offset for sequential read() calls.
+  // Protected by offset_mutex_ for thread-safe access.
+  // Note: read_at() does not use or modify this offset.
   mutable absl::Mutex offset_mutex_;
   uint64_t current_offset_ = 0;
 
