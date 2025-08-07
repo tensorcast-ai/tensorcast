@@ -1,0 +1,103 @@
+// Copyright (c) 2025, StepCast Team. All rights reserved.
+
+#include "core/store/loader/gpu_memory_sink.h"
+
+#include "absl/log/log.h"
+#include "core/common/device_guard.h"
+
+namespace stepcast::store::loader {
+
+GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
+  if (!options_.gpu_base_ptr) {
+    overall_status_ = absl::InvalidArgumentError("GPU base pointer is null");
+    return;
+  }
+
+  // Create non-blocking CUDA stream for H2D transfers
+  common::DeviceGuard guard(options_.device_id);
+  if (!guard.status().ok()) {
+    overall_status_ = guard.status();
+    return;
+  }
+
+  auto stream_status = stepcast::cuda::stream_create_with_flags(&h2d_stream_, cudaStreamNonBlocking);
+  if (!stream_status.ok()) {
+    overall_status_ = stream_status;
+    LOG(ERROR) << "Failed to create CUDA stream: " << stream_status;
+    return;
+  }
+  stream_created_ = true;
+}
+
+GPUMemorySink::~GPUMemorySink() {
+  if (stream_created_) {
+    auto destroy_status = stepcast::cuda::stream_destroy(h2d_stream_);
+    if (!destroy_status.ok()) {
+      LOG(ERROR) << "Failed to destroy CUDA stream: " << destroy_status;
+    }
+  }
+}
+
+absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
+  if (!overall_status_.ok()) {
+    return overall_status_;
+  }
+
+  if (current_offset_ + bytes > options_.total_size) {
+    return absl::InvalidArgumentError("Write would exceed total GPU memory size");
+  }
+
+  // Set device context
+  common::DeviceGuard guard(options_.device_id);
+  if (!guard.status().ok()) {
+    overall_status_ = guard.status();
+    return overall_status_;
+  }
+
+  // Calculate destination GPU pointer
+  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + current_offset_;
+
+  // Perform async H2D transfer
+  auto copy_status = stepcast::cuda::memcpy_async(gpu_dest, src, bytes, cudaMemcpyHostToDevice, h2d_stream_);
+
+  if (!copy_status.ok()) {
+    overall_status_ = copy_status;
+    LOG(ERROR) << "Failed to copy data to GPU: " << copy_status;
+    return copy_status;
+  }
+
+  current_offset_ += bytes;
+
+  VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << (current_offset_ - bytes);
+
+  return absl::OkStatus();
+}
+
+absl::Status GPUMemorySink::close() {
+  if (!overall_status_.ok()) {
+    return overall_status_;
+  }
+
+  if (!stream_created_) {
+    return absl::OkStatus();
+  }
+
+  // Set device context
+  common::DeviceGuard guard(options_.device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
+  }
+
+  // Synchronize stream to ensure all transfers complete
+  auto sync_status = stepcast::cuda::stream_synchronize(h2d_stream_);
+  if (!sync_status.ok()) {
+    LOG(ERROR) << "Failed to synchronize CUDA stream: " << sync_status;
+    return sync_status;
+  }
+
+  VLOG(2) << "GPU memory sink closed successfully. Total bytes written: " << current_offset_;
+
+  return absl::OkStatus();
+}
+
+} // namespace stepcast::store::loader

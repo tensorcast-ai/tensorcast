@@ -12,14 +12,20 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
+#include "core/common/model_verification.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loading/loading_spec.h" // For DiskSource
+#include "core/store/model/memory_manager.h"
 // Forward declaration instead of include to avoid circular dependency
+
+// Forward declaration of MemoryManager in the original namespace
+namespace stepcast::store {
+class MemoryManager;
+}
 
 namespace stepcast::store {
 
-// Forward declaration
-class MemoryManager;
+// MemoryManager is already defined in this namespace via included header.
 
 /**
  * @brief Loader implementation for reading model data partitions from disk.
@@ -54,6 +60,11 @@ class DiskLoader : public IModelLoader {
    * @return absl::StatusOr<uint64_t> Total model size in bytes or error status.
    */
   absl::StatusOr<uint64_t> get_model_size() override ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
+   * @brief Returns the model verification information loaded from disk (if any).
+   */
+  absl::StatusOr<ModelVerificationInfo> get_verification_info() const;
 
   /**
    * @brief Asynchronously loads data from disk partitions into CPU pinned memory
@@ -97,10 +108,10 @@ class DiskLoader : public IModelLoader {
   mutable absl::Mutex mutex_; // Protects initialization state and partition info access
 
   DiskSource source_ ABSL_GUARDED_BY(mutex_);
-  uint64_t model_size_ ABSL_GUARDED_BY(mutex_) = 0;
-  std::vector<std::filesystem::path> partition_paths_ ABSL_GUARDED_BY(mutex_);
-  std::vector<size_t> partition_sizes_ ABSL_GUARDED_BY(mutex_);
-  bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
+  uint64_t model_size_ = 0;
+  std::vector<std::filesystem::path> partition_paths_;
+  std::vector<size_t> partition_sizes_;
+  bool initialized_ = false;
 };
 
 } // namespace stepcast::store

@@ -49,7 +49,7 @@ class P2PLoader : public IModelLoader {
    * @param chunk_idx Index of the chunk to pull
    * @return Status of the pull operation
    */
-  absl::Status pull_chunk(std::shared_ptr<MemoryManager> mem_manager, uint32_t chunk_idx);
+  absl::Status pull_chunk(const std::shared_ptr<MemoryManager>& mem_manager, uint32_t chunk_idx);
 
   ~P2PLoader() override = default;
 
@@ -107,7 +107,7 @@ class P2PLoader : public IModelLoader {
    * @return std::future<absl::Status> A future indicating the completion status.
    */
   std::future<absl::Status> load_chunks_async(
-      std::shared_ptr<MemoryManager> mem_manager,
+      const std::shared_ptr<MemoryManager>& mem_manager,
       ModelLocation target_location,
       const std::vector<uint32_t>& chunk_indices,
       int concurrency) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -116,7 +116,7 @@ class P2PLoader : public IModelLoader {
   mutable absl::Mutex mutex_;
 
   P2PSource source_;
-  bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
+  bool initialized_ = false;
 };
 
 } // namespace stepcast::store

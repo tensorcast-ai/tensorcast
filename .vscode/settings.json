@@ -29,7 +29,6 @@
         ".pytest_cache": true,
         ".ruff_cache": true,
     },
-    "clang-format.executable": "${workspaceFolder}/.venv/bin/clang-format",
     "clangd.path": "${workspaceFolder}/external/toolchains_llvm++llvm+llvm_toolchain/bin/clangd",
     "python.pythonPath": ".venv/bin/python3.10",
 }

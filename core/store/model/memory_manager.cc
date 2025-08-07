@@ -1235,6 +1235,20 @@ void* MemoryManager::get_dvmp_cpu_base() const {
   return dvmp_cpu_base_;
 }
 
+// --- DVMP metadata snapshot -------------------------------------------------
+// Provides a lightweight, read-only view of per-chunk metadata stored inside
+// the DistributedMemoryPool (DVMP).  The span remains valid as long as the
+// DVMP instance itself lives.  Callers must treat the returned ChunkMeta
+// objects as immutable and use the atomic accessors defined inside ChunkMeta
+// for state inspection.
+absl::Span<const store::ChunkMeta> stepcast::store::MemoryManager::chunk_snapshot() const {
+  // No expensive operations here – simply delegate to DVMP. We only acquire
+  // the mutex to safely access the shared_ptr.  DVMP provides its own
+  // internal locking for thread-safe snapshot retrieval.
+  absl::MutexLock lock(&mutex_);
+  return dvmp_->chunk_snapshot(instance_key_.model_id);
+}
+
 // --- NEW: Unified Memory Management implementations ---
 
 std::shared_ptr<UnifiedModelMemory> MemoryManager::get_unified_memory() const {

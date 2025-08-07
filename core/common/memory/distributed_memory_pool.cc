@@ -37,7 +37,11 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
     return absl::AlreadyExistsError("Model already has an allocated region");
   }
 
-  void* addr = mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  // Reserve virtual address range with read/write permissions so that loaders
+  // can directly stream data into the region without needing per-page mprotect
+  // calls.  Using PROT_NONE caused segmentation faults when streaming data via
+  // DVMPMappedSink::write because the destination pages were not writable.
+  void* addr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (addr == MAP_FAILED) {
     return absl::ErrnoToStatus(errno, "mmap failed while reserving VA space");
   }
