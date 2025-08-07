@@ -42,8 +42,19 @@ absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
   if (!overall_status_.ok()) {
     return overall_status_;
   }
+  auto st = write_at(current_offset_, src, bytes);
+  if (st.ok()) {
+    current_offset_ += bytes;
+  }
+  return st;
+}
 
-  if (current_offset_ + bytes > options_.total_size) {
+absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t bytes) {
+  if (!overall_status_.ok()) {
+    return overall_status_;
+  }
+
+  if (offset + bytes > options_.total_size) {
     return absl::InvalidArgumentError("Write would exceed total GPU memory size");
   }
 
@@ -55,7 +66,7 @@ absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
   }
 
   // Calculate destination GPU pointer
-  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + current_offset_;
+  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
 
   // Perform async H2D transfer
   auto copy_status = stepcast::cuda::memcpy_async(gpu_dest, src, bytes, cudaMemcpyHostToDevice, h2d_stream_);
@@ -66,9 +77,7 @@ absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
     return copy_status;
   }
 
-  current_offset_ += bytes;
-
-  VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << (current_offset_ - bytes);
+  VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << offset;
 
   return absl::OkStatus();
 }
@@ -80,6 +89,13 @@ absl::Status GPUMemorySink::close() {
 
   if (!stream_created_) {
     return absl::OkStatus();
+  }
+
+  // Validate that all expected data was written
+  if (current_offset_ != options_.total_size) {
+    LOG(WARNING) << "GPU memory sink closed with incomplete transfer. "
+                 << "Expected " << options_.total_size << " bytes, "
+                 << "but only " << current_offset_ << " bytes were written.";
   }
 
   // Set device context

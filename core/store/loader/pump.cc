@@ -5,6 +5,7 @@
 #include <atomic>
 #include <limits>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "absl/log/log.h"
@@ -20,6 +21,9 @@ struct PumpState {
   absl::Status producer_status;
   absl::Status consumer_status;
   absl::Mutex status_mutex;
+  // Map global_chunk_id -> destination offset for range pumping
+  std::unordered_map<uint64_t, uint64_t> chunk_offsets;
+  absl::Mutex offsets_mutex;
 };
 
 void RunProducer(Source& src, BufferPool& pool, PumpState& state) {
@@ -105,7 +109,7 @@ void RunProducer(Source& src, BufferPool& pool, PumpState& state) {
   }
 }
 
-void RunConsumer(Sink& dst, BufferPool& pool, PumpState& state) {
+void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   LOG(INFO) << "Consumer thread started";
   while (!state.should_stop.load(std::memory_order_acquire)) {
     auto chunk_result = pool.get_ready_chunk();
@@ -129,7 +133,22 @@ void RunConsumer(Sink& dst, BufferPool& pool, PumpState& state) {
     }
 
     const auto& chunk = *chunk_result;
-    auto status = dst.write(chunk.data_ptr, chunk.bytes_in_chunk);
+    uint64_t dest_offset = 0;
+    {
+      absl::MutexLock lock(&state.offsets_mutex);
+      auto it = state.chunk_offsets.find(chunk.global_chunk_id);
+      if (it == state.chunk_offsets.end()) {
+        absl::MutexLock s(&state.status_mutex);
+        state.consumer_status = absl::InternalError("Missing destination offset for ready chunk");
+        state.should_stop.store(true, std::memory_order_release);
+        pool.return_chunk(chunk.slot_id);
+        break;
+      }
+      dest_offset = it->second;
+      state.chunk_offsets.erase(it);
+    }
+
+    auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
     pool.return_chunk(chunk.slot_id);
 
     if (!status.ok()) {
@@ -227,6 +246,12 @@ void RunRangeProducer(
         break;
       }
 
+      // Record destination offset for this produced chunk
+      {
+        absl::MutexLock lock(&state.offsets_mutex);
+        state.chunk_offsets.emplace(chunk_id, current_offset);
+      }
+
       auto status = pool.mark_chunk_ready(slot_id, chunk_id, bytes_read);
       if (!status.ok()) {
         absl::MutexLock lock(&state.status_mutex);
@@ -292,7 +317,7 @@ absl::Status pump(Source& src, Sink& dst, BufferPool& pool, int concurrency) {
 
 absl::Status pump_ranges(
     SeekableSource& src,
-    Sink& dst,
+    PositionedSink& dst,
     BufferPool& pool,
     absl::Span<const std::pair<uint64_t, size_t>> ranges,
     int concurrency) {

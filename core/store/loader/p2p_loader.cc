@@ -9,8 +9,10 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/store/loader/dvmp_mapped_sink.h"
+#include "core/store/loader/dvmp_region_sink.h"
+#include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
+#include "core/store/loader/mux_seekable_source.h"
 #include "core/store/loader/pump.h"
 #include "core/store/loader/remote_key_source.h"
 #include "core/store/loader/streaming_buffer_adapter.h"
@@ -48,6 +50,50 @@ absl::Status P2PLoader::initialize() {
   return absl::OkStatus();
 }
 
+namespace {
+absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_source_opts(
+    const std::string& dir,
+    size_t chunk_size,
+    uint64_t expected_total) {
+  namespace fs = std::filesystem;
+  fs::path model_dir(dir);
+  if (dir.empty() || !fs::exists(model_dir) || !fs::is_directory(model_dir)) {
+    return absl::NotFoundError("Fallback model directory not found or not a directory");
+  }
+  std::vector<fs::path> paths;
+  std::vector<size_t> sizes;
+  uint64_t total = 0;
+  for (const auto& entry : fs::directory_iterator(model_dir)) {
+    if (entry.is_regular_file()) {
+      const std::string filename = entry.path().filename().string();
+      if (filename.rfind("tensor.data", 0) == 0) {
+        paths.push_back(entry.path());
+        size_t sz = fs::file_size(entry.path());
+        sizes.push_back(sz);
+        total += sz;
+      }
+    }
+  }
+  if (paths.empty()) {
+    return absl::NotFoundError("No tensor.data partitions in fallback dir");
+  }
+  std::vector<std::pair<fs::path, size_t>> pair;
+  for (size_t i = 0; i < paths.size(); ++i)
+    pair.emplace_back(paths[i], sizes[i]);
+  std::sort(
+      pair.begin(), pair.end(), [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
+  store::loader::FilePartitionSource::Options opts;
+  for (auto& p : pair) {
+    opts.partition_paths.push_back(p.first);
+    opts.partition_sizes.push_back(p.second);
+  }
+  opts.total_size = (expected_total > 0) ? expected_total : total;
+  opts.chunk_size = chunk_size;
+  opts.use_direct_io = (opts.total_size > 5ULL * 1024 * 1024 * 1024);
+  return opts;
+}
+} // namespace
+
 std::future<absl::Status> P2PLoader::load_async(
     std::shared_ptr<MemoryManager> mem_manager,
     ModelLocation target_location,
@@ -82,7 +128,21 @@ std::future<absl::Status> P2PLoader::load_async(
         .ip = source_.ip,
         .port = source_.port,
         .total_size = source_.size_bytes};
-    store::loader::RemoteKeySource remote_source(source_opts);
+    auto remote_src_ptr = std::make_shared<store::loader::RemoteKeySource>(source_opts);
+    // Optional disk fallback via env var SCSTORE_FALLBACK_MODEL_DIR
+    const char* fb_dir_env = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
+    std::shared_ptr<store::loader::SeekableSource> mux_source;
+    if (fb_dir_env != nullptr && std::strlen(fb_dir_env) > 0) {
+      auto disk_opts_or =
+          build_fallback_disk_source_opts(fb_dir_env, mem_manager->get_pool_chunk_size(), source_.size_bytes);
+      if (disk_opts_or.ok()) {
+        auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
+        mux_source = std::make_shared<store::loader::MuxSeekableSource>(remote_src_ptr, file_src_ptr);
+        VLOG(1) << "P2PLoader: enabled disk fallback via MuxSeekableSource using dir='" << fb_dir_env << "'";
+      } else {
+        LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
+      }
+    }
 
     // GPU path - use streaming buffer and pump
     if (target_location == ModelLocation::GPU) {
@@ -123,7 +183,11 @@ std::future<absl::Status> P2PLoader::load_async(
 
       // Run pump
       CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADING));
-      status = store::loader::pump(remote_source, unified_sink, buffer_adapter, concurrency);
+      if (mux_source) {
+        status = store::loader::pump(*mux_source, unified_sink, buffer_adapter, concurrency);
+      } else {
+        status = store::loader::pump(*remote_src_ptr, unified_sink, buffer_adapter, concurrency);
+      }
 
       if (!status.ok()) {
         CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::FAILED));
@@ -142,16 +206,11 @@ std::future<absl::Status> P2PLoader::load_async(
         return absl::InternalError("CPU memory not allocated");
       }
 
-      store::loader::DVMPMappedSink::Options dvmp_opts{
-          .base_addr = cpu_ptr[0],
-          .total_size = source_.size_bytes,
-          .partition_paths = {},
-          .partition_sizes = {},
-          .populate_pages = true};
-      store::loader::DVMPMappedSink dvmp_sink(dvmp_opts);
+      store::loader::DVMPRegionSink::Options dvmp_opts{.memory_manager = mem_manager, .total_size = source_.size_bytes};
+      auto dvmp_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
 
       store::loader::UnifiedMemorySink::Options unified_opts{
-          .inner_sink = std::make_shared<store::loader::DVMPMappedSink>(std::move(dvmp_sink)),
+          .inner_sink = dvmp_ptr,
           .memory_manager = mem_manager,
           .target_location = ModelLocation::PAGEABLE_CPU,
           .device_id = std::nullopt,
@@ -173,7 +232,11 @@ std::future<absl::Status> P2PLoader::load_async(
       }
 
       store::loader::StreamingBufferAdapter buffer_adapter(spb);
-      status = store::loader::pump(remote_source, unified_sink, buffer_adapter, concurrency);
+      if (mux_source) {
+        status = store::loader::pump(*mux_source, unified_sink, buffer_adapter, concurrency);
+      } else {
+        status = store::loader::pump(*remote_src_ptr, unified_sink, buffer_adapter, concurrency);
+      }
 
       if (!status.ok()) {
         CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
@@ -223,7 +286,21 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             .ip = source_.ip,
             .port = source_.port,
             .total_size = source_.size_bytes};
-        store::loader::RemoteKeySource remote_source(src_opts);
+        auto remote_src_ptr = std::make_shared<store::loader::RemoteKeySource>(src_opts);
+
+        // Optional disk fallback via Mux
+        const char* fb_dir_env2 = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
+        std::shared_ptr<store::loader::SeekableSource> mux_source2;
+        if (fb_dir_env2 != nullptr && std::strlen(fb_dir_env2) > 0) {
+          auto disk_opts_or =
+              build_fallback_disk_source_opts(fb_dir_env2, mem_manager->get_pool_chunk_size(), source_.size_bytes);
+          if (disk_opts_or.ok()) {
+            auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
+            mux_source2 = std::make_shared<store::loader::MuxSeekableSource>(remote_src_ptr, file_src_ptr);
+          } else {
+            LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
+          }
+        }
 
         // Build byte ranges corresponding to requested chunks
         size_t chunk_size = mem_manager->get_pool_chunk_size();
@@ -269,8 +346,13 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
               .chunk_indices = chunk_indices};
           store::loader::UnifiedMemorySink unified_sink(unified_opts);
 
-          status =
-              store::loader::pump_ranges(remote_source, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          if (mux_source2) {
+            status =
+                store::loader::pump_ranges(*mux_source2, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          } else {
+            status = store::loader::pump_ranges(
+                *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          }
         } else if (target_location == ModelLocation::PAGEABLE_CPU) {
           // Prepare buffering
           status = mem_manager->ensure_streaming_buffer(1);
@@ -289,13 +371,9 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             return absl::InternalError("CPU memory not allocated");
           }
 
-          store::loader::DVMPMappedSink::Options dvmp_opts{
-              .base_addr = cpu_ptr[0],
-              .total_size = source_.size_bytes,
-              .partition_paths = {},
-              .partition_sizes = {},
-              .populate_pages = true};
-          auto dvmp_sink_ptr = std::make_shared<store::loader::DVMPMappedSink>(dvmp_opts);
+          store::loader::DVMPRegionSink::Options dvmp_opts{
+              .memory_manager = mem_manager, .total_size = source_.size_bytes};
+          auto dvmp_sink_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
 
           store::loader::UnifiedMemorySink::Options unified_opts{
               .inner_sink = dvmp_sink_ptr,
@@ -305,8 +383,13 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
               .chunk_indices = chunk_indices};
           store::loader::UnifiedMemorySink unified_sink(unified_opts);
 
-          status =
-              store::loader::pump_ranges(remote_source, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          if (mux_source2) {
+            status =
+                store::loader::pump_ranges(*mux_source2, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          } else {
+            status = store::loader::pump_ranges(
+                *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
+          }
         } else {
           return absl::UnimplementedError("Unsupported target location");
         }

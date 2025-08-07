@@ -29,6 +29,23 @@ absl::Status UnifiedMemorySink::write(const void* src, size_t bytes) {
   return status;
 }
 
+absl::Status UnifiedMemorySink::write_at(uint64_t offset, const void* src, size_t bytes) {
+  if (!options_.inner_sink) {
+    return absl::InvalidArgumentError("Inner sink is null");
+  }
+  // Try positioned sink path
+  if (auto* ps = dynamic_cast<PositionedSink*>(options_.inner_sink.get())) {
+    auto st = ps->write_at(offset, src, bytes);
+    if (st.ok()) {
+      bytes_written_ += bytes;
+    }
+    return st;
+  }
+  // Fallback: sequential write (less correct for out-of-order ranges)
+  LOG(WARNING) << "UnifiedMemorySink: inner sink does not implement PositionedSink; falling back to sequential write";
+  return write(src, bytes);
+}
+
 absl::Status UnifiedMemorySink::close() {
   if (!options_.inner_sink) {
     return absl::InvalidArgumentError("Inner sink is null");

@@ -15,7 +15,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "core/common/model_verification.h"
-#include "core/store/loader/dvmp_mapped_sink.h"
+#include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
 #include "core/store/loader/pump.h"
@@ -245,65 +245,39 @@ std::future<absl::Status> DiskLoader::load_async(
       return absl::OkStatus();
     }
 
-    // CPU path - use DVMP fast path for page-aligned data
+    // CPU path - use DVMP positioned writes into reserved region
     if (target_location == ModelLocation::PAGEABLE_CPU) {
       auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
       if (cpu_ptr.empty()) {
         return absl::InternalError("CPU memory not allocated");
       }
 
-      auto dvmp_sink = std::make_shared<loader::DVMPMappedSink>(loader::DVMPMappedSink::Options{
-          .base_addr = cpu_ptr[0],
-          .total_size = model_size_,
-          .partition_paths = partition_paths_,
-          .partition_sizes = partition_sizes_,
-          .populate_pages = true});
+      auto dvmp_sink = std::make_shared<loader::DVMPRegionSink>(
+          loader::DVMPRegionSink::Options{.memory_manager = mem_manager, .total_size = model_size_});
 
       loader::UnifiedMemorySink unified_sink(
           {.inner_sink = dvmp_sink, .memory_manager = mem_manager, .target_location = ModelLocation::PAGEABLE_CPU});
 
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
 
-      // For page-aligned partitions, use fast mmap path
-      bool all_page_aligned = true;
-      for (auto& size : partition_sizes_) {
-        if (size % 4096 != 0) {
-          all_page_aligned = false;
-          break;
-        }
+      // Use streaming pump for CPU path
+      size_t num_chunks = 4; // Smaller buffer for CPU
+      auto status = mem_manager->ensure_streaming_buffer(num_chunks);
+      if (!status.ok()) {
+        return status;
       }
 
-      if (all_page_aligned && model_size_ >= 4096) {
-        // Direct mmap fast path
-        auto status = dvmp_sink->map_partitions();
-        if (status.ok()) {
-          status = unified_sink.close();
-        }
+      auto spb = mem_manager->get_streaming_buffer();
+      if (!spb) {
+        return absl::InternalError("Failed to get streaming buffer");
+      }
 
-        if (!status.ok()) {
-          ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
-          return status;
-        }
-      } else {
-        // Use pump for non-aligned data
-        size_t num_chunks = 4; // Smaller buffer for CPU
-        auto status = mem_manager->ensure_streaming_buffer(num_chunks);
-        if (!status.ok()) {
-          return status;
-        }
+      loader::StreamingBufferAdapter buffer_adapter(spb);
+      status = loader::pump(source, unified_sink, buffer_adapter, concurrency);
 
-        auto spb = mem_manager->get_streaming_buffer();
-        if (!spb) {
-          return absl::InternalError("Failed to get streaming buffer");
-        }
-
-        loader::StreamingBufferAdapter buffer_adapter(spb);
-        status = loader::pump(source, unified_sink, buffer_adapter, concurrency);
-
-        if (!status.ok()) {
-          ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
-          return status;
-        }
+      if (!status.ok()) {
+        ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
+        return status;
       }
 
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADED));
@@ -406,12 +380,8 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
             return absl::InternalError("CPU memory not allocated");
           }
 
-          auto dvmp_sink_chunk = std::make_shared<loader::DVMPMappedSink>(loader::DVMPMappedSink::Options{
-              .base_addr = cpu_ptr[0],
-              .total_size = model_size_,
-              .partition_paths = partition_paths_,
-              .partition_sizes = partition_sizes_,
-              .populate_pages = true});
+          auto dvmp_sink_chunk = std::make_shared<loader::DVMPRegionSink>(
+              loader::DVMPRegionSink::Options{.memory_manager = mem_manager, .total_size = model_size_});
 
           loader::UnifiedMemorySink unified_sink(
               {.inner_sink = dvmp_sink_chunk,

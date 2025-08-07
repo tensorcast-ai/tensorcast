@@ -1224,6 +1224,128 @@ absl::Status MemoryManager::disable_remote_memory_access(
   return absl::OkStatus();
 }
 
+// --- Chunk-scoped export / unexport for P2P access -------------------------
+
+namespace {
+// Coalesce sorted chunk indices into contiguous [start,end] inclusive ranges
+static std::vector<std::pair<uint32_t, uint32_t>> coalesce_ranges(std::vector<uint32_t> chunks) {
+  std::vector<std::pair<uint32_t, uint32_t>> out;
+  if (chunks.empty())
+    return out;
+  std::sort(chunks.begin(), chunks.end());
+  uint32_t start = chunks.front();
+  uint32_t prev = start;
+  for (size_t i = 1; i < chunks.size(); ++i) {
+    if (chunks[i] == prev + 1) {
+      prev = chunks[i];
+      continue;
+    }
+    out.emplace_back(start, prev);
+    start = prev = chunks[i];
+  }
+  out.emplace_back(start, prev);
+  return out;
+}
+} // namespace
+
+absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
+    ModelLocation location,
+    absl::Span<const uint32_t> chunks,
+    communicator::CommunicateEngine& comm_engine) {
+  // For now, implement CPU path; GPU remains whole-region.
+  if (location != ModelLocation::PAGEABLE_CPU) {
+    return absl::UnimplementedError("export_chunks_for_p2p currently supports PAGEABLE_CPU only");
+  }
+  if (chunks.empty()) {
+    return absl::InvalidArgumentError("No chunks specified for export");
+  }
+
+  std::shared_ptr<memory::DistributedMemoryPool> dvmp_capture;
+  void* base_capture = nullptr;
+  std::string model_id;
+  uint64_t model_bytes = 0;
+  {
+    absl::MutexLock lock(&mutex_);
+    if (pageable_cpu_state_ != MemoryState::LOADED) {
+      return absl::FailedPreconditionError("CPU memory must be LOADED to export chunks");
+    }
+    dvmp_capture = dvmp_;
+    base_capture = dvmp_cpu_base_;
+    model_id = model_identifier_;
+    model_bytes = model_size_;
+  }
+  if (!dvmp_capture || base_capture == nullptr) {
+    return absl::FailedPreconditionError("DVMP not available or base not set");
+  }
+
+  // Build contiguous ranges and register each as a tensor key with a pin lease
+  CommRegistrationInfo info;
+  info.model_size = model_bytes;
+  info.location = location;
+  info.device_id = 1;
+  info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_CPU;
+
+  std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
+  auto ranges = coalesce_ranges(std::move(chunk_vec));
+
+  constexpr uint64_t kChunk = memory::DistributedMemoryPool::kChunk;
+  size_t range_idx = 0;
+  for (const auto& [start, end] : ranges) {
+    uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
+    uint64_t va_end = std::min<uint64_t>(model_bytes, (static_cast<uint64_t>(end) + 1) * kChunk);
+    uint64_t length = (va_end > va_off) ? (va_end - va_off) : 0;
+    if (length == 0)
+      continue;
+
+    auto lease_or = dvmp_capture->pin_range(model_id, va_off, length, "ExternalShare");
+    if (!lease_or.ok()) {
+      return lease_or.status();
+    }
+    {
+      absl::MutexLock lock(&mutex_);
+      cpu_pin_leases_.emplace_back(std::move(*lease_or));
+    }
+
+    uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base_capture) + va_off);
+    auto key = absl::StrFormat("%s_CPU_chunks_%zu", model_id, range_idx++);
+    auto ret = comm_engine.register_tensor(key, addr, length, info.comm_dev_type, info.device_id);
+    if (!ret.ok()) {
+      return absl::InternalError("Failed to register chunk-range tensor");
+    }
+    info.buffer_addresses.push_back(addr);
+    info.buffer_sizes.push_back(static_cast<size_t>(length));
+    info.remote_memory_keys.push_back(std::move(key));
+  }
+
+  return info;
+}
+
+absl::Status MemoryManager::unexport_chunks_for_p2p(
+    ModelLocation location,
+    absl::Span<const uint32_t> /*chunks*/,
+    communicator::CommunicateEngine& comm_engine) {
+  if (location != ModelLocation::PAGEABLE_CPU) {
+    return absl::UnimplementedError("unexport_chunks_for_p2p currently supports PAGEABLE_CPU only");
+  }
+  // Unregister keys and release pin leases
+  absl::Status first_error;
+  {
+    absl::MutexLock lock(&mutex_);
+    for (const auto& key : pageable_cpu_comm_registration_info_.remote_memory_keys) {
+      absl::Status st = comm_engine.unregister_tensor(key);
+      if (!st.ok() && first_error.ok())
+        first_error = st;
+    }
+    pageable_cpu_comm_registration_info_.buffer_addresses.clear();
+    pageable_cpu_comm_registration_info_.buffer_sizes.clear();
+    pageable_cpu_comm_registration_info_.remote_memory_keys.clear();
+    cpu_pin_leases_.clear();
+  }
+  if (!first_error.ok())
+    return first_error;
+  return absl::OkStatus();
+}
+
 // --- DVMP accessor implementation ---
 memory::DistributedMemoryPool* stepcast::store::MemoryManager::get_dvmp() {
   absl::MutexLock lock(&mutex_);

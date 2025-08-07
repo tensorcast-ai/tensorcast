@@ -2,11 +2,13 @@
 
 #include "core/common/memory/distributed_memory_pool.h"
 
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <optional>
 #include <utility>
 
@@ -52,9 +54,11 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
   info.bytes = bytes;
   info.metadata = std::make_unique<stepcast::store::ChunkMeta[]>(num_chunks);
   info.chunk_count = num_chunks;
+  info.pin_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
   for (size_t i = 0; i < num_chunks; ++i) {
     info.metadata[i].state.store(stepcast::store::ChunkState::COLD, std::memory_order_relaxed);
     info.metadata[i].last_touch_s.store(0, std::memory_order_relaxed);
+    info.pin_refcnt[i].store(0, std::memory_order_relaxed);
   }
 
   models_.emplace(key, std::move(info));
@@ -212,6 +216,10 @@ size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t
   for (ssize_t idx = static_cast<ssize_t>(info.chunk_count) - 1; idx >= 0 && freed < bytes; --idx) {
     auto& meta = info.metadata[idx];
     store::ChunkState st = meta.state.load(std::memory_order_acquire);
+    // Skip pinned chunks
+    if (info.pin_refcnt[idx].load(std::memory_order_acquire) > 0) {
+      continue;
+    }
     if (st == store::ChunkState::LOCKED_TX || st == store::ChunkState::EVICTED) {
       continue; // Cannot evict locked or already evicted
     }
@@ -286,6 +294,10 @@ absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, 
       return absl::OutOfRangeError("Chunk index out of range");
     }
     auto& meta = info.metadata[i];
+    // Skip pinned chunks
+    if (info.pin_refcnt[i].load(std::memory_order_acquire) > 0) {
+      continue;
+    }
     store::ChunkState expected = meta.state.load(std::memory_order_acquire);
     // Eligible states: HOT, COLD, COPIED_GPU (may still hold identical data but no longer needed)
     if (expected == store::ChunkState::HOT || expected == store::ChunkState::COLD ||
@@ -306,6 +318,172 @@ absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, 
     }
   }
   return absl::OkStatus();
+}
+
+absl::Status DistributedMemoryPool::write_at(
+    std::string_view model_id,
+    uint64_t va_offset,
+    const void* src,
+    size_t bytes) {
+  const std::string key(model_id);
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = models_.find(key);
+  if (it == models_.end()) {
+    return absl::NotFoundError("Model not found in DVMP");
+  }
+  ModelInfo& info = it->second;
+  if (va_offset >= info.bytes) {
+    return absl::OutOfRangeError("write_at offset beyond model size");
+  }
+  size_t to_copy = std::min<size_t>(bytes, info.bytes - va_offset);
+  if (to_copy == 0) {
+    return absl::OutOfRangeError("Nothing to write");
+  }
+
+  void* dst = static_cast<char*>(info.base) + va_offset;
+  std::memcpy(dst, src, to_copy);
+
+  // Update metadata for affected chunks
+  const uint64_t first = va_offset / kChunk;
+  const uint64_t last = (va_offset + to_copy - 1) / kChunk;
+  uint64_t ts = now_s();
+  for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
+    info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
+    info.metadata[i].last_touch_s.store(static_cast<uint32_t>(ts), std::memory_order_relaxed);
+  }
+  return absl::OkStatus();
+}
+
+absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id, absl::Span<const FileSegment> segs) {
+  const std::string key(model_id);
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = models_.find(key);
+  if (it == models_.end()) {
+    return absl::NotFoundError("Model not found in DVMP");
+  }
+  ModelInfo& info = it->second;
+
+  const long page = sysconf(_SC_PAGESIZE);
+  for (const auto& s : segs) {
+    if (!std::filesystem::exists(s.path)) {
+      return absl::NotFoundError("File segment path not found");
+    }
+    if (s.va_offset + s.length > info.bytes) {
+      return absl::OutOfRangeError("File segment range exceeds VA");
+    }
+    if ((s.file_offset % page) != 0 || (s.va_offset % page) != 0) {
+      return absl::InvalidArgumentError("file_offset and va_offset must be page-aligned for mmap");
+    }
+    int fd = ::open(s.path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return absl::ErrnoToStatus(errno, "open failed for segment");
+    }
+    int flags = MAP_PRIVATE | MAP_FIXED;
+#ifdef MAP_POPULATE
+    if (s.populate)
+      flags |= MAP_POPULATE;
+#endif
+    void* target = static_cast<char*>(info.base) + s.va_offset;
+    void* mapped = ::mmap(target, s.length, PROT_READ, flags, fd, static_cast<off_t>(s.file_offset));
+    int saved = errno;
+    ::close(fd);
+    if (mapped == MAP_FAILED) {
+      return absl::ErrnoToStatus(saved, "mmap failed for file segment");
+    }
+    if (mapped != target) {
+      ::munmap(mapped, s.length);
+      return absl::InternalError("mmap returned unexpected address");
+    }
+
+    // Update metadata for affected chunks
+    const uint64_t first = s.va_offset / kChunk;
+    const uint64_t last = (s.va_offset + s.length - 1) / kChunk;
+    uint64_t ts = now_s();
+    for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
+      info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
+      info.metadata[i].last_touch_s.store(static_cast<uint32_t>(ts), std::memory_order_relaxed);
+    }
+  }
+  return absl::OkStatus();
+}
+
+// PinLease impl --------------------------------------------------------------
+DistributedMemoryPool::PinLease::~PinLease() {
+  if (!impl_)
+    return;
+  DistributedMemoryPool* dvmp = impl_->dvmp;
+  if (!dvmp)
+    return;
+  std::lock_guard<std::mutex> lock(dvmp->mutex_);
+  auto it = dvmp->models_.find(impl_->model_key);
+  if (it == dvmp->models_.end())
+    return;
+  dvmp->release_pins_unlocked(it->second, impl_->chunks);
+}
+
+DistributedMemoryPool::PinLease::PinLease(PinLease&& other) noexcept {
+  impl_ = std::move(other.impl_);
+}
+DistributedMemoryPool::PinLease& DistributedMemoryPool::PinLease::operator=(PinLease&& other) noexcept {
+  if (this != &other) {
+    impl_ = std::move(other.impl_);
+  }
+  return *this;
+}
+
+void DistributedMemoryPool::release_pins_unlocked(ModelInfo& info, absl::Span<const uint32_t> chunks) {
+  for (uint32_t i : chunks) {
+    if (i >= info.chunk_count)
+      continue;
+    // Decrement refcount and best-effort munlock
+    auto cnt = info.pin_refcnt[i].load(std::memory_order_acquire);
+    if (cnt > 0) {
+      info.pin_refcnt[i].store(cnt - 1, std::memory_order_release);
+    }
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
+    if (::munlock(addr, kChunk) != 0) {
+      // Ignore errors; best-effort only
+    }
+  }
+}
+
+absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range(
+    std::string_view model_id,
+    uint64_t va_offset,
+    uint64_t bytes,
+    std::string_view /*reason*/) {
+  const std::string key(model_id);
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = models_.find(key);
+  if (it == models_.end()) {
+    return absl::NotFoundError("Model not found in DVMP");
+  }
+  ModelInfo& info = it->second;
+  if (va_offset >= info.bytes) {
+    return absl::OutOfRangeError("pin_range offset beyond model size");
+  }
+  uint64_t to_cover = std::min<uint64_t>(bytes, info.bytes - va_offset);
+  if (to_cover == 0) {
+    return absl::OutOfRangeError("pin_range length zero");
+  }
+
+  const uint32_t first = static_cast<uint32_t>(va_offset / kChunk);
+  const uint32_t last = static_cast<uint32_t>((va_offset + to_cover - 1) / kChunk);
+  std::vector<uint32_t> chunks;
+  chunks.reserve(last - first + 1);
+  for (uint32_t i = first; i <= last && i < info.chunk_count; ++i) {
+    chunks.push_back(i);
+  }
+  for (uint32_t i : chunks) {
+    // Inc refcount and best-effort mlock
+    auto prev = info.pin_refcnt[i].load(std::memory_order_acquire);
+    info.pin_refcnt[i].store(prev + 1, std::memory_order_release);
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
+    if (::mlock(addr, kChunk) != 0) {
+      // Best-effort; ignore ENOMEM/EPERM and others here
+    }
+  }
+  return PinLease(PinLease::Impl{.dvmp = this, .model_key = key, .chunks = std::move(chunks)});
 }
 
 } // namespace stepcast::memory

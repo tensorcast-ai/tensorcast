@@ -19,4 +19,13 @@ class Sink {
   }
 };
 
+// Sink that supports positioned writes into a destination space.
+class PositionedSink {
+ public:
+  virtual ~PositionedSink() = default;
+
+  // Write bytes starting at destination-global offset.
+  virtual absl::Status write_at(uint64_t offset, const void* src, size_t bytes) = 0;
+};
+
 } // namespace stepcast::store::loader

@@ -17,7 +17,7 @@ absl::Status pump(Source& src, Sink& dst, BufferPool& pool, int concurrency = 2)
 
 absl::Status pump_ranges(
     SeekableSource& src,
-    Sink& dst,
+    PositionedSink& dst,
     BufferPool& pool,
     absl::Span<const std::pair<uint64_t, size_t>> ranges,
     int concurrency = 2);

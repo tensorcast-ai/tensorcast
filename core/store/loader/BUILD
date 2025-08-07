@@ -81,6 +81,17 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "mux_seekable_source",
+    srcs = ["mux_seekable_source.cc"],
+    hdrs = ["mux_seekable_source.h"],
+    deps = [
+        ":source",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
 # Sink implementations
 cc_library(
     name = "gpu_memory_sink",
@@ -89,6 +100,19 @@ cc_library(
     deps = [
         ":sink",
         "//core/common",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_library(
+    name = "dvmp_region_sink",
+    srcs = ["dvmp_region_sink.cc"],
+    hdrs = ["dvmp_region_sink.h"],
+    deps = [
+        ":sink",
+        "//core/common:distributed_memory_pool",
+        "//core/store/model:memory_manager",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
     ],
@@ -137,7 +161,7 @@ cc_library(
     srcs = ["disk_loader.cc"],
     hdrs = ["disk_loader.h"],
     deps = [
-        ":dvmp_mapped_sink",
+        ":dvmp_region_sink",
         ":file_partition_source",
         ":gpu_memory_sink",
         ":loader",
@@ -162,9 +186,11 @@ cc_library(
     srcs = ["p2p_loader.cc"],
     hdrs = ["p2p_loader.h"],
     deps = [
-        ":dvmp_mapped_sink",
+        ":dvmp_region_sink",
+        ":file_partition_source",
         ":gpu_memory_sink",
         ":loader",
+        ":mux_seekable_source",
         ":pump",
         ":remote_key_source",
         ":streaming_buffer_adapter",
