@@ -131,3 +131,62 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
+
+# New loader abstraction tests
+cc_test(
+    name = "test_pump",
+    srcs = ["test_pump.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/store/loader:pump",
+        "//core/store/loader:source",
+        "//core/store/loader:sink",
+        "//core/store/loader:buffer_pool",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "test_file_partition_source",
+    srcs = ["test_file_partition_source.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/store/loader:file_partition_source",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "test_gpu_memory_sink",
+    srcs = ["test_gpu_memory_sink.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/store/loader:gpu_memory_sink",
+        "//core/common/cuda:cuda_api",
+        "//core/common:device_guard",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
