@@ -58,13 +58,15 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
     disk_src.path = base / model_subdir;
 
     // Use aggregate initialization for ModelConfig
+    // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
         .model_identifier = model_id,
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
-        .dvmp = dvmp};
+        .dvmp = dvmp,
+        .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
     REQUIRE(mstatus.ok());
@@ -270,13 +272,15 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     disk_src.path = base / model_subdir;
 
     // Use aggregate initialization for ModelConfig
+    // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
         .model_identifier = model_id,
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
-        .dvmp = dvmp};
+        .dvmp = dvmp,
+        .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
     REQUIRE(mstatus.ok());
@@ -316,13 +320,15 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     disk_src.path = base / model_subdir;
 
     // Use aggregate initialization for ModelConfig
+    // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
         .model_identifier = model_id,
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
-        .dvmp = dvmp};
+        .dvmp = dvmp,
+        .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
     REQUIRE(mstatus.ok());
@@ -361,13 +367,15 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     disk_src.path = base / model_subdir;
 
     // Use aggregate initialization for ModelConfig
+    // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
         .model_identifier = model_id,
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
-        .dvmp = dvmp};
+        .dvmp = dvmp,
+        .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
     REQUIRE(mstatus.ok());

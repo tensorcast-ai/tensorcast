@@ -74,13 +74,15 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[model][disk][multi_gpu]") {
     disk_src.path = base / model_subdir;
 
     // Use aggregate initialization for ModelConfig
+    // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
         .model_identifier = model_id + std::to_string(dev),
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = dev,
         .pinned_memory_pool = pool,
-        .dvmp = dvmp};
+        .dvmp = dvmp,
+        .max_buffer_bytes = pool_total};
 
     auto mstat = Model::create(cfg);
     REQUIRE(mstat.ok());

@@ -541,6 +541,8 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
   // --- Phase 1: Acquire Lock, Check State, Prepare Data for Capture ---
   std::shared_ptr<CudaMemory> cuda_mem_capture;
   std::shared_ptr<::stepcast::memory::DistributedMemoryPool> dvmp_capture;
+  // Copy of streaming_buffer_ taken while holding mutex_
+  std::shared_ptr<StreamingPinnedBuffer> streaming_buffer_capture;
   void* dvmp_base_capture = nullptr;
   size_t size_capture = 0;
   cudaStream_t stream_capture = nullptr;
@@ -587,6 +589,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
     // Validate that required buffers exist
     if (src_is_host || dst_is_host) {
       ABSL_CHECK(streaming_buffer_) << "StreamingPinnedBuffer must be allocated before host↔device copy operations.";
+      streaming_buffer_capture = streaming_buffer_; // Capture the streaming buffer!
     }
     if (source == ModelLocation::GPU && (!cuda_mem_ || cuda_mem_->get() == nullptr)) {
       return std::async(std::launch::deferred, [id = model_identifier_] {
@@ -640,7 +643,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
        stream = stream_capture,
        device_id = device_id_capture,
        model_id = std::move(model_id_capture),
-       streaming_buffer_capture = streaming_buffer_]() -> absl::Status {
+       streaming_buffer_copy = std::move(streaming_buffer_capture)]() -> absl::Status {
         absl::Status copy_status;
         std::string dst_str_async = location_to_string(destination); // For logging inside lambda
 
@@ -653,7 +656,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
           copy_status = perform_copy_cpu_to_gpu_streaming(
               model_id,
               device_id,
-              streaming_buffer_capture,
+              streaming_buffer_copy,
               cuda_mem_copy ? cuda_mem_copy->get() : nullptr,
               total_size,
               stream,
@@ -664,7 +667,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
           copy_status = perform_copy_gpu_to_cpu_streaming(
               model_id,
               device_id,
-              streaming_buffer_capture,
+              streaming_buffer_copy,
               cuda_mem_copy ? cuda_mem_copy->get() : nullptr,
               total_size,
               stream,
