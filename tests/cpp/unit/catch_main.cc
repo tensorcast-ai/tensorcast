@@ -6,7 +6,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "absl/debugging/failure_signal_handler.h"
-#include "absl/log/initialize.h"
+#include "core/common/logging_init.h"
 
 // Custom listener to initialize logging before tests
 struct LoggingInitializer : Catch::EventListenerBase {
@@ -15,7 +15,8 @@ struct LoggingInitializer : Catch::EventListenerBase {
   void testRunStarting(Catch::TestRunInfo const& /*testRunInfo*/) override {
     static bool initialized = false;
     if (!initialized) {
-      absl::InitializeLog();
+      // Use ensure_logging_initialized which respects SCSTORE_VLOG_LEVEL env var
+      stepcast::store::ensure_logging_initialized();
       absl::FailureSignalHandlerOptions options;
       absl::InstallFailureSignalHandler(options);
       initialized = true;

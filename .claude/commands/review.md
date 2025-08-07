@@ -15,13 +15,14 @@ If the `--rfc` flag is provided, the command augments the review by cross-checki
 ```
 
 ## Arguments
-- `target` – The path, module name, PR number, or commit hash to review. (Use gh cli to get the target)
+- `target` – (Optional) The path, module name, PR number, or commit hash to review. Can be empty if using `--rfc` to review an RFC. (Use gh cli to get the target)
   Examples: `backend/core/`, `123` (PR), `a1b2c3d` (commit).
 - `--rfc` – (Optional) Numeric identifier of the RFC (e.g. `0001`).
   When supplied, the reviewer must:
   1. Parse the RFC located at `rfcs/<rfc-number>*`.
   2. Correlate the target changes with the RFC’s design and acceptance criteria.
   3. Highlight any deviations or alignment issues.
+  4. Append the finalized review report to the corresponding RFC document under a *Review History* section. (The Reports to append should focus solely on shortcomings and areas for improvement; omit strengths or positive praise.)
 - `--summary-only` – Output a condensed, executive-level summary (no detailed inline comments).
 
 ## Review Process
@@ -42,10 +43,7 @@ If the `--rfc` flag is provided, the command augments the review by cross-checki
 4. **Output**
    - Use the Review Format defined in `code_review.mdc`.
      For each issue provide: **Identify • Explain • Suggest • Priority**
-   - Reports should focus solely on shortcomings and areas for improvement; omit strengths or positive praise.
    - If `--summary-only` is set, output a high-level list of critical findings and overall verdict.
-5. **RFC Review Synchronization (Conditional)**
-   - When `--rfc` is specified, append the finalized review report to the corresponding RFC document under a *Review History* (or existing *Execution Status*) section.
 
 ## Intelligent Persona Activation
 - **Architecture**: For system-wide impacts.
@@ -55,6 +53,7 @@ If the `--rfc` flag is provided, the command augments the review by cross-checki
 ## Example
 ```bash
 /review 45                               # Review PR #45
+/review --rfc 1                          # Review RFC 0001
 /review backend/memory/ --summary-only   # Brief review of module
 /review 112 --rfc 1                      # Review PR #112 in context of RFC 0001
 ```

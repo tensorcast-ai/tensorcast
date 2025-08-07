@@ -127,7 +127,6 @@ cc_library(
         "//core/communicator",
         "//core/store/loader",
         "//core/store/loader:disk_loader",
-        "//core/store/loader:file_partition_reader",
         "//core/store/loader:p2p_loader",
         "//core/store/model",
         "//proto:global_store_grpc_cpp",
