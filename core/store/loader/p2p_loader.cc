@@ -9,6 +9,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "core/common/metrics/metric_objects.h"
 #include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
@@ -194,6 +195,13 @@ std::future<absl::Status> P2PLoader::load_async(
         return status;
       }
 
+      // Metrics: bytes loaded via P2P to GPU
+      try {
+        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(source_.size_bytes));
+      } catch (...) {
+      }
+
       CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADED));
       LOG(INFO) << "P2P transfer to GPU complete: " << source_.size_bytes << " bytes";
       return absl::OkStatus();
@@ -241,6 +249,13 @@ std::future<absl::Status> P2PLoader::load_async(
       if (!status.ok()) {
         CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
         return status;
+      }
+
+      // Metrics: bytes loaded via P2P to CPU
+      try {
+        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(source_.size_bytes));
+      } catch (...) {
       }
 
       CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADED));
@@ -353,6 +368,16 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             status = store::loader::pump_ranges(
                 *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
           }
+          if (status.ok()) {
+            uint64_t bytes_sum = 0;
+            for (const auto& r : ranges)
+              bytes_sum += r.second;
+            try {
+              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(bytes_sum));
+            } catch (...) {
+            }
+          }
         } else if (target_location == ModelLocation::PAGEABLE_CPU) {
           // Prepare buffering
           status = mem_manager->ensure_streaming_buffer(1);
@@ -390,6 +415,16 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             status = store::loader::pump_ranges(
                 *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
           }
+          if (status.ok()) {
+            uint64_t bytes_sum = 0;
+            for (const auto& r : ranges)
+              bytes_sum += r.second;
+            try {
+              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(bytes_sum));
+            } catch (...) {
+            }
+          }
         } else {
           return absl::UnimplementedError("Unsupported target location");
         }
@@ -400,45 +435,6 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
 
         return status;
       });
-}
-
-absl::Status P2PLoader::pull_chunk(const std::shared_ptr<MemoryManager>& mem_manager, uint32_t chunk_idx) {
-  if (!initialized_) {
-    auto status = initialize();
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
-  size_t chunk_size = mem_manager->get_pool_chunk_size();
-  uint64_t offset = static_cast<uint64_t>(chunk_idx) * chunk_size;
-  size_t bytes_to_read = std::min(chunk_size, static_cast<size_t>(source_.size_bytes - offset));
-
-  // Destination pointer inside PAGEABLE_CPU region
-  auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
-  if (cpu_ptr.empty()) {
-    return absl::InternalError("CPU memory not allocated");
-  }
-  char* dest = static_cast<char*>(cpu_ptr[0]) + offset;
-
-  // Use RemoteKeySource for direct random-access read
-  store::loader::RemoteKeySource::Options src_opts{
-      .comm_engine = source_.comm_engine,
-      .memory_keys = source_.memory_keys,
-      .buffer_sizes = source_.buf_sizes,
-      .ip = source_.ip,
-      .port = source_.port,
-      .total_size = source_.size_bytes};
-  store::loader::RemoteKeySource remote_source(src_opts);
-
-  auto read_st = remote_source.read_at(offset, dest, bytes_to_read);
-  if (!read_st.ok()) {
-    return read_st.status();
-  }
-  if (*read_st != bytes_to_read) {
-    return absl::DataLossError("Incomplete chunk read from remote");
-  }
-  return absl::OkStatus();
 }
 
 absl::StatusOr<uint64_t> P2PLoader::get_model_size() {

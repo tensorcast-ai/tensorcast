@@ -331,7 +331,7 @@ Export CPU to peers:
 
 ## Execution Status (2025-08-08)
 
-- Overall: Major features are implemented and integrated; pending are metrics, tests, and an optional planner refinement. See mapping below.
+- Overall: Major features are implemented and integrated; metrics (pin leases, chunk exports, mux fallbacks, loader bytes) are wired; one new unit test validates mux fallback; remaining work is optional planner refinement and additional tests. See mapping below.
 
 - Implemented (by RFC section):
   - 4.1 DVMP‑Owned IO: `DistributedMemoryPool::{write_at,map_file_segments}` added; writes update per‑chunk state/timestamps; only DVMP uses `MAP_FIXED`.
@@ -343,6 +343,10 @@ Export CPU to peers:
 - Partially implemented:
   - 4.5 Safe external access: Added `MemoryManager::{export_chunks_for_p2p,unexport_chunks_for_p2p}` (CPU). These coalesce requested chunks, acquire DVMP pin leases, and register per‑range keys. Default `enable_remote_memory_access(PAGEABLE_CPU)` still registers the whole region; flipping the default to chunk‑scoped export is a follow‑up.
   - Planner refinement (4.4): We provide per‑range P2P→disk mux at the source level. A full plan that ranks sources per chunk and coalesces by source type can be layered on top; not required for functional correctness.
+
+- Clean‑ups (compat removals):
+  - Removed `UnifiedMemorySink` fallback to sequential writes when `PositionedSink` is unavailable; positioned writes are now required for correctness.
+  - Removed `P2PLoader::pull_chunk()` which performed DVMP‑bypassing direct writes; all CPU writes go through `DVMPRegionSink`/`DVMP::write_at`.
 
 - Usage notes:
   - Disk fallback opt‑in: set `SCSTORE_FALLBACK_MODEL_DIR=/path/to/model_dir` where `tensor.data*` partitions exist. P2P pipelines will automatically fallback per‑range on short/error reads.
@@ -357,12 +361,16 @@ Export CPU to peers:
   - CPU export APIs: `core/store/model/memory_manager.{h,cc}`
 
 - Build/Test status:
-  - Bazel: a workspace external repo issue (`@hedron_compile_commands`) blocks a full `//...` build; expected to clear independently of this RFC.
-  - Targeted compile/tests: to be added; unit tests for `pump_ranges` offsets, pin‑lease eviction immunity, and mux fallback are planned.
+  - Bazel: a workspace external repo issue (`@hedron_compile_commands`) may still block a full `//...` build; targeted builds for loaders, DVMP, and unit tests pass.
+  - Added unit test `tests/cpp/unit:mux_seekable_source_test` covering primary‑error fallback to disk; further tests for `pump_ranges` offsets and pin‑lease eviction immunity are planned.
 
-- Metrics & acceptance gaps:
-  - Metrics hooks pending: `pin_leases_total{reason}`, `chunk_exports_total{location}`, `fallback_chunks_total{reason}`, `loader_bytes_total{source,location}`.
-  - Acceptance targets (throughput/regression guard) to be validated post‑build fix with 10–50 GB test artifacts.
+- Metrics & acceptance:
+  - Metrics hooked:
+    - `pin_leases_total{reason}` in DVMP `pin_range()`
+    - `chunk_exports_total{location}` in `MemoryManager::export_chunks_for_p2p()`
+    - `fallback_chunks_total{reason}` in `MuxSeekableSource::read_at()` on `primary_error|short_read`
+    - `loader_bytes_total{source,location}` in DiskLoader and P2PLoader (full + chunked)
+  - Acceptance targets (throughput/regression guard) to be validated post‑build with 10–50 GB test artifacts.
 
 - Deviations from “no compatibility mode” (intentional/pragmatic):
   - We kept the existing whole‑region CPU registration in `enable_remote_memory_access` for now and added chunk‑scoped export as an explicit API. Default flip can be done after consumers are updated.
@@ -370,6 +378,5 @@ Export CPU to peers:
 
 - Next steps (tracked):
   - Flip CPU default exposure to chunk‑scoped export once downstreams adopt the new API.
-  - Add unit tests for `pump_ranges` offset correctness, pin‑lease behavior, and mux fallback.
-  - Wire metrics and add perf regression guard against RFC‑0002 numbers.
+  - Add unit tests for `pump_ranges` offset correctness and pin‑lease behavior; add perf regression guard against RFC‑0002 numbers.
   - Optional: introduce a small ranking/planning layer to choose P2P/disk per chunk ahead of pumping (current mux suffices functionally).

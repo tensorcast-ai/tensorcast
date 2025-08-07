@@ -87,6 +87,7 @@ cc_library(
     hdrs = ["mux_seekable_source.h"],
     deps = [
         ":source",
+        "//core/common",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status:statusor",
     ],
@@ -115,18 +116,6 @@ cc_library(
         "//core/store/model:memory_manager",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
-    ],
-)
-
-cc_library(
-    name = "dvmp_mapped_sink",
-    srcs = ["dvmp_mapped_sink.cc"],
-    hdrs = ["dvmp_mapped_sink.h"],
-    deps = [
-        ":sink",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/strings",
     ],
 )
 

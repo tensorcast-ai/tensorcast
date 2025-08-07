@@ -14,6 +14,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
+#include "core/common/metrics/metric_objects.h"
 #include "core/common/model_verification.h"
 #include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
@@ -280,6 +281,13 @@ std::future<absl::Status> DiskLoader::load_async(
         return status;
       }
 
+      // Metrics: count loaded bytes by source/location
+      try {
+        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        kLoaderBytes.with_labels({{"source", "disk"}, {"location", "CPU"}}).inc(static_cast<double>(model_size_));
+      } catch (...) {
+      }
+
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADED));
       return absl::OkStatus();
     }
@@ -374,6 +382,17 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
 
           // Run pump_ranges
           status = loader::pump_ranges(source, unified_sink, buffer_adapter, ranges, concurrency);
+          if (status.ok()) {
+            // Metrics: sum bytes loaded for the requested ranges
+            uint64_t bytes_sum = 0;
+            for (const auto& r : ranges)
+              bytes_sum += r.second;
+            try {
+              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              kLoaderBytes.with_labels({{"source", "disk"}, {"location", "GPU"}}).inc(static_cast<double>(bytes_sum));
+            } catch (...) {
+            }
+          }
         } else if (target_location == ModelLocation::PAGEABLE_CPU) {
           auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
           if (cpu_ptr.empty()) {
@@ -402,6 +421,16 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
 
           loader::StreamingBufferAdapter buffer_adapter(spb);
           status = loader::pump_ranges(source, unified_sink, buffer_adapter, ranges, concurrency);
+          if (status.ok()) {
+            uint64_t bytes_sum = 0;
+            for (const auto& r : ranges)
+              bytes_sum += r.second;
+            try {
+              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              kLoaderBytes.with_labels({{"source", "disk"}, {"location", "CPU"}}).inc(static_cast<double>(bytes_sum));
+            } catch (...) {
+            }
+          }
         } else {
           return absl::UnimplementedError("Unsupported target location");
         }

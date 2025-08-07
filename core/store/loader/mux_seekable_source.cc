@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "absl/log/log.h"
+#include "core/common/metrics/metric_objects.h"
 
 namespace stepcast::store::loader {
 
@@ -42,6 +43,12 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
       total_read = *st;
     } else {
       VLOG(1) << "MuxSeekableSource: primary read_at failed: " << st.status();
+      // Metrics: record fallback due to primary error
+      try {
+        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
+        kFallbackChunks.with_labels({{"reason", "primary_error"}}).inc();
+      } catch (...) {
+      }
     }
   }
 
@@ -57,6 +64,14 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
       return total_read;
     }
     total_read += *fst;
+    if (total_read == bytes) {
+      // Metrics: record fallback due to short read (primary delivered fewer bytes than requested)
+      try {
+        static const stepcast::metrics::Counter kFallbackChunks("fallback_chunks_total");
+        kFallbackChunks.with_labels({{"reason", "short_read"}}).inc();
+      } catch (...) {
+      }
+    }
   }
 
   return total_read;

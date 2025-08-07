@@ -162,6 +162,39 @@ void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   }
 }
 
+void RunConsumerSequential(Sink& dst, BufferPool& pool, PumpState& state) {
+  LOG(INFO) << "Consumer (sequential) thread started";
+  while (!state.should_stop.load(std::memory_order_acquire)) {
+    auto chunk_result = pool.get_ready_chunk();
+    if (!chunk_result.ok()) {
+      if (absl::IsUnavailable(chunk_result.status()) || absl::IsOutOfRange(chunk_result.status())) {
+        LOG(INFO) << "Consumer (sequential): No more chunks";
+        break;
+      }
+      LOG(ERROR) << "Consumer (sequential) failed to get ready chunk: " << chunk_result.status();
+      absl::MutexLock lock(&state.status_mutex);
+      if (state.consumer_status.ok()) {
+        state.consumer_status = chunk_result.status();
+      }
+      state.should_stop.store(true, std::memory_order_release);
+      break;
+    }
+
+    const auto& chunk = *chunk_result;
+    auto status = dst.write(chunk.data_ptr, chunk.bytes_in_chunk);
+    pool.return_chunk(chunk.slot_id);
+
+    if (!status.ok()) {
+      absl::MutexLock lock(&state.status_mutex);
+      if (state.consumer_status.ok()) {
+        state.consumer_status = status;
+      }
+      state.should_stop.store(true, std::memory_order_release);
+      break;
+    }
+  }
+}
+
 void RunRangeProducer(
     SeekableSource& src,
     BufferPool& pool,
@@ -285,7 +318,7 @@ absl::Status pump(Source& src, Sink& dst, BufferPool& pool, int concurrency) {
   }
 
   // Start consumer thread
-  std::thread consumer(RunConsumer, std::ref(dst), std::ref(pool), std::ref(state));
+  std::thread consumer(RunConsumerSequential, std::ref(dst), std::ref(pool), std::ref(state));
 
   // Wait for all producers to finish
   for (auto& t : producers) {
@@ -354,7 +387,11 @@ absl::Status pump_ranges(
   consumer.join();
 
   // Close the sink
-  auto close_status = dst.close();
+  // Attempt to close if dst also implements Sink
+  absl::Status close_status = absl::OkStatus();
+  if (auto* base_sink = dynamic_cast<Sink*>(&dst)) {
+    close_status = base_sink->close();
+  }
 
   // Return first error encountered
   {

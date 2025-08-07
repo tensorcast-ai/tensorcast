@@ -41,9 +41,8 @@ absl::Status UnifiedMemorySink::write_at(uint64_t offset, const void* src, size_
     }
     return st;
   }
-  // Fallback: sequential write (less correct for out-of-order ranges)
-  LOG(WARNING) << "UnifiedMemorySink: inner sink does not implement PositionedSink; falling back to sequential write";
-  return write(src, bytes);
+  // No fallback: positioned writes are required for correctness under concurrency.
+  return absl::FailedPreconditionError("UnifiedMemorySink: inner sink must implement PositionedSink for write_at");
 }
 
 absl::Status UnifiedMemorySink::close() {

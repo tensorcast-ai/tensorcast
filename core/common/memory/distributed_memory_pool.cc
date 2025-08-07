@@ -15,6 +15,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "core/common/metrics/metric_objects.h"
 
 namespace stepcast::memory {
 
@@ -41,8 +42,8 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
 
   // Reserve virtual address range with read/write permissions so that loaders
   // can directly stream data into the region without needing per-page mprotect
-  // calls.  Using PROT_NONE caused segmentation faults when streaming data via
-  // DVMPMappedSink::write because the destination pages were not writable.
+  // calls. Using PROT_NONE previously caused segmentation faults when streaming
+  // into pages that were not writable.
   void* addr = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (addr == MAP_FAILED) {
     return absl::ErrnoToStatus(errno, "mmap failed while reserving VA space");
@@ -482,6 +483,13 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
     if (::mlock(addr, kChunk) != 0) {
       // Best-effort; ignore ENOMEM/EPERM and others here
     }
+  }
+  // Metrics: record a pin-lease acquisition event for external safety/export.
+  try {
+    static const stepcast::metrics::Counter kPinLeasesTotal("pin_leases_total");
+    kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
+  } catch (...) {
+    // Metrics are best-effort; ignore label errors
   }
   return PinLease(PinLease::Impl{.dvmp = this, .model_key = key, .chunks = std::move(chunks)});
 }
