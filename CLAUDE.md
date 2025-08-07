@@ -283,7 +283,7 @@ For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 ### Python Guidelines
 
 #### Development Environment
-- use `uv run xxx.py` to run python scripts
+- use `uv run xxx.py` to run python scripts instead of `python xxx.py`
 - use `uv run pytest tests/python/xxxx` to run python tests
 - use `bazel test //tests/cpp:xxxx` to run cxx tests
 

@@ -26,11 +26,14 @@
 - Prefer `contextlib.suppress` over `try/except` for suppressing exceptions
 
 ## Dependencies & Tools
-- **Testing**: pytest (destination: `tests/python/`)
-- **Type Checking**: pyright & mypy
-- **Data Modeling**: Pydantic
 - **Package Management**: uv
-- **Virtual Environment**: `.venv/bin/python`
+  - use `uv run xxx.py` to run python scripts instead of `python xxx.py`
+- **Testing**: pytest (destination: `tests/python/`); use `uv run pytest tests/python/xxxx` to run tests.
+- **Type Checking**: pyright & mypy & ruff
+  - `uv run mypy ./scstore`
+  - `uv run ruff check .`
+  - `uv run ruff format .`
+- **Data Modeling**: Pydantic
 
 ## Best Practices
 - Prefer iteration and modularization over code duplication

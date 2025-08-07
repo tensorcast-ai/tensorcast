@@ -50,6 +50,7 @@ alwaysApply: false
 - **Measurable**: Define success metrics
 - **Code References**: Use `\`\`\`startLine:endLine:filepath` format
 - **Visual**: Include Mermaid diagrams
+- **Timeline Agnostic**: Focus on implementation phases, not time estimates
 
 ## Update Practices
 - Keep status current during implementation

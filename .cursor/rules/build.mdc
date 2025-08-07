@@ -9,11 +9,17 @@ alwaysApply: false
 
 ### C++ and Python Extension Build
 ```bash
-# Standard build (requires CUDA)
-BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop
+# Initialize uv env
+uv sync --all-extras --all-groups
+
+# Build all. BUILD_CORE means cxx files in core/
+#  BUILD_EXTENSION means cxx files in scstore/csrc
+# Always should run this command when you modify any cxx files and
+# you want to test the changes in the python code.
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Development build (no GPU required)
-BUILD_CORE=1 BUILD_EXTENSION=1 USE_FAKE_CUDA=1 python setup.py develop
+USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 ```
 
 ### Protocol Buffers
@@ -66,23 +72,6 @@ python -m pytest tests/python/test_name
 
 ### Missing Dependencies
 ```bash
-# Install Python development dependencies
-pip install -e ".[dev]"
-
 # Check Bazel dependencies
 bazel query //...
-```
-
-### CUDA Issues
-- Ensure CUDA 12.6+ is installed
-- Check `nvcc` is in PATH
-- Use fake CUDA for development without GPU
-
-### Clean Build
-```bash
-# Clean Bazel cache
-bazel clean --expunge
-
-# Clean Python build artifacts
-rm -rf build/ dist/ *.egg-info
 ```

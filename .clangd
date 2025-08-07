@@ -10,6 +10,7 @@ CompileFlags:
     - -Wunused-result                # 未使用结果警告
     - -fcolor-diagnostics            # 彩色诊断输出
     - -ferror-limit=100              # 错误限制，避免过多错误淹没有用信息
+    - -Wno-sign-compare
 
   # 移除可能冲突的选项
   Remove:
@@ -18,7 +19,6 @@ CompileFlags:
     - -Xclang                       # 移除 clang 特定标志
     - -fno-cxx-modules              # 移除模块相关标志
     - --gcc-toolchain=*             # 移除 GCC 工具链路径
-
   # 指定编译器
   Compiler: ./external/toolchains_llvm++llvm+llvm_toolchain_llvm/bin/clang++  # 使用项目内的 clang++
 
