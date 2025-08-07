@@ -223,10 +223,10 @@ class MemoryManager {
 
   // Streaming buffer helpers -------------------------------------------------
   /**
-   * @brief Allocate a streaming buffer pool with a fixed number of chunks.
-   *        This is used by loaders implementing producer/consumer pipelines.
+   * @brief Ensures a streaming buffer pool is allocated with at least the
+   *        specified number of chunks. Thread-safe and idempotent.
    */
-  absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  absl::Status ensure_streaming_buffer(size_t num_chunks) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Release the streaming buffer pool (if allocated).
@@ -369,6 +369,11 @@ class MemoryManager {
    * re‑entrant locking.
    */
   absl::Status set_state_locked(ModelLocation location, MemoryState new_state) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  /**
+   * @brief Internal helper: allocate streaming buffer pool (caller must hold mutex_)
+   */
+  absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   mutable absl::Mutex mutex_; // Protects all member variables below
 

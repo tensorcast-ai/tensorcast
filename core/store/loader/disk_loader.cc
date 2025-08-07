@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -326,7 +327,7 @@ std::future<absl::Status> DiskLoader::load_async(
           }
 
           // Allocate streaming buffer
-          st = mem_manager->allocate_buffer_pool(num_buffer_chunks);
+          st = mem_manager->ensure_streaming_buffer(num_buffer_chunks);
           if (!st.ok()) {
             return st;
           }
@@ -512,106 +513,104 @@ std::future<absl::Status> DiskLoader::load_async(
       VLOG(1)
           << "DiskLoader: Falling back to buffered read path because at least one partition is smaller than system page size ("
           << page_sz << ")";
-    } else {
-      // All partitions are >= page size – safe to mmap (kernel handles non-aligned sizes).
-
-      // Capture partition metadata under loader mutex for thread-safety.
-      std::vector<std::filesystem::path> paths_copy;
-      std::vector<size_t> sizes_copy;
-      uint64_t model_size_copy;
-      {
-        absl::MutexLock lock(&mutex_);
-        paths_copy = partition_paths_;
-        sizes_copy = partition_sizes_;
-        model_size_copy = model_size_;
-      }
-
-      return SC_TRACE_ASYNC(
-          std::launch::async,
-          [mem_manager,
-           paths = std::move(paths_copy),
-           part_sizes = std::move(sizes_copy),
-           model_size = model_size_copy]() -> absl::Status {
-            // Helper lambda for consistent finalisation.
-            auto finish = [&](const absl::Status& st) -> absl::Status {
-              absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
-              return finalize_status.ok() ? st : finalize_status;
-            };
-
-            // ----------------------------------------------------------------------
-            // DVMP region handling
-            // ----------------------------------------------------------------------
-            // The MemoryManager::allocate_memory() call that precedes DiskLoader
-            // invocation in Model::ensure_loaded_async has already r
-            // eserved the
-            // DVMP virtual region.  Therefore we must reuse that reservation
-            // instead of calling allocate_pageable_cpu_region() again (which would
-            // race and immediately return kAlreadyExists).
-
-            const std::string model_id = mem_manager->instance_key().model_id;
-
-            void* base_addr = mem_manager->get_dvmp_cpu_base();
-
-            // Fallback: In the unlikely event the region has not been allocated
-            // yet (e.g., future refactor touches call-order) we attempt to
-            // allocate it here.
-            CHECK(base_addr != nullptr);
-
-            // Obtain DVMP instance (guaranteed to exist after the allocation helper).
-            auto dvmp = mem_manager->get_dvmp();
-            if (!dvmp) {
-              return finish(absl::InternalError("DVMP instance unexpectedly null after region allocation."));
-            }
-
-            // Allocate memory state in MemoryManager if not yet done.
-            CHECK(mem_manager->get_state(ModelLocation::PAGEABLE_CPU) != MemoryState::UNALLOCATED);
-
-            // Transition to LOADING.
-            ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
-
-            // Map each partition file into the reserved VA region using MAP_FIXED.
-            size_t offset = 0;
-            for (size_t idx = 0; idx < paths.size(); ++idx) {
-              const auto& path = paths[idx];
-              size_t part_size = part_sizes[idx];
-
-              int fd = ::open(path.c_str(), O_RDONLY);
-              if (fd < 0) {
-                return finish(
-                    absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open partition %s", path.string())));
-              }
-
-              int mmap_flags = MAP_PRIVATE | MAP_FIXED;
-              mmap_flags |= MAP_POPULATE;
-
-              void* target_addr = static_cast<char*>(base_addr) + offset;
-              void* mapped = ::mmap(target_addr, part_size, PROT_READ, mmap_flags, fd, 0);
-              int saved_errno = errno; // capture before close
-              ::close(fd);
-
-              if (mapped == MAP_FAILED) {
-                return finish(absl::ErrnoToStatus(saved_errno, absl::StrFormat("mmap failed for %s", path.string())));
-              }
-
-              if (mapped != target_addr) {
-                return finish(absl::InternalError("mmap did not map at the expected fixed address."));
-              }
-
-              // Advance offset
-              offset += part_size;
-            }
-
-            // After successful mapping, mark all chunks as HOT via lock/unlock dance.
-            size_t num_chunks = (model_size + stepcast::memory::DistributedMemoryPool::kChunk - 1) /
-                stepcast::memory::DistributedMemoryPool::kChunk;
-            std::vector<uint32_t> idx(num_chunks);
-            std::iota(idx.begin(), idx.end(), 0U);
-
-            ABSL_CHECK_OK(dvmp->lock_chunks(model_id, idx));
-            ABSL_CHECK_OK(dvmp->unlock_chunks(model_id, idx, /*copied_gpu=*/false));
-            return finish(absl::OkStatus());
-          });
     }
+
+    // Capture partition metadata under loader mutex for thread-safety.
+    std::vector<std::filesystem::path> paths_copy;
+    std::vector<size_t> sizes_copy;
+    uint64_t model_size_copy;
+    {
+      absl::MutexLock lock(&mutex_);
+      paths_copy = partition_paths_;
+      sizes_copy = partition_sizes_;
+      model_size_copy = model_size_;
+    }
+
+    return SC_TRACE_ASYNC(
+        std::launch::async,
+        [mem_manager, paths = std::move(paths_copy), part_sizes = std::move(sizes_copy), model_size = model_size_copy]()
+            -> absl::Status {
+          // Helper lambda for consistent finalisation.
+          auto finish = [&](const absl::Status& st) -> absl::Status {
+            absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
+            return finalize_status.ok() ? st : finalize_status;
+          };
+
+          // ----------------------------------------------------------------------
+          // DVMP region handling
+          // ----------------------------------------------------------------------
+          // The MemoryManager::allocate_memory() call that precedes DiskLoader
+          // invocation in Model::ensure_loaded_async has already r
+          // eserved the
+          // DVMP virtual region.  Therefore we must reuse that reservation
+          // instead of calling allocate_pageable_cpu_region() again (which would
+          // race and immediately return kAlreadyExists).
+
+          const std::string model_id = mem_manager->instance_key().model_id;
+
+          void* base_addr = mem_manager->get_dvmp_cpu_base();
+
+          // Fallback: In the unlikely event the region has not been allocated
+          // yet (e.g., future refactor touches call-order) we attempt to
+          // allocate it here.
+          CHECK(base_addr != nullptr);
+
+          // Obtain DVMP instance (guaranteed to exist after the allocation helper).
+          auto dvmp = mem_manager->get_dvmp();
+          if (!dvmp) {
+            return finish(absl::InternalError("DVMP instance unexpectedly null after region allocation."));
+          }
+
+          // Allocate memory state in MemoryManager if not yet done.
+          CHECK(mem_manager->get_state(ModelLocation::PAGEABLE_CPU) != MemoryState::UNALLOCATED);
+
+          // Transition to LOADING.
+          ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
+
+          // Map each partition file into the reserved VA region using MAP_FIXED.
+          const long page_sz_long_inner = ::sysconf(_SC_PAGESIZE);
+          const size_t page_sz_inner = page_sz_long_inner > 0 ? static_cast<size_t>(page_sz_long_inner) : 4096UL;
+          size_t offset = 0;
+          for (size_t idx = 0; idx < paths.size(); ++idx) {
+            const auto& path = paths[idx];
+            size_t part_size = part_sizes[idx];
+
+            int fd = ::open(path.c_str(), O_RDONLY);
+            if (fd < 0) {
+              return finish(absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open partition %s", path.string())));
+            }
+
+            int mmap_flags = MAP_PRIVATE | MAP_FIXED;
+            mmap_flags |= MAP_POPULATE;
+
+            void* target_addr = static_cast<char*>(base_addr) + offset;
+            void* mapped = ::mmap(target_addr, part_size, PROT_READ, mmap_flags, fd, 0);
+            int saved_errno = errno; // capture before close
+            ::close(fd);
+
+            if (mapped == MAP_FAILED) {
+              return finish(absl::ErrnoToStatus(saved_errno, absl::StrFormat("mmap failed for %s", path.string())));
+            }
+
+            if (mapped != target_addr) {
+              return finish(absl::InternalError("mmap did not map at the expected fixed address."));
+            }
+
+            // Advance offset (round up to page size to avoid overlap for small partitions)
+            size_t padded_size = ((part_size + page_sz_inner - 1) / page_sz_inner) * page_sz_inner;
+            offset += padded_size;
+          }
+
+          // After successful mapping, mark all chunks as HOT via lock/unlock dance.
+          size_t num_chunks = (model_size + stepcast::memory::DistributedMemoryPool::kChunk - 1) /
+              stepcast::memory::DistributedMemoryPool::kChunk;
+          std::vector<uint32_t> idx(num_chunks);
+          std::iota(idx.begin(), idx.end(), 0U);
+
+          ABSL_CHECK_OK(dvmp->lock_chunks(model_id, idx));
+          ABSL_CHECK_OK(dvmp->unlock_chunks(model_id, idx, /*copied_gpu=*/false));
+          return finish(absl::OkStatus());
+        });
   }
 
   // Non-streaming path (original): only support loading into CPU
@@ -621,166 +620,10 @@ std::future<absl::Status> DiskLoader::load_async(
     });
   }
 
-  absl::StatusOr<uint64_t> size_status = get_model_size();
-  if (!size_status.ok()) {
-    return std::async(std::launch::deferred, [status = size_status.status()] { return status; });
-  }
-  uint64_t expected_size = *size_status;
-
-  // --- Pre-checks in Memory Manager (Must be done before launching async) ---
-  if (mem_manager->get_model_size() == 0) {
-    mem_manager->set_model_size(expected_size);
-  } else if (mem_manager->get_model_size() != expected_size) {
-    return std::async(std::launch::deferred, [expected_size, mgr_size = mem_manager->get_model_size()] {
-      return absl::FailedPreconditionError(
-          absl::StrFormat("DiskLoader size (%d) mismatch with MemoryManager size (%d).", expected_size, mgr_size));
-    });
-  }
-
-  // Ensure memory is allocated in the manager
-  absl::Status alloc_status = mem_manager->allocate_memory(ModelLocation::PAGEABLE_CPU);
-  if (!alloc_status.ok()) {
-    return std::async(std::launch::deferred, [alloc_status] { return alloc_status; });
-  }
-
-  // --- Set Loading State ---
-  {
-    absl::Status state_status = mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING);
-    if (!state_status.ok()) {
-      return std::async(std::launch::deferred, [state_status] { return state_status; });
-    }
-  } // Release manager lock before potentially blocking IO
-
-  // --- Launch Async Read Task ---
-  // Capture necessary members safely
-  std::vector<std::filesystem::path> paths_copy;
-  std::vector<size_t> sizes_copy;
-  {
-    absl::MutexLock lock(&mutex_); // Lock loader mutex to copy partition info
-    paths_copy = partition_paths_;
-    sizes_copy = partition_sizes_;
-  }
-
-  // Sanitize concurrency: ensure at least one thread. If 0 or negative, fall back to
-  // hardware_concurrency() (or 1 if unavailable).
-  int effective_threads = concurrency;
-  if (effective_threads <= 0) {
-    unsigned int hw = std::min(std::thread::hardware_concurrency(), 4U);
-    effective_threads = static_cast<int>(hw == 0 ? 1 : hw);
-  }
-
-  return SC_TRACE_ASYNC(
-      std::launch::async,
-      [mem_manager,
-       paths = std::move(paths_copy),
-       part_sizes = std::move(sizes_copy),
-       num_threads = effective_threads]() -> absl::Status {
-        // Helper: ensure MemoryManager state finalisation exactly once.
-        auto finish = [&](const absl::Status& st) -> absl::Status {
-          // Use the return value of finalize_load_state, propagating the original 'st' only if finalize succeeds.
-          absl::Status finalize_status = mem_manager->finalize_load_state(ModelLocation::PAGEABLE_CPU, st);
-          // If finalize_load_state failed, return its error. Otherwise, return the original status 'st'.
-          return finalize_status.ok() ? st : finalize_status;
-        };
-
-        // --- Get Pinned Memory Buffers ---
-        std::shared_ptr<PinnedMemory> pinned_mem = mem_manager->get_pinned_memory();
-        std::shared_ptr<BatchVector> chunk_queue = mem_manager->get_host_chunk_queue();
-
-        if (!pinned_mem || !chunk_queue) {
-          return finish(absl::InternalError("MemoryManager did not provide valid PinnedMemory or BatchVector."));
-        }
-
-        const size_t num_chunks = pinned_mem->num_chunks();
-        const size_t chunk_size = pinned_mem->chunk_size();
-        auto& host_buffers = pinned_mem->get(); // Get vector of char*
-
-        if (host_buffers.empty() || num_chunks == 0) {
-          return finish(absl::FailedPreconditionError("No pinned memory chunks allocated."));
-        }
-
-        // --- Create FilePartitionReader ---
-        auto file_reader = std::make_shared<FilePartitionReader>();
-        absl::Status open_status = file_reader->open_partitions(paths, part_sizes);
-        if (!open_status.ok()) {
-          return finish(open_status);
-        }
-
-        // Log DIRECT_IO status
-        if (file_reader->is_direct_io_enabled()) {
-          LOG(INFO) << "DiskLoader: Using DIRECT_IO for efficient large model loading (CPU path)";
-        }
-
-        const size_t total_model_size = mem_manager->get_model_size();
-
-        LOG(INFO) << "DiskLoader: Starting load from disk to CPU using " << num_threads
-                  << " threads. Total Chunks: " << num_chunks;
-
-        // --- Multi-threaded Read Logic (Simplified with FilePartitionReader) ---
-        auto read_task = [&](int thread_idx) -> absl::Status {
-          const size_t chunk_per_thread = (num_chunks + num_threads - 1) / num_threads;
-          const size_t start_chunk = thread_idx * chunk_per_thread;
-          const size_t end_chunk = std::min((thread_idx + 1) * chunk_per_thread, num_chunks);
-
-          // Check if this thread has any work
-          if (start_chunk >= num_chunks) {
-            return absl::OkStatus();
-          }
-
-          for (size_t chunk_id = start_chunk; chunk_id < end_chunk; ++chunk_id) {
-            SC_TRACE_SCOPE("disk_read_partitions");
-
-            size_t global_offset = chunk_id * chunk_size;
-            size_t bytes_to_read = std::min(chunk_size, total_model_size - global_offset);
-
-            if (bytes_to_read == 0) {
-              break; // Reached the end of the model data
-            }
-
-            if (chunk_id >= host_buffers.size() || !host_buffers[chunk_id]) {
-              LOG(ERROR) << "DiskLoader (Thread " << thread_idx << "): Invalid buffer for chunk " << chunk_id;
-              return absl::InternalError(absl::StrFormat("Invalid buffer for chunk %d", chunk_id));
-            }
-
-            char* buffer = host_buffers[chunk_id];
-
-            // Use FilePartitionReader to read the data
-            absl::Status read_status = file_reader->read_at_offset(global_offset, buffer, bytes_to_read);
-            if (!read_status.ok()) {
-              LOG(ERROR) << "DiskLoader (Thread " << thread_idx << "): Failed to read chunk " << chunk_id << ": "
-                         << read_status;
-              return read_status;
-            }
-
-            // Notify that chunk is ready (can be used for pipelining CPU->GPU)
-            chunk_queue->enqueue(chunk_id, Batch{chunk_id, bytes_to_read});
-          } // end for each chunk
-
-          return absl::OkStatus();
-        }; // end read_task lambda
-
-        // --- Launch and Wait for Threads ---
-        std::vector<std::future<absl::Status>> futures;
-        futures.reserve(num_threads);
-        for (int i = 0; i < num_threads; ++i) {
-          futures.emplace_back(
-              SC_TRACE_ASYNC(std::launch::async, [&, thread_idx = i]() { return read_task(thread_idx); }));
-        }
-
-        absl::Status overall_status = absl::OkStatus();
-        for (auto& f : futures) {
-          absl::Status thread_status = f.get();
-          if (!thread_status.ok()) {
-            LOG(ERROR) << "DiskLoader: Error occurred in read thread: " << thread_status;
-            overall_status = thread_status; // Keep first error encountered
-          }
-        }
-
-        // --- Cleanup ---
-        file_reader->close_all();
-
-        return finish(overall_status);
-      }); // end SC_TRACE_ASYNC for overall load task
+  // Legacy pinned memory fallback path removed; mmap is now used for all partitions.
+  return std::async(std::launch::deferred, [] {
+    return absl::InternalError("Unreachable code path after removal of pinned memory fallback.");
+  });
 }
 
 std::future<absl::Status> DiskLoader::load_chunks_async(
@@ -876,7 +719,7 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
           }
 
           // Allocate streaming buffer
-          st = mem_manager->allocate_buffer_pool(num_buffer_chunks);
+          st = mem_manager->ensure_streaming_buffer(num_buffer_chunks);
           if (!st.ok()) {
             return st;
           }

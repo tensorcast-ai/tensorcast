@@ -214,7 +214,7 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
       size_t chunk_size = pinned_pool_->chunk_size();
       // Compute number of chunks so total pinned bytes <= max_buffer_bytes_
       size_t max_chunks = std::max<size_t>(1, max_buffer_bytes_ / chunk_size);
-      
+
       // Validate that the actual allocation won't exceed max_buffer_bytes_
       size_t actual_buffer_bytes = max_chunks * chunk_size;
       if (actual_buffer_bytes > max_buffer_bytes_ && max_chunks > 1) {
@@ -222,11 +222,11 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         max_chunks = max_buffer_bytes_ / chunk_size;
         actual_buffer_bytes = max_chunks * chunk_size;
       }
-      
+
       ABSL_CHECK_OK(allocate_buffer_pool(max_chunks));
 
       LOG(INFO) << "MemoryManager(" << model_identifier_ << "): Allocated streaming pinned buffer with " << max_chunks
-                << " chunks (chunk_size=" << chunk_size << ", total=" << actual_buffer_bytes 
+                << " chunks (chunk_size=" << chunk_size << ", total=" << actual_buffer_bytes
                 << " bytes) for PAGEABLE_CPU staging.";
       break;
     }
@@ -539,7 +539,6 @@ void MemoryManager::log_state_change(ModelLocation loc, MemoryState old_state, M
 
 std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, ModelLocation destination) {
   // --- Phase 1: Acquire Lock, Check State, Prepare Data for Capture ---
-  std::shared_ptr<PinnedMemory> pinned_mem_capture = nullptr;
   std::shared_ptr<CudaMemory> cuda_mem_capture;
   std::shared_ptr<::stepcast::memory::DistributedMemoryPool> dvmp_capture;
   void* dvmp_base_capture = nullptr;
@@ -600,7 +599,6 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
       });
     }
 
-    pinned_mem_capture = nullptr; // pinned_mem_ removed
     cuda_mem_capture = cuda_mem_; // Copy shared_ptr
 
     // Capture DVMP data when either side is host (needed for streaming path)
@@ -635,7 +633,6 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
        source,
        destination, // Captured location enums
        // Captured data needed for the copy operation itself:
-       pinned_mem_capture = std::move(pinned_mem_capture),
        cuda_mem_copy = std::move(cuda_mem_capture),
        dvmp_copy = std::move(dvmp_capture),
        dvmp_base = dvmp_base_capture,
@@ -1498,6 +1495,14 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
   }
 
   return absl::OkStatus();
+}
+
+absl::Status MemoryManager::ensure_streaming_buffer(size_t num_chunks) {
+  absl::MutexLock lock(&mutex_);
+  if (streaming_buffer_) {
+    return absl::OkStatus();
+  }
+  return allocate_buffer_pool(num_chunks);
 }
 
 } // namespace stepcast::store
