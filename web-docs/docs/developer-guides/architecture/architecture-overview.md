@@ -48,9 +48,10 @@ graph TD
 ### 1. Global Store
 **Role**: Centralized metadata service and coordination layer
 
-- **Responsibility**: Manages model registry, replica locations, and coordinates transfers
+- **Responsibility**: Manages model registry, replica locations **and per-chunk directory metadata**, coordinates transfers
 - **Technology**: gRPC service with DuckDB persistence
-- **Key Feature**: Model data never flows through Global Store - only metadata
+- **Key Feature**: Model data never flows through Global Store — only metadata (including chunk directory)
+- **Chunk Directory**: Tracks residency/state for every chunk across the cluster
 - **Documentation**: [Global Store Development Guide](./global-store.md)
 
 ### 2. Store Daemon

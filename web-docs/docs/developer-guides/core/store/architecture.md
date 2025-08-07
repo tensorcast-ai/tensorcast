@@ -746,3 +746,10 @@ The system is designed with multiple extension points to support future requirem
 2. **New Memory Types**: Extend `MemoryManager` support
 3. **New Transfer Protocols**: Extend communication engine
 4. **New Verification Methods**: Extend verification framework
+
+## Related Guides
+
+- **Device Registry**: Learn how GPUs are mapped to logical `DeviceKey`s in the [Device Registry guide](./device-registry.md).
+- **Communicator Internals**: See communication engine details in `../communicator/README.md`.
+- **CheckpointStore API**: High-level usage patterns are documented in `../checkpoint/README.md`.
+- **DeviceManager** — runtime GPU enumeration and streams ([Device Manager](./device-manager.md))

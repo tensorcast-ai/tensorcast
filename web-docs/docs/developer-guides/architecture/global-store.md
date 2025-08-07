@@ -29,12 +29,14 @@ scstore/global_store/
 │   ├── base.py          # Base repository
 │   ├── model_replica_repository.py
 │   ├── worker_repository.py
-│   └── transport_repository.py
+│   ├── transport_repository.py
+│   └── chunk_directory_repository.py
 ├── services/            # Business logic layer
 │   ├── __init__.py
 │   ├── model_service.py
 │   ├── transport_service.py
 │   ├── worker_service.py
+│   ├── chunk_service.py
 │   └── recovery_service.py
 ├── config/              # Configuration
 │   ├── __init__.py
@@ -102,6 +104,10 @@ The Global Store exposes its functionality through a gRPC interface defined in [
 - `SynchronizeWorkerState`: Sync worker state
 - `RequestFullStateSync`: Request complete sync
 
+#### Chunk Directory
+- `QueryChunkLocations`: Query chunk locations across replicas
+- `BatchUpdateChunkStates`: Batch update chunk metadata
+
 ## Service Layer Details
 
 ### ModelService
@@ -155,6 +161,25 @@ class WorkerService:
         """Remove workers that missed heartbeat timeout."""
 ```
 
+### ChunkService
+Manages distributed chunk directory queries and updates.
+
+```python
+class ChunkService:
+    def query_chunk_locations(
+        self, model_id: str, chunk_indices: Optional[List[int]] = None
+    ) -> List[ChunkLocation]:
+        """Return candidate locations for requested chunks."""
+
+    def batch_update_chunk_states(
+        self,
+        worker_id: str,
+        node_id: str,
+        updates: List[ChunkStateUpdate],
+    ) -> int:
+        """Apply chunk state updates from a worker."""
+```
+
 ### RecoveryService
 Handles high availability and state synchronization.
 
@@ -201,6 +226,7 @@ The complete schema is defined in `init.sql`. Key tables:
 - **model_replicas**: Model instance locations
 - **replica_counters**: High-frequency load tracking
 - **model_transports**: In-flight transfers
+- **chunk_directory**: Chunk-level metadata and state
 
 ## Configuration
 
