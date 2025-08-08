@@ -2,11 +2,13 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <ctime>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -83,6 +85,9 @@ class DistributedMemoryPool {
     PinLease& operator=(PinLease&&) noexcept;
     PinLease(const PinLease&) = delete;
     PinLease& operator=(const PinLease&) = delete;
+    
+    // Check if lease has expired (returns false if no timeout was set)
+    bool is_expired() const;
 
    private:
     friend class DistributedMemoryPool;
@@ -90,6 +95,7 @@ class DistributedMemoryPool {
       DistributedMemoryPool* dvmp;
       std::string model_key;
       std::vector<uint32_t> chunks;
+      std::optional<std::chrono::steady_clock::time_point> expiry_time;
     };
     explicit PinLease(Impl impl) : impl_(std::make_shared<Impl>(std::move(impl))) {}
     std::shared_ptr<Impl> impl_;
@@ -100,6 +106,14 @@ class DistributedMemoryPool {
       uint64_t va_offset,
       uint64_t bytes,
       std::string_view reason);
+  
+  // Overload with optional timeout
+  virtual absl::StatusOr<PinLease> pin_range(
+      std::string_view model_id,
+      uint64_t va_offset,
+      uint64_t bytes,
+      std::string_view reason,
+      std::optional<std::chrono::milliseconds> timeout_ms);
 
  private:
   struct ModelInfo {

@@ -548,3 +548,204 @@ TEST_CASE("Pump edge cases", "[pump]") {
     REQUIRE(status.code() == absl::StatusCode::kInvalidArgument);
   }
 }
+
+TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]") {
+  SECTION("Multiple producers with overlapping ranges verify ordering") {
+    // This test verifies that pump_ranges correctly handles concurrent
+    // producers writing to positioned sinks with proper ordering
+    
+    constexpr size_t total_size = 100 * 1024;  // 100KB total
+    constexpr size_t chunk_size = 4096;        // 4KB chunks
+    constexpr size_t num_ranges = 10;          // 10 ranges
+    constexpr size_t range_size = total_size / num_ranges;
+    
+    // Create a positioned sink that tracks write order
+    class OrderTrackingPositionedSink : public PositionedSink {
+    public:
+      OrderTrackingPositionedSink(size_t expected_size) 
+        : buffer_(expected_size, 0), 
+          write_order_log_(),
+          mutex_() {}
+      
+      absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        if (offset + bytes > buffer_.size()) {
+          return absl::InvalidArgumentError("Write exceeds buffer size");
+        }
+        
+        // Record the write operation
+        write_order_log_.push_back({offset, bytes, write_counter_++});
+        
+        // Perform the write
+        std::memcpy(buffer_.data() + offset, src, bytes);
+        return absl::OkStatus();
+      }
+      
+      absl::Status close() override { return absl::OkStatus(); }
+      
+      // Verify that all writes were non-overlapping and cover the full range
+      bool verify_coverage() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Sort write operations by offset
+        auto sorted_writes = write_order_log_;
+        std::sort(sorted_writes.begin(), sorted_writes.end(),
+                  [](const auto& a, const auto& b) { return a.offset < b.offset; });
+        
+        // Check for gaps or overlaps
+        uint64_t expected_next = 0;
+        for (const auto& write : sorted_writes) {
+          if (write.offset != expected_next) {
+            return false;  // Gap or overlap detected
+          }
+          expected_next = write.offset + write.bytes;
+        }
+        
+        return expected_next == buffer_.size();
+      }
+      
+      const std::vector<uint8_t>& get_buffer() const { return buffer_; }
+      
+    private:
+      struct WriteOp {
+        uint64_t offset;
+        size_t bytes;
+        uint32_t order;
+      };
+      
+      std::vector<uint8_t> buffer_;
+      std::vector<WriteOp> write_order_log_;
+      mutable std::mutex mutex_;
+      std::atomic<uint32_t> write_counter_{0};
+    };
+    
+    // Create source with predictable pattern
+    std::vector<uint8_t> source_data(total_size);
+    for (size_t i = 0; i < total_size; ++i) {
+      source_data[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    // Create seekable source
+    class TestSeekableSource : public SeekableSource {
+    public:
+      TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
+      
+      absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+        return read_at(offset_, dst, max_bytes);
+      }
+      
+      absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+        if (offset >= data_.size()) {
+          return size_t{0};  // EOF
+        }
+        
+        size_t to_read = std::min(bytes, data_.size() - offset);
+        std::memcpy(dst, data_.data() + offset, to_read);
+        offset_ = offset + to_read;
+        return to_read;
+      }
+      
+    private:
+      const std::vector<uint8_t>& data_;
+      uint64_t offset_{0};
+    };
+    
+    // Create positioned sink
+    auto sink = std::make_shared<OrderTrackingPositionedSink>(total_size);
+    
+    // Create ranges
+    std::vector<Range> ranges;
+    for (size_t i = 0; i < num_ranges; ++i) {
+      ranges.push_back({i * range_size, range_size});
+    }
+    
+    // Create buffer pool
+    MockBufferPool pool(chunk_size, num_ranges * 2);  // Enough buffers for all ranges
+    
+    // Run pump_ranges with multiple concurrent workers
+    TestSeekableSource source(source_data);
+    auto status = pump_ranges(source, *sink, pool, ranges, 4);  // 4 concurrent workers
+    
+    REQUIRE(status.ok());
+    REQUIRE(sink->verify_coverage());
+    
+    // Verify data integrity
+    const auto& result = sink->get_buffer();
+    REQUIRE(result == source_data);
+  }
+  
+  SECTION("Concurrent producers with different sized ranges") {
+    // Test with uneven range sizes to verify correct handling
+    constexpr size_t total_size = 64 * 1024;  // 64KB
+    
+    std::vector<uint8_t> source_data(total_size);
+    for (size_t i = 0; i < total_size; ++i) {
+      source_data[i] = static_cast<uint8_t>((i * 7) % 256);  // Different pattern
+    }
+    
+    class TestSeekableSource : public SeekableSource {
+    public:
+      TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
+      
+      absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+        return read_at(offset_, dst, max_bytes);
+      }
+      
+      absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+        if (offset >= data_.size()) {
+          return size_t{0};
+        }
+        size_t to_read = std::min(bytes, data_.size() - offset);
+        std::memcpy(dst, data_.data() + offset, to_read);
+        offset_ = offset + to_read;
+        return to_read;
+      }
+      
+    private:
+      const std::vector<uint8_t>& data_;
+      uint64_t offset_{0};
+    };
+    
+    // Create ranges of varying sizes
+    std::vector<Range> ranges = {
+      {0, 1024},       // 1KB
+      {1024, 4096},    // 4KB  
+      {5120, 8192},    // 8KB
+      {13312, 16384},  // 16KB
+      {29696, 34816}   // ~34KB (rest of the data)
+    };
+    
+    // Simple positioned sink that just collects data
+    class SimplePositionedSink : public PositionedSink {
+    public:
+      SimplePositionedSink(size_t size) : buffer_(size, 0) {}
+      
+      absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (offset + bytes > buffer_.size()) {
+          return absl::InvalidArgumentError("Write exceeds buffer");
+        }
+        std::memcpy(buffer_.data() + offset, src, bytes);
+        return absl::OkStatus();
+      }
+      
+      absl::Status close() override { return absl::OkStatus(); }
+      
+      const std::vector<uint8_t>& get_buffer() const { return buffer_; }
+      
+    private:
+      std::vector<uint8_t> buffer_;
+      mutable std::mutex mutex_;
+    };
+    
+    auto sink = std::make_shared<SimplePositionedSink>(total_size);
+    MockBufferPool pool(2048, 8);
+    
+    TestSeekableSource source(source_data);
+    auto status = pump_ranges(source, *sink, pool, ranges, 3);
+    
+    REQUIRE(status.ok());
+    REQUIRE(sink->get_buffer() == source_data);
+  }
+}

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/strings/str_format.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/common/metrics/metric_objects.h"
@@ -336,17 +337,20 @@ absl::Status DistributedMemoryPool::write_at(
   if (va_offset >= info.bytes) {
     return absl::OutOfRangeError("write_at offset beyond model size");
   }
-  size_t to_copy = std::min<size_t>(bytes, info.bytes - va_offset);
-  if (to_copy == 0) {
-    return absl::OutOfRangeError("Nothing to write");
+  
+  // Check if write would exceed bounds - make this an explicit error
+  if (va_offset + bytes > info.bytes) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Write would exceed model bounds: offset=%lu + bytes=%lu > model_size=%lu",
+                        va_offset, bytes, info.bytes));
   }
-
+  
   void* dst = static_cast<char*>(info.base) + va_offset;
-  std::memcpy(dst, src, to_copy);
+  std::memcpy(dst, src, bytes);
 
   // Update metadata for affected chunks
   const uint64_t first = va_offset / kChunk;
-  const uint64_t last = (va_offset + to_copy - 1) / kChunk;
+  const uint64_t last = (va_offset + bytes - 1) / kChunk;
   uint64_t ts = now_s();
   for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
     info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
@@ -412,6 +416,12 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
 DistributedMemoryPool::PinLease::~PinLease() {
   if (!impl_)
     return;
+  
+  // Check if the lease has expired before releasing pins
+  if (is_expired()) {
+    LOG(WARNING) << "PinLease expired before being destroyed for model: " << impl_->model_key;
+  }
+  
   DistributedMemoryPool* dvmp = impl_->dvmp;
   if (!dvmp)
     return;
@@ -420,6 +430,12 @@ DistributedMemoryPool::PinLease::~PinLease() {
   if (it == dvmp->models_.end())
     return;
   dvmp->release_pins_unlocked(it->second, impl_->chunks);
+}
+
+bool DistributedMemoryPool::PinLease::is_expired() const {
+  if (!impl_ || !impl_->expiry_time)
+    return false;
+  return std::chrono::steady_clock::now() > *impl_->expiry_time;
 }
 
 DistributedMemoryPool::PinLease::PinLease(PinLease&& other) noexcept {
@@ -452,7 +468,16 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
     std::string_view model_id,
     uint64_t va_offset,
     uint64_t bytes,
-    std::string_view /*reason*/) {
+    std::string_view reason) {
+  return pin_range(model_id, va_offset, bytes, reason, std::nullopt);
+}
+
+absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range(
+    std::string_view model_id,
+    uint64_t va_offset,
+    uint64_t bytes,
+    std::string_view reason,
+    std::optional<std::chrono::milliseconds> timeout_ms) {
   const std::string key(model_id);
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = models_.find(key);
@@ -484,6 +509,12 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
       // Best-effort; ignore ENOMEM/EPERM and others here
     }
   }
+  // Calculate expiry time if timeout is specified
+  std::optional<std::chrono::steady_clock::time_point> expiry_time;
+  if (timeout_ms.has_value()) {
+    expiry_time = std::chrono::steady_clock::now() + *timeout_ms;
+  }
+  
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
     static const stepcast::metrics::Counter kPinLeasesTotal("pin_leases_total");
@@ -491,7 +522,13 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
   } catch (...) {
     // Metrics are best-effort; ignore label errors
   }
-  return PinLease(PinLease::Impl{.dvmp = this, .model_key = key, .chunks = std::move(chunks)});
+  
+  return PinLease(PinLease::Impl{
+      .dvmp = this, 
+      .model_key = key, 
+      .chunks = std::move(chunks),
+      .expiry_time = expiry_time
+  });
 }
 
 } // namespace stepcast::memory

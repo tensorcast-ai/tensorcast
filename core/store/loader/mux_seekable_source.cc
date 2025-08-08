@@ -57,6 +57,10 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     size_t remain = bytes - total_read;
     auto fst = fallback_->read_at(offset + total_read, ptr + total_read, remain);
     if (!fst.ok()) {
+      // Log fallback failure for debugging
+      LOG(WARNING) << "MuxSeekableSource: fallback read_at failed after primary delivered " 
+                   << total_read << " of " << bytes << " bytes. Fallback error: " << fst.status();
+      
       // If both primary and fallback failed to deliver any data, return fallback error.
       if (total_read == 0)
         return fst.status();
