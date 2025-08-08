@@ -37,6 +37,11 @@ class RemoteKeySource : public SeekableSource {
   // Random access read (required for pump_ranges)
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
+  // Enable direct-write when RDMA is available on the engine.
+  [[nodiscard]] bool supports_direct_write() const override;
+  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const store::DirectWriteToken& token)
+      override;
+
  private:
   Options options_;
   size_t current_key_index_ = 0;

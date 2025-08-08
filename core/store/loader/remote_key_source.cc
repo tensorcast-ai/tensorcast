@@ -91,23 +91,26 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
   size_t bytes_read = 0;
   char* dst_ptr = static_cast<char*>(dst);
 
-  // Determine starting key index and offset within that key
+  // Determine starting key index and local offset within that key (stateless)
   size_t key_index = 0;
-  uint64_t running_total = 0;
-  for (size_t i = 0; i < options_.buffer_sizes.size(); ++i) {
-    if (offset < running_total + options_.buffer_sizes[i]) {
-      key_index = i;
-      current_key_offset_ = static_cast<size_t>(offset - running_total);
-      break;
+  size_t key_offset = 0;
+  {
+    uint64_t running_total = 0;
+    for (size_t i = 0; i < options_.buffer_sizes.size(); ++i) {
+      if (offset < running_total + options_.buffer_sizes[i]) {
+        key_index = i;
+        key_offset = static_cast<size_t>(offset - running_total);
+        break;
+      }
+      running_total += options_.buffer_sizes[i];
     }
-    running_total += options_.buffer_sizes[i];
   }
 
   while (bytes_read < bytes_to_read && key_index < options_.memory_keys.size()) {
     const auto& key = options_.memory_keys[key_index];
     const auto key_size = options_.buffer_sizes[key_index];
 
-    size_t remaining_in_key = key_size - current_key_offset_;
+    size_t remaining_in_key = key_size - key_offset;
     size_t to_read = std::min(bytes_to_read - bytes_read, remaining_in_key);
 
     auto future = options_.comm_engine->read_tensor(
@@ -118,7 +121,7 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
         -1,
         options_.ip,
         options_.port,
-        static_cast<uint64_t>(current_key_offset_));
+        static_cast<uint64_t>(key_offset));
 
     auto result = future.get();
     if (!result.status.ok()) {
@@ -126,14 +129,94 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     }
 
     bytes_read += to_read;
-    current_key_offset_ += to_read;
-    if (current_key_offset_ >= key_size) {
+    key_offset += to_read;
+    if (key_offset >= key_size) {
       key_index++;
-      current_key_offset_ = 0;
+      key_offset = 0;
     }
   }
 
   return bytes_read;
+}
+
+bool RemoteKeySource::supports_direct_write() const {
+  return options_.comm_engine && options_.comm_engine->is_rdma_enabled();
+}
+
+absl::StatusOr<size_t> RemoteKeySource::read_into(
+    uint64_t dest_va_offset,
+    size_t bytes,
+    const stepcast::store::DirectWriteToken& token) {
+  if (!options_.comm_engine) {
+    return absl::InvalidArgumentError("CommunicateEngine is null");
+  }
+  if (dest_va_offset >= options_.total_size) {
+    return 0; // Beyond EOF
+  }
+
+  // Helper: find token segment for a given VA offset
+  auto find_segment = [&](uint64_t va_off) -> const DirectWriteToken::Segment* {
+    for (const auto& seg : token.segments) {
+      if (va_off >= seg.va_offset && va_off < seg.va_offset + seg.length) {
+        return &seg;
+      }
+    }
+    return nullptr;
+  };
+
+  size_t to_read_total = std::min<uint64_t>(bytes, options_.total_size - dest_va_offset);
+  size_t bytes_done = 0;
+  uint64_t src_global_offset = dest_va_offset; // assume linear global mapping
+
+  while (bytes_done < to_read_total) {
+    const uint64_t cur_va = dest_va_offset + bytes_done;
+    const auto* seg = find_segment(cur_va);
+    if (seg == nullptr) {
+      return absl::InvalidArgumentError("DirectWriteToken lacks segment for requested VA range");
+    }
+    const uint64_t seg_off_in_bytes = cur_va - seg->va_offset;
+    const uint64_t local_addr = seg->local_addr + seg_off_in_bytes;
+    const uint64_t seg_bytes_left = seg->length - seg_off_in_bytes;
+
+    // Determine starting key and offset for src_global_offset
+    size_t key_index = 0;
+    size_t key_offset = 0;
+    {
+      uint64_t running_total = 0;
+      for (size_t i = 0; i < options_.buffer_sizes.size(); ++i) {
+        if (src_global_offset < running_total + options_.buffer_sizes[i]) {
+          key_index = i;
+          key_offset = static_cast<size_t>(src_global_offset - running_total);
+          break;
+        }
+        running_total += options_.buffer_sizes[i];
+      }
+    }
+
+    const auto& key = options_.memory_keys[key_index];
+    const auto key_size = options_.buffer_sizes[key_index];
+    const size_t remaining_in_key = key_size - key_offset;
+    const size_t step = static_cast<size_t>(
+        std::min<uint64_t>(to_read_total - bytes_done, std::min<uint64_t>(remaining_in_key, seg_bytes_left)));
+
+    auto future = options_.comm_engine->read_tensor(
+        key,
+        local_addr,
+        static_cast<uint64_t>(step),
+        0 /* CPU */,
+        -1,
+        options_.ip,
+        options_.port,
+        static_cast<uint64_t>(key_offset));
+    auto result = future.get();
+    if (!result.status.ok()) {
+      return result.status;
+    }
+
+    bytes_done += step;
+    src_global_offset += step;
+  }
+  return bytes_done;
 }
 
 } // namespace stepcast::store::loader

@@ -16,7 +16,9 @@ cc_library(
 
 cc_library(
     name = "source",
-    hdrs = ["source.h"],
+    hdrs = [
+        "source.h",
+    ],
     deps = [
         "@abseil-cpp//absl/status:statusor",
     ],
@@ -46,6 +48,7 @@ cc_library(
     hdrs = ["pump.h"],
     deps = [
         ":buffer_pool",
+        ":dvmp_region_sink",
         ":sink",
         ":source",
         ":streaming_buffer_adapter",
