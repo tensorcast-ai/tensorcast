@@ -209,3 +209,19 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
+
+cc_test(
+    name = "test_dvmp_region_handle",
+    srcs = ["test_dvmp_region_handle.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/common:distributed_memory_pool",
+        "@catch2//:catch2_main",
+    ],
+)

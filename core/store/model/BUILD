@@ -55,6 +55,7 @@ cc_library(
         "//core/common:distributed_memory_pool",
         "//core/communicator",
         "//core/store:device_types",
+        "//core/store:direct_write",
         "//core/store:loading_spec",
         "//core/store:memory_types",
         "@abseil-cpp//absl/base:core_headers",

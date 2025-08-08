@@ -26,6 +26,12 @@ class PositionedSink {
 
   // Write bytes starting at destination-global offset.
   virtual absl::Status write_at(uint64_t offset, const void* src, size_t bytes) = 0;
+
+  // Optional close hook mirroring Sink API for positioned sinks that also
+  // need lifecycle management in tests/pipelines. Default no-op.
+  virtual absl::Status close() {
+    return absl::OkStatus();
+  }
 };
 
 } // namespace stepcast::store::loader

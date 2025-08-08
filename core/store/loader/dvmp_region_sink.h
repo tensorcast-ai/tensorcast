@@ -29,6 +29,14 @@ class DVMPRegionSink : public Sink, public PositionedSink {
     return absl::OkStatus();
   }
 
+  // Expose MemoryManager for direct-write coordination when needed.
+  std::shared_ptr<store::MemoryManager> get_memory_manager() const {
+    return options_.memory_manager;
+  }
+  uint64_t total_size() const {
+    return options_.total_size;
+  }
+
  private:
   Options options_;
   uint64_t current_offset_ = 0;

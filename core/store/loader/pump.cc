@@ -10,6 +10,8 @@
 
 #include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
+#include "core/store/direct_write.h"
+#include "core/store/loader/dvmp_region_sink.h"
 
 namespace stepcast::store::loader {
 
@@ -352,13 +354,52 @@ absl::Status pump_ranges(
     SeekableSource& src,
     PositionedSink& dst,
     BufferPool& pool,
-    absl::Span<const std::pair<uint64_t, size_t>> ranges,
+    absl::Span<const Range> ranges,
     int concurrency) {
   if (concurrency <= 0) {
     return absl::InvalidArgumentError("Concurrency must be positive");
   }
   if (ranges.empty()) {
     return absl::InvalidArgumentError("Ranges cannot be empty");
+  }
+
+  // Optional direct-write fast path: only when destination is DVMP region and
+  // source supports direct writes (e.g., RDMA-enabled RemoteKeySource), and
+  // explicitly enabled via env SCSTORE_ENABLE_DIRECT_DVMP=1.
+  if (const char* env = ::getenv("SCSTORE_ENABLE_DIRECT_DVMP"); env && std::string(env) == "1") {
+    if (auto* dvmp_sink = dynamic_cast<DVMPRegionSink*>(&dst)) {
+      if (src.supports_direct_write()) {
+        auto mm = dvmp_sink->get_memory_manager();
+        if (mm) {
+          // Build VaRanges and plan a direct write token
+          std::vector<VaRange> va_ranges;
+          va_ranges.reserve(ranges.size());
+          for (const auto& r : ranges) {
+            va_ranges.push_back({r.first, r.second});
+          }
+          auto token_or = mm->plan_direct_write(va_ranges);
+          if (!token_or.ok()) {
+            return token_or.status();
+          }
+
+          const auto& token = *token_or;
+          for (const auto& [off, len] : ranges) {
+            auto got = src.read_into(off, len, token);
+            if (!got.ok()) {
+              return got.status();
+            }
+            if (*got != len) {
+              return absl::OutOfRangeError("Short direct write");
+            }
+          }
+          // Attempt to close if dst also implements Sink
+          if (auto* base_sink = dynamic_cast<Sink*>(&dst)) {
+            return base_sink->close();
+          }
+          return absl::OkStatus();
+        }
+      }
+    }
   }
 
   PumpState state;

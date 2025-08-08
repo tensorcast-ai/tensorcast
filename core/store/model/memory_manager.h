@@ -23,6 +23,7 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
+#include "core/store/direct_write.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/memory_types.h"
 #include "core/store/model/chunk_meta.h"
@@ -345,6 +346,9 @@ class MemoryManager {
 
   // NEW: Expose base address of DVMP region reserved for PAGEABLE_CPU. Returns nullptr if region not allocated.
   void* get_dvmp_cpu_base() const ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Plan a direct-write token for destination VA ranges (PAGEABLE_CPU).
+  absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   /**

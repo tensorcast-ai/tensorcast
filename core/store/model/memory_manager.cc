@@ -19,6 +19,7 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/common/metrics/metric_objects.h"
 #include "core/communicator/engine/engine.h"
+#include "core/store/direct_write.h"
 
 #define model_identifier_ instance_key_.model_id
 #define local_device_id_ instance_key_.device.ordinal
@@ -34,7 +35,9 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp);
+    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp,
+    const std::shared_ptr<UnifiedModelMemory>& uma,
+    const stepcast::store::InstanceKey& ikey);
 
 // Forward declaration (add after perform_copy_cpu_to_gpu_streaming declaration)
 absl::Status perform_copy_gpu_to_cpu_streaming(
@@ -168,9 +171,10 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
   // Only GPU allocations require a valid CUDA stream.  PAGEABLE_CPU allocations rely solely on
   // pinned host memory and therefore do not depend on CUDA stream initialisation.
   if (location == ModelLocation::GPU && !stream_initialized_) {
-    return absl::FailedPreconditionError(absl::StrFormat(
-        "MemoryManager(%s): CUDA stream not initialised. Provide a valid device id during MemoryManager construction before GPU allocation.",
-        model_identifier_));
+    return absl::FailedPreconditionError(
+        absl::StrFormat(
+            "MemoryManager(%s): CUDA stream not initialised. Provide a valid device id during MemoryManager construction before GPU allocation.",
+            model_identifier_));
   }
 
   MemoryState* state_ptr = nullptr;
@@ -185,10 +189,11 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         return absl::OkStatus();
       }
       if (*state_ptr != MemoryState::UNALLOCATED) {
-        return absl::FailedPreconditionError(absl::StrFormat(
-            "MemoryManager(%s): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found %s.",
-            model_identifier_,
-            state_to_string(*state_ptr)));
+        return absl::FailedPreconditionError(
+            absl::StrFormat(
+                "MemoryManager(%s): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found %s.",
+                model_identifier_,
+                state_to_string(*state_ptr)));
       }
 
       auto region_or = dvmp_->allocate(model_identifier_, model_size_);
@@ -237,10 +242,11 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         return absl::OkStatus(); // Already allocated
       }
       if (*state_ptr != MemoryState::UNALLOCATED) {
-        return absl::FailedPreconditionError(absl::StrFormat(
-            "MemoryManager(%s): Cannot allocate GPU memory. Expected UNALLOCATED state, but found %s.",
-            model_identifier_,
-            state_to_string(*state_ptr)));
+        return absl::FailedPreconditionError(
+            absl::StrFormat(
+                "MemoryManager(%s): Cannot allocate GPU memory. Expected UNALLOCATED state, but found %s.",
+                model_identifier_,
+                state_to_string(*state_ptr)));
       }
 
       cuda_mem_ = std::make_shared<CudaMemory>();
@@ -256,11 +262,12 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
                    << "): Direct cudaMalloc failed: " << alloc_status.message();
         cuda_mem_.reset();
         ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
-        return absl::ResourceExhaustedError(absl::StrFormat(
-            "MemoryManager(%s): Failed direct cudaMalloc on device %d: %s",
-            model_identifier_,
-            local_device_id_,
-            alloc_status.message()));
+        return absl::ResourceExhaustedError(
+            absl::StrFormat(
+                "MemoryManager(%s): Failed direct cudaMalloc on device %d: %s",
+                model_identifier_,
+                local_device_id_,
+                alloc_status.message()));
       }
 
       VLOG(1) << "MemoryManager(" << model_identifier_ << "): Direct cudaMalloc successful (ptr=" << cuda_mem_->get()
@@ -342,8 +349,11 @@ absl::Status MemoryManager::release_memory(ModelLocation location, bool safe_rel
     if (safe_release) {
       LOG(WARNING) << "MemoryManager(" << model_identifier_ << "): Safe release requested for " << loc_str
                    << " while LOADING. Release denied.";
-      return absl::FailedPreconditionError(absl::StrFormat(
-          "MemoryManager(%s): Cannot safely release %s memory while in LOADING state.", model_identifier_, loc_str));
+      return absl::FailedPreconditionError(
+          absl::StrFormat(
+              "MemoryManager(%s): Cannot safely release %s memory while in LOADING state.",
+              model_identifier_,
+              loc_str));
     }
 
     VLOG(1) << "MemoryManager(" << model_identifier_ << "): Unsafe release requested for " << loc_str
@@ -545,6 +555,7 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
   std::string src_str = location_to_string(source);
   std::string dst_str = location_to_string(destination);
 
+  bool need_allocate_um = false;
   { // Mutex Lock Scope
     absl::MutexLock lock(&mutex_);
 
@@ -612,6 +623,9 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
     // Note: lock_chunks/unlock_chunks calls removed per review feedback
     // DVMP chunk locking is handled at a higher layer if needed
 
+    // Check if we need UMA after releasing the lock
+    need_allocate_um = (src_is_host || dst_is_host) && !unified_memory_;
+
     // --- Mark Destination as Loading ---
     absl::Status state_status = set_state_locked(destination, MemoryState::LOADING);
     if (!state_status.ok()) {
@@ -622,6 +636,14 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
       return std::async(std::launch::deferred, [state_status] { return state_status; });
     }
   } // Mutex Released
+
+  // Allocate UMA if needed (avoid calling while holding mutex_)
+  if (need_allocate_um) {
+    auto st_um = allocate_unified();
+    if (!st_um.ok()) {
+      return std::async(std::launch::deferred, [st_um] { return st_um; });
+    }
+  }
 
   // --- Phase 2: Launch Asynchronous Task ---
   return std::async(
@@ -646,7 +668,6 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
         bool dst_host_async = (destination == ModelLocation::PAGEABLE_CPU);
 
         if (src_host_async && !dst_host_async) { // Host -> GPU (streaming path only)
-          absl::MutexLock lock(&mutex_);
           copy_status = perform_copy_cpu_to_gpu_streaming(
               model_id,
               device_id,
@@ -655,9 +676,10 @@ std::future<absl::Status> MemoryManager::copy_data_async(ModelLocation source, M
               total_size,
               stream,
               dvmp_base,
-              dvmp_copy);
+              dvmp_copy,
+              this->unified_memory_,
+              this->instance_key_);
         } else if (!src_host_async && dst_host_async) { // GPU -> Host (streaming path only)
-          absl::MutexLock lock(&mutex_);
           copy_status = perform_copy_gpu_to_cpu_streaming(
               model_id,
               device_id,
@@ -804,10 +826,11 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
       registered_ptr = &gpu_comm_registered_;
       cached_info_ptr = &gpu_comm_registration_info_;
     } else {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "MemoryManager(%s): Invalid location specified for Comm registration: %d",
-          model_identifier_,
-          static_cast<int>(location)));
+      return absl::InvalidArgumentError(
+          absl::StrFormat(
+              "MemoryManager(%s): Invalid location specified for Comm registration: %d",
+              model_identifier_,
+              static_cast<int>(location)));
     }
 
     if (*registered_ptr) {
@@ -851,8 +874,9 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
     }
 
     if (!cpu_loaded) {
-      return absl::FailedPreconditionError(absl::StrFormat(
-          "MemoryManager(%s): PAGEABLE_CPU memory must be in LOADED state for Comm registration.", model_id_copy));
+      return absl::FailedPreconditionError(
+          absl::StrFormat(
+              "MemoryManager(%s): PAGEABLE_CPU memory must be in LOADED state for Comm registration.", model_id_copy));
     }
     if (dvmp_base_copy == nullptr) {
       return absl::FailedPreconditionError("DVMP CPU base address is null; cannot register PAGEABLE_CPU memory.");
@@ -886,17 +910,19 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
 
       // GPU must be ready (LOADED) to be registered
       if (gpu_state_ != MemoryState::LOADED) {
-        return absl::FailedPreconditionError(absl::StrFormat(
-            "MemoryManager(%s): GPU memory must be in LOADED state for Comm registration (current: %s).",
-            model_identifier_,
-            state_to_string(gpu_state_)));
+        return absl::FailedPreconditionError(
+            absl::StrFormat(
+                "MemoryManager(%s): GPU memory must be in LOADED state for Comm registration (current: %s).",
+                model_identifier_,
+                state_to_string(gpu_state_)));
       }
       if (!cuda_mem_ || cuda_mem_->get() == nullptr) {
-        return absl::InternalError(absl::StrFormat(
-            "MemoryManager(%s): Invalid GPU memory object (null=%d) or size (%d) for Comm registration.",
-            model_identifier_,
-            cuda_mem_ == nullptr || cuda_mem_->get() == nullptr,
-            model_size_));
+        return absl::InternalError(
+            absl::StrFormat(
+                "MemoryManager(%s): Invalid GPU memory object (null=%d) or size (%d) for Comm registration.",
+                model_identifier_,
+                cuda_mem_ == nullptr || cuda_mem_->get() == nullptr,
+                model_size_));
       }
       ptr_to_register = cuda_mem_->get();
       device_id_copy = reg_info.device_id;
@@ -1191,10 +1217,11 @@ absl::Status MemoryManager::disable_remote_memory_access(
     registered_ptr = &gpu_comm_registered_;
     info_ptr = &gpu_comm_registration_info_;
   } else {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "MemoryManager(%s): Invalid location specified for Comm unregistration: %d",
-        model_identifier_,
-        static_cast<int>(location)));
+    return absl::InvalidArgumentError(
+        absl::StrFormat(
+            "MemoryManager(%s): Invalid location specified for Comm unregistration: %d",
+            model_identifier_,
+            static_cast<int>(location)));
   }
 
   if (!*registered_ptr) {
@@ -1380,6 +1407,55 @@ void* MemoryManager::get_dvmp_cpu_base() const {
   return dvmp_cpu_base_;
 }
 
+// Opaque keepalive container for DVMP pin leases held by a DirectWriteToken
+namespace {
+struct DwKeepalive {
+  std::vector<memory::DistributedMemoryPool::PinLease> leases;
+};
+} // namespace
+
+absl::StatusOr<DirectWriteToken> MemoryManager::plan_direct_write(absl::Span<const VaRange> ranges) {
+  std::shared_ptr<memory::DistributedMemoryPool> dvmp;
+  void* base = nullptr;
+  std::string model_id;
+  uint64_t model_bytes = 0;
+  {
+    absl::MutexLock lock(&mutex_);
+    if (pageable_cpu_state_ != MemoryState::LOADED && pageable_cpu_state_ != MemoryState::ALLOCATED) {
+      return absl::FailedPreconditionError("CPU memory must be allocated/loaded for direct write");
+    }
+    dvmp = dvmp_;
+    base = dvmp_cpu_base_;
+    model_id = model_identifier_;
+    model_bytes = model_size_;
+  }
+  if (!dvmp || base == nullptr) {
+    return absl::FailedPreconditionError("DVMP base not available");
+  }
+
+  auto keep = std::make_shared<DwKeepalive>();
+  DirectWriteToken token;
+  token.segments.reserve(ranges.size());
+  for (const auto& r : ranges) {
+    if (r.offset + r.length > model_bytes) {
+      return absl::OutOfRangeError("Direct write range exceeds model bounds");
+    }
+    // Acquire a pin lease to protect this VA range
+    auto lease_or = dvmp->pin_range(model_id, r.offset, r.length, "DirectWrite");
+    if (!lease_or.ok()) {
+      return lease_or.status();
+    }
+    keep->leases.emplace_back(std::move(*lease_or));
+    token.segments.push_back(
+        DirectWriteToken::Segment{
+            .va_offset = r.offset,
+            .local_addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + r.offset),
+            .length = r.length});
+  }
+  token.keepalive = keep;
+  return token;
+}
+
 // --- DVMP metadata snapshot -------------------------------------------------
 // Provides a lightweight, read-only view of per-chunk metadata stored inside
 // the DistributedMemoryPool (DVMP).  The span remains valid as long as the
@@ -1531,59 +1607,87 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp) {
+    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp,
+    const std::shared_ptr<UnifiedModelMemory>& uma,
+    const stepcast::store::InstanceKey& ikey) {
   // Required components must be present – enforce via CHECKKs
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU destination pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
-  size_t chunk_size = streaming_buf->chunk_size();
-  size_t offset = 0;
+  const size_t dvmp_chunk = ::stepcast::memory::DistributedMemoryPool::kChunk;
+  const size_t copy_chunk = streaming_buf->chunk_size();
 
   auto device_status = stepcast::cuda::set_device(device_id);
   if (!device_status.ok()) {
     return device_status;
   }
 
-  while (offset < total_size) {
-    size_t current_chunk_size = std::min(chunk_size, total_size - offset);
+  // Chunk-aware copy: iterate DVMP chunk ranges so that UMA can lock/unlock
+  // per-chunk and update states correctly.
+  const size_t num_dvmp_chunks = (total_size + dvmp_chunk - 1) / dvmp_chunk;
+  for (size_t dvmp_idx = 0; dvmp_idx < num_dvmp_chunks; ++dvmp_idx) {
+    const size_t dvmp_off = dvmp_idx * dvmp_chunk;
+    const size_t this_len = std::min(dvmp_chunk, total_size - dvmp_off);
 
-    // Acquire a free chunk slot
-    auto slot_or = streaming_buf->get_free_chunk();
-    if (!slot_or.ok()) {
-      return slot_or.status();
+    // UMA lock this DVMP chunk for transfer (CPU -> GPU)
+    if (uma) {
+      std::vector<uint32_t> one{static_cast<uint32_t>(dvmp_idx)};
+      auto st = uma->lock_chunks_for_transfer(ikey, ModelLocation::PAGEABLE_CPU, ModelLocation::GPU, one);
+      if (!st.ok()) {
+        return st;
+      }
     }
-    int slot_id = *slot_or;
-    char* host_ptr = streaming_buf->get_chunk_ptr(slot_id);
-    if (host_ptr == nullptr) {
+
+    size_t copied = 0;
+    while (copied < this_len) {
+      size_t step = std::min(copy_chunk, this_len - copied);
+      // Acquire a free chunk slot
+      auto slot_or = streaming_buf->get_free_chunk();
+      if (!slot_or.ok()) {
+        return slot_or.status();
+      }
+      int slot_id = *slot_or;
+      char* host_ptr = streaming_buf->get_chunk_ptr(slot_id);
+      if (host_ptr == nullptr) {
+        ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
+        return absl::InternalError("Failed to get chunk pointer from streaming buffer");
+      }
+
+      // Copy from DVMP region to pinned chunk
+      void* src_host = static_cast<char*>(dvmp_base) + dvmp_off + copied;
+      std::memcpy(host_ptr, src_host, step);
+
+      // Async copy H2D
+      void* dst_device = static_cast<char*>(gpu_ptr) + dvmp_off + copied;
+      auto memcpy_status = stepcast::cuda::memcpy_async(dst_device, host_ptr, step, cudaMemcpyHostToDevice, stream);
+      if (!memcpy_status.ok()) {
+        ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
+        return memcpy_status;
+      }
+
+      // Synchronize to ensure chunk can be reused safely
+      auto sync_status = stepcast::cuda::stream_synchronize(stream);
+      if (!sync_status.ok()) {
+        ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
+        return sync_status;
+      }
+
+      // Return chunk to buffer
       ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
-      return absl::InternalError("Failed to get chunk pointer from streaming buffer");
+      copied += step;
     }
 
-    // Copy from DVMP region to pinned chunk
-    void* src_host = static_cast<char*>(dvmp_base) + offset;
-    std::memcpy(host_ptr, src_host, current_chunk_size);
-
-    // Async copy H2D
-    void* dst_device = static_cast<char*>(gpu_ptr) + offset;
-    auto memcpy_status =
-        stepcast::cuda::memcpy_async(dst_device, host_ptr, current_chunk_size, cudaMemcpyHostToDevice, stream);
-    if (!memcpy_status.ok()) {
-      ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
-      return memcpy_status;
+    // UMA update: mark DVMP chunk as COPIED_GPU which triggers DVMP unlock
+    if (uma) {
+      std::vector<uint32_t> one{static_cast<uint32_t>(dvmp_idx)};
+      auto st = uma->update_chunk_states(ikey, ModelLocation::GPU, one, ChunkState::COPIED_GPU, device_id);
+      if (!st.ok()) {
+        // Best-effort unlock on failure to avoid holding LOCKED_TX
+        (void)dvmp->unlock_chunks(model_id, one, /*copied_gpu=*/true);
+        return st;
+      }
     }
-
-    // Synchronize to ensure chunk can be reused safely
-    auto sync_status = stepcast::cuda::stream_synchronize(stream);
-    if (!sync_status.ok()) {
-      ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
-      return sync_status;
-    }
-
-    // Return chunk to buffer
-    ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
-
-    offset += current_chunk_size;
   }
 
   return absl::OkStatus();

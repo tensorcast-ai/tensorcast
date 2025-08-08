@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "absl/status/statusor.h"
+#include "core/store/direct_write.h"
 
 namespace stepcast::store::loader {
 
@@ -19,6 +20,20 @@ class Source {
 class SeekableSource : public Source {
  public:
   virtual absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) = 0;
+
+  // Optional zero-copy capability: direct write into destination address space.
+  // Default implementations disable the feature.
+  [[nodiscard]] virtual bool supports_direct_write() const {
+    return false;
+  }
+  virtual absl::StatusOr<size_t> read_into(
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const stepcast::store::DirectWriteToken& /*token*/) {
+    (void)dest_va_offset;
+    (void)bytes;
+    return absl::UnimplementedError("direct write not supported");
+  }
 };
 
 } // namespace stepcast::store::loader

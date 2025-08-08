@@ -3,7 +3,6 @@
 #pragma once
 
 #include <utility>
-#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
@@ -13,13 +12,16 @@
 
 namespace stepcast::store::loader {
 
+// Convenience alias for byte ranges used by pump_ranges
+using Range = std::pair<uint64_t, size_t>;
+
 absl::Status pump(Source& src, Sink& dst, BufferPool& pool, int concurrency = 2);
 
 absl::Status pump_ranges(
     SeekableSource& src,
     PositionedSink& dst,
     BufferPool& pool,
-    absl::Span<const std::pair<uint64_t, size_t>> ranges,
+    absl::Span<const Range> ranges,
     int concurrency = 2);
 
 } // namespace stepcast::store::loader
