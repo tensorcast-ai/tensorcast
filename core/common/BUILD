@@ -76,10 +76,12 @@ cc_library(
     srcs = ["memory/distributed_memory_pool.cc"],
     hdrs = ["memory/distributed_memory_pool.h"],
     deps = [
+        "//core/common",
         "//core/store/model:chunk_meta",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
     ],
 )

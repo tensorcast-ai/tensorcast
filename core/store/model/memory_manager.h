@@ -272,6 +272,17 @@ class MemoryManager {
   absl::Status disable_remote_memory_access(ModelLocation location, communicator::CommunicateEngine& comm_engine)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // Chunk-scoped export APIs using DVMP pin leases
+  absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
+      ModelLocation location,
+      absl::Span<const uint32_t> chunks,
+      communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  absl::Status unexport_chunks_for_p2p(
+      ModelLocation location,
+      absl::Span<const uint32_t> chunks,
+      communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+
   // --- New DVMP accessors ---------------------------------------------------
   /**
    * @brief Exposes the underlying DistributedMemoryPool instance used by this
@@ -404,6 +415,8 @@ class MemoryManager {
   bool gpu_comm_registered_ ABSL_GUARDED_BY(mutex_) = false;
   CommRegistrationInfo pageable_cpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
   CommRegistrationInfo gpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
+  // Active DVMP pin leases for exported CPU chunks
+  std::vector<memory::DistributedMemoryPool::PinLease> cpu_pin_leases_ ABSL_GUARDED_BY(mutex_);
 
   // Streaming pinned buffer (optional, allocated only when streaming transfer is enabled)
   std::shared_ptr<StreamingPinnedBuffer> streaming_buffer_ ABSL_GUARDED_BY(mutex_) = nullptr;

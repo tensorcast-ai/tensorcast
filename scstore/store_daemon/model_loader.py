@@ -225,6 +225,7 @@ class ModelLoader:
         # needs the `_load_with_fallback` wrapper now that all source-selection
         # logic has moved into C++.
 
+        mem_handle: MemoryHandle | None
         try:
             device_id = resolve_device_id(request.device_uuid)
             target_device_spec = f"gpu:{device_id}"

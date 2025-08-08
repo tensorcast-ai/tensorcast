@@ -17,6 +17,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/common/metrics/metric_objects.h"
 #include "core/communicator/engine/engine.h"
 
 #define model_identifier_ instance_key_.model_id
@@ -167,10 +168,9 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
   // Only GPU allocations require a valid CUDA stream.  PAGEABLE_CPU allocations rely solely on
   // pinned host memory and therefore do not depend on CUDA stream initialisation.
   if (location == ModelLocation::GPU && !stream_initialized_) {
-    return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "MemoryManager(%s): CUDA stream not initialised. Provide a valid device id during MemoryManager construction before GPU allocation.",
-            model_identifier_));
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "MemoryManager(%s): CUDA stream not initialised. Provide a valid device id during MemoryManager construction before GPU allocation.",
+        model_identifier_));
   }
 
   MemoryState* state_ptr = nullptr;
@@ -185,11 +185,10 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         return absl::OkStatus();
       }
       if (*state_ptr != MemoryState::UNALLOCATED) {
-        return absl::FailedPreconditionError(
-            absl::StrFormat(
-                "MemoryManager(%s): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found %s.",
-                model_identifier_,
-                state_to_string(*state_ptr)));
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "MemoryManager(%s): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found %s.",
+            model_identifier_,
+            state_to_string(*state_ptr)));
       }
 
       auto region_or = dvmp_->allocate(model_identifier_, model_size_);
@@ -238,11 +237,10 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
         return absl::OkStatus(); // Already allocated
       }
       if (*state_ptr != MemoryState::UNALLOCATED) {
-        return absl::FailedPreconditionError(
-            absl::StrFormat(
-                "MemoryManager(%s): Cannot allocate GPU memory. Expected UNALLOCATED state, but found %s.",
-                model_identifier_,
-                state_to_string(*state_ptr)));
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "MemoryManager(%s): Cannot allocate GPU memory. Expected UNALLOCATED state, but found %s.",
+            model_identifier_,
+            state_to_string(*state_ptr)));
       }
 
       cuda_mem_ = std::make_shared<CudaMemory>();
@@ -258,12 +256,11 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
                    << "): Direct cudaMalloc failed: " << alloc_status.message();
         cuda_mem_.reset();
         ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
-        return absl::ResourceExhaustedError(
-            absl::StrFormat(
-                "MemoryManager(%s): Failed direct cudaMalloc on device %d: %s",
-                model_identifier_,
-                local_device_id_,
-                alloc_status.message()));
+        return absl::ResourceExhaustedError(absl::StrFormat(
+            "MemoryManager(%s): Failed direct cudaMalloc on device %d: %s",
+            model_identifier_,
+            local_device_id_,
+            alloc_status.message()));
       }
 
       VLOG(1) << "MemoryManager(" << model_identifier_ << "): Direct cudaMalloc successful (ptr=" << cuda_mem_->get()
@@ -345,11 +342,8 @@ absl::Status MemoryManager::release_memory(ModelLocation location, bool safe_rel
     if (safe_release) {
       LOG(WARNING) << "MemoryManager(" << model_identifier_ << "): Safe release requested for " << loc_str
                    << " while LOADING. Release denied.";
-      return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): Cannot safely release %s memory while in LOADING state.",
-              model_identifier_,
-              loc_str));
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "MemoryManager(%s): Cannot safely release %s memory while in LOADING state.", model_identifier_, loc_str));
     }
 
     VLOG(1) << "MemoryManager(" << model_identifier_ << "): Unsafe release requested for " << loc_str
@@ -796,102 +790,118 @@ absl::Status MemoryManager::wait_for_state(ModelLocation location, MemoryState t
 absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
     ModelLocation location,
     stepcast::communicator::CommunicateEngine& comm_engine) {
-  absl::MutexLock lock(&mutex_);
-
-  // Check if already registered for the specific location
+  // Pointers to cached flags/infos (set under lock); used again when we cache results.
   bool* registered_ptr = nullptr;
   CommRegistrationInfo* cached_info_ptr = nullptr;
+  uint64_t model_size_snapshot = 0;
+  {
+    absl::MutexLock lock(&mutex_);
+    // Check if already registered for the specific location
+    if (location == ModelLocation::PAGEABLE_CPU) {
+      registered_ptr = &pageable_cpu_comm_registered_;
+      cached_info_ptr = &pageable_cpu_comm_registration_info_;
+    } else if (location == ModelLocation::GPU) {
+      registered_ptr = &gpu_comm_registered_;
+      cached_info_ptr = &gpu_comm_registration_info_;
+    } else {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "MemoryManager(%s): Invalid location specified for Comm registration: %d",
+          model_identifier_,
+          static_cast<int>(location)));
+    }
 
-  if (location == ModelLocation::PAGEABLE_CPU) {
-    registered_ptr = &pageable_cpu_comm_registered_;
-    cached_info_ptr = &pageable_cpu_comm_registration_info_;
-  } else if (location == ModelLocation::GPU) {
-    registered_ptr = &gpu_comm_registered_;
-    cached_info_ptr = &gpu_comm_registration_info_;
-  } else {
-    return absl::InvalidArgumentError(
-        absl::StrFormat(
-            "MemoryManager(%s): Invalid location specified for Comm registration: %d",
-            model_identifier_,
-            static_cast<int>(location)));
-  }
+    if (*registered_ptr) {
+      LOG(INFO) << "MemoryManager(" << model_identifier_ << "): Memory for " << location_to_string(location)
+                << " already registered for communication. Returning cached registration info.";
+      return *cached_info_ptr;
+    }
 
-  if (*registered_ptr) {
-    LOG(INFO) << "MemoryManager(" << model_identifier_ << "): Memory for " << location_to_string(location)
-              << " already registered for communication. Returning cached registration info.";
-    return *cached_info_ptr;
-  }
-
-  if (model_size_ == 0) {
-    return absl::FailedPreconditionError(
-        absl::StrFormat("MemoryManager(%s): Model size is 0, cannot register memory.", model_identifier_));
+    if (model_size_ == 0) {
+      return absl::FailedPreconditionError(
+          absl::StrFormat("MemoryManager(%s): Model size is 0, cannot register memory.", model_identifier_));
+    }
+    model_size_snapshot = model_size_;
   }
 
   CommRegistrationInfo reg_info;
-  reg_info.model_size = model_size_;
+  reg_info.model_size = model_size_snapshot;
   reg_info.location = location;
 
   std::string location_str;
   reg_info.comm_dev_type = stepcast::communicator::COMMUNICATE_ENGINE_DEV_CPU;
 
   if (location == ModelLocation::PAGEABLE_CPU) {
+    // New default: chunk-scoped export using DVMP pin leases.
     location_str = "PAGEABLE_CPU";
     reg_info.device_id = 1; // Explicitly 1 for CPU
 
-    if (pageable_cpu_state_ != MemoryState::LOADED) {
-      return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): PAGEABLE_CPU memory must be in LOADED state for Comm registration (current: %s).",
-              model_identifier_,
-              state_to_string(pageable_cpu_state_)));
+    // Snapshot necessary state under lock to satisfy thread-safety analysis.
+    bool cpu_loaded = false;
+    void* dvmp_base_copy = nullptr;
+    std::string model_id_copy;
+    size_t chunk_count = 0;
+    {
+      absl::MutexLock lock(&mutex_);
+      cpu_loaded = (pageable_cpu_state_ == MemoryState::LOADED);
+      dvmp_base_copy = dvmp_cpu_base_;
+      model_id_copy = model_identifier_;
+      // Compute count from model size to avoid calling into DVMP while holding our mutex.
+      chunk_count =
+          (model_size_snapshot + memory::DistributedMemoryPool::kChunk - 1) / memory::DistributedMemoryPool::kChunk;
     }
-    if (dvmp_cpu_base_ == nullptr) {
+
+    if (!cpu_loaded) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "MemoryManager(%s): PAGEABLE_CPU memory must be in LOADED state for Comm registration.", model_id_copy));
+    }
+    if (dvmp_base_copy == nullptr) {
       return absl::FailedPreconditionError("DVMP CPU base address is null; cannot register PAGEABLE_CPU memory.");
     }
 
-    LOG(INFO) << "MemoryManager(" << model_identifier_
-              << "): Registering contiguous DVMP CPU region for Comm (size=" << model_size_ << ")";
-
-    uint64_t base_addr = reinterpret_cast<uint64_t>(dvmp_cpu_base_);
-    reg_info.buffer_addresses.push_back(base_addr);
-    reg_info.buffer_sizes.push_back(model_size_);
-    auto tensor_name_for_comm = absl::StrFormat("%s_%s_region", model_identifier_, location_str);
-    reg_info.remote_memory_keys.push_back(tensor_name_for_comm);
-
-    auto ret = comm_engine.register_tensor(
-        tensor_name_for_comm, base_addr, model_size_, reg_info.comm_dev_type, reg_info.device_id);
-
-    if (!ret.ok()) {
-      LOG(ERROR) << "MemoryManager(" << model_identifier_ << "): Failed to register DVMP CPU region. Status: " << ret;
-      return absl::InternalError("Failed to register DVMP CPU memory via CommunicateEngine");
+    // Build full chunk index list [0..N-1] and export via chunk API.
+    if (chunk_count == 0) {
+      return absl::FailedPreconditionError("No DVMP chunks available for CPU export");
     }
+    std::vector<uint32_t> all_chunks;
+    all_chunks.reserve(chunk_count);
+    for (uint32_t i = 0; i < chunk_count; ++i)
+      all_chunks.push_back(i);
 
-    // Finished registration
+    // Use chunk-scoped export; this acquires pin leases and registers keys per coalesced range.
+    // Cache the returned info below to enable proper unregistration.
+    auto info_or = export_chunks_for_p2p(ModelLocation::PAGEABLE_CPU, all_chunks, comm_engine);
+    if (!info_or.ok()) {
+      return info_or.status();
+    }
+    reg_info = *info_or;
   } else if (location == ModelLocation::GPU) {
     location_str = "GPU";
-    reg_info.device_id = local_device_id_; // Use actual device ID for GPU
-    reg_info.comm_dev_type = stepcast::communicator::COMMUNICATE_ENGINE_DEV_GPU;
+    uint32_t device_id_copy = 0;
+    void* ptr_to_register = nullptr;
+    size_t size_to_register = model_size_snapshot;
+    {
+      absl::MutexLock lock(&mutex_);
+      reg_info.device_id = local_device_id_; // Use actual device ID for GPU
+      reg_info.comm_dev_type = stepcast::communicator::COMMUNICATE_ENGINE_DEV_GPU;
 
-    // GPU must be ready (LOADED) to be registered
-    if (gpu_state_ != MemoryState::LOADED) {
-      return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): GPU memory must be in LOADED state for Comm registration (current: %s).",
-              model_identifier_,
-              state_to_string(gpu_state_)));
+      // GPU must be ready (LOADED) to be registered
+      if (gpu_state_ != MemoryState::LOADED) {
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "MemoryManager(%s): GPU memory must be in LOADED state for Comm registration (current: %s).",
+            model_identifier_,
+            state_to_string(gpu_state_)));
+      }
+      if (!cuda_mem_ || cuda_mem_->get() == nullptr) {
+        return absl::InternalError(absl::StrFormat(
+            "MemoryManager(%s): Invalid GPU memory object (null=%d) or size (%d) for Comm registration.",
+            model_identifier_,
+            cuda_mem_ == nullptr || cuda_mem_->get() == nullptr,
+            model_size_));
+      }
+      ptr_to_register = cuda_mem_->get();
+      device_id_copy = reg_info.device_id;
     }
-    if (!cuda_mem_ || cuda_mem_->get() == nullptr) {
-      return absl::InternalError(
-          absl::StrFormat(
-              "MemoryManager(%s): Invalid GPU memory object (null=%d) or size (%d) for Comm registration.",
-              model_identifier_,
-              cuda_mem_ == nullptr || cuda_mem_->get() == nullptr,
-              model_size_));
-    }
-
-    void* ptr_to_register = cuda_mem_->get();
     auto addr_to_register = reinterpret_cast<uint64_t>(ptr_to_register);
-    size_t size_to_register = model_size_;
 
     // Construct a unique key for the single GPU buffer registration
     // Using "chunk0" suffix for consistency, even though it's one block.
@@ -902,7 +912,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
             << "): Registering GPU memory (1 chunk) for Comm via CommunicateEngine. Name: '" << tensor_name_for_comm
             << "', Addr: " << ptr_to_register << " (" << addr_to_register << ")"
             << ", Size: " << size_to_register << ", DevType: " << reg_info.comm_dev_type
-            << ", DevId: " << reg_info.device_id;
+            << ", DevId: " << device_id_copy;
 
     // Call the communicator engine's registration function
     auto ret = comm_engine.register_tensor(
@@ -922,8 +932,11 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::enable_remote_memory_access(
   }
 
   // Cache the registration result for the specific location
-  *registered_ptr = true;
-  *cached_info_ptr = reg_info;
+  {
+    absl::MutexLock lock(&mutex_);
+    *registered_ptr = true;
+    *cached_info_ptr = reg_info;
+  }
 
   return reg_info; // Return the populated struct
 }
@@ -1178,11 +1191,10 @@ absl::Status MemoryManager::disable_remote_memory_access(
     registered_ptr = &gpu_comm_registered_;
     info_ptr = &gpu_comm_registration_info_;
   } else {
-    return absl::InvalidArgumentError(
-        absl::StrFormat(
-            "MemoryManager(%s): Invalid location specified for Comm unregistration: %d",
-            model_identifier_,
-            static_cast<int>(location)));
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "MemoryManager(%s): Invalid location specified for Comm unregistration: %d",
+        model_identifier_,
+        static_cast<int>(location)));
   }
 
   if (!*registered_ptr) {
@@ -1221,6 +1233,139 @@ absl::Status MemoryManager::disable_remote_memory_access(
 
   LOG(INFO) << "MemoryManager(" << model_identifier_ << "): Successfully unregistered memory at "
             << location_to_string(location) << " for communication.";
+  return absl::OkStatus();
+}
+
+// --- Chunk-scoped export / unexport for P2P access -------------------------
+
+namespace {
+// Coalesce sorted chunk indices into contiguous [start,end] inclusive ranges
+static std::vector<std::pair<uint32_t, uint32_t>> coalesce_ranges(std::vector<uint32_t> chunks) {
+  std::vector<std::pair<uint32_t, uint32_t>> out;
+  if (chunks.empty())
+    return out;
+  std::sort(chunks.begin(), chunks.end());
+  uint32_t start = chunks.front();
+  uint32_t prev = start;
+  for (size_t i = 1; i < chunks.size(); ++i) {
+    if (chunks[i] == prev + 1) {
+      prev = chunks[i];
+      continue;
+    }
+    out.emplace_back(start, prev);
+    start = prev = chunks[i];
+  }
+  out.emplace_back(start, prev);
+  return out;
+}
+} // namespace
+
+absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
+    ModelLocation location,
+    absl::Span<const uint32_t> chunks,
+    communicator::CommunicateEngine& comm_engine) {
+  // For now, implement CPU path; GPU remains whole-region.
+  if (location != ModelLocation::PAGEABLE_CPU) {
+    return absl::UnimplementedError("export_chunks_for_p2p currently supports PAGEABLE_CPU only");
+  }
+  if (chunks.empty()) {
+    return absl::InvalidArgumentError("No chunks specified for export");
+  }
+
+  std::shared_ptr<memory::DistributedMemoryPool> dvmp_capture;
+  void* base_capture = nullptr;
+  std::string model_id;
+  uint64_t model_bytes = 0;
+  {
+    absl::MutexLock lock(&mutex_);
+    if (pageable_cpu_state_ != MemoryState::LOADED) {
+      return absl::FailedPreconditionError("CPU memory must be LOADED to export chunks");
+    }
+    dvmp_capture = dvmp_;
+    base_capture = dvmp_cpu_base_;
+    model_id = model_identifier_;
+    model_bytes = model_size_;
+  }
+  if (!dvmp_capture || base_capture == nullptr) {
+    return absl::FailedPreconditionError("DVMP not available or base not set");
+  }
+
+  // Build contiguous ranges and register each as a tensor key with a pin lease
+  CommRegistrationInfo info;
+  info.model_size = model_bytes;
+  info.location = location;
+  info.device_id = 1;
+  info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_CPU;
+
+  std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
+  auto ranges = coalesce_ranges(std::move(chunk_vec));
+
+  constexpr uint64_t kChunk = memory::DistributedMemoryPool::kChunk;
+  size_t range_idx = 0;
+  for (const auto& [start, end] : ranges) {
+    uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
+    uint64_t va_end = std::min<uint64_t>(model_bytes, (static_cast<uint64_t>(end) + 1) * kChunk);
+    uint64_t length = (va_end > va_off) ? (va_end - va_off) : 0;
+    if (length == 0)
+      continue;
+
+    auto lease_or = dvmp_capture->pin_range(model_id, va_off, length, "ExternalShare");
+    if (!lease_or.ok()) {
+      return lease_or.status();
+    }
+    {
+      absl::MutexLock lock(&mutex_);
+      cpu_pin_leases_.emplace_back(std::move(*lease_or));
+    }
+
+    auto addr = reinterpret_cast<uint64_t>(static_cast<char*>(base_capture) + va_off);
+    auto key = absl::StrFormat("%s_CPU_chunk_%zu", model_id, range_idx++);
+    auto ret = comm_engine.register_tensor(key, addr, length, info.comm_dev_type, info.device_id);
+    if (!ret.ok()) {
+      return absl::InternalError("Failed to register chunk-range tensor");
+    }
+    info.buffer_addresses.push_back(addr);
+    info.buffer_sizes.push_back(static_cast<size_t>(length));
+    info.remote_memory_keys.push_back(std::move(key));
+  }
+
+  // Metrics: count exported chunks by location
+  try {
+    static const stepcast::metrics::Counter kChunkExports("chunk_exports_total");
+    const char* loc = (location == ModelLocation::GPU) ? "GPU" : "CPU";
+    kChunkExports.with_labels({{"location", loc}}).inc(static_cast<double>(chunks.size()));
+  } catch (...) {
+    // Best-effort metrics
+  }
+
+  return info;
+}
+
+absl::Status MemoryManager::unexport_chunks_for_p2p(
+    ModelLocation location,
+    absl::Span<const uint32_t> /*chunks*/,
+    communicator::CommunicateEngine& comm_engine) {
+  if (location != ModelLocation::PAGEABLE_CPU) {
+    return absl::UnimplementedError("unexport_chunks_for_p2p currently supports PAGEABLE_CPU only");
+  }
+  // Unregister keys and release pin leases
+  absl::Status first_error;
+  {
+    absl::MutexLock lock(&mutex_);
+    for (const auto& key : pageable_cpu_comm_registration_info_.remote_memory_keys) {
+      absl::Status st = comm_engine.unregister_tensor(key);
+      if (!st.ok() && first_error.ok()) {
+        first_error = st;
+      }
+    }
+    pageable_cpu_comm_registration_info_.buffer_addresses.clear();
+    pageable_cpu_comm_registration_info_.buffer_sizes.clear();
+    pageable_cpu_comm_registration_info_.remote_memory_keys.clear();
+    cpu_pin_leases_.clear();
+  }
+  if (!first_error.ok()) {
+    return first_error;
+  }
   return absl::OkStatus();
 }
 

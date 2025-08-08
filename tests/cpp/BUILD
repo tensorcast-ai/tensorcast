@@ -208,6 +208,19 @@ test_suite(
 )
 
 cc_test(
+    name = "loader_unit_tests",
+    srcs = [
+        "unit/mux_seekable_source_test.cc",
+    ],
+    deps = [
+        "//core/store/loader:mux_seekable_source",
+        "//core/store/loader:source",
+        "@abseil-cpp//absl/status:statusor",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "unified_model_memory_test",
     srcs = ["unified_model_memory_test.cc"],
     deps = [

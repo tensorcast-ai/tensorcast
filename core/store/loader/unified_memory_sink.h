@@ -12,7 +12,7 @@
 
 namespace stepcast::store::loader {
 
-class UnifiedMemorySink : public Sink {
+class UnifiedMemorySink : public Sink, public PositionedSink {
  public:
   struct Options {
     std::shared_ptr<Sink> inner_sink;
@@ -26,6 +26,9 @@ class UnifiedMemorySink : public Sink {
   ~UnifiedMemorySink() override = default;
 
   absl::Status write(const void* src, size_t bytes) override;
+
+  // Forward positioned writes when inner sink supports it
+  absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override;
 
   absl::Status close() override;
 

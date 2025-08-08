@@ -45,6 +45,7 @@ cc_library(
     testonly = 1,
     srcs = ["catch_main.cc"],
     deps = [
+        "//core/common",
         "@abseil-cpp//absl/debugging:failure_signal_handler",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log:initialize",
@@ -144,10 +145,10 @@ cc_test(
     linkstatic = 1,
     deps = [
         ":catch_main",
-        "//core/store/loader:pump",
-        "//core/store/loader:source",
-        "//core/store/loader:sink",
         "//core/store/loader:buffer_pool",
+        "//core/store/loader:pump",
+        "//core/store/loader:sink",
+        "//core/store/loader:source",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
@@ -183,10 +184,28 @@ cc_test(
     linkstatic = 1,
     deps = [
         ":catch_main",
-        "//core/store/loader:gpu_memory_sink",
-        "//core/common/cuda:cuda_api",
         "//core/common:device_guard",
+        "//core/common/cuda:cuda_api",
+        "//core/store/loader:gpu_memory_sink",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "test_mux_seekable_source",
+    srcs = ["mux_seekable_source_test.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/store/loader:mux_seekable_source",
+        "//core/store/loader:source",
+        "@abseil-cpp//absl/status:statusor",
         "@catch2//:catch2_main",
     ],
 )

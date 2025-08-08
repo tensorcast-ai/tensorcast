@@ -38,19 +38,6 @@ class P2PLoader : public IModelLoader {
    */
   explicit P2PLoader(P2PSource source);
 
-  /**
-   * @brief Pull a single chunk from remote to local PAGEABLE_CPU memory.
-   *
-   * This method is used for on-demand chunk fetching when a page fault
-   * occurs on an evicted chunk. It integrates with DVMP to directly
-   * transfer data into the pre-reserved virtual address space.
-   *
-   * @param mem_manager Memory manager for the model
-   * @param chunk_idx Index of the chunk to pull
-   * @return Status of the pull operation
-   */
-  absl::Status pull_chunk(const std::shared_ptr<MemoryManager>& mem_manager, uint32_t chunk_idx);
-
   ~P2PLoader() override = default;
 
   // Disable copy and move

@@ -3,38 +3,35 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 #include "absl/status/status.h"
-#include "core/common/cuda_api.h"
 #include "core/store/loader/sink.h"
+#include "core/store/model/memory_manager.h"
 
 namespace stepcast::store::loader {
 
-class GPUMemorySink : public Sink, public PositionedSink {
+// Writes directly into the DVMP-reserved CPU region at a given offset.
+// Uses DVMP::write_at to ensure chunk metadata is updated.
+class DVMPRegionSink : public Sink, public PositionedSink {
  public:
   struct Options {
-    void* gpu_base_ptr = nullptr;
+    std::shared_ptr<store::MemoryManager> memory_manager; // to access DVMP and model id
     uint64_t total_size = 0;
-    size_t chunk_size = 128 * 1024 * 1024; // 128MB default
-    int device_id = 0;
   };
 
-  explicit GPUMemorySink(Options options);
-  ~GPUMemorySink() override;
+  explicit DVMPRegionSink(Options options);
+  ~DVMPRegionSink() override = default;
 
   absl::Status write(const void* src, size_t bytes) override;
-
-  // Positioned write into GPU base + offset
   absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override;
-
-  absl::Status close() override;
+  absl::Status close() override {
+    return absl::OkStatus();
+  }
 
  private:
   Options options_;
-  cudaStream_t h2d_stream_ = nullptr;
   uint64_t current_offset_ = 0;
-  bool stream_created_ = false;
-  absl::Status overall_status_;
 };
 
 } // namespace stepcast::store::loader
