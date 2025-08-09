@@ -157,6 +157,29 @@ cc_test(
 )
 
 cc_test(
+    name = "test_pump_direct",
+    srcs = ["test_pump_direct.cc"],
+    linkopts = [
+        "-lm",
+        "-lstdc++",
+        "-g",
+    ],
+    linkstatic = 1,
+    deps = [
+        ":catch_main",
+        "//core/store:direct_write",
+        "//core/store/loader:buffer_pool",
+        "//core/store/loader:pump",
+        "//core/store/loader:sink",
+        "//core/store/loader:source",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "test_file_partition_source",
     srcs = ["test_file_partition_source.cc"],
     linkopts = [
@@ -184,8 +207,8 @@ cc_test(
     linkstatic = 1,
     deps = [
         ":catch_main",
+        "//core/common",
         "//core/common:device_guard",
-        "//core/common/cuda:cuda_api",
         "//core/store/loader:gpu_memory_sink",
         "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",

@@ -15,8 +15,6 @@ namespace stepcast::store::loader {
 // Convenience alias for byte ranges used by pump_ranges
 using Range = std::pair<uint64_t, size_t>;
 
-absl::Status pump(Source& src, Sink& dst, BufferPool& pool, int concurrency = 2);
-
 absl::Status pump_ranges(
     SeekableSource& src,
     PositionedSink& dst,

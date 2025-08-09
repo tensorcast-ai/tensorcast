@@ -17,7 +17,6 @@
 #include "core/store/loader/pump.h"
 #include "core/store/loader/remote_key_source.h"
 #include "core/store/loader/streaming_buffer_adapter.h"
-#include "core/store/loader/unified_memory_sink.h"
 #include "core/store/model/memory_manager.h"
 #include "core/store/model/memory_state.h"
 
@@ -174,26 +173,23 @@ std::future<absl::Status> P2PLoader::load_async(
           .device_id = 0};
       store::loader::GPUMemorySink gpu_sink(gpu_opts);
 
-      store::loader::UnifiedMemorySink::Options unified_opts{
-          .inner_sink = std::make_shared<store::loader::GPUMemorySink>(std::move(gpu_sink)),
-          .memory_manager = mem_manager,
-          .target_location = ModelLocation::GPU,
-          .device_id = 0,
-          .chunk_indices = std::nullopt};
-      store::loader::UnifiedMemorySink unified_sink(unified_opts);
-
-      // Run pump
+      // Run pump (positioned via single-range wrapper)
       CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADING));
+      std::vector<store::loader::Range> ranges;
+      ranges.emplace_back(0ULL, source_.size_bytes);
       if (mux_source) {
-        status = store::loader::pump(*mux_source, unified_sink, buffer_adapter, concurrency);
+        status = store::loader::pump_ranges(*mux_source, gpu_sink, buffer_adapter, ranges, concurrency);
       } else {
-        status = store::loader::pump(*remote_src_ptr, unified_sink, buffer_adapter, concurrency);
+        status = store::loader::pump_ranges(*remote_src_ptr, gpu_sink, buffer_adapter, ranges, concurrency);
       }
 
       if (!status.ok()) {
         CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::FAILED));
         return status;
       }
+
+      CHECK_OK(gpu_sink.close());
+      CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU));
 
       // Metrics: bytes loaded via P2P to GPU
       try {
@@ -214,16 +210,12 @@ std::future<absl::Status> P2PLoader::load_async(
         return absl::InternalError("CPU memory not allocated");
       }
 
-      store::loader::DVMPRegionSink::Options dvmp_opts{.memory_manager = mem_manager, .total_size = source_.size_bytes};
+      auto region_or = mem_manager->get_dvmp_region();
+      if (!region_or.ok()) {
+        return region_or.status();
+      }
+      store::loader::DVMPRegionSink::Options dvmp_opts{.region = *region_or, .total_size = source_.size_bytes};
       auto dvmp_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
-
-      store::loader::UnifiedMemorySink::Options unified_opts{
-          .inner_sink = dvmp_ptr,
-          .memory_manager = mem_manager,
-          .target_location = ModelLocation::PAGEABLE_CPU,
-          .device_id = std::nullopt,
-          .chunk_indices = std::nullopt};
-      store::loader::UnifiedMemorySink unified_sink(unified_opts);
 
       CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
 
@@ -240,16 +232,21 @@ std::future<absl::Status> P2PLoader::load_async(
       }
 
       store::loader::StreamingBufferAdapter buffer_adapter(spb);
+      std::vector<store::loader::Range> ranges;
+      ranges.emplace_back(0ULL, source_.size_bytes);
       if (mux_source) {
-        status = store::loader::pump(*mux_source, unified_sink, buffer_adapter, concurrency);
+        status = store::loader::pump_ranges(*mux_source, *dvmp_ptr, buffer_adapter, ranges, concurrency);
       } else {
-        status = store::loader::pump(*remote_src_ptr, unified_sink, buffer_adapter, concurrency);
+        status = store::loader::pump_ranges(*remote_src_ptr, *dvmp_ptr, buffer_adapter, ranges, concurrency);
       }
 
       if (!status.ok()) {
         CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
         return status;
       }
+
+      CHECK_OK(dvmp_ptr->close());
+      CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU));
 
       // Metrics: bytes loaded via P2P to CPU
       try {
@@ -353,20 +350,12 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
               .device_id = 0};
           auto gpu_sink_ptr = std::make_shared<store::loader::GPUMemorySink>(gpu_opts);
 
-          store::loader::UnifiedMemorySink::Options unified_opts{
-              .inner_sink = gpu_sink_ptr,
-              .memory_manager = mem_manager,
-              .target_location = ModelLocation::GPU,
-              .device_id = 0,
-              .chunk_indices = chunk_indices};
-          store::loader::UnifiedMemorySink unified_sink(unified_opts);
-
           if (mux_source2) {
             status =
-                store::loader::pump_ranges(*mux_source2, unified_sink, buffer_adapter, ranges, effective_concurrency);
+                store::loader::pump_ranges(*mux_source2, *gpu_sink_ptr, buffer_adapter, ranges, effective_concurrency);
           } else {
             status = store::loader::pump_ranges(
-                *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
+                *remote_src_ptr, *gpu_sink_ptr, buffer_adapter, ranges, effective_concurrency);
           }
           if (status.ok()) {
             uint64_t bytes_sum = 0;
@@ -378,6 +367,11 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             } catch (...) {
             }
           }
+          if (!status.ok()) {
+            return status;
+          }
+          CHECK_OK(gpu_sink_ptr->close());
+          CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU, absl::MakeSpan(chunk_indices)));
         } else if (target_location == ModelLocation::PAGEABLE_CPU) {
           // Prepare buffering
           status = mem_manager->ensure_streaming_buffer(1);
@@ -396,24 +390,19 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             return absl::InternalError("CPU memory not allocated");
           }
 
-          store::loader::DVMPRegionSink::Options dvmp_opts{
-              .memory_manager = mem_manager, .total_size = source_.size_bytes};
+          auto region_or = mem_manager->get_dvmp_region();
+          if (!region_or.ok()) {
+            return region_or.status();
+          }
+          store::loader::DVMPRegionSink::Options dvmp_opts{.region = *region_or, .total_size = source_.size_bytes};
           auto dvmp_sink_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
-
-          store::loader::UnifiedMemorySink::Options unified_opts{
-              .inner_sink = dvmp_sink_ptr,
-              .memory_manager = mem_manager,
-              .target_location = ModelLocation::PAGEABLE_CPU,
-              .device_id = std::nullopt,
-              .chunk_indices = chunk_indices};
-          store::loader::UnifiedMemorySink unified_sink(unified_opts);
 
           if (mux_source2) {
             status =
-                store::loader::pump_ranges(*mux_source2, unified_sink, buffer_adapter, ranges, effective_concurrency);
+                store::loader::pump_ranges(*mux_source2, *dvmp_sink_ptr, buffer_adapter, ranges, effective_concurrency);
           } else {
             status = store::loader::pump_ranges(
-                *remote_src_ptr, unified_sink, buffer_adapter, ranges, effective_concurrency);
+                *remote_src_ptr, *dvmp_sink_ptr, buffer_adapter, ranges, effective_concurrency);
           }
           if (status.ok()) {
             uint64_t bytes_sum = 0;
@@ -425,6 +414,11 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             } catch (...) {
             }
           }
+          if (!status.ok()) {
+            return status;
+          }
+          CHECK_OK(dvmp_sink_ptr->close());
+          CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU, absl::MakeSpan(chunk_indices)));
         } else {
           return absl::UnimplementedError("Unsupported target location");
         }
