@@ -85,3 +85,13 @@ cc_library(
         "@abseil-cpp//absl/types:span",
     ],
 )
+
+cc_library(
+    name = "device_guard",
+    hdrs = [
+        "device_guard.h",
+    ],
+    deps = [
+        "//core/common",
+    ],
+)

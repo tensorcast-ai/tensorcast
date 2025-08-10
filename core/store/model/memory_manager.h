@@ -132,13 +132,12 @@ class MemoryManager {
   MemoryState get_state(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Gets the raw memory pointer for the specified location.
-   * Returns nullptr if memory is not allocated or not in a LOADED state.
-   * For PAGEABLE_CPU, this might return the pointer to the first chunk, or require a different interface
-   * if chunk access is needed externally (e.g., `get_cpu_chunks()`). Consider carefully.
-   * For simplicity, we return a single pointer, assuming GPU primarily.
+   * @brief Gets raw pointer(s) for the specified location.
+   * - For GPU: returns one pointer when state is ALLOCATED, LOADING, or LOADED.
+   * - For PAGEABLE_CPU: returns the DVMP base pointer when state is ALLOCATED or LOADED.
+   * Returns an empty vector otherwise.
    * @param location PAGEABLE_CPU or GPU.
-   * @return std::vector<void*> Vector of pointers to the memory, or empty vector if not allocated.
+   * @return std::vector<void*> Vector with zero or one pointer.
    */
   std::vector<void*> get_pointer(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -151,8 +150,11 @@ class MemoryManager {
 
   /**
    * @brief Retrieves the CUDA IPC memory handle associated with the managed GPU
-   *        memory. The model must have its GPU memory in the LOADED state and
-   *        the underlying CudaMemory object must be initialised.
+   *        memory. The model must have its GPU memory buffer allocated and the
+   *        underlying CudaMemory object initialised.
+   *
+   * The IPC handle can be obtained once the GPU buffer is allocated (states
+   * ALLOCATED, LOADING, or LOADED).
    *
    * @return absl::StatusOr<cudaIpcMemHandle_t>  The CUDA IPC handle on success
    *         or an error status if the memory is not available.
@@ -350,6 +352,15 @@ class MemoryManager {
   // Plan a direct-write token for destination VA ranges (PAGEABLE_CPU).
   absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // Explicit finalize hook to update UMA states after a load into a location
+  // completes (replaces UnifiedMemorySink close-time updates).
+  absl::Status finalize_load(
+      ModelLocation location,
+      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Provide a per-model DVMP handle (region) for sinks and loaders.
+  absl::StatusOr<memory::DistributedMemoryPool::DvmpRegion> get_dvmp_region() const ABSL_LOCKS_EXCLUDED(mutex_);
+
  private:
   /**
    * @brief Helper to perform the asynchronous CPU -> GPU copy.
@@ -385,45 +396,78 @@ class MemoryManager {
    */
   absl::Status set_state_locked(ModelLocation location, MemoryState new_state) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  // Helper to retrieve state and condition variable pointers under lock
+  absl::Status get_state_and_cond_locked_(ModelLocation location, MemoryState** state_ptr, absl::CondVar** cond_ptr)
+      ABSL_SHARED_LOCKS_REQUIRED(mutex_);
+
   /**
    * @brief Internal helper: allocate streaming buffer pool (caller must hold mutex_)
    */
   absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  // --- Internal copy refactor helpers (no behavior change) ---------------
+  struct CopyLaunchParams {
+    std::shared_ptr<StreamingPinnedBuffer> streaming_buffer;
+    std::shared_ptr<::stepcast::memory::DistributedMemoryPool> dvmp;
+    void* dvmp_base = nullptr;
+    std::shared_ptr<CudaMemory> cuda_mem;
+    size_t total_size = 0;
+    cudaStream_t stream = nullptr;
+    uint32_t device_id = 0;
+    std::string model_id;
+  };
+
+  // Capture and validate all state needed for an async copy and set LOADING
+  // on destination under lock. Returns parameters for the copy task.
+  absl::Status capture_copy_context_(
+      ModelLocation source,
+      ModelLocation destination,
+      CopyLaunchParams* out,
+      bool* need_allocate_um) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Finalize destination MemoryState based on copy status under lock.
+  absl::Status finalize_copy_state_(ModelLocation destination, const absl::Status& copy_status)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // ----------------------------------------------------------------------
+  // Refactor: CPU/GPU pods to group related members under a single lock
+  // ----------------------------------------------------------------------
+  struct CpuPod {
+    MemoryState state = MemoryState::UNINITIALIZED;
+    std::shared_ptr<BatchVector> host_chunk_queue = nullptr;
+    absl::CondVar cond;
+    bool comm_registered = false;
+    CommRegistrationInfo comm_registration_info;
+    std::vector<memory::DistributedMemoryPool::PinLease> pin_leases;
+    // DVMP-backed VA info
+    void* dvmp_base = nullptr;
+    size_t dvmp_bytes = 0;
+    // Streaming buffer used for staged transfers
+    std::shared_ptr<StreamingPinnedBuffer> streaming_buffer = nullptr;
+  };
+
+  struct GpuPod {
+    MemoryState state = MemoryState::UNINITIALIZED;
+    absl::CondVar cond;
+    std::shared_ptr<CudaMemory> cuda_mem;
+    // Dedicated CUDA stream for memory copies
+    cudaStream_t stream = nullptr;
+    bool stream_initialized = false;
+    // Communication registration
+    bool comm_registered = false;
+    CommRegistrationInfo comm_registration_info;
+  };
+
   mutable absl::Mutex mutex_; // Protects all member variables below
+
+  // CPU / GPU pods (guarded by the same mutex for now; can be split later)
+  CpuPod cpu_ ABSL_GUARDED_BY(mutex_);
+  GpuPod gpu_ ABSL_GUARDED_BY(mutex_);
 
   uint64_t model_size_ = 0;
 
   // Memory Pools
   gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_pool_ ABSL_GUARDED_BY(mutex_);
-
-  // PAGEABLE_CPU Memory State
-  MemoryState pageable_cpu_state_ ABSL_GUARDED_BY(mutex_) = MemoryState::UNINITIALIZED;
-  std::shared_ptr<BatchVector> host_chunk_queue_ ABSL_GUARDED_BY(mutex_) =
-      nullptr; // Tracks loaded chunks for PAGEABLE_CPU
-
-  // GPU Memory State
-  MemoryState gpu_state_ ABSL_GUARDED_BY(mutex_) = MemoryState::UNINITIALIZED;
-  std::shared_ptr<CudaMemory> cuda_mem_ ABSL_GUARDED_BY(mutex_);
-
-  // Condition variables for waiting on state changes
-  absl::CondVar pageable_cpu_cond_ ABSL_GUARDED_BY(mutex_);
-  absl::CondVar gpu_cond_ ABSL_GUARDED_BY(mutex_);
-
-  // Dedicated CUDA stream for memory copies managed by this instance
-  cudaStream_t copy_stream_ ABSL_GUARDED_BY(mutex_);
-  bool stream_initialized_ ABSL_GUARDED_BY(mutex_) = false;
-
-  // Communication registration state tracking - separate for PAGEABLE_CPU and GPU
-  bool pageable_cpu_comm_registered_ ABSL_GUARDED_BY(mutex_) = false;
-  bool gpu_comm_registered_ ABSL_GUARDED_BY(mutex_) = false;
-  CommRegistrationInfo pageable_cpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
-  CommRegistrationInfo gpu_comm_registration_info_ ABSL_GUARDED_BY(mutex_);
-  // Active DVMP pin leases for exported CPU chunks
-  std::vector<memory::DistributedMemoryPool::PinLease> cpu_pin_leases_ ABSL_GUARDED_BY(mutex_);
-
-  // Streaming pinned buffer (optional, allocated only when streaming transfer is enabled)
-  std::shared_ptr<StreamingPinnedBuffer> streaming_buffer_ ABSL_GUARDED_BY(mutex_) = nullptr;
 
   // Streaming buffer configuration
   const size_t max_buffer_bytes_; // 1 GB default
@@ -432,15 +476,20 @@ class MemoryManager {
   const std::chrono::milliseconds pinned_memory_timeout_;
 
   // Whether to fail transfer if DVMP chunk locking fails
-  const bool require_dvmp_lock_success_;
+  [[maybe_unused]] const bool require_dvmp_lock_success_;
 
   gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
-  // Base CPU virtual address reserved by DVMP for this model (PAGEABLE_CPU path).
-  void* dvmp_cpu_base_ ABSL_GUARDED_BY(mutex_) = nullptr;
-  size_t dvmp_cpu_bytes_ ABSL_GUARDED_BY(mutex_) = 0;
 
   // Unified memory management instance
   std::shared_ptr<UnifiedModelMemory> unified_memory_ ABSL_GUARDED_BY(mutex_);
+
+  // --- New: small internal helpers to reduce duplication -----------------
+  // Reserve/open DVMP region and cache base/size. Expects mutex_ held.
+  absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> reserve_dvmp_region_locked_()
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Ensure GPU stream is initialised (create if needed). Expects mutex_ held.
+  absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 };
 
 } // namespace stepcast::store

@@ -26,12 +26,17 @@ absl::Status UnifiedModelMemory::allocate(const InstanceKey& key, size_t bytes) 
 
   // Allocate DRAM via DVMP
   auto region_or = dvmp_->allocate(key.model_id, bytes);
-  if (!region_or.ok()) {
+  ModelAllocation alloc;
+  if (region_or.ok()) {
+    alloc.dram_region = *region_or;
+  } else if (region_or.status().code() == absl::StatusCode::kAlreadyExists) {
+    // Region already reserved elsewhere. Proceed to initialise UMA bookkeeping
+    // without duplicating the reservation. We may not know the base pointer.
+    alloc.dram_region = stepcast::memory::DistributedMemoryPool::VirtualRegion{
+        .cpu_base = nullptr, .gpu_base = nullptr, .bytes = bytes};
+  } else {
     return region_or.status();
   }
-
-  ModelAllocation alloc;
-  alloc.dram_region = *region_or;
   alloc.total_bytes = bytes;
   alloc.num_chunks =
       (bytes + stepcast::memory::DistributedMemoryPool::kChunk - 1) / stepcast::memory::DistributedMemoryPool::kChunk;

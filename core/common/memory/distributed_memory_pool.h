@@ -51,6 +51,10 @@ class DistributedMemoryPool {
   class DvmpRegion;
   virtual absl::StatusOr<DvmpRegion> open(std::string_view model_id);
 
+  // NEW: Query existing region information (base pointer and size) without modifying state.
+  // Returns NotFound if the model_id does not exist.
+  virtual absl::StatusOr<VirtualRegion> region_info(std::string_view model_id) const;
+
   // ===== Snapshot & State =====
   virtual absl::Span<const stepcast::store::ChunkMeta> chunk_snapshot(std::string_view model_id) const noexcept;
 

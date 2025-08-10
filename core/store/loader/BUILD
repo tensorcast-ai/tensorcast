@@ -20,6 +20,7 @@ cc_library(
         "source.h",
     ],
     deps = [
+        "//core/store:direct_write",
         "@abseil-cpp//absl/status:statusor",
     ],
 )
@@ -28,7 +29,10 @@ cc_library(
     name = "sink",
     hdrs = ["sink.h"],
     deps = [
+        "//core/store:direct_write",
         "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -48,10 +52,10 @@ cc_library(
     hdrs = ["pump.h"],
     deps = [
         ":buffer_pool",
-        ":dvmp_region_sink",
         ":sink",
         ":source",
         ":streaming_buffer_adapter",
+        "//core/store:direct_write",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",
@@ -122,19 +126,6 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "unified_memory_sink",
-    srcs = ["unified_memory_sink.cc"],
-    hdrs = ["unified_memory_sink.h"],
-    deps = [
-        ":sink",
-        "//core/store/model:chunk_meta",
-        "//core/store/model:memory_manager",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
-    ],
-)
-
 # Buffer pool adapter
 cc_library(
     name = "streaming_buffer_adapter",
@@ -159,7 +150,6 @@ cc_library(
         ":loader",
         ":pump",
         ":streaming_buffer_adapter",
-        ":unified_memory_sink",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/store:loading_spec",
@@ -186,7 +176,6 @@ cc_library(
         ":pump",
         ":remote_key_source",
         ":streaming_buffer_adapter",
-        ":unified_memory_sink",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",

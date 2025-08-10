@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "absl/status/status.h"
+#include "core/common/memory/distributed_memory_pool.h"
 #include "core/store/loader/sink.h"
 #include "core/store/model/memory_manager.h"
 
@@ -13,10 +14,13 @@ namespace stepcast::store::loader {
 
 // Writes directly into the DVMP-reserved CPU region at a given offset.
 // Uses DVMP::write_at to ensure chunk metadata is updated.
-class DVMPRegionSink : public Sink, public PositionedSink {
+class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritableSink {
  public:
   struct Options {
-    std::shared_ptr<store::MemoryManager> memory_manager; // to access DVMP and model id
+    // Per‑model DVMP region handle (preferred for writes)
+    memory::DistributedMemoryPool::DvmpRegion region;
+    // Optional: memory manager for capability planning (direct writes)
+    std::shared_ptr<store::MemoryManager> memory_manager;
     uint64_t total_size = 0;
   };
 
@@ -29,9 +33,13 @@ class DVMPRegionSink : public Sink, public PositionedSink {
     return absl::OkStatus();
   }
 
-  // Expose MemoryManager for direct-write coordination when needed.
-  std::shared_ptr<store::MemoryManager> get_memory_manager() const {
-    return options_.memory_manager;
+  // Capability: plan direct writes for provided ranges via MemoryManager
+  absl::StatusOr<stepcast::store::DirectWriteToken> plan_direct_write(
+      absl::Span<const stepcast::store::VaRange> ranges) override {
+    if (!options_.memory_manager) {
+      return absl::FailedPreconditionError("DVMPRegionSink: memory_manager is null for plan_direct_write");
+    }
+    return options_.memory_manager->plan_direct_write(ranges);
   }
   uint64_t total_size() const {
     return options_.total_size;

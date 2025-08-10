@@ -5,6 +5,9 @@
 #include <cstddef>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "core/store/direct_write.h"
 
 namespace stepcast::store::loader {
 
@@ -32,6 +35,18 @@ class PositionedSink {
   virtual absl::Status close() {
     return absl::OkStatus();
   }
+};
+
+// Optional capability: destination can plan direct writes into its VA ranges.
+class DirectWritableSink {
+ public:
+  virtual ~DirectWritableSink() = default;
+
+  // Plan a direct write token for the given destination VA ranges.
+  // The returned token authorizes writing into these ranges and carries
+  // any required keepalive resources (e.g., DVMP pin leases).
+  virtual absl::StatusOr<stepcast::store::DirectWriteToken> plan_direct_write(
+      absl::Span<const stepcast::store::VaRange> ranges) = 0;
 };
 
 } // namespace stepcast::store::loader

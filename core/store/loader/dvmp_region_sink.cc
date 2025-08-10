@@ -10,8 +10,8 @@
 namespace stepcast::store::loader {
 
 DVMPRegionSink::DVMPRegionSink(Options options) : options_(std::move(options)) {
-  if (!options_.memory_manager) {
-    LOG(ERROR) << "DVMPRegionSink: memory_manager is null";
+  if (options_.total_size == 0) {
+    LOG(WARNING) << "DVMPRegionSink: total_size is 0";
   }
 }
 
@@ -24,20 +24,11 @@ absl::Status DVMPRegionSink::write(const void* src, size_t bytes) {
 }
 
 absl::Status DVMPRegionSink::write_at(uint64_t offset, const void* src, size_t bytes) {
-  if (!options_.memory_manager) {
-    return absl::InvalidArgumentError("DVMPRegionSink: memory_manager is null");
-  }
-
-  auto* dvmp = options_.memory_manager->get_dvmp();
-  if (dvmp == nullptr) {
-    return absl::FailedPreconditionError("DVMPRegionSink: DVMP not available");
-  }
-
   if (offset + bytes > options_.total_size) {
     return absl::InvalidArgumentError("DVMPRegionSink: write would exceed total size");
   }
 
-  return dvmp->write_at(options_.memory_manager->get_model_id(), offset, src, bytes);
+  return options_.region.write_at(offset, src, bytes);
 }
 
 } // namespace stepcast::store::loader

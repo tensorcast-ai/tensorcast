@@ -2,6 +2,13 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# Header-only token and VA range types for direct-write capability
+cc_library(
+    name = "direct_write",
+    hdrs = ["direct_write.h"],
+    deps = [],
+)
+
 # Type header libraries
 cc_library(
     name = "communication_types",

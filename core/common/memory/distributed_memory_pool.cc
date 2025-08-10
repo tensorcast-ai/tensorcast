@@ -429,6 +429,17 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
   return absl::OkStatus();
 }
 
+absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::region_info(
+    std::string_view model_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = models_.find(std::string(model_id));
+  if (it == models_.end() || !it->second) {
+    return absl::NotFoundError("Model not found in DVMP");
+  }
+  const auto& info_sp = it->second;
+  return VirtualRegion{info_sp->base, nullptr, info_sp->bytes};
+}
+
 // PinLease impl --------------------------------------------------------------
 DistributedMemoryPool::PinLease::~PinLease() {
   if (!impl_)

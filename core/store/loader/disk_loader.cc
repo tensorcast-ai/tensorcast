@@ -21,7 +21,6 @@
 #include "core/store/loader/gpu_memory_sink.h"
 #include "core/store/loader/pump.h"
 #include "core/store/loader/streaming_buffer_adapter.h"
-#include "core/store/loader/unified_memory_sink.h"
 #include "core/store/model/memory_manager.h"
 #include "core/store/model/memory_state.h"
 
@@ -227,20 +226,20 @@ std::future<absl::Status> DiskLoader::load_async(
           .chunk_size = mem_manager->get_pool_chunk_size(),
           .device_id = mem_manager->get_local_device_id()});
 
-      loader::UnifiedMemorySink unified_sink(
-          {.inner_sink = gpu_sink,
-           .memory_manager = mem_manager,
-           .target_location = ModelLocation::GPU,
-           .device_id = mem_manager->get_local_device_id()});
-
-      // Run pump
+      // Run pump (positioned via single-range wrapper)
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADING));
-      status = loader::pump(source, unified_sink, buffer_adapter, concurrency);
+      std::vector<loader::Range> ranges;
+      ranges.emplace_back(0ULL, model_size_);
+      status = loader::pump_ranges(source, *gpu_sink, buffer_adapter, ranges, concurrency);
 
       if (!status.ok()) {
         ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::FAILED));
         return status;
       }
+
+      // Close sink and finalize UMA for GPU
+      ABSL_CHECK_OK(gpu_sink->close());
+      ABSL_CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU));
 
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADED));
       return absl::OkStatus();
@@ -253,15 +252,17 @@ std::future<absl::Status> DiskLoader::load_async(
         return absl::InternalError("CPU memory not allocated");
       }
 
-      auto dvmp_sink = std::make_shared<loader::DVMPRegionSink>(
-          loader::DVMPRegionSink::Options{.memory_manager = mem_manager, .total_size = model_size_});
-
-      loader::UnifiedMemorySink unified_sink(
-          {.inner_sink = dvmp_sink, .memory_manager = mem_manager, .target_location = ModelLocation::PAGEABLE_CPU});
+      // Construct sink with per-model DVMP region handle
+      auto region_or = mem_manager->get_dvmp_region();
+      if (!region_or.ok()) {
+        return region_or.status();
+      }
+      auto dvmp_sink = std::make_shared<loader::DVMPRegionSink>(loader::DVMPRegionSink::Options{
+          .region = *region_or, .memory_manager = mem_manager, .total_size = model_size_});
 
       ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
 
-      // Use streaming pump for CPU path
+      // Use streaming pump (positioned) for CPU path
       size_t num_chunks = 4; // Smaller buffer for CPU
       auto status = mem_manager->ensure_streaming_buffer(num_chunks);
       if (!status.ok()) {
@@ -274,12 +275,18 @@ std::future<absl::Status> DiskLoader::load_async(
       }
 
       loader::StreamingBufferAdapter buffer_adapter(spb);
-      status = loader::pump(source, unified_sink, buffer_adapter, concurrency);
+      std::vector<loader::Range> ranges;
+      ranges.emplace_back(0ULL, model_size_);
+      status = loader::pump_ranges(source, *dvmp_sink, buffer_adapter, ranges, concurrency);
 
       if (!status.ok()) {
         ABSL_CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
         return status;
       }
+
+      // Close sink and finalize (CPU path is a no-op in finalize_load per RFC)
+      ABSL_CHECK_OK(dvmp_sink->close());
+      ABSL_CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU));
 
       // Metrics: count loaded bytes by source/location
       try {
@@ -373,15 +380,8 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
               .chunk_size = mem_manager->get_pool_chunk_size(),
               .device_id = mem_manager->get_local_device_id()});
 
-          loader::UnifiedMemorySink unified_sink(
-              {.inner_sink = gpu_sink_chunk,
-               .memory_manager = mem_manager,
-               .target_location = ModelLocation::GPU,
-               .device_id = mem_manager->get_local_device_id(),
-               .chunk_indices = chunk_indices});
-
           // Run pump_ranges
-          status = loader::pump_ranges(source, unified_sink, buffer_adapter, ranges, concurrency);
+          status = loader::pump_ranges(source, *gpu_sink_chunk, buffer_adapter, ranges, concurrency);
           if (status.ok()) {
             // Metrics: sum bytes loaded for the requested ranges
             uint64_t bytes_sum = 0;
@@ -393,20 +393,24 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
             } catch (...) {
             }
           }
+
+          if (!status.ok()) {
+            return status;
+          }
+          ABSL_CHECK_OK(gpu_sink_chunk->close());
+          ABSL_CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU, absl::MakeSpan(chunk_indices)));
         } else if (target_location == ModelLocation::PAGEABLE_CPU) {
           auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
           if (cpu_ptr.empty()) {
             return absl::InternalError("CPU memory not allocated");
           }
 
-          auto dvmp_sink_chunk = std::make_shared<loader::DVMPRegionSink>(
-              loader::DVMPRegionSink::Options{.memory_manager = mem_manager, .total_size = model_size_});
-
-          loader::UnifiedMemorySink unified_sink(
-              {.inner_sink = dvmp_sink_chunk,
-               .memory_manager = mem_manager,
-               .target_location = ModelLocation::PAGEABLE_CPU,
-               .chunk_indices = chunk_indices});
+          auto region_or = mem_manager->get_dvmp_region();
+          if (!region_or.ok()) {
+            return region_or.status();
+          }
+          auto dvmp_sink_chunk = std::make_shared<loader::DVMPRegionSink>(loader::DVMPRegionSink::Options{
+              .region = *region_or, .memory_manager = mem_manager, .total_size = model_size_});
 
           // Ensure buffer for pump
           status = mem_manager->ensure_streaming_buffer(2);
@@ -420,7 +424,7 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
           }
 
           loader::StreamingBufferAdapter buffer_adapter(spb);
-          status = loader::pump_ranges(source, unified_sink, buffer_adapter, ranges, concurrency);
+          status = loader::pump_ranges(source, *dvmp_sink_chunk, buffer_adapter, ranges, concurrency);
           if (status.ok()) {
             uint64_t bytes_sum = 0;
             for (const auto& r : ranges)
@@ -431,6 +435,12 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
             } catch (...) {
             }
           }
+
+          if (!status.ok()) {
+            return status;
+          }
+          ABSL_CHECK_OK(dvmp_sink_chunk->close());
+          ABSL_CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU, absl::MakeSpan(chunk_indices)));
         } else {
           return absl::UnimplementedError("Unsupported target location");
         }
