@@ -30,6 +30,12 @@
 #include "core/store/model/model_location.h"
 #include "core/store/model/model_memory_coordinator.h"
 
+// Forward declare loader types to avoid header dependency cycles
+namespace stepcast::store::loader {
+class SeekableSource;
+class PositionedSink;
+} // namespace stepcast::store::loader
+
 namespace stepcast::store {
 
 /**
@@ -108,7 +114,7 @@ class MemoryManager {
   /**
    * @brief Allocates memory at the specified location using the configured memory pools.
    * Transitions state from UNALLOCATED to ALLOCATED on success.
-   * @param location ModelLocation::PAGEABLE_CPU or ModelLocation::GPU.
+   * @param location ModelLocation::PAGEABLE_CPU or GPU.
    * @return absl::Status OkStatus on success, or an error status.
    */
   absl::Status allocate_memory(ModelLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -163,6 +169,16 @@ class MemoryManager {
    */
   std::future<absl::Status> copy_data_async(ModelLocation source, ModelLocation destination)
       ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
+   * @brief NEW: Orchestrate DISK/REMOTE → CPU/GPU using a provided source.
+   * Performs allocation, state transitions, buffer setup, pumping, and finalization.
+   */
+  std::future<absl::Status> load_async_from_source(
+      std::unique_ptr<loader::SeekableSource> source,
+      ModelLocation target_location,
+      int concurrency,
+      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits for the memory at the specified location to reach the LOADED state.
@@ -335,7 +351,7 @@ class MemoryManager {
   // completes (replaces UnifiedMemorySink close-time updates).
   absl::Status finalize_load(
       ModelLocation location,
-      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Provide a per-model DVMP handle (region) for sinks and loaders.
   absl::StatusOr<memory::DistributedVirtualMemoryPool::DvmpRegion> get_dvmp_region() const ABSL_LOCKS_EXCLUDED(mutex_);
@@ -466,6 +482,15 @@ class MemoryManager {
 
   // Ensure GPU stream is initialised (create if needed). Expects mutex_ held.
   absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Build a sink for the target location (CPU DVMPRegionSink or GPU GPUMemorySink)
+  absl::StatusOr<std::unique_ptr<loader::PositionedSink>> build_sink_(ModelLocation target_location)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Build byte ranges either for full model or specified chunks
+  std::vector<std::pair<uint64_t, size_t>> build_ranges_(
+      std::optional<absl::Span<const uint32_t>> chunk_indices,
+      size_t chunk_size) const;
 };
 
 } // namespace stepcast::store

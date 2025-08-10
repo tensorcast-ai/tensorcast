@@ -13,6 +13,7 @@
 
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/p2p_loader.h"
+#include "core/store/loader/source.h"
 #include "core/store/model/memory_manager.h"
 #include "tests/cpp/communicator/test_helpers.h"
 
@@ -80,7 +81,9 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     mem_manager->set_model_size(model_size);
 
     // Load asynchronously
-    auto load_future = loader->load_async(mem_manager, ModelLocation::GPU, 1);
+    auto src_or = loader->open_source();
+    REQUIRE(src_or.ok());
+    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), ModelLocation::GPU, 1);
     auto load_status = load_future.get();
     CAPTURE(load_status.message());
     REQUIRE(load_status.ok());
@@ -154,7 +157,9 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     // Allocate CPU memory before loading
     REQUIRE(mem_manager->allocate_memory(ModelLocation::PAGEABLE_CPU).ok());
 
-    auto load_future = loader->load_async(mem_manager, ModelLocation::PAGEABLE_CPU, 1);
+    auto src_or = loader->open_source();
+    REQUIRE(src_or.ok());
+    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), ModelLocation::PAGEABLE_CPU, 1);
     auto load_status = load_future.get();
     CAPTURE(load_status.message());
     // Remote GPU -> Local CPU is currently unsupported and should fail.

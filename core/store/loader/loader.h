@@ -4,15 +4,18 @@
 
 #include <future>
 #include <memory>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/store/model/model_location.h"
 
-namespace stepcast::store {
+// Forward declare SeekableSource in the loader namespace to avoid heavy includes here
+namespace stepcast::store::loader {
+class SeekableSource;
+}
 
-// Forward declaration
-class MemoryManager;
+namespace stepcast::store {
 
 /**
  * @brief Interface for loading model data from a source (Disk, P2P)
@@ -36,25 +39,10 @@ class IModelLoader {
   virtual absl::StatusOr<uint64_t> get_model_size() = 0;
 
   /**
-   * @brief Asynchronously loads data from the source into the target location
-   *        managed by the MemoryManager.
-   *
-   * The Loader assumes the destination memory has already been prepared
-   * (e.g., via allocate_memory) for the target_location
-   * and will transition the MemoryManager's state for that location
-   * within the MemoryManager from ALLOCATED to LOADING and then
-   * to LOADED (on success) or FAILED (on error).
-   *
-   * @param mem_manager Reference to the MemoryManager handling the target memory.
-   * @param target_location The destination for the data (ModelLocation::PAGEABLE_CPU or ModelLocation::GPU).
-   *                        Loaders might only support specific targets (e.g., DiskLoader to CPU, P2PLoader to GPU).
-   * @param concurrency Hint for the number of parallel tasks to use (e.g., threads for disk I/O).
-   * @return std::future<absl::Status> A future indicating the completion status of the load operation.
+   * @brief NEW: Provide a data source handle for this loader.
+   * Implementations may return a muxed source (e.g., primary + fallback).
    */
-  virtual std::future<absl::Status> load_async(
-      std::shared_ptr<MemoryManager> mem_manager,
-      ModelLocation target_location,
-      int concurrency) = 0;
+  virtual absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() = 0;
 
   // Disable copy and move semantics
   IModelLoader(const IModelLoader&) = delete;

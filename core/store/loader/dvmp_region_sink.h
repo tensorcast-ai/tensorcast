@@ -3,12 +3,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loader/sink.h"
-#include "core/store/model/memory_manager.h"
 
 namespace stepcast::store::loader {
 
@@ -19,8 +21,8 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
   struct Options {
     // Per‑model DVMP region handle (preferred for writes)
     memory::DistributedVirtualMemoryPool::DvmpRegion region;
-    // Optional: memory manager for capability planning (direct writes)
-    std::shared_ptr<MemoryManager> memory_manager;
+    // Replace MemoryManager dependency with an injected callback to avoid cycles
+    std::function<absl::StatusOr<DirectWriteToken>(absl::Span<const VaRange>)> plan_direct_write_fn;
     uint64_t total_size = 0;
   };
 
@@ -33,12 +35,12 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
     return absl::OkStatus();
   }
 
-  // Capability: plan direct writes for provided ranges via MemoryManager
+  // Capability: plan direct writes for provided ranges via injected callback
   absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) override {
-    if (!options_.memory_manager) {
-      return absl::FailedPreconditionError("DVMPRegionSink: memory_manager is null for plan_direct_write");
+    if (!options_.plan_direct_write_fn) {
+      return absl::FailedPreconditionError("DVMPRegionSink: plan_direct_write_fn is null");
     }
-    return options_.memory_manager->plan_direct_write(ranges);
+    return options_.plan_direct_write_fn(ranges);
   }
   [[nodiscard]] uint64_t total_size() const {
     return options_.total_size;

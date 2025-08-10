@@ -52,32 +52,6 @@ cc_library(
 )
 
 cc_test(
-    name = "model_disk_test",
-    srcs = [
-        "model_disk/aligned_cpu_test.cc",
-        "model_disk/basic_cpu_test.cc",
-        "model_disk/cpu_to_gpu_test.cc",
-        "model_disk/disk_loader_streaming_buffer_test.cc",
-        "model_disk/error_test.cc",
-        "model_disk/gpu_auto_release_test.cc",
-        "model_disk/model_verification_system_test.cc",
-        "model_disk/multi_gpu_test.cc",
-        "model_disk/streaming_buffer_test.cc",
-    ],
-    linkopts = [
-        "-lm",
-        "-lstdc++",
-    ],
-    deps = [
-        ":common",
-        "//core/common",
-        "//core/communicator",
-        "//core/store",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "checkpoint_test",
     srcs = [
         "checkpoint/duplicate_buffer_test.cc",
@@ -216,6 +190,22 @@ cc_test(
         "//core/store/model:model_memory_coordinator",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_library(
+    name = "test_common",
+    srcs = [
+        "common.cc",
+    ],
+    hdrs = [
+        "common.h",
+    ],
+    deps = [
+        "//core/common",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
 )

@@ -22,6 +22,12 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/direct_write.h"
 
+// Added loader pipeline includes for source->sink pumping
+#include "core/store/loader/dvmp_region_sink.h"
+#include "core/store/loader/gpu_memory_sink.h"
+#include "core/store/loader/pump.h"
+#include "core/store/loader/streaming_buffer_adapter.h"
+
 // Remove bridge macros; use structured members directly.
 // instance_key_.model_id -> instance_key_.model_id
 // instance_key_.device.ordinal -> instance_key_.device.ordinal
@@ -176,6 +182,26 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
       if (!region_or.ok()) {
         ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
         return region_or.status();
+      }
+
+      // Ensure UMA unified allocation exists so get_pointer() has a valid CPU base.
+      if (!memory_coordinator_->has_allocation(instance_key_)) {
+        VLOG(1) << "MemoryManager(" << instance_key_.model_id
+                << "): UMA has no allocation for this model, calling allocate_model_memory()";
+        // Release lock while allocating UMA to avoid deadlock
+        mutex_.Unlock();
+        auto uma_status = allocate_model_memory();
+        mutex_.Lock();
+        if (!uma_status.ok() && uma_status.code() != absl::StatusCode::kAlreadyExists) {
+          LOG(ERROR) << "MemoryManager(" << instance_key_.model_id
+                     << "): Failed to allocate UMA model state: " << uma_status.message();
+          ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
+          return absl::FailedPreconditionError(
+              absl::StrFormat(
+                  "MemoryManager(%s): Failed UMA allocation for PAGEABLE_CPU: %s",
+                  instance_key_.model_id,
+                  uma_status.message()));
+        }
       }
 
       // Allocate a streaming buffer pool instead of full pinned memory.
@@ -1273,7 +1299,7 @@ absl::StatusOr<DirectWriteToken> MemoryManager::plan_direct_write(absl::Span<con
 
 absl::Status MemoryManager::finalize_load(
     ModelLocation location,
-    std::optional<absl::Span<const uint32_t>> chunk_indices) {
+    std::optional<absl::Span<const uint32_t>> chunk_indices) const {
   // Unified memory optional – if absent, treat as no-op for CPU/GPU.
   auto uma = get_memory_coordinator();
   if (!uma) {
@@ -1508,6 +1534,191 @@ absl::Status MemoryManager::ensure_streaming_buffer(size_t num_chunks) {
         absl::StrFormat("Pinned pool chunk size (%zu) must be a multiple of 4096 for O_DIRECT alignment", pool_chunk));
   }
   return allocate_buffer_pool(num_chunks);
+}
+
+absl::StatusOr<std::unique_ptr<loader::PositionedSink>> MemoryManager::build_sink_(ModelLocation target_location) {
+  if (target_location == ModelLocation::GPU) {
+    // GPU sink writes into device memory at positioned offsets
+    auto gpu_ptrs = get_pointer(ModelLocation::GPU);
+    if (gpu_ptrs.empty()) {
+      return absl::FailedPreconditionError("GPU memory not allocated");
+    }
+    auto sink = std::make_unique<loader::GPUMemorySink>(loader::GPUMemorySink::Options{
+        .gpu_base_ptr = gpu_ptrs[0],
+        .total_size = get_model_size(),
+        .chunk_size = get_pool_chunk_size(),
+        .device_id = get_local_device_id()});
+    return sink;
+  }
+
+  if (target_location == ModelLocation::PAGEABLE_CPU) {
+    // CPU sink writes into DVMP region via PositionedSink
+    auto region_or = get_dvmp_region();
+    if (!region_or.ok()) {
+      return region_or.status();
+    }
+    loader::DVMPRegionSink::Options opts;
+    opts.region = *region_or;
+    opts.total_size = get_model_size();
+    // Inject callback to plan direct write tokens via MemoryManager
+    opts.plan_direct_write_fn = [this](absl::Span<const VaRange> ranges) { return this->plan_direct_write(ranges); };
+    auto sink = std::make_unique<loader::DVMPRegionSink>(std::move(opts));
+    return sink;
+  }
+
+  return absl::InvalidArgumentError("Unsupported target for sink construction");
+}
+
+std::vector<std::pair<uint64_t, size_t>> MemoryManager::build_ranges_(
+    std::optional<absl::Span<const uint32_t>> chunk_indices,
+    size_t chunk_size) const {
+  std::vector<std::pair<uint64_t, size_t>> ranges;
+  const uint64_t total = get_model_size();
+  if (!chunk_indices.has_value() || chunk_indices->empty()) {
+    ranges.emplace_back(0ULL, total);
+    return ranges;
+  }
+
+  // Build coalesced ranges from chunk indices
+  std::vector<uint32_t> sorted(chunk_indices->begin(), chunk_indices->end());
+  std::sort(sorted.begin(), sorted.end());
+  uint32_t run_start = sorted.front();
+  uint32_t prev = run_start;
+  for (size_t i = 1; i < sorted.size(); ++i) {
+    const uint32_t idx = sorted[i];
+    if (idx == prev + 1) {
+      prev = idx;
+      continue;
+    }
+    const uint64_t off = static_cast<uint64_t>(run_start) * chunk_size;
+    const uint64_t end = static_cast<uint64_t>(prev + 1) * chunk_size;
+    const uint64_t len64 = (end > total) ? (total - off) : (end - off);
+    const size_t len = static_cast<size_t>(len64);
+    ranges.emplace_back(off, len);
+    run_start = prev = idx;
+  }
+  // Flush last run
+  const uint64_t off = static_cast<uint64_t>(run_start) * chunk_size;
+  const uint64_t end = static_cast<uint64_t>(prev + 1) * chunk_size;
+  const uint64_t len64 = (end > total) ? (total - off) : (end - off);
+  const size_t len = static_cast<size_t>(len64);
+  ranges.emplace_back(off, len);
+  return ranges;
+}
+
+std::future<absl::Status> MemoryManager::load_async_from_source(
+    std::unique_ptr<loader::SeekableSource> source,
+    ModelLocation target_location,
+    int concurrency,
+    std::optional<absl::Span<const uint32_t>> chunk_indices) {
+  // Phase 1: capture state under lock and ensure allocation + LOADING
+  uint64_t model_size = 0;
+  size_t chunk_size = 0;
+  bool need_buffer = false;
+  bool need_allocate = false;
+  {
+    absl::MutexLock lock(&mutex_);
+    model_size = model_size_;
+    if (model_size == 0) {
+      return std::async(
+          std::launch::deferred, [] { return absl::FailedPreconditionError("Model size must be set before loading"); });
+    }
+    // Allocate destination if needed
+    MemoryState* state_ptr = nullptr;
+    absl::CondVar* cond_ptr = nullptr;
+    auto s = get_state_and_cond_locked_(target_location, &state_ptr, &cond_ptr);
+    if (!s.ok()) {
+      auto err = s;
+      return std::async(std::launch::deferred, [err] { return err; });
+    }
+    if (*state_ptr == MemoryState::UNALLOCATED) {
+      need_allocate = true;
+    }
+  }
+
+  if (need_allocate) {
+    auto st = allocate_memory(target_location);
+    if (!st.ok()) {
+      return std::async(std::launch::deferred, [st] { return st; });
+    }
+  }
+
+  // Ensure streaming buffer for pump. Heuristics: small for CPU/REMOTE, larger for DISK/GPU
+  {
+    absl::MutexLock lock(&mutex_);
+    chunk_size = pinned_pool_->chunk_size();
+    need_buffer = (cpu_.streaming_buffer == nullptr);
+  }
+  if (need_buffer) {
+    size_t desired_chunks = 0;
+    if (target_location == ModelLocation::GPU) {
+      desired_chunks = 8;
+    } else {
+      desired_chunks = 2;
+    }
+    // Bound desired chunks by model size
+    const size_t max_chunks = static_cast<size_t>((get_model_size() + chunk_size - 1) / chunk_size);
+    desired_chunks = std::min(desired_chunks, std::max<size_t>(1, max_chunks));
+    auto st = ensure_streaming_buffer(desired_chunks);
+    if (!st.ok()) {
+      return std::async(std::launch::deferred, [st] { return st; });
+    }
+  }
+
+  // Mark destination LOADING
+  {
+    absl::MutexLock lock(&mutex_);
+    (void)set_state_locked(target_location, MemoryState::LOADING);
+  }
+
+  // Phase 2: launch async pump task
+  return std::async(
+      std::launch::async,
+      [this, source = std::move(source), target_location, concurrency, chunk_indices, model_size, chunk_size]() mutable
+          -> absl::Status {
+        // Build adapter and sink outside of lock
+        auto spb = this->get_streaming_buffer();
+        if (!spb) {
+          (void)this->set_state(target_location, MemoryState::FAILED);
+          return absl::InternalError("Streaming buffer not available");
+        }
+        loader::StreamingBufferAdapter adapter(spb);
+
+        auto sink_or = this->build_sink_(target_location);
+        if (!sink_or.ok()) {
+          (void)this->set_state(target_location, MemoryState::FAILED);
+          return sink_or.status();
+        }
+        std::unique_ptr<loader::PositionedSink> sink = std::move(*sink_or);
+
+        // Compute ranges
+        auto ranges = this->build_ranges_(chunk_indices, chunk_size);
+
+        // Execute pump
+        absl::Status pump_status = loader::pump_ranges(*source, *sink, adapter, absl::MakeSpan(ranges), concurrency);
+
+        if (!pump_status.ok()) {
+          (void)this->set_state(target_location, MemoryState::FAILED);
+          return pump_status;
+        }
+
+        // Close sink
+        (void)sink->close();
+
+        // Finalization
+        absl::Status fin = this->finalize_load(target_location, chunk_indices);
+        if (!fin.ok()) {
+          (void)this->set_state(target_location, MemoryState::FAILED);
+          return fin;
+        }
+
+        // Mark LOADED
+        absl::Status st = this->set_state(target_location, MemoryState::LOADED);
+        if (!st.ok()) {
+          return st;
+        }
+        return absl::OkStatus();
+      });
 }
 
 } // namespace stepcast::store

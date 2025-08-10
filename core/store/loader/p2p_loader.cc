@@ -3,22 +3,19 @@
 #include "core/store/loader/p2p_loader.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <future>
 #include <memory>
 #include <vector>
+
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "core/common/metrics/metric_objects.h"
-#include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
-#include "core/store/loader/gpu_memory_sink.h"
 #include "core/store/loader/mux_seekable_source.h"
-#include "core/store/loader/pump.h"
 #include "core/store/loader/remote_key_source.h"
-#include "core/store/loader/streaming_buffer_adapter.h"
-#include "core/store/model/memory_manager.h"
-#include "core/store/model/memory_state.h"
 
 namespace stepcast::store {
 
@@ -94,341 +91,55 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
 }
 } // namespace
 
-std::future<absl::Status> P2PLoader::load_async(
-    std::shared_ptr<MemoryManager> mem_manager,
-    ModelLocation target_location,
-    int concurrency) {
-  return std::async(std::launch::async, [this, mem_manager, target_location, concurrency]() mutable -> absl::Status {
-    // Initialize if needed
-    if (!initialized_) {
-      auto status = initialize();
-      if (!status.ok()) {
-        return status;
-      }
+absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source() {
+  if (!initialized_) {
+    auto st = initialize();
+    if (!st.ok()) {
+      return st;
     }
+  }
 
-    // Set default concurrency (lower for network transfers)
-    if (concurrency <= 0) {
-      concurrency = 2;
+  // Construct primary remote source
+  store::loader::RemoteKeySource::Options src_opts{
+      .comm_engine = source_.comm_engine,
+      .memory_keys = source_.memory_keys,
+      .buffer_sizes = source_.buf_sizes,
+      .ip = source_.ip,
+      .port = source_.port,
+      .total_size = source_.size_bytes};
+  auto remote_src = std::make_shared<store::loader::RemoteKeySource>(src_opts);
+
+  // Optional disk fallback via env var SCSTORE_FALLBACK_MODEL_DIR
+  const char* fb_dir_env = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
+  if (fb_dir_env != nullptr && std::strlen(fb_dir_env) > 0) {
+    auto disk_opts_or = build_fallback_disk_source_opts(fb_dir_env, 128 * 1024 * 1024, source_.size_bytes);
+    if (disk_opts_or.ok()) {
+      auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
+      auto mux = std::make_unique<store::loader::MuxSeekableSource>(remote_src, file_src_ptr);
+      return mux;
+    } else {
+      LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
     }
+  }
 
-    // Allocate target memory
-    if (mem_manager->get_state(target_location) == MemoryState::UNALLOCATED) {
-      auto status = mem_manager->allocate_memory(target_location);
-      if (!status.ok()) {
-        return status;
-      }
+  // Default: return remote source (unique_ptr wrapper around shared)
+  struct Wrapper : public loader::SeekableSource {
+    explicit Wrapper(std::shared_ptr<loader::SeekableSource> inner) : inner_(std::move(inner)) {}
+    absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+      return inner_->read(dst, max_bytes);
     }
-
-    // Create remote source
-    store::loader::RemoteKeySource::Options source_opts{
-        .comm_engine = source_.comm_engine,
-        .memory_keys = source_.memory_keys,
-        .buffer_sizes = source_.buf_sizes,
-        .ip = source_.ip,
-        .port = source_.port,
-        .total_size = source_.size_bytes};
-    auto remote_src_ptr = std::make_shared<store::loader::RemoteKeySource>(source_opts);
-    // Optional disk fallback via env var SCSTORE_FALLBACK_MODEL_DIR
-    const char* fb_dir_env = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
-    std::shared_ptr<store::loader::SeekableSource> mux_source;
-    if (fb_dir_env != nullptr && std::strlen(fb_dir_env) > 0) {
-      auto disk_opts_or =
-          build_fallback_disk_source_opts(fb_dir_env, mem_manager->get_pool_chunk_size(), source_.size_bytes);
-      if (disk_opts_or.ok()) {
-        auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
-        mux_source = std::make_shared<store::loader::MuxSeekableSource>(remote_src_ptr, file_src_ptr);
-        VLOG(1) << "P2PLoader: enabled disk fallback via MuxSeekableSource using dir='" << fb_dir_env << "'";
-      } else {
-        LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
-      }
+    absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+      return inner_->read_at(offset, dst, bytes);
     }
-
-    // GPU path - use streaming buffer and pump
-    if (target_location == ModelLocation::GPU) {
-      // Ensure streaming buffer (smaller for network)
-      size_t chunk_size = mem_manager->get_pool_chunk_size();
-      size_t num_chunks = std::min<size_t>(4, (source_.size_bytes + chunk_size - 1) / chunk_size);
-      auto status = mem_manager->ensure_streaming_buffer(num_chunks);
-      if (!status.ok()) {
-        return status;
-      }
-
-      auto spb = mem_manager->get_streaming_buffer();
-      if (!spb) {
-        return absl::InternalError("Failed to get streaming buffer");
-      }
-
-      // Create adapter and sink pipeline
-      store::loader::StreamingBufferAdapter buffer_adapter(spb);
-      auto gpu_ptr = mem_manager->get_pointer(ModelLocation::GPU);
-      if (gpu_ptr.empty()) {
-        return absl::InternalError("GPU memory not allocated");
-      }
-
-      store::loader::GPUMemorySink::Options gpu_opts{
-          .gpu_base_ptr = gpu_ptr[0],
-          .total_size = source_.size_bytes,
-          .chunk_size = mem_manager->get_pool_chunk_size(),
-          .device_id = 0};
-      store::loader::GPUMemorySink gpu_sink(gpu_opts);
-
-      // Run pump (positioned via single-range wrapper)
-      CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADING));
-      std::vector<store::loader::Range> ranges;
-      ranges.emplace_back(0ULL, source_.size_bytes);
-      if (mux_source) {
-        status = store::loader::pump_ranges(*mux_source, gpu_sink, buffer_adapter, ranges, concurrency);
-      } else {
-        status = store::loader::pump_ranges(*remote_src_ptr, gpu_sink, buffer_adapter, ranges, concurrency);
-      }
-
-      if (!status.ok()) {
-        CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::FAILED));
-        return status;
-      }
-
-      CHECK_OK(gpu_sink.close());
-      CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU));
-
-      // Metrics: bytes loaded via P2P to GPU
-      try {
-        static const metrics::Counter kLoaderBytes("loader_bytes_total");
-        kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(source_.size_bytes));
-      } catch (...) {
-      }
-
-      CHECK_OK(mem_manager->set_state(ModelLocation::GPU, MemoryState::LOADED));
-      LOG(INFO) << "P2P transfer to GPU complete: " << source_.size_bytes << " bytes";
-      return absl::OkStatus();
+    bool supports_direct_write() const override {
+      return inner_->supports_direct_write();
     }
-
-    // CPU path
-    if (target_location == ModelLocation::PAGEABLE_CPU) {
-      auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
-      if (cpu_ptr.empty()) {
-        return absl::InternalError("CPU memory not allocated");
-      }
-
-      auto region_or = mem_manager->get_dvmp_region();
-      if (!region_or.ok()) {
-        return region_or.status();
-      }
-      store::loader::DVMPRegionSink::Options dvmp_opts{.region = *region_or, .total_size = source_.size_bytes};
-      auto dvmp_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
-
-      CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADING));
-
-      // Need a small buffer for pump
-      size_t num_chunks = 2;
-      auto status = mem_manager->ensure_streaming_buffer(num_chunks);
-      if (!status.ok()) {
-        return status;
-      }
-
-      auto spb = mem_manager->get_streaming_buffer();
-      if (!spb) {
-        return absl::InternalError("Failed to get streaming buffer");
-      }
-
-      store::loader::StreamingBufferAdapter buffer_adapter(spb);
-      std::vector<store::loader::Range> ranges;
-      ranges.emplace_back(0ULL, source_.size_bytes);
-      if (mux_source) {
-        status = store::loader::pump_ranges(*mux_source, *dvmp_ptr, buffer_adapter, ranges, concurrency);
-      } else {
-        status = store::loader::pump_ranges(*remote_src_ptr, *dvmp_ptr, buffer_adapter, ranges, concurrency);
-      }
-
-      if (!status.ok()) {
-        CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::FAILED));
-        return status;
-      }
-
-      CHECK_OK(dvmp_ptr->close());
-      CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU));
-
-      // Metrics: bytes loaded via P2P to CPU
-      try {
-        static const metrics::Counter kLoaderBytes("loader_bytes_total");
-        kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(source_.size_bytes));
-      } catch (...) {
-      }
-
-      CHECK_OK(mem_manager->set_state(ModelLocation::PAGEABLE_CPU, MemoryState::LOADED));
-      LOG(INFO) << "P2P transfer to CPU complete: " << source_.size_bytes << " bytes";
-      return absl::OkStatus();
+    absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {
+      return inner_->read_into(dest_va_offset, bytes, token);
     }
-
-    return absl::UnimplementedError("Unsupported target location");
-  });
-}
-
-std::future<absl::Status> P2PLoader::load_chunks_async(
-    const std::shared_ptr<MemoryManager>& mem_manager,
-    ModelLocation target_location,
-    const std::vector<uint32_t>& chunk_indices,
-    int concurrency) {
-  return std::async(
-      std::launch::async, [this, mem_manager, target_location, chunk_indices, concurrency]() mutable -> absl::Status {
-        // Ensure initialization
-        if (!initialized_) {
-          auto status = initialize();
-          if (!status.ok()) {
-            return status;
-          }
-        }
-
-        // Default single-thread for chunk transfers if not specified
-        int effective_concurrency = (concurrency <= 0) ? 1 : concurrency;
-
-        // Make sure destination memory is allocated
-        if (mem_manager->get_state(target_location) == MemoryState::UNALLOCATED) {
-          auto status = mem_manager->allocate_memory(target_location);
-          if (!status.ok()) {
-            return status;
-          }
-        }
-
-        // Construct RemoteKeySource
-        store::loader::RemoteKeySource::Options src_opts{
-            .comm_engine = source_.comm_engine,
-            .memory_keys = source_.memory_keys,
-            .buffer_sizes = source_.buf_sizes,
-            .ip = source_.ip,
-            .port = source_.port,
-            .total_size = source_.size_bytes};
-        auto remote_src_ptr = std::make_shared<store::loader::RemoteKeySource>(src_opts);
-
-        // Optional disk fallback via Mux
-        const char* fb_dir_env2 = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
-        std::shared_ptr<store::loader::SeekableSource> mux_source2;
-        if (fb_dir_env2 != nullptr && std::strlen(fb_dir_env2) > 0) {
-          auto disk_opts_or =
-              build_fallback_disk_source_opts(fb_dir_env2, mem_manager->get_pool_chunk_size(), source_.size_bytes);
-          if (disk_opts_or.ok()) {
-            auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
-            mux_source2 = std::make_shared<store::loader::MuxSeekableSource>(remote_src_ptr, file_src_ptr);
-          } else {
-            LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
-          }
-        }
-
-        // Build byte ranges corresponding to requested chunks
-        size_t chunk_size = mem_manager->get_pool_chunk_size();
-        std::vector<std::pair<uint64_t, size_t>> ranges;
-        for (auto idx : chunk_indices) {
-          uint64_t offset = static_cast<uint64_t>(idx) * chunk_size;
-          size_t size = std::min(chunk_size, static_cast<size_t>(source_.size_bytes - offset));
-          ranges.emplace_back(offset, size);
-        }
-
-        absl::Status status;
-        if (target_location == ModelLocation::GPU) {
-          // Prepare buffering
-          size_t num_chunks = std::min<size_t>(2, chunk_indices.size());
-          status = mem_manager->ensure_streaming_buffer(num_chunks);
-          if (!status.ok()) {
-            return status;
-          }
-
-          auto spb = mem_manager->get_streaming_buffer();
-          if (!spb) {
-            return absl::InternalError("Failed to get streaming buffer");
-          }
-          store::loader::StreamingBufferAdapter buffer_adapter(spb);
-
-          auto gpu_ptr = mem_manager->get_pointer(ModelLocation::GPU);
-          if (gpu_ptr.empty()) {
-            return absl::InternalError("GPU memory not allocated");
-          }
-
-          store::loader::GPUMemorySink::Options gpu_opts{
-              .gpu_base_ptr = gpu_ptr[0],
-              .total_size = source_.size_bytes,
-              .chunk_size = mem_manager->get_pool_chunk_size(),
-              .device_id = 0};
-          auto gpu_sink_ptr = std::make_shared<store::loader::GPUMemorySink>(gpu_opts);
-
-          if (mux_source2) {
-            status =
-                store::loader::pump_ranges(*mux_source2, *gpu_sink_ptr, buffer_adapter, ranges, effective_concurrency);
-          } else {
-            status = store::loader::pump_ranges(
-                *remote_src_ptr, *gpu_sink_ptr, buffer_adapter, ranges, effective_concurrency);
-          }
-          if (status.ok()) {
-            uint64_t bytes_sum = 0;
-            for (const auto& r : ranges)
-              bytes_sum += r.second;
-            try {
-              static const metrics::Counter kLoaderBytes("loader_bytes_total");
-              kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(bytes_sum));
-            } catch (...) {
-            }
-          }
-          if (!status.ok()) {
-            return status;
-          }
-          CHECK_OK(gpu_sink_ptr->close());
-          CHECK_OK(mem_manager->finalize_load(ModelLocation::GPU, absl::MakeSpan(chunk_indices)));
-        } else if (target_location == ModelLocation::PAGEABLE_CPU) {
-          // Prepare buffering
-          status = mem_manager->ensure_streaming_buffer(1);
-          if (!status.ok()) {
-            return status;
-          }
-
-          auto spb = mem_manager->get_streaming_buffer();
-          if (!spb) {
-            return absl::InternalError("Failed to get streaming buffer");
-          }
-          store::loader::StreamingBufferAdapter buffer_adapter(spb);
-
-          auto cpu_ptr = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
-          if (cpu_ptr.empty()) {
-            return absl::InternalError("CPU memory not allocated");
-          }
-
-          auto region_or = mem_manager->get_dvmp_region();
-          if (!region_or.ok()) {
-            return region_or.status();
-          }
-          store::loader::DVMPRegionSink::Options dvmp_opts{.region = *region_or, .total_size = source_.size_bytes};
-          auto dvmp_sink_ptr = std::make_shared<store::loader::DVMPRegionSink>(dvmp_opts);
-
-          if (mux_source2) {
-            status =
-                store::loader::pump_ranges(*mux_source2, *dvmp_sink_ptr, buffer_adapter, ranges, effective_concurrency);
-          } else {
-            status = store::loader::pump_ranges(
-                *remote_src_ptr, *dvmp_sink_ptr, buffer_adapter, ranges, effective_concurrency);
-          }
-          if (status.ok()) {
-            uint64_t bytes_sum = 0;
-            for (const auto& r : ranges)
-              bytes_sum += r.second;
-            try {
-              static const metrics::Counter kLoaderBytes("loader_bytes_total");
-              kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(bytes_sum));
-            } catch (...) {
-            }
-          }
-          if (!status.ok()) {
-            return status;
-          }
-          CHECK_OK(dvmp_sink_ptr->close());
-          CHECK_OK(mem_manager->finalize_load(ModelLocation::PAGEABLE_CPU, absl::MakeSpan(chunk_indices)));
-        } else {
-          return absl::UnimplementedError("Unsupported target location");
-        }
-
-        if (status.ok()) {
-          LOG(INFO) << "P2P chunk transfer complete: " << chunk_indices.size() << " chunks";
-        }
-
-        return status;
-      });
+    std::shared_ptr<loader::SeekableSource> inner_;
+  };
+  return std::make_unique<Wrapper>(remote_src);
 }
 
 absl::StatusOr<uint64_t> P2PLoader::get_model_size() {

@@ -31,10 +31,12 @@ absl::Status ModelMemoryCoordinator::allocate(const InstanceKey& key, size_t byt
   if (region_or.ok()) {
     alloc.dram_region = *region_or;
   } else if (region_or.status().code() == absl::StatusCode::kAlreadyExists) {
-    // Region already reserved elsewhere. Proceed to initialise UMA bookkeeping
-    // without duplicating the reservation. We may not know the base pointer.
-    alloc.dram_region = stepcast::memory::DistributedVirtualMemoryPool::VirtualRegion{
-        .cpu_base = nullptr, .gpu_base = nullptr, .bytes = bytes};
+    // Region already reserved elsewhere. Query region info to populate base pointer.
+    auto info_or = dvmp_->region_info(key.model_id);
+    if (!info_or.ok()) {
+      return info_or.status();
+    }
+    alloc.dram_region = *info_or;
   } else {
     return region_or.status();
   }

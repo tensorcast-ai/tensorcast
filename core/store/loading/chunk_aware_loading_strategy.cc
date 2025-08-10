@@ -10,11 +10,13 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/types/span.h"
 #include "core/common/cuda_api.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/p2p_loader.h"
+#include "core/store/loader/source.h"
 #include "core/store/model/memory_manager.h"
 #include "core/store/model/model_memory_coordinator.h"
 
@@ -369,8 +371,13 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
       break;
     }
 
-    // Load chunks
-    auto future = loader->load_chunks_async(mem_manager, op.target, chunks, 4);
+    // Load chunks via open_source + MemoryManager
+    auto src_or = loader->open_source();
+    if (!src_or.ok()) {
+      overall_status = src_or.status();
+      break;
+    }
+    auto future = mem_manager->load_async_from_source(std::move(*src_or), op.target, 4, absl::MakeSpan(chunks));
 
     absl::Status load_status = future.get();
     if (!load_status.ok()) {
@@ -415,8 +422,12 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     return init_status;
   }
 
-  // Load chunks
-  auto future = loader->load_chunks_async(mem_manager, target, chunks, 4);
+  // Load chunks via open_source + MemoryManager
+  auto src_or = loader->open_source();
+  if (!src_or.ok()) {
+    return src_or.status();
+  }
+  auto future = mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(chunks));
 
   absl::Status load_status = future.get();
 

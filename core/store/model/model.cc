@@ -12,7 +12,9 @@
 #include "absl/strings/str_format.h"
 
 #include "core/store/loader/disk_loader.h"
+#include "core/store/loader/loader.h"
 #include "core/store/loader/p2p_loader.h"
+#include "core/store/loader/source.h"
 #include "core/store/model/memory_manager.h"
 
 namespace stepcast::store {
@@ -250,7 +252,6 @@ std::shared_future<absl::Status> Model::ensure_loaded_async(
   MemoryState current_state = MemoryState::UNINITIALIZED;
   std::shared_future<absl::Status>* member_future = nullptr;
   MemoryManager* mm_ptr = nullptr; // raw pointer is safe as Model owns MemoryManager lifetime
-  IModelLoader* ldr_ptr = nullptr; // same rationale as above
   ModelLocation source_location = ModelLocation::NONE;
   bool need_allocation = false;
   absl::StatusOr<ModelLocation> src_status; // Declare here
@@ -262,9 +263,8 @@ std::shared_future<absl::Status> Model::ensure_loaded_async(
       return make_ready_future(absl::InternalError("Model loader or memory manager is invalid."));
     }
 
-    // Get raw pointers under lock
+    // Get raw pointer under lock
     mm_ptr = memory_manager_.get();
-    ldr_ptr = loader_.get();
 
     if (target_location == ModelLocation::PAGEABLE_CPU) {
       member_future = &cpu_load_future_;
@@ -390,7 +390,12 @@ std::shared_future<absl::Status> Model::ensure_loaded_async(
   } else if (source_location == ModelLocation::GPU && target_location == ModelLocation::PAGEABLE_CPU) {
     new_future = mm_ptr->copy_data_async(ModelLocation::GPU, ModelLocation::PAGEABLE_CPU).share();
   } else if (source_location == ModelLocation::DISK || source_location == ModelLocation::REMOTE) {
-    new_future = ldr_ptr->load_async(memory_manager_, target_location, concurrency).share();
+    auto src_or = loader_->open_source();
+    if (!src_or.ok()) {
+      return make_ready_future(src_or.status());
+    }
+    // Delegate orchestration to MemoryManager using the provided source
+    new_future = memory_manager_->load_async_from_source(std::move(*src_or), target_location, concurrency).share();
   } else {
     return make_ready_future(absl::InternalError("Invalid source/target combination."));
   }

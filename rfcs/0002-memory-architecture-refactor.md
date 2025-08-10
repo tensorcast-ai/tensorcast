@@ -198,7 +198,7 @@ graph TD;
 1) ✅ **UMA VRAM ownership**: route `allocate_memory(GPU)` through UMA's `get_or_create_gpu_allocation` and remove direct `cudaMalloc` call sites and logs entirely. Do not fallback to direct allocation on UMA errors. Cache the returned `std::shared_ptr<CudaMemory>` in `gpu_.cuda_mem` to preserve pointer APIs while keeping UMA as the lifetime owner.
 2) ✅ **D2H correctness**: use `dvmp->write_at` in GPU→CPU copy helpers; implement UMA public CPU sync (`sync_cpu_chunk_states`) and have `finalize_load(PAGEABLE_CPU, ranges)` call it for touched DVMP chunk ranges. Sync-from-DVMP should be range-based (using DVMP snapshot/dirty intervals) and must not hold the `MemoryManager` mutex during long operations.
 3) ✅ **Optional SPB enhancements**: add `try_get_free_chunk()` and introspection (`capacity()`, `inflight()`, `production_done()`); prefer `absl::StatusOr<int>` for `try_get_free_chunk()` with `Unavailable` on no capacity, and document O(1), non-blocking semantics. Keep the adapter.
-4) 🔲 **Decouple loaders from state orchestration incrementally** (use BufferPool and sinks/sources only). [Deferred - requires significant refactoring]
+4) ✅ **Decouple loaders from state orchestration**: completed. See Section 11 (Loader Decoupling) for design and implementation details.
 5) ✅ **Optionally move transfer helpers into a separate TU** (`transfer_helpers.{h,cc}`) without introducing a new runtime component.
 
 ### File Modification Table
@@ -208,7 +208,7 @@ graph TD;
 | core/store/model/memory_manager.{h,cc} | ✅ Refactor | UMA-owned VRAM allocation; D2H uses DVMP `write_at`; CPU finalize triggers UMA sync-from-DVMP; remove all direct `cudaMalloc` usages; extracted transfer helpers |
 | core/store/model/model_memory_coordinator.{h,cc} | ✅ Minor | Clarify sole VRAM ownership; EXPOSE CPU sync-from-DVMP as public (`sync_cpu_chunk_states` with optional range-based overload) |
 | core/common/memory/streaming_pinned_buffer.h/.cc | ✅ Optional | Add `try_get_free_chunk()` (prefer `absl::StatusOr<int>` returning `Unavailable` when none; document non-blocking O(1) semantics) + introspection (`capacity()`, `inflight()`, `production_done()`); keep existing adapter |
-| core/common/memory/distributed_virtual_memory_pool.h | ✅ Minor | Document `write_at` semantics: updates CPU metadata visibility (at least HOT) and `last_touch_s`; clarify concurrency expectations |
+| core/common/memory/distributed_virtual_memory_pool.h | ✅ Minor | Document `write_at` semantics: updates CPU metadata visibility, chunk states to HOT |
 | core/store/loader/* | 🔲 Refactor (later) | Remove direct state orchestration gradually [Deferred] |
 | core/store/model/model.h | ✅ Minor | No public API change; continue delegating through MemoryManager |
 | core/store/model/transfer_helpers.h/.cc | ✅ New | Extract existing helper functions; no new singleton/service |
@@ -363,7 +363,6 @@ None - implementation follows RFC specification exactly.
 
 ### Remaining Work (Future Phases)
 
-- Phase 4: Decouple loaders from state orchestration (deferred - requires significant refactoring)
 - Performance optimization: Consider DVMP batch I/O for D2H operations
 
 ## 10. Phase 1 Verification Summary
@@ -401,5 +400,175 @@ All Phase 1 implementations have been verified to be correctly in place:
 - Assumed successful per user indication
 
 ### Next Steps
-- Phase 4 and 5 remain as future work
-- System is fully functional with Phase 1 complete
+- Performance optimizations remain as future work (e.g., DVMP batch I/O)
+- System is fully functional
+
+## 11. Loader Decoupling (Phase 4)
+
+This section merges the contents of RFC 0003 ("Decouple Loaders from State Orchestration - Phase 4") into the Memory Architecture Refactor document.
+
+### 11.1 Overview
+
+- Problem: `DiskLoader`/`P2PLoader` previously orchestrated memory state and resources via `MemoryManager` (allocation, streaming buffer, LOADING/FAILED/LOADED, finalize). This duplicated orchestration, increased lock coupling, and raised change amplification.
+- Goal: Make `MemoryManager` the single façade for orchestration (allocation, state transitions, sink construction, pump, finalization). Loaders become pure source providers. Preserve existing public `Model` API and transfer helpers.
+
+### 11.2 Scope
+
+- In-scope:
+  - `core/store/loader/*` (interfaces + Disk/P2P loaders + sinks/sources + pump)
+  - `core/store/model/{model, memory_manager}`
+- Out-of-scope:
+  - External `Model` public API changes (none)
+  - New runtime engine (none)
+
+### 11.3 Design Summary
+
+- Loaders provide data sources only:
+  - Added `IModelLoader::open_source()` returning a `loader::SeekableSource` (possibly muxed for fallback).
+  - Callers use `open_source()` + `MemoryManager::load_async_from_source(...)` directly.
+- MemoryManager owns orchestration for DISK/REMOTE → CPU/GPU:
+  - New API `load_async_from_source(...)` that:
+    - Ensures allocation and sets destination to LOADING (under lock)
+    - Ensures `StreamingPinnedBuffer` capacity (under lock)
+    - Constructs appropriate `Sink` (`DVMPRegionSink` for CPU direct-write, `GPUMemorySink` for GPU)
+    - Constructs `StreamingBufferAdapter` and computes byte ranges
+    - Calls `pump_ranges` (outside lock)
+    - On success: `finalize_load(location, ranges?)` then `finalize_load_state(location, Ok)`
+    - On failure: `finalize_load_state(location, Failed)` and return error
+- `DVMPRegionSink` no longer depends on `MemoryManager` directly:
+  - Replaced the `memory_manager` pointer in `Options` with a callback `plan_direct_write_fn` to avoid header/dep coupling and cycles.
+- Model dispatch remains stable:
+  - For `DISK`/`REMOTE` sources, call `loader->open_source()` and pass the source to `MemoryManager::load_async_from_source`.
+  - CPU↔GPU copy remains via `memory_manager_->copy_data_async(...)`.
+
+### 11.4 Interface Changes
+
+- `core/store/loader/loader.h`
+
+```cpp
+class IModelLoader {
+ public:
+  virtual ~IModelLoader() = default;
+  virtual absl::Status initialize() = 0;
+  virtual absl::StatusOr<uint64_t> get_model_size() = 0;
+  // NEW: Provide a data source (may be a muxed source for fallback)
+  virtual absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() = 0;
+};
+```
+
+- `core/store/loader/dvmp_region_sink.h`
+
+```cpp
+struct Options {
+  memory::DistributedVirtualMemoryPool::DvmpRegion region;
+  // REPLACE: remove MemoryManager. Inject a callback instead.
+  std::function<absl::StatusOr<DirectWriteToken>(absl::Span<const VaRange>)> plan_direct_write_fn;
+  uint64_t total_size = 0;
+};
+
+class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritableSink {
+  absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) override {
+    if (!options_.plan_direct_write_fn) {
+      return absl::FailedPreconditionError("plan_direct_write_fn is null");
+    }
+    return options_.plan_direct_write_fn(ranges);
+  }
+};
+```
+
+- `core/store/model/memory_manager.h`
+
+```cpp
+class MemoryManager {
+ public:
+  // NEW: Orchestrate DISK/REMOTE → CPU/GPU using provided source
+  std::future<absl::Status> load_async_from_source(
+      std::unique_ptr<loader::SeekableSource> source,
+      ModelLocation target_location,
+      int concurrency,
+      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+
+ private:
+  // Helpers (private):
+  absl::StatusOr<std::unique_ptr<loader::PositionedSink>> build_sink_(ModelLocation target);
+  std::vector<std::pair<uint64_t, size_t>> build_ranges_(
+      std::optional<absl::Span<const uint32_t>> chunk_indices, size_t chunk_size) const;
+};
+```
+
+- `core/store/model/model.cc` (dispatch change)
+  - For `DISK`/`REMOTE` sources, call `loader->open_source()` then `memory_manager_->load_async_from_source(...)`.
+  - CPU↔GPU copy remains via `memory_manager_->copy_data_async(...)`.
+
+### 11.5 Orchestration Flow (MemoryManager)
+
+- Under `mutex_`:
+  - Validate model size; if `UNALLOCATED`, allocate memory for target
+  - Set destination state to `LOADING`
+  - Ensure streaming buffer capacity; capture required handles
+- Outside lock:
+  - Create `StreamingBufferAdapter`
+  - Build `PositionedSink` (CPU: `DVMPRegionSink`; GPU: `GPUMemorySink`)
+  - Compute ranges (full or chunked/coalesced)
+  - `pump_ranges(*source, *sink, adapter, ranges, concurrency)`
+- Finalization:
+  - On success: `finalize_load(target, chunk_indices?)` then `finalize_load_state(target, Ok)`
+  - On failure: `finalize_load_state(target, Failed)` and propagate status
+
+Locking and error handling:
+- Acquire/release locks only for short critical sections; propagate first non-OK status; ensure destination transitions to `FAILED` on errors.
+- CPU direct-write path relies on DVMP semantics (`write_at` updates residency and timestamps). UMA CPU view is synced after load.
+
+### 11.6 Migration Plan (Completed)
+
+- Step 1: Break dependency cycles
+  - Replaced `DVMPRegionSink::Options.memory_manager` with `plan_direct_write_fn` callback; updated all sink construction sites
+- Step 2: Add `IModelLoader::open_source()`
+  - `DiskLoader::open_source()` → `FilePartitionSource`
+  - `P2PLoader::open_source()` → `RemoteKeySource` or `MuxSeekableSource` (fallback)
+  - Transitional `load_async()`/`load_chunks_async()` wrappers existed during migration
+- Step 3: Implement `MemoryManager::load_async_from_source(...)`
+  - Added helper methods `build_sink_`, `build_ranges_`; proper thread-safety with mutex management; UMA integration
+- Step 4: Switch `Model::ensure_loaded_async`
+  - Use `open_source()` + `load_async_from_source(...)` for `DISK`/`REMOTE`
+  - Preserve CPU↔GPU copy paths via `copy_data_async()`
+- Step 5: Cleanup
+  - Removed legacy orchestration from loaders; trimmed BUILD deps; confirmed no direct `allocate_memory`/`ensure_streaming_buffer`/`finalize_*` calls in loaders
+
+### 11.7 Testing Strategy
+
+- Unit
+  - `MemoryManager::load_async_from_source`: DISK→GPU/CPU, REMOTE→GPU/CPU; full and partial `chunk_indices`; error rollback; UMA updates
+  - `DVMPRegionSink` direct-write callback invoked; error propagation
+- Integration
+  - `Model::ensure_loaded_async` for `DISK`/`REMOTE` targets; chunk-selective loads; UMA/DVMP metadata correctness
+- Regression
+  - `copy_data_async` (CPU↔GPU) unchanged and green; no deadlocks; no long operations under `MemoryManager` lock
+
+### 11.8 Success Metrics
+
+- Loaders remove all direct `MemoryManager` state/allocate/finalize/SPB calls
+- Single orchestration path in `MemoryManager` handles `DISK`/`REMOTE` loads
+- No cycles in BUILD; loaders do not depend on `MemoryManager`; `DVMPRegionSink` uses callback injection
+- No performance regressions relative to baseline
+
+### 11.9 Risks and Mitigations
+
+- Dep cycles: Resolved via `DVMPRegionSink` callback injection
+- Behavior drift: Preserved finalization semantics; added integration tests per path
+- Performance: Kept `pump`/SPB parameters aligned; tunable chunk counts per source
+- Transition churn: Kept transitional wrappers during migration; switched callers gradually
+
+### 11.10 Execution Status and Validation
+
+- Date: 2025-08-10
+- Status: Complete — Steps 1–5 completed; loaders decoupled and cleanup finished
+- Build: `bazel build //core/store/model:model //core/store/loader:all` — OK
+- Unit tests: representative suites for sources, pump, sinks — OK
+- Implementation decisions: thread-safety in async paths; BUILD deps cleaned; chunk state management via UMA
+
+### 11.11 Compatibility Notes
+
+- External `Model` API unchanged
+- Transfer helpers remain the single place for CPU↔GPU copies
+- UMA remains the authority for VRAM allocation and chunk states

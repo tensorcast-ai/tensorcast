@@ -13,6 +13,7 @@
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loader/disk_loader.h"
+#include "core/store/loader/source.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_manager.h"
 
@@ -64,7 +65,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
 
   // Setup MemoryManager with streaming enabled
   const size_t pool_total = 1024 * 1024;
-  const size_t pool_chunk = 1024;
+  const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
   auto memmgr = std::make_shared<MemoryManager>(
@@ -76,7 +77,9 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   memmgr->set_model_size(model_size);
 
   // Launch streaming load to GPU
-  auto fut = loader.load_async(memmgr, ModelLocation::GPU, /*concurrency=*/2);
+  auto src_or = loader.open_source();
+  REQUIRE(src_or.ok());
+  auto fut = memmgr->load_async_from_source(std::move(*src_or), ModelLocation::GPU, /*concurrency=*/2);
   REQUIRE(fut.valid());
   auto st = fut.get();
   LOG(INFO) << "Streaming load result: " << st.message();
