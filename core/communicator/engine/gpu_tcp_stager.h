@@ -138,7 +138,7 @@ class GpuTcpStager {
   explicit GpuTcpStager(
       size_t chunk_size = 64 * 1024 * 1024,
       size_t num_chunks = 2,
-      std::shared_ptr<stepcast::store::PinnedMemoryPool> pool = nullptr);
+      std::shared_ptr<store::PinnedMemoryPool> pool = nullptr);
   ~GpuTcpStager();
 
   // Disable copy and move
@@ -251,8 +251,8 @@ class GpuTcpStager {
   mutable absl::Mutex mutex_;
 
   // Use existing infrastructure
-  std::shared_ptr<stepcast::store::PinnedMemoryPool> memory_pool_;
-  std::unique_ptr<stepcast::store::StreamingPinnedBuffer> streaming_buffer_;
+  std::shared_ptr<store::PinnedMemoryPool> memory_pool_;
+  std::unique_ptr<store::StreamingPinnedBuffer> streaming_buffer_;
 
   // Track ongoing operations
   std::unordered_map<int, StagingOperation> active_operations_ ABSL_GUARDED_BY(mutex_);

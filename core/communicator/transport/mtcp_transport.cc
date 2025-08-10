@@ -293,7 +293,7 @@ void MTcpTransport::set_gpu_tcp_stager(std::shared_ptr<GpuTcpStager> stager) {
   gpu_tcp_stager_ = stager;
 }
 
-void MTcpTransport::set_memory_pool(std::shared_ptr<stepcast::store::PinnedMemoryPool> pool) {
+void MTcpTransport::set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool) {
   memory_pool_ = pool;
 }
 
@@ -647,8 +647,7 @@ void MTcpTransport::recv_loop() {
         // overlap network I/O and GPU copies, so four buffers is usually enough.
         size_t num_buffers = std::min(static_cast<size_t>(conn_count_), size_t(4));
 
-        gpu_recv_buffer_ =
-            std::make_unique<stepcast::store::StreamingPinnedBuffer>(num_buffers, pool_chunk_size, memory_pool_);
+        gpu_recv_buffer_ = std::make_unique<store::StreamingPinnedBuffer>(num_buffers, pool_chunk_size, memory_pool_);
 
         auto init_status = gpu_recv_buffer_->initialize();
         CHECK(init_status.ok()) << "Failed to initialize GPU receive buffer: " << init_status;
@@ -733,7 +732,7 @@ void MTcpTransport::recv_loop() {
                   return {TRANSPORT_FAILED, result.cost};
                 }
 
-                auto copy_status = stepcast::cuda::memcpy(gpu_ptr, staged_ptr, sub_chunk_size, cudaMemcpyHostToDevice);
+                auto copy_status = cuda::memcpy(gpu_ptr, staged_ptr, sub_chunk_size, cudaMemcpyHostToDevice);
                 if (!copy_status.ok()) {
                   LOG(ERROR) << "Failed to copy to GPU: " << copy_status.message();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));

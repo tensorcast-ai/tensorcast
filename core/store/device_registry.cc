@@ -19,7 +19,7 @@ void DeviceRegistry::register_gpu(int ordinal, std::string uuid) {
 
 DeviceKey DeviceRegistry::gpu_key(int ordinal) const {
   absl::MutexLock lock(&mutex_);
-  DeviceKey key{::stepcast::DeviceType::GPU, ordinal, ""};
+  DeviceKey key{DeviceType::GPU, ordinal, ""};
   auto it = ordinal_to_uuid_.find(ordinal);
   if (it != ordinal_to_uuid_.end()) {
     key.uuid = it->second;
@@ -28,7 +28,7 @@ DeviceKey DeviceRegistry::gpu_key(int ordinal) const {
 }
 
 DeviceKey DeviceRegistry::normalize(const DeviceKey& in) const {
-  if (in.type != ::stepcast::DeviceType::GPU) {
+  if (in.type != DeviceType::GPU) {
     return in; // CPU / REMOTE are already canonical.
   }
 
@@ -38,7 +38,7 @@ DeviceKey DeviceRegistry::normalize(const DeviceKey& in) const {
   if (!in.uuid.empty()) {
     auto ord_it = uuid_to_ordinal_.find(in.uuid);
     if (ord_it != uuid_to_ordinal_.end()) {
-      return DeviceKey{::stepcast::DeviceType::GPU, ord_it->second, in.uuid};
+      return DeviceKey{DeviceType::GPU, ord_it->second, in.uuid};
     }
     // Unknown uuid – fall back to provided fields.
     return in;
@@ -47,7 +47,7 @@ DeviceKey DeviceRegistry::normalize(const DeviceKey& in) const {
   // Case 2: uuid empty – try to fill it.
   auto uuid_it = ordinal_to_uuid_.find(in.ordinal);
   if (uuid_it != ordinal_to_uuid_.end()) {
-    return DeviceKey{::stepcast::DeviceType::GPU, in.ordinal, uuid_it->second};
+    return DeviceKey{DeviceType::GPU, in.ordinal, uuid_it->second};
   }
 
   // No mapping – return original key.

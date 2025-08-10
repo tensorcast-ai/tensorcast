@@ -58,9 +58,9 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     auto fst = fallback_->read_at(offset + total_read, ptr + total_read, remain);
     if (!fst.ok()) {
       // Log fallback failure for debugging
-      LOG(WARNING) << "MuxSeekableSource: fallback read_at failed after primary delivered " 
-                   << total_read << " of " << bytes << " bytes. Fallback error: " << fst.status();
-      
+      LOG(WARNING) << "MuxSeekableSource: fallback read_at failed after primary delivered " << total_read << " of "
+                   << bytes << " bytes. Fallback error: " << fst.status();
+
       // If both primary and fallback failed to deliver any data, return fallback error.
       if (total_read == 0)
         return fst.status();
@@ -71,7 +71,7 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     if (total_read == bytes) {
       // Metrics: record fallback due to short read (primary delivered fewer bytes than requested)
       try {
-        static const stepcast::metrics::Counter kFallbackChunks("fallback_chunks_total");
+        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
         kFallbackChunks.with_labels({{"reason", "short_read"}}).inc();
       } catch (...) {
       }

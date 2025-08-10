@@ -109,7 +109,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 
   void set_conn_count(int conn_count);
   void set_gpu_tcp_stager(std::shared_ptr<GpuTcpStager> stager);
-  void set_memory_pool(std::shared_ptr<stepcast::store::PinnedMemoryPool> pool);
+  void set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool);
 
  private:
   void server_loop();
@@ -144,8 +144,8 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
 
   // GPU receive buffer management
-  std::shared_ptr<stepcast::store::PinnedMemoryPool> memory_pool_;
-  std::unique_ptr<stepcast::store::StreamingPinnedBuffer> gpu_recv_buffer_;
+  std::shared_ptr<store::PinnedMemoryPool> memory_pool_;
+  std::unique_ptr<store::StreamingPinnedBuffer> gpu_recv_buffer_;
 
   // Track outstanding async tasks for proper cleanup
   mutable std::mutex async_tasks_mutex_;

@@ -46,7 +46,7 @@ CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_s
     const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS;
     const size_t total_pool_size = chunk_size * (num_buffers + recv_num_buffers);
 
-    gpu_memory_pool_ = std::make_shared<stepcast::store::PinnedMemoryPool>(total_pool_size, chunk_size);
+    gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
     gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, gpu_memory_pool_);
 
     VLOG(2) << "Initialized GPU TCP stager with " << num_buffers << " buffers of " << GPU_TCP_STAGER_CHUNK_SIZE_MB

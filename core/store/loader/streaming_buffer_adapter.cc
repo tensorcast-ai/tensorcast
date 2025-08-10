@@ -6,7 +6,7 @@
 
 namespace stepcast::store::loader {
 
-StreamingBufferAdapter::StreamingBufferAdapter(std::shared_ptr<::stepcast::store::StreamingPinnedBuffer> buffer)
+StreamingBufferAdapter::StreamingBufferAdapter(std::shared_ptr<StreamingPinnedBuffer> buffer)
     : buffer_(std::move(buffer)) {
   if (!buffer_) {
     LOG(ERROR) << "StreamingPinnedBuffer is null";

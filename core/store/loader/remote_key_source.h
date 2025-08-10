@@ -21,7 +21,7 @@ namespace stepcast::store::loader {
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {
-    std::shared_ptr<stepcast::communicator::CommunicateEngine> comm_engine; // Communicator instance
+    std::shared_ptr<communicator::CommunicateEngine> comm_engine; // Communicator instance
     std::vector<std::string> memory_keys; // Remote tensor keys in order
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP
@@ -39,8 +39,7 @@ class RemoteKeySource : public SeekableSource {
 
   // Enable direct-write when RDMA is available on the engine.
   [[nodiscard]] bool supports_direct_write() const override;
-  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const store::DirectWriteToken& token)
-      override;
+  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override;
 
  private:
   Options options_;

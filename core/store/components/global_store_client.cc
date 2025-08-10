@@ -350,7 +350,7 @@ void GlobalStoreClient::fill_memory_info(
   info->set_memory_size(memory_size);
   info->set_memory_type(convert_to_proto_memory_type(location));
 
-  if (device.type == ::stepcast::DeviceType::GPU) {
+  if (device.type == DeviceType::GPU) {
     info->set_device_id(device.ordinal);
   }
 }

@@ -20,7 +20,7 @@ GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
     return;
   }
 
-  auto stream_status = stepcast::cuda::stream_create_with_flags(&h2d_stream_, cudaStreamNonBlocking);
+  auto stream_status = cuda::stream_create_with_flags(&h2d_stream_, cudaStreamNonBlocking);
   if (!stream_status.ok()) {
     overall_status_ = stream_status;
     LOG(ERROR) << "Failed to create CUDA stream: " << stream_status;
@@ -31,7 +31,7 @@ GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
 
 GPUMemorySink::~GPUMemorySink() {
   if (stream_created_) {
-    auto destroy_status = stepcast::cuda::stream_destroy(h2d_stream_);
+    auto destroy_status = cuda::stream_destroy(h2d_stream_);
     if (!destroy_status.ok()) {
       LOG(ERROR) << "Failed to destroy CUDA stream: " << destroy_status;
     }
@@ -69,7 +69,7 @@ absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t by
   char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
 
   // Perform async H2D transfer
-  auto copy_status = stepcast::cuda::memcpy_async(gpu_dest, src, bytes, cudaMemcpyHostToDevice, h2d_stream_);
+  auto copy_status = cuda::memcpy_async(gpu_dest, src, bytes, cudaMemcpyHostToDevice, h2d_stream_);
 
   if (!copy_status.ok()) {
     overall_status_ = copy_status;
@@ -105,7 +105,7 @@ absl::Status GPUMemorySink::close() {
   }
 
   // Synchronize stream to ensure all transfers complete
-  auto sync_status = stepcast::cuda::stream_synchronize(h2d_stream_);
+  auto sync_status = cuda::stream_synchronize(h2d_stream_);
   if (!sync_status.ok()) {
     LOG(ERROR) << "Failed to synchronize CUDA stream: " << sync_status;
     return sync_status;

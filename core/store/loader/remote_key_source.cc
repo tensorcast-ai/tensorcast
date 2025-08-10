@@ -146,7 +146,7 @@ bool RemoteKeySource::supports_direct_write() const {
 absl::StatusOr<size_t> RemoteKeySource::read_into(
     uint64_t dest_va_offset,
     size_t bytes,
-    const stepcast::store::DirectWriteToken& token) {
+    const DirectWriteToken& token) {
   if (!options_.comm_engine) {
     return absl::InvalidArgumentError("CommunicateEngine is null");
   }

@@ -290,7 +290,7 @@ std::future<absl::Status> DiskLoader::load_async(
 
       // Metrics: count loaded bytes by source/location
       try {
-        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        static const metrics::Counter kLoaderBytes("loader_bytes_total");
         kLoaderBytes.with_labels({{"source", "disk"}, {"location", "CPU"}}).inc(static_cast<double>(model_size_));
       } catch (...) {
       }
@@ -388,7 +388,7 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
             for (const auto& r : ranges)
               bytes_sum += r.second;
             try {
-              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              static const metrics::Counter kLoaderBytes("loader_bytes_total");
               kLoaderBytes.with_labels({{"source", "disk"}, {"location", "GPU"}}).inc(static_cast<double>(bytes_sum));
             } catch (...) {
             }
@@ -430,7 +430,7 @@ std::future<absl::Status> DiskLoader::load_chunks_async(
             for (const auto& r : ranges)
               bytes_sum += r.second;
             try {
-              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              static const metrics::Counter kLoaderBytes("loader_bytes_total");
               kLoaderBytes.with_labels({{"source", "disk"}, {"location", "CPU"}}).inc(static_cast<double>(bytes_sum));
             } catch (...) {
             }

@@ -58,11 +58,11 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
   auto info = std::make_shared<DvmpRegionState>();
   info->base = addr;
   info->bytes = bytes;
-  info->metadata = std::make_unique<stepcast::store::ChunkMeta[]>(num_chunks);
+  info->metadata = std::make_unique<store::ChunkMeta[]>(num_chunks);
   info->chunk_count = num_chunks;
   info->pin_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
   for (size_t i = 0; i < num_chunks; ++i) {
-    info->metadata[i].state.store(stepcast::store::ChunkState::COLD, std::memory_order_relaxed);
+    info->metadata[i].state.store(store::ChunkState::COLD, std::memory_order_relaxed);
     info->metadata[i].last_touch_s.store(0, std::memory_order_relaxed);
     info->pin_refcnt[i].store(0, std::memory_order_relaxed);
   }
@@ -74,8 +74,7 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
   return region;
 }
 
-absl::Span<const stepcast::store::ChunkMeta> DistributedMemoryPool::chunk_snapshot(
-    std::string_view model_id) const noexcept {
+absl::Span<const store::ChunkMeta> DistributedMemoryPool::chunk_snapshot(std::string_view model_id) const noexcept {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return {};
@@ -373,7 +372,7 @@ absl::Status DistributedMemoryPool::write_at(
   }
   // Metrics: bytes written
   try {
-    static const stepcast::metrics::Counter kWriteBytes("dvmp_write_bytes_total");
+    static const metrics::Counter kWriteBytes("dvmp_write_bytes_total");
     kWriteBytes.inc(static_cast<double>(bytes));
   } catch (...) {
   }
@@ -432,7 +431,7 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
   }
   // Metrics: bytes mapped
   try {
-    static const stepcast::metrics::Counter kMapBytes("dvmp_map_bytes_total");
+    static const metrics::Counter kMapBytes("dvmp_map_bytes_total");
     uint64_t total = 0;
     for (const auto& s : segs) {
       total += s.length;
@@ -564,7 +563,7 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const stepcast::metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
+    static const metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
     kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
   } catch (...) {
   }

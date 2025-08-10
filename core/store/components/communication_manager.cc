@@ -12,14 +12,14 @@ namespace stepcast::store {
 //-------------------------------------------------------------------------
 // Constructor with externally provided CommunicateEngine (Phase-3 DI)
 //-------------------------------------------------------------------------
-CommunicationManager::CommunicationManager(std::shared_ptr<stepcast::communicator::CommunicateEngine> external_engine)
+CommunicationManager::CommunicationManager(std::shared_ptr<communicator::CommunicateEngine> external_engine)
     : enabled_(external_engine != nullptr), comm_engine_(std::move(external_engine)) {}
 
 absl::Status CommunicationManager::initialize(const std::string& listen_addr, uint16_t listen_port, bool enable_rdma) {
   // Phase-5: RDMA enable/disable is now explicitly provided by configuration.
   //          Environment variables are no longer consulted at this layer.
 
-  comm_engine_ = std::make_shared<stepcast::communicator::CommunicateEngine>(enable_rdma);
+  comm_engine_ = std::make_shared<communicator::CommunicateEngine>(enable_rdma);
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -58,8 +58,7 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
         key,
         reinterpret_cast<uint64_t>(buffer_addresses[i]),
         buffer_sizes[i],
-        device_id >= 0 ? stepcast::communicator::COMMUNICATE_ENGINE_DEV_GPU
-                       : stepcast::communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        device_id >= 0 ? communicator::COMMUNICATE_ENGINE_DEV_GPU : communicator::COMMUNICATE_ENGINE_DEV_CPU,
         device_id >= 0 ? device_id : 0);
 
     if (!status.ok()) {
@@ -77,8 +76,8 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
   info.buffer_sizes = buffer_sizes;
   info.remote_memory_keys = remote_keys;
   info.device_id = device_id;
-  info.comm_dev_type = device_id >= 0 ? stepcast::communicator::COMMUNICATE_ENGINE_DEV_GPU
-                                      : stepcast::communicator::COMMUNICATE_ENGINE_DEV_CPU;
+  info.comm_dev_type =
+      device_id >= 0 ? communicator::COMMUNICATE_ENGINE_DEV_GPU : communicator::COMMUNICATE_ENGINE_DEV_CPU;
 
   // Calculate total model size
   info.model_size = 0;

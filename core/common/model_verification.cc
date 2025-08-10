@@ -207,12 +207,11 @@ absl::Status ModelVerifier::read_data_chunk(
 
     if (device_id >= 0) {
       // GPU memory copy - set device first for safety
-      auto set_device_status = stepcast::cuda::set_device(device_id);
+      auto set_device_status = cuda::set_device(device_id);
       if (!set_device_status.ok()) {
         return set_device_status;
       }
-      auto memcpy_status =
-          stepcast::cuda::memcpy(dest_ptr + bytes_read, src_ptr, bytes_to_read, cudaMemcpyDeviceToHost);
+      auto memcpy_status = cuda::memcpy(dest_ptr + bytes_read, src_ptr, bytes_to_read, cudaMemcpyDeviceToHost);
       if (!memcpy_status.ok()) {
         return memcpy_status;
       }
@@ -274,7 +273,7 @@ absl::StatusOr<ModelVerificationInfo> ModelVerifier::generate_verification_info(
 
   // Set CUDA device if needed
   if (device_id >= 0) {
-    auto set_device_status = stepcast::cuda::set_device(device_id);
+    auto set_device_status = cuda::set_device(device_id);
     if (!set_device_status.ok()) {
       return set_device_status;
     }
@@ -369,7 +368,7 @@ absl::Status ModelVerifier::verify_key_points(
 
   // Set CUDA device if needed
   if (device_id >= 0) {
-    auto set_device_status = stepcast::cuda::set_device(device_id);
+    auto set_device_status = cuda::set_device(device_id);
     if (!set_device_status.ok()) {
       return set_device_status;
     }

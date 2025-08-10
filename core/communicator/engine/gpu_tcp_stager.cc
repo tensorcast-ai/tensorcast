@@ -30,19 +30,16 @@ void ScopedStagedBuffer::reset() {
   size_ = 0;
 }
 
-GpuTcpStager::GpuTcpStager(
-    size_t chunk_size,
-    size_t num_chunks,
-    std::shared_ptr<stepcast::store::PinnedMemoryPool> pool)
+GpuTcpStager::GpuTcpStager(size_t chunk_size, size_t num_chunks, std::shared_ptr<store::PinnedMemoryPool> pool)
     : chunk_size_(chunk_size), num_chunks_(num_chunks), memory_pool_(pool) {
   // Create memory pool if not provided
   if (!memory_pool_) {
     // Create a pool with enough memory for all chunks
-    memory_pool_ = std::make_shared<stepcast::store::PinnedMemoryPool>(chunk_size_ * num_chunks_, chunk_size_);
+    memory_pool_ = std::make_shared<store::PinnedMemoryPool>(chunk_size_ * num_chunks_, chunk_size_);
   }
 
   // Create streaming buffer
-  streaming_buffer_ = std::make_unique<stepcast::store::StreamingPinnedBuffer>(num_chunks_, chunk_size_, memory_pool_);
+  streaming_buffer_ = std::make_unique<store::StreamingPinnedBuffer>(num_chunks_, chunk_size_, memory_pool_);
 
   // Initialize streaming buffer
   auto status = streaming_buffer_->initialize();
@@ -53,7 +50,7 @@ GpuTcpStager::GpuTcpStager(
   }
 
   // Create CUDA stream for async copies
-  auto stream_status = stepcast::cuda::stream_create(&copy_stream_);
+  auto stream_status = cuda::stream_create(&copy_stream_);
   if (!stream_status.ok()) {
     LOG(ERROR) << "Failed to create CUDA stream: " << stream_status.message();
     CHECK_OK(streaming_buffer_->release());
@@ -65,18 +62,18 @@ GpuTcpStager::GpuTcpStager(
   // Pre-create CUDA events
   cuda_events_.resize(num_chunks_);
   for (size_t i = 0; i < num_chunks_; ++i) {
-    auto event_status = stepcast::cuda::event_create_with_flags(&cuda_events_[i], cudaEventDisableTiming);
+    auto event_status = cuda::event_create_with_flags(&cuda_events_[i], cudaEventDisableTiming);
     if (!event_status.ok()) {
       LOG(ERROR) << "Failed to create CUDA event: " << event_status.message();
       // Clean up
       for (size_t j = 0; j < i; ++j) {
-        auto destroy_status = stepcast::cuda::event_destroy(cuda_events_[j]);
+        auto destroy_status = cuda::event_destroy(cuda_events_[j]);
         if (!destroy_status.ok()) {
           LOG(ERROR) << "Failed to destroy CUDA event during cleanup: " << destroy_status.message();
         }
       }
       cuda_events_.clear();
-      auto stream_destroy_status = stepcast::cuda::stream_destroy(copy_stream_);
+      auto stream_destroy_status = cuda::stream_destroy(copy_stream_);
       if (!stream_destroy_status.ok()) {
         LOG(ERROR) << "Failed to destroy CUDA stream during cleanup: " << stream_destroy_status.message();
       }
@@ -94,11 +91,11 @@ GpuTcpStager::GpuTcpStager(
 GpuTcpStager::~GpuTcpStager() {
   // Wait for all pending copies to complete
   if (copy_stream_) {
-    auto sync_status = stepcast::cuda::stream_synchronize(copy_stream_);
+    auto sync_status = cuda::stream_synchronize(copy_stream_);
     if (!sync_status.ok()) {
       LOG(ERROR) << "Failed to synchronize CUDA stream during destruction: " << sync_status.message();
     }
-    auto destroy_status = stepcast::cuda::stream_destroy(copy_stream_);
+    auto destroy_status = cuda::stream_destroy(copy_stream_);
     if (!destroy_status.ok()) {
       LOG(ERROR) << "Failed to destroy CUDA stream during destruction: " << destroy_status.message();
     }
@@ -107,7 +104,7 @@ GpuTcpStager::~GpuTcpStager() {
   // Destroy CUDA events
   for (auto* event : cuda_events_) {
     if (event) {
-      auto destroy_status = stepcast::cuda::event_destroy(event);
+      auto destroy_status = cuda::event_destroy(event);
       if (!destroy_status.ok()) {
         LOG(ERROR) << "Failed to destroy CUDA event during destruction: " << destroy_status.message();
       }
@@ -195,7 +192,7 @@ absl::StatusOr<void*> GpuTcpStager::stage(
   }
 
   // For synchronous interface, wait for completion
-  auto sync_status = stepcast::cuda::event_synchronize(event);
+  auto sync_status = cuda::event_synchronize(event);
   if (!sync_status.ok()) {
     // Clean up on error
     absl::MutexLock lock(&mutex_);
@@ -298,7 +295,7 @@ absl::StatusOr<void*> GpuTcpStager::wait_staging_complete(int slot_id) {
   }
 
   // Wait for the copy to complete
-  auto event_sync_status = stepcast::cuda::event_synchronize(op.copy_complete_event);
+  auto event_sync_status = cuda::event_synchronize(op.copy_complete_event);
   if (!event_sync_status.ok()) {
     // Clean up on error
     absl::MutexLock lock(&mutex_);
@@ -372,13 +369,13 @@ absl::Status GpuTcpStager::perform_staging_copy(
 
   // Perform async GPU->CPU copy
   void* gpu_ptr = reinterpret_cast<void*>(tensor->get_uint64_addr() + offset);
-  auto copy_status = stepcast::cuda::memcpy_async(dest_ptr, gpu_ptr, bytes, cudaMemcpyDeviceToHost, copy_stream_);
+  auto copy_status = cuda::memcpy_async(dest_ptr, gpu_ptr, bytes, cudaMemcpyDeviceToHost, copy_stream_);
   if (!copy_status.ok()) {
     return copy_status;
   }
 
   // Record event for tracking copy completion
-  auto record_status = stepcast::cuda::event_record(event, copy_stream_);
+  auto record_status = cuda::event_record(event, copy_stream_);
   if (!record_status.ok()) {
     return record_status;
   }

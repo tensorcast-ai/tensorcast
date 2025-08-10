@@ -45,8 +45,7 @@ class DirectWritableSink {
   // Plan a direct write token for the given destination VA ranges.
   // The returned token authorizes writing into these ranges and carries
   // any required keepalive resources (e.g., DVMP pin leases).
-  virtual absl::StatusOr<stepcast::store::DirectWriteToken> plan_direct_write(
-      absl::Span<const stepcast::store::VaRange> ranges) = 0;
+  virtual absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) = 0;
 };
 
 } // namespace stepcast::store::loader

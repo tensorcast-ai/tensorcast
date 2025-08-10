@@ -106,7 +106,7 @@ net_dev_t RdmaContext::get_best_dev(int gpu_id) {
   char pci_path[512] = {0};
   {
     cudaDeviceProp device_prop;
-    auto status = stepcast::cuda::get_device_properties(gpu_id, &device_prop);
+    auto status = cuda::get_device_properties(gpu_id, &device_prop);
     if (!status.ok()) {
       LOG(WARNING) << "Unable to get CUDA device properties for device " << gpu_id << ": " << status;
       return nullptr;

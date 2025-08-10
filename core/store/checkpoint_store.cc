@@ -150,7 +150,7 @@ std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() c
         const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
         if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
           cudaPointerAttributes attrs;
-          auto attr_status = stepcast::cuda::pointer_get_attributes_full(gpu_ptrs[0], &attrs);
+          auto attr_status = cuda::pointer_get_attributes_full(gpu_ptrs[0], &attrs);
           if (attr_status.ok() && attrs.type == cudaMemoryTypeDevice) {
             auto gpu_info_result = device_manager_->get_gpu_info(attrs.device);
             if (gpu_info_result.ok()) {
@@ -779,10 +779,6 @@ absl::Status try_evict_gpu_memory_impl(
     MetricsCollector* metrics,
     int device_id,
     size_t required_bytes) {
-  using ::stepcast::DeviceType;
-  using stepcast::store::MemoryState;
-  using stepcast::store::ModelLocation;
-
   // Query initial free memory so we can track progress.
   auto free_before_or = device_manager.get_free_memory(device_id);
   if (!free_before_or.ok()) {
@@ -909,6 +905,7 @@ absl::StatusOr<CommRegistrationInfo> CheckpointStore::enable_remote_instance_acc
   if (!model_res.ok()) {
     return absl::NotFoundError("Model instance not found");
   }
+  // Delegates to Model which uses chunk-scoped export APIs under the hood.
   return model_res.value()->enable_remote_memory_access(location, comm_manager_->get_engine());
 }
 
@@ -920,6 +917,7 @@ absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& 
   if (!model_res.ok()) {
     return absl::NotFoundError("Model instance not found");
   }
+  // Delegates to Model which uses chunk-scoped unexport APIs under the hood.
   return model_res.value()->disable_remote_memory_access(location, comm_manager_->get_engine());
 }
 

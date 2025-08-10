@@ -151,12 +151,12 @@ absl::Status StreamingTensorWriter::copy_gpu_to_buffer(
     cudaStream_t stream) {
   absl::Status copy_status;
   if (stream) {
-    copy_status = stepcast::cuda::memcpy_async(buffer, gpu_data, size, cudaMemcpyDeviceToHost, stream);
+    copy_status = cuda::memcpy_async(buffer, gpu_data, size, cudaMemcpyDeviceToHost, stream);
     if (copy_status.ok()) {
-      copy_status = stepcast::cuda::stream_synchronize(stream); // Wait for copy to complete
+      copy_status = cuda::stream_synchronize(stream); // Wait for copy to complete
     }
   } else {
-    copy_status = stepcast::cuda::memcpy(buffer, gpu_data, size, cudaMemcpyDeviceToHost);
+    copy_status = cuda::memcpy(buffer, gpu_data, size, cudaMemcpyDeviceToHost);
   }
 
   if (!copy_status.ok()) {

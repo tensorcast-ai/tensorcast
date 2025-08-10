@@ -193,7 +193,7 @@ std::future<absl::Status> P2PLoader::load_async(
 
       // Metrics: bytes loaded via P2P to GPU
       try {
-        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        static const metrics::Counter kLoaderBytes("loader_bytes_total");
         kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(source_.size_bytes));
       } catch (...) {
       }
@@ -250,7 +250,7 @@ std::future<absl::Status> P2PLoader::load_async(
 
       // Metrics: bytes loaded via P2P to CPU
       try {
-        static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+        static const metrics::Counter kLoaderBytes("loader_bytes_total");
         kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(source_.size_bytes));
       } catch (...) {
       }
@@ -362,7 +362,7 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             for (const auto& r : ranges)
               bytes_sum += r.second;
             try {
-              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              static const metrics::Counter kLoaderBytes("loader_bytes_total");
               kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "GPU"}}).inc(static_cast<double>(bytes_sum));
             } catch (...) {
             }
@@ -409,7 +409,7 @@ std::future<absl::Status> P2PLoader::load_chunks_async(
             for (const auto& r : ranges)
               bytes_sum += r.second;
             try {
-              static const stepcast::metrics::Counter kLoaderBytes("loader_bytes_total");
+              static const metrics::Counter kLoaderBytes("loader_bytes_total");
               kLoaderBytes.with_labels({{"source", "p2p"}, {"location", "CPU"}}).inc(static_cast<double>(bytes_sum));
             } catch (...) {
             }

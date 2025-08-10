@@ -47,7 +47,7 @@ PinnedMemoryPool::PinnedMemoryPool(size_t total_size, size_t chunk_size) : chunk
       LOG(FATAL) << "aligned_alloc failed for size " << chunk_size_;
     }
 
-    auto register_status = stepcast::cuda::host_register(buffer, chunk_size_, cudaHostRegisterDefault);
+    auto register_status = cuda::host_register(buffer, chunk_size_, cudaHostRegisterDefault);
     if (!register_status.ok()) {
       LOG(FATAL) << "PinnedMemoryPool: cudaHostRegister failed: " << register_status.message();
     }
@@ -58,7 +58,7 @@ PinnedMemoryPool::PinnedMemoryPool(size_t total_size, size_t chunk_size) : chunk
 
 PinnedMemoryPool::~PinnedMemoryPool() {
   for (char* buffer : pool_) {
-    auto unregister_status = stepcast::cuda::host_unregister(buffer);
+    auto unregister_status = cuda::host_unregister(buffer);
     if (!unregister_status.ok()) {
       LOG(ERROR) << "Failed to unregister CUDA host memory: " << unregister_status.message();
     }

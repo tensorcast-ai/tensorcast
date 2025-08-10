@@ -116,13 +116,13 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
   // --- Create Model Instance ---
   // Build InstanceKey for this model/device
   DeviceKey dev_key;
-  if (config.device_type == ::stepcast::DeviceType::GPU) {
+  if (config.device_type == DeviceType::GPU) {
     // Explicit GPU target. Fall back to ordinal 0 if not provided.
-    dev_key.type = ::stepcast::DeviceType::GPU;
+    dev_key.type = DeviceType::GPU;
     dev_key.ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
   } else {
     // Default / explicit CPU target (or unsupported type which we map to CPU for now).
-    dev_key.type = ::stepcast::DeviceType::CPU;
+    dev_key.type = DeviceType::CPU;
     dev_key.ordinal = -1;
   }
 
@@ -522,14 +522,21 @@ MemoryManager& Model::get_memory_manager() const {
 absl::StatusOr<CommRegistrationInfo> Model::enable_remote_memory_access(
     ModelLocation location,
     stepcast::communicator::CommunicateEngine& comm_engine) {
-  // Mutex potentially not needed here IF MemoryManager::enable_remote_memory_access is fully thread-safe
-  // However, accessing memory_manager_ itself might warrant the lock.
   absl::MutexLock lock(&mutex_);
   if (!memory_manager_) {
     return absl::InternalError("MemoryManager is null.");
   }
 
-  return memory_manager_->enable_remote_memory_access(location, comm_engine);
+  // Build full chunk list using DVMP metadata snapshot.
+  absl::Span<const store::ChunkMeta> meta = memory_manager_->chunk_snapshot();
+  std::vector<uint32_t> chunks;
+  chunks.reserve(meta.size());
+  for (uint32_t i = 0; i < meta.size(); ++i) {
+    chunks.push_back(i);
+  }
+
+  // Delegate to chunk-scoped export (also handles GPU with coalesced ranges)
+  return memory_manager_->export_chunks_for_p2p(location, chunks, comm_engine);
 }
 
 absl::StatusOr<ModelVerificationInfo> Model::generate_verification_info(ModelLocation location) const {
@@ -671,7 +678,9 @@ absl::Status Model::disable_remote_memory_access(
     return absl::InternalError("MemoryManager is null.");
   }
 
-  return memory_manager_->disable_remote_memory_access(location, comm_engine);
+  // Use chunk-scoped unexport. Chunks parameter is currently ignored internally.
+  std::vector<uint32_t> empty;
+  return memory_manager_->unexport_chunks_for_p2p(location, empty, comm_engine);
 }
 
 absl::Status Model::copy_from(const Model& src) {

@@ -12,7 +12,7 @@ namespace stepcast::store::loader {
 // Adapter to make StreamingPinnedBuffer implement the BufferPool interface
 class StreamingBufferAdapter : public BufferPool {
  public:
-  explicit StreamingBufferAdapter(std::shared_ptr<::stepcast::store::StreamingPinnedBuffer> buffer);
+  explicit StreamingBufferAdapter(std::shared_ptr<StreamingPinnedBuffer> buffer);
   ~StreamingBufferAdapter() override = default;
 
   [[nodiscard]] size_t chunk_size() const override;
@@ -32,12 +32,12 @@ class StreamingBufferAdapter : public BufferPool {
   void* get_chunk_data_ptr(int slot_id) override;
 
   // Get the underlying buffer for direct access if needed
-  ::stepcast::store::StreamingPinnedBuffer* get_buffer() {
+  StreamingPinnedBuffer* get_buffer() {
     return buffer_.get();
   }
 
  private:
-  std::shared_ptr<::stepcast::store::StreamingPinnedBuffer> buffer_;
+  std::shared_ptr<StreamingPinnedBuffer> buffer_;
 };
 
 } // namespace stepcast::store::loader

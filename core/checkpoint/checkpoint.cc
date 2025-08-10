@@ -174,7 +174,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
 
       cudaPointerAttributes attr;
       auto attr_status =
-          stepcast::cuda::pointer_get_attributes_full(const_cast<void*>(static_cast<const void*>(data_ptr)), &attr);
+          cuda::pointer_get_attributes_full(const_cast<void*>(static_cast<const void*>(data_ptr)), &attr);
       if (attr_status.ok()) {
 #if CUDART_VERSION >= 10000
         is_device_ptr = (attr.type == cudaMemoryTypeDevice);
@@ -183,7 +183,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
 #endif
       } else {
         // Clear sticky error to avoid poisoning later CUDA calls (and reset).
-        ABSL_CHECK_OK(stepcast::cuda::get_last_error());
+        ABSL_CHECK_OK(cuda::get_last_error());
       }
 
       const char* host_src_ptr = data_ptr;
@@ -191,7 +191,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
 
       if (is_device_ptr) {
         host_buffer = std::make_unique<char[]>(write_size);
-        auto copy_status = stepcast::cuda::memcpy(host_buffer.get(), data_ptr, write_size, cudaMemcpyDeviceToHost);
+        auto copy_status = cuda::memcpy(host_buffer.get(), data_ptr, write_size, cudaMemcpyDeviceToHost);
         if (!copy_status.ok()) {
           LOG(FATAL) << "Failed to copy tensor data from GPU to host: " << copy_status.message();
         }
@@ -223,7 +223,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
  */
 ModelVerificationInfo generate_model_verification_info_from_disk(
     const std::string& model_path,
-    stepcast::store::VerificationLevel max_level) {
+    VerificationLevel max_level) {
   // First calculate the actual model size from tensor_index.json
   uint64_t actual_model_size = calculate_actual_model_size(model_path);
 
@@ -434,9 +434,9 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         auto deleter = [from_ipc_shm](void* ptr) {
           absl::Status status;
           if (from_ipc_shm) {
-            status = stepcast::cuda::close_ipc_mem_handle(ptr);
+            status = cuda::close_ipc_mem_handle(ptr);
           } else {
-            status = stepcast::cuda::free(ptr);
+            status = cuda::free(ptr);
           }
 
           if (!status.ok()) {
@@ -601,7 +601,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
         }
 
         // Copy pinned buffer to GPU memory (synchronous copy is sufficient here)
-        auto copy_status = stepcast::cuda::memcpy(
+        auto copy_status = cuda::memcpy(
             reinterpret_cast<void*>(gpu_base_ptr + current_global_offset), host_buf, to_read, cudaMemcpyHostToDevice);
 
         if (!copy_status.ok()) {
@@ -730,7 +730,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
 
 std::unordered_map<std::string, int> get_gpu_uuid() {
   int device_count = 0;
-  auto device_count_status = stepcast::cuda::get_device_count(&device_count);
+  auto device_count_status = cuda::get_device_count(&device_count);
   if (!device_count_status.ok()) {
     LOG(ERROR) << "Failed to get device count: " << device_count_status.message();
     return {};
@@ -740,7 +740,7 @@ std::unordered_map<std::string, int> get_gpu_uuid() {
 
   for (int dev_id = 0; dev_id < device_count; ++dev_id) {
     cudaDeviceProp props;
-    auto props_status = stepcast::cuda::get_device_properties(dev_id, &props);
+    auto props_status = cuda::get_device_properties(dev_id, &props);
     if (!props_status.ok()) {
       LOG(ERROR) << "Failed to get device properties for device " << dev_id << ": " << props_status.message();
       continue;
@@ -777,13 +777,13 @@ std::unordered_map<std::string, int> get_gpu_uuid() {
 
 std::uint64_t allocate_cuda_memory(int device_id, size_t tensor_size) {
   void* ptr = nullptr;
-  auto set_device_status = stepcast::cuda::set_device(device_id);
+  auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
     LOG(ERROR) << "Failed to set CUDA device " << device_id << ": " << set_device_status.message();
     return 0;
   }
 
-  auto malloc_status = stepcast::cuda::malloc(&ptr, tensor_size);
+  auto malloc_status = cuda::malloc(&ptr, tensor_size);
   if (!malloc_status.ok()) {
     LOG(ERROR) << "Failed to allocate CUDA memory: " << malloc_status.message();
     return 0;
@@ -794,13 +794,13 @@ std::uint64_t allocate_cuda_memory(int device_id, size_t tensor_size) {
 
 std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
   cudaIpcMemHandle_t handle;
-  auto set_device_status = stepcast::cuda::set_device(device_id);
+  auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
     LOG(ERROR) << "Failed to set CUDA device " << device_id << ": " << set_device_status.message();
     return "";
   }
 
-  auto ipc_status = stepcast::cuda::get_ipc_mem_handle(&handle, reinterpret_cast<void*>(memory_ptr));
+  auto ipc_status = cuda::get_ipc_mem_handle(&handle, reinterpret_cast<void*>(memory_ptr));
   if (!ipc_status.ok()) {
     LOG(ERROR) << "Failed to get IPC memory handle: " << ipc_status.message();
     return "";
@@ -813,13 +813,13 @@ absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::stri
   cudaIpcMemHandle_t ipc_handle;
   memcpy(&ipc_handle, cuda_ipc_handle.data(), sizeof(cudaIpcMemHandle_t));
 
-  auto set_device_status = stepcast::cuda::set_device(device_id);
+  auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
     return set_device_status;
   }
 
   void* opened_ptr = nullptr;
-  auto ipc_open_status = stepcast::cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
+  auto ipc_open_status = cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
   if (!ipc_open_status.ok()) {
     return ipc_open_status;
   }
@@ -832,12 +832,12 @@ absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::stri
 }
 
 absl::Status close_cuda_memory_handle(int device_id, std::uint64_t cuda_ipc_ptr) {
-  auto set_device_status = stepcast::cuda::set_device(device_id);
+  auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
     return set_device_status;
   }
 
-  auto close_status = stepcast::cuda::close_ipc_mem_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
+  auto close_status = cuda::close_ipc_mem_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
   if (!close_status.ok()) {
     return close_status;
   }

@@ -20,7 +20,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
     // Per‑model DVMP region handle (preferred for writes)
     memory::DistributedMemoryPool::DvmpRegion region;
     // Optional: memory manager for capability planning (direct writes)
-    std::shared_ptr<store::MemoryManager> memory_manager;
+    std::shared_ptr<MemoryManager> memory_manager;
     uint64_t total_size = 0;
   };
 
@@ -34,8 +34,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
   }
 
   // Capability: plan direct writes for provided ranges via MemoryManager
-  absl::StatusOr<stepcast::store::DirectWriteToken> plan_direct_write(
-      absl::Span<const stepcast::store::VaRange> ranges) override {
+  absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) override {
     if (!options_.memory_manager) {
       return absl::FailedPreconditionError("DVMPRegionSink: memory_manager is null for plan_direct_write");
     }

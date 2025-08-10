@@ -189,20 +189,11 @@ class MemoryManager {
   /**
    * @brief Registers the loaded memory (PAGEABLE_CPU or GPU) for communication access via the communicator engine.
    * Requires the memory to be in the LOADED state at the specified location.
+   * NOTE: Deprecated. Use chunk-scoped APIs `export_chunks_for_p2p`/`unexport_chunks_for_p2p`.
    * @param location The memory location to register (ModelLocation::PAGEABLE_CPU or ModelLocation::GPU).
    * @param comm_engine The communicator engine to use for communication registration.
    * @return absl::StatusOr<CommRegistrationInfo> Information needed by remote peers to access the memory, or an error.
    */
-  absl::StatusOr<CommRegistrationInfo> enable_remote_memory_access(
-      ModelLocation location,
-      stepcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Checks if communication registration has been done for the specified location.
-   * @param location The memory location to check (ModelLocation::PAGEABLE_CPU or ModelLocation::GPU).
-   * @return bool True if the location is already registered for communication, false otherwise.
-   */
-  bool is_comm_registered(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets the size of individual chunks used for CPU pinned memory.
@@ -272,10 +263,7 @@ class MemoryManager {
    */
   absl::Status set_state(ModelLocation location, MemoryState new_state) ABSL_LOCKS_EXCLUDED(mutex_);
 
-  absl::Status disable_remote_memory_access(ModelLocation location, communicator::CommunicateEngine& comm_engine)
-      ABSL_LOCKS_EXCLUDED(mutex_);
-
-  // Chunk-scoped export APIs using DVMP pin leases
+  // Chunk-scoped export APIs using DVMP pin leases (now supports CPU and GPU)
   absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
       ModelLocation location,
       absl::Span<const uint32_t> chunks,

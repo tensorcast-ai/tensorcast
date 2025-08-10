@@ -139,7 +139,7 @@ class CommunicateEngine {
   std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
 
   // Shared pinned memory pool for GPU operations
-  std::shared_ptr<stepcast::store::PinnedMemoryPool> gpu_memory_pool_;
+  std::shared_ptr<store::PinnedMemoryPool> gpu_memory_pool_;
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;

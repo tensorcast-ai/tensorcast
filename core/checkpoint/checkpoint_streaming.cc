@@ -86,7 +86,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
 
   // Create CUDA stream for async operations
   cudaStream_t stream = nullptr;
-  auto stream_status = stepcast::cuda::stream_create(&stream);
+  auto stream_status = cuda::stream_create(&stream);
   if (!stream_status.ok()) {
     LOG(WARNING) << "Streaming save - stream_create failed (will fallback to sync transfers): "
                  << stream_status.message();
@@ -109,8 +109,8 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
       // Detect whether the pointer is device (CUDA) memory or host
       bool is_device_ptr = false;
       cudaPointerAttributes attr;
-      auto attr_status = stepcast::cuda::pointer_get_attributes_full(
-          const_cast<void*>(reinterpret_cast<const void*>(data_ptr)), &attr);
+      auto attr_status =
+          cuda::pointer_get_attributes_full(const_cast<void*>(reinterpret_cast<const void*>(data_ptr)), &attr);
       if (attr_status.ok()) {
 #if CUDART_VERSION >= 10000
         is_device_ptr = (attr.type == cudaMemoryTypeDevice);
@@ -118,7 +118,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
         is_device_ptr = (attr.memoryType == cudaMemoryTypeDevice);
 #endif
       } else {
-        ABSL_CHECK_OK(stepcast::cuda::get_last_error());
+        ABSL_CHECK_OK(cuda::get_last_error());
       }
 
       auto offset_result = writer.write_tensor(data_ptr, size_to_write, is_device_ptr, stream);
@@ -140,7 +140,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
 
   // Cleanup CUDA stream
   if (stream) {
-    auto destroy_status = stepcast::cuda::stream_destroy(stream);
+    auto destroy_status = cuda::stream_destroy(stream);
     if (!destroy_status.ok()) {
       LOG(ERROR) << "Failed to destroy CUDA stream: " << destroy_status.message();
     }

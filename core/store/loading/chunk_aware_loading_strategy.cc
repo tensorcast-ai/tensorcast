@@ -285,7 +285,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
 
   // Create CUDA stream for async transfers
   cudaStream_t stream;
-  auto stream_status = stepcast::cuda::stream_create(&stream);
+  auto stream_status = cuda::stream_create(&stream);
   if (!stream_status.ok()) {
     return stream_status;
   }
@@ -301,7 +301,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     void* src = static_cast<char*>(cpu_base) + offset;
     void* dst = static_cast<char*>(gpu_base) + offset;
 
-    auto cuda_status = stepcast::cuda::memcpy_async(dst, src, size, cudaMemcpyHostToDevice, stream);
+    auto cuda_status = cuda::memcpy_async(dst, src, size, cudaMemcpyHostToDevice, stream);
 
     if (!cuda_status.ok()) {
       copy_status = cuda_status;
@@ -315,14 +315,14 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
 
   // Synchronize stream
   if (copy_status.ok()) {
-    auto sync_status = stepcast::cuda::stream_synchronize(stream);
+    auto sync_status = cuda::stream_synchronize(stream);
     if (!sync_status.ok()) {
       copy_status = sync_status;
     }
   }
 
   // Cleanup stream
-  auto destroy_status = stepcast::cuda::stream_destroy(stream);
+  auto destroy_status = cuda::stream_destroy(stream);
   if (!destroy_status.ok() && copy_status.ok()) {
     copy_status = destroy_status;
   }
