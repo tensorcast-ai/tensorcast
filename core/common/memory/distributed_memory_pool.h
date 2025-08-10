@@ -127,7 +127,7 @@ class DistributedMemoryPool {
       std::optional<std::chrono::milliseconds> timeout_ms);
 
  private:
-  struct ModelInfo {
+  struct DvmpRegionState {
     void* base{nullptr};
     size_t bytes{0};
     std::unique_ptr<stepcast::store::ChunkMeta[]> metadata;
@@ -140,14 +140,14 @@ class DistributedMemoryPool {
   };
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, std::shared_ptr<ModelInfo>> models_;
+  std::unordered_map<std::string, std::shared_ptr<DvmpRegionState>> models_;
 
   // Helpers for PinLease
-  void release_pins_unlocked(ModelInfo& info, absl::Span<const uint32_t> chunks);
+  static void release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks);
 
   // Lookup helper to reduce boilerplate in public methods. Returns shared_ptr
   // to ModelInfo or NotFound status.
-  absl::StatusOr<std::shared_ptr<ModelInfo>> get_model_info(std::string_view model_id) const {
+  absl::StatusOr<std::shared_ptr<DvmpRegionState>> get_model_info(std::string_view model_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = models_.find(std::string(model_id));
     if (it == models_.end() || !it->second) {

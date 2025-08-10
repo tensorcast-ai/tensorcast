@@ -273,6 +273,7 @@ For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 - **Immutability**: Prefer `const` and `constexpr`
 - **RAII**: Always use for resource management
 - **Logging**: Use `LOG` for logging, `CHECK` for assertions, `VLOG` for verbose logging, `PLOG` for error messages with `errno`
+- Statement should be inside braces
 
 #### Best Practices
 - **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`

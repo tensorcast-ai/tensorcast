@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -23,11 +24,12 @@ namespace stepcast::memory {
 DistributedMemoryPool::~DistributedMemoryPool() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& [id, info_sp] : models_) {
-    if (!info_sp)
+    if (!info_sp) {
       continue;
+    }
     if (info_sp->base != nullptr && info_sp->bytes > 0) {
       if (munmap(info_sp->base, info_sp->bytes) != 0) {
-        LOG(WARNING) << "munmap failed for model " << id << ": " << std::strerror(errno);
+        PLOG(WARNING) << "munmap failed for model " << id;
       }
     }
   }
@@ -53,7 +55,7 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
   }
 
   const size_t num_chunks = (bytes + kChunk - 1) / kChunk;
-  auto info = std::make_shared<ModelInfo>();
+  auto info = std::make_shared<DvmpRegionState>();
   info->base = addr;
   info->bytes = bytes;
   info->metadata = std::make_unique<stepcast::store::ChunkMeta[]>(num_chunks);
@@ -75,11 +77,13 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
 absl::Span<const stepcast::store::ChunkMeta> DistributedMemoryPool::chunk_snapshot(
     std::string_view model_id) const noexcept {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return {};
+  }
   const auto& info_sp = *info_sp_or;
-  if (!info_sp || info_sp->metadata == nullptr)
+  if (!info_sp || info_sp->metadata == nullptr) {
     return {};
+  }
   return {info_sp->metadata.get(), info_sp->chunk_count};
 }
 
@@ -90,10 +94,11 @@ constexpr int kMadviseFlagsFree = MADV_FREE; // Hints that pages can be reclaime
 
 absl::Status DistributedMemoryPool::lock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
+  }
   const std::string key(model_id);
-  ModelInfo& info = **info_sp_or;
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
 
   if (idx.empty()) {
@@ -175,9 +180,10 @@ absl::Status DistributedMemoryPool::unlock_chunks(
     absl::Span<const uint32_t> idx,
     bool copied_gpu) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
   for (uint32_t i : idx) {
@@ -194,7 +200,7 @@ absl::Status DistributedMemoryPool::unlock_chunks(
     void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
     int rc = ::munlock(addr, kChunk);
     if (rc != 0) {
-      LOG(WARNING) << "munlock failed for chunk " << i << ": " << std::strerror(errno);
+      PLOG(WARNING) << "munlock failed for chunk " << i;
     }
 
     meta.last_touch_s.store(now_s(), std::memory_order_relaxed);
@@ -204,9 +210,10 @@ absl::Status DistributedMemoryPool::unlock_chunks(
 
 size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t bytes) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return 0;
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   size_t freed = 0;
   // Iterate from tail backwards.
@@ -236,7 +243,7 @@ size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t
 #endif
       int rc = ::madvise(addr, advise_len, madv_flag);
       if (rc != 0) {
-        LOG(WARNING) << "madvise PAGEOUT failed: " << std::strerror(errno);
+        PLOG(WARNING) << "madvise PAGEOUT failed";
       }
       freed += kChunk;
     }
@@ -246,9 +253,10 @@ size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t
 
 void DistributedMemoryPool::refresh_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return;
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   uint64_t ts = now_s();
   for (uint32_t i : idx) {
@@ -260,9 +268,10 @@ void DistributedMemoryPool::refresh_chunks(std::string_view model_id, absl::Span
 
 absl::Status DistributedMemoryPool::ensure_chunk_resident(std::string_view model_id, uint32_t chunk_idx) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   if (chunk_idx >= info.chunk_count) {
     return absl::OutOfRangeError("Chunk index out of range");
@@ -276,9 +285,10 @@ absl::Status DistributedMemoryPool::ensure_chunk_resident(std::string_view model
 
 absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   for (uint32_t i : idx) {
     if (i >= info.chunk_count) {
@@ -302,7 +312,7 @@ absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, 
             rc = ::madvise(addr, kChunk, MADV_DONTNEED);
           }
           if (rc != 0) {
-            LOG(WARNING) << "madvise FREE/DONTNEED failed: " << std::strerror(errno);
+            PLOG(WARNING) << "madvise FREE/DONTNEED failed";
           }
         }
       }
@@ -317,10 +327,11 @@ absl::Status DistributedMemoryPool::write_at(
     const void* src,
     size_t bytes) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  const std::string key(model_id);
-  ModelInfo& info = **info_sp_or;
+  }
+
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   if (va_offset >= info.bytes) {
     return absl::OutOfRangeError("write_at offset beyond model size");
@@ -335,7 +346,7 @@ absl::Status DistributedMemoryPool::write_at(
 
   // Ensure destination range is writable; if any part is file-backed read-only,
   // try mprotect to upgrade, otherwise remap anonymously for the subrange.
-  const long page = sysconf(_SC_PAGESIZE);
+  const int64_t page = sysconf(_SC_PAGESIZE);
   uint64_t page_aligned_off = (va_offset / page) * page;
   uint64_t end_off = va_offset + bytes;
   uint64_t page_aligned_end = ((end_off + page - 1) / page) * page;
@@ -371,12 +382,13 @@ absl::Status DistributedMemoryPool::write_at(
 
 absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id, absl::Span<const FileSegment> segs) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
 
-  const long page = sysconf(_SC_PAGESIZE);
+  const int64_t page = sysconf(_SC_PAGESIZE);
   for (const auto& s : segs) {
     if (!std::filesystem::exists(s.path)) {
       return absl::NotFoundError("File segment path not found");
@@ -393,8 +405,9 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
     }
     int flags = MAP_PRIVATE | MAP_FIXED;
 #ifdef MAP_POPULATE
-    if (s.populate)
+    if (s.populate) {
       flags |= MAP_POPULATE;
+    }
 #endif
     void* target = static_cast<char*>(info.base) + s.va_offset;
     void* mapped = ::mmap(target, s.length, PROT_READ, flags, fd, static_cast<off_t>(s.file_offset));
@@ -421,8 +434,9 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
   try {
     static const stepcast::metrics::Counter kMapBytes("dvmp_map_bytes_total");
     uint64_t total = 0;
-    for (const auto& s : segs)
+    for (const auto& s : segs) {
       total += s.length;
+    }
     kMapBytes.inc(static_cast<double>(total));
   } catch (...) {
   }
@@ -442,8 +456,9 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::regi
 
 // PinLease impl --------------------------------------------------------------
 DistributedMemoryPool::PinLease::~PinLease() {
-  if (!impl_)
+  if (!impl_) {
     return;
+  }
 
   // Check if the lease has expired before releasing pins
   if (is_expired()) {
@@ -451,21 +466,25 @@ DistributedMemoryPool::PinLease::~PinLease() {
   }
 
   DistributedMemoryPool* dvmp = impl_->dvmp;
-  if (!dvmp)
+  if (!dvmp) {
     return;
+  }
   auto info_sp_or = dvmp->get_model_info(impl_->model_key);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return;
+  }
   auto info_sp = *info_sp_or;
-  if (!info_sp)
+  if (!info_sp) {
     return;
+  }
   std::lock_guard<std::mutex> model_lock(info_sp->model_mu);
-  dvmp->release_pins_unlocked(*info_sp, impl_->chunks);
+  release_pins_unlocked(*info_sp, impl_->chunks);
 }
 
 bool DistributedMemoryPool::PinLease::is_expired() const {
-  if (!impl_ || !impl_->expiry_time)
+  if (!impl_ || !impl_->expiry_time) {
     return false;
+  }
   return std::chrono::steady_clock::now() > *impl_->expiry_time;
 }
 
@@ -479,10 +498,11 @@ DistributedMemoryPool::PinLease& DistributedMemoryPool::PinLease::operator=(PinL
   return *this;
 }
 
-void DistributedMemoryPool::release_pins_unlocked(ModelInfo& info, absl::Span<const uint32_t> chunks) {
+void DistributedMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks) {
   for (uint32_t i : chunks) {
-    if (i >= info.chunk_count)
+    if (i >= info.chunk_count) {
       continue;
+    }
     // Decrement refcount and best-effort munlock
     auto cnt = info.pin_refcnt[i].load(std::memory_order_acquire);
     if (cnt > 0) {
@@ -511,9 +531,10 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
     std::optional<std::chrono::milliseconds> timeout_ms) {
   const std::string key(model_id);
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
-  ModelInfo& info = **info_sp_or;
+  }
+  DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
   if (va_offset >= info.bytes) {
     return absl::OutOfRangeError("pin_range offset beyond model size");
@@ -554,8 +575,9 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
 
 absl::StatusOr<DistributedMemoryPool::DvmpRegion> DistributedMemoryPool::open(std::string_view model_id) {
   auto info_sp_or = get_model_info(model_id);
-  if (!info_sp_or.ok())
+  if (!info_sp_or.ok()) {
     return info_sp_or.status();
+  }
   return DvmpRegion(this, std::string(model_id));
 }
 

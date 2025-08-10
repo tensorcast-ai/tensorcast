@@ -41,7 +41,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
     }
     return options_.memory_manager->plan_direct_write(ranges);
   }
-  uint64_t total_size() const {
+  [[nodiscard]] uint64_t total_size() const {
     return options_.total_size;
   }
 
