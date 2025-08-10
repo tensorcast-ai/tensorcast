@@ -10,7 +10,7 @@
 
 #include "absl/status/status.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loading/loading_spec.h"
@@ -66,7 +66,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 1024;
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
-  auto dvmp = std::make_shared<stepcast::memory::DistributedMemoryPool>();
+  auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
   auto memmgr = std::make_shared<MemoryManager>(
       "loader_stream_model",
       /*device=*/0,

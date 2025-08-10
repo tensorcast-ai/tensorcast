@@ -5,7 +5,7 @@
 #include <cstring>
 
 #include "absl/log/log.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 
 namespace stepcast::store::loader {
 

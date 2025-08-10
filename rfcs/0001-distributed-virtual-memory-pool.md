@@ -53,7 +53,7 @@ File: `core/common/memory/distributed_memory_pool.{h,cc}`
 - DVMP‑owned IO:
   - `map_file_segments(model_id, [{path,file_offset,va_offset,length,populate}])` maps with `MAP_FIXED|PROT_READ` and marks chunks `HOT`.
   - `write_at(model_id, va_offset, src, bytes)` ensures a writable mapping (mprotect→anonymous remap if needed), copies bytes, and marks chunks `HOT`.
-- Pin Leases: `PinLease pin_range(model_id, va_off, len, reason[, timeout])` increments per‑chunk pin refcounts, best‑effort `mlock`, and blocks DVMP eviction/preemption for leased chunks; destructor releases.
+- Pin Leases: `ChunkResidencyLease pin_range(model_id, va_off, len, reason[, timeout])` increments per‑chunk pin refcounts, best‑effort `mlock`, and blocks DVMP eviction/preemption for leased chunks; destructor releases.
 - Metrics: `dvmp_write_bytes_total`, `dvmp_map_bytes_total`, `dvmp_pin_leases_total{reason}`.
 
 ### 3.2 Per‑Model Handles (DvmpRegion)
@@ -117,8 +117,8 @@ Files: `core/store/loader/*`
 
 ## 6. Mapping to Code
 
-- DVMP: `core/common/memory/distributed_memory_pool.{h,cc}` (per‑model lock, `write_at`, `map_file_segments`, `PinLease`).
-- UMA and state: `core/store/model/unified_model_memory.{h,cc}`.
+- DVMP: `core/common/memory/distributed_memory_pool.{h,cc}` (per‑model lock, `write_at`, `map_file_segments`, `ChunkResidencyLease`).
+- UMA and state: `core/store/model/model_memory_coordinator.{h,cc}`.
 - Memory manager: `core/store/model/memory_manager.{h,cc}` (unified allocation, CPU export APIs, DVMP accessors, mandatory CPU release after GPU copy).
 - Loader plumbing: `core/store/loader/{source.h, sink.h, pump.{h,cc}, dvmp_region_sink.{h,cc}, gpu_memory_sink.{h,cc}, remote_key_source.{h,cc}, mux_seekable_source.{h,cc}, streaming_buffer_adapter.{h,cc}}`.
 
@@ -142,7 +142,7 @@ Files: `core/store/loader/*`
 
 ## 10. Appendix — Offset↔Chunk Mapping
 
-- DVMP chunk size: `DistributedMemoryPool::kChunk` (256 MiB by default).
+- DVMP chunk size: `DistributedVirtualMemoryPool::kChunk` (256 MiB by default).
 - Given `va_offset, bytes`:
   - First chunk: `i0 = va_offset / kChunk`.
   - Last chunk: `i1 = (va_offset + bytes - 1) / kChunk`.
@@ -175,9 +175,9 @@ flowchart LR
   end
 
   subgraph Memory
-    UMA[UnifiedModelMemory]
+    UMA[ModelMemoryCoordinator]
     MM[MemoryManager]
-    DVMP[DistributedMemoryPool]
+    DVMP[DistributedVirtualMemoryPool]
   end
 
   PUMP -->|Positioned writes| UMS
@@ -256,7 +256,7 @@ Policy:
 sequenceDiagram
     autonumber
     participant MM as MemoryManager
-    participant UMA as UnifiedModelMemory
+    participant UMA as ModelMemoryCoordinator
     participant DV as DVMP
     participant SB as StreamingPinnedBuffer
     participant GP as GPUMemorySink
@@ -288,14 +288,14 @@ sequenceDiagram
 
     MM-->>MM: coalesce chunk indices → VA ranges
     MM->>DV: pin_range(model, va_off, len, ExternalShare)
-    DV-->>MM: PinLease
+    DV-->>MM: ChunkResidencyLease
     MM->>CE: register_tensor(key, addr, len, CPU)
     CE-->>MM: ok (handle)
     Note over MM: store keys + leases for unexport
 
     rect rgba(200,200,200,0.2)
     MM->>CE: unregister_tensor(key...)
-    MM->>DV: release PinLease (dtor)
+    MM->>DV: release ChunkResidencyLease (dtor)
     end
 ```
 

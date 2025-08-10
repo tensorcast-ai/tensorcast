@@ -23,7 +23,7 @@
 
 namespace stepcast::memory {
 
-class DistributedMemoryPool {
+class DistributedVirtualMemoryPool {
  public:
   static constexpr size_t kChunk = 256ULL * 1024ULL * 1024ULL; // 256 MiB
   static constexpr absl::StatusCode kErrChunkRemote = absl::StatusCode::kUnavailable;
@@ -34,11 +34,11 @@ class DistributedMemoryPool {
     size_t bytes{0};
   };
 
-  DistributedMemoryPool() = default;
-  virtual ~DistributedMemoryPool();
+  DistributedVirtualMemoryPool() = default;
+  virtual ~DistributedVirtualMemoryPool();
 
-  DistributedMemoryPool(const DistributedMemoryPool&) = delete;
-  DistributedMemoryPool& operator=(const DistributedMemoryPool&) = delete;
+  DistributedVirtualMemoryPool(const DistributedVirtualMemoryPool&) = delete;
+  DistributedVirtualMemoryPool& operator=(const DistributedVirtualMemoryPool&) = delete;
 
   // ===== Allocation =====
   // Reserve contiguous VA range for the whole model. Physical pages are mapped
@@ -88,38 +88,38 @@ class DistributedMemoryPool {
   virtual absl::Status write_at(std::string_view model_id, uint64_t va_offset, const void* src, size_t bytes);
 
   // ===== Pin Leases =====
-  class PinLease {
+  class ChunkResidencyLease {
    public:
-    PinLease() = default;
-    ~PinLease();
-    PinLease(PinLease&&) noexcept;
-    PinLease& operator=(PinLease&&) noexcept;
-    PinLease(const PinLease&) = delete;
-    PinLease& operator=(const PinLease&) = delete;
+    ChunkResidencyLease() = default;
+    ~ChunkResidencyLease();
+    ChunkResidencyLease(ChunkResidencyLease&&) noexcept;
+    ChunkResidencyLease& operator=(ChunkResidencyLease&&) noexcept;
+    ChunkResidencyLease(const ChunkResidencyLease&) = delete;
+    ChunkResidencyLease& operator=(const ChunkResidencyLease&) = delete;
 
     // Check if lease has expired (returns false if no timeout was set)
-    bool is_expired() const;
+    [[nodiscard]] bool is_expired() const;
 
    private:
-    friend class DistributedMemoryPool;
+    friend class DistributedVirtualMemoryPool;
     struct Impl {
-      DistributedMemoryPool* dvmp;
+      DistributedVirtualMemoryPool* dvmp;
       std::string model_key;
       std::vector<uint32_t> chunks;
       std::optional<std::chrono::steady_clock::time_point> expiry_time;
     };
-    explicit PinLease(Impl impl) : impl_(std::make_shared<Impl>(std::move(impl))) {}
+    explicit ChunkResidencyLease(Impl impl) : impl_(std::make_shared<Impl>(std::move(impl))) {}
     std::shared_ptr<Impl> impl_;
   };
 
-  virtual absl::StatusOr<PinLease> pin_range(
+  virtual absl::StatusOr<ChunkResidencyLease> pin_range(
       std::string_view model_id,
       uint64_t va_offset,
       uint64_t bytes,
       std::string_view reason);
 
   // Overload with optional timeout
-  virtual absl::StatusOr<PinLease> pin_range(
+  virtual absl::StatusOr<ChunkResidencyLease> pin_range(
       std::string_view model_id,
       uint64_t va_offset,
       uint64_t bytes,
@@ -132,7 +132,7 @@ class DistributedMemoryPool {
     size_t bytes{0};
     std::unique_ptr<stepcast::store::ChunkMeta[]> metadata;
     size_t chunk_count{0};
-    // Per-chunk pin refcounts used by PinLease API
+    // Per-chunk pin refcounts used by ChunkResidencyLease API
     std::unique_ptr<std::atomic<uint32_t>[]> pin_refcnt;
     // Per-model mutex guarding model-local state; global mutex_ only protects
     // the models_ map and retrieval of shared_ptrs.
@@ -142,7 +142,7 @@ class DistributedMemoryPool {
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<DvmpRegionState>> models_;
 
-  // Helpers for PinLease
+  // Helpers for ChunkResidencyLease
   static void release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks);
 
   // Lookup helper to reduce boilerplate in public methods. Returns shared_ptr
@@ -165,7 +165,7 @@ class DistributedMemoryPool {
 // Per-model DVMP region handle. Lightweight wrapper that reuses the parent
 // DVMP implementation with model scoping. Copyable and cheap (stores shared
 //_ptr to ModelInfo internally).
-class DistributedMemoryPool::DvmpRegion {
+class DistributedVirtualMemoryPool::DvmpRegion {
  public:
   DvmpRegion() = default;
   absl::Status lock_chunks(absl::Span<const uint32_t> idx) {
@@ -196,11 +196,11 @@ class DistributedMemoryPool::DvmpRegion {
     return dvmp_ ? dvmp_->write_at(model_key_, va_offset, src, bytes)
                  : absl::FailedPreconditionError("null dvmp region");
   }
-  absl::StatusOr<PinLease> pin_range(uint64_t va_offset, uint64_t bytes, std::string_view reason) {
+  absl::StatusOr<ChunkResidencyLease> pin_range(uint64_t va_offset, uint64_t bytes, std::string_view reason) {
     return dvmp_ ? dvmp_->pin_range(model_key_, va_offset, bytes, reason)
                  : absl::FailedPreconditionError("null dvmp region");
   }
-  absl::StatusOr<PinLease> pin_range(
+  absl::StatusOr<ChunkResidencyLease> pin_range(
       uint64_t va_offset,
       uint64_t bytes,
       std::string_view reason,
@@ -210,9 +210,10 @@ class DistributedMemoryPool::DvmpRegion {
   }
 
  private:
-  friend class DistributedMemoryPool;
-  DvmpRegion(DistributedMemoryPool* dvmp, std::string model_key) : dvmp_(dvmp), model_key_(std::move(model_key)) {}
-  DistributedMemoryPool* dvmp_{nullptr};
+  friend class DistributedVirtualMemoryPool;
+  DvmpRegion(DistributedVirtualMemoryPool* dvmp, std::string model_key)
+      : dvmp_(dvmp), model_key_(std::move(model_key)) {}
+  DistributedVirtualMemoryPool* dvmp_{nullptr};
   std::string model_key_;
 };
 

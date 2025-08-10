@@ -59,7 +59,7 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<DistributedMemoryPool>();
+  auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
   // Create DiskSource
   DiskSource disk_src;

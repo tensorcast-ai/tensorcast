@@ -19,8 +19,8 @@ cc_library(
             "cuda_api.h",
             "cuda_real.cc",
             "cuda_fake.cc",
-            "memory/distributed_memory_pool.cc",
-            "memory/distributed_memory_pool.h",
+            "memory/distributed_virtual_memory_pool.cc",
+            "memory/distributed_virtual_memory_pool.h",
         ],
     ) + select({
         ":use_fake_cuda": ["cuda_fake.cc"],
@@ -73,8 +73,8 @@ cc_library(
 
 cc_library(
     name = "distributed_memory_pool",
-    srcs = ["memory/distributed_memory_pool.cc"],
-    hdrs = ["memory/distributed_memory_pool.h"],
+    srcs = ["memory/distributed_virtual_memory_pool.cc"],
+    hdrs = ["memory/distributed_virtual_memory_pool.h"],
     deps = [
         "//core/common",
         "//core/store/model:chunk_meta",

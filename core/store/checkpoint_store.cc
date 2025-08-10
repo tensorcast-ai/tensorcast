@@ -77,7 +77,7 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
   memory_pool_ = std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_);
 
   // Initialize system-wide DVMP instance
-  dvmp_ = std::make_shared<memory::DistributedMemoryPool>();
+  dvmp_ = std::make_shared<memory::DistributedVirtualMemoryPool>();
 
   // CommunicationManager handling
   if (opts.comm_manager) {

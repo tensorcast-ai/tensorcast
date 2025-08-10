@@ -10,7 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
@@ -67,7 +67,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[model][disk][multi_gpu]") {
     REQUIRE(pool != nullptr);
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;

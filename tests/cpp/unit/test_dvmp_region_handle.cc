@@ -3,12 +3,12 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 
-using stepcast::memory::DistributedMemoryPool;
+using stepcast::memory::DistributedVirtualMemoryPool;
 
 TEST_CASE("DvmpRegion handle open and basic delegation") {
-  DistributedMemoryPool dvmp;
+  DistributedVirtualMemoryPool dvmp;
   auto not_found = dvmp.open("missing");
   REQUIRE(!not_found.ok());
 

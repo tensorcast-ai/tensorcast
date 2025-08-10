@@ -36,8 +36,8 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp,
-    const std::shared_ptr<UnifiedModelMemory>& uma,
+    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<ModelMemoryCoordinator>& uma,
     const stepcast::store::InstanceKey& ikey);
 
 // Forward declaration (add after perform_copy_cpu_to_gpu_streaming declaration)
@@ -49,13 +49,13 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp);
+    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp);
 
 MemoryManager::MemoryManager(
     std::string model_identifier,
     int local_device_id,
     const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
-    const gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>>& dvmp,
+    const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
     bool require_dvmp_lock_success)
@@ -837,7 +837,7 @@ size_t MemoryManager::get_pool_chunk_size() const {
 // ---------------------------------------------------------------------------
 // DVMP pageable CPU region allocation helper
 // ---------------------------------------------------------------------------
-absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> MemoryManager::allocate_pageable_cpu_region() {
+absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> MemoryManager::allocate_pageable_cpu_region() {
   absl::MutexLock lock(&mutex_);
 
   if (model_size_ == 0) {
@@ -849,7 +849,7 @@ absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> MemoryManager::allo
 }
 
 // --- Internal helpers implementation --------------------------------------
-absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> MemoryManager::reserve_dvmp_region_locked_() {
+absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> MemoryManager::reserve_dvmp_region_locked_() {
   // Assumes mutex_ is held
   // Attempt allocation. This call may return kAlreadyExists if another loader already reserved the region.
   auto region_or = dvmp_->allocate(instance_key_.model_id, model_size_);
@@ -1008,7 +1008,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
   }
 
   if (location == ModelLocation::PAGEABLE_CPU) {
-    std::shared_ptr<memory::DistributedMemoryPool> dvmp_capture;
+    std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp_capture;
     void* base_capture = nullptr;
     std::string model_id;
     uint64_t model_bytes = 0;
@@ -1036,7 +1036,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
     std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
 
-    constexpr uint64_t kChunk = memory::DistributedMemoryPool::kChunk;
+    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
     size_t range_idx = 0;
     for (const auto& [start, end] : ranges) {
       uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
@@ -1110,7 +1110,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
     std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
 
-    constexpr uint64_t kChunk = memory::DistributedMemoryPool::kChunk;
+    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
     size_t range_idx = 0;
     for (const auto& [start, end] : ranges) {
       uint64_t off = static_cast<uint64_t>(start) * kChunk;
@@ -1201,7 +1201,7 @@ absl::Status MemoryManager::unexport_chunks_for_p2p(
 }
 
 // --- DVMP accessor implementation ---
-memory::DistributedMemoryPool* stepcast::store::MemoryManager::get_dvmp() {
+memory::DistributedVirtualMemoryPool* stepcast::store::MemoryManager::get_dvmp() {
   absl::MutexLock lock(&mutex_);
   return dvmp_.get().get();
 }
@@ -1214,12 +1214,12 @@ void* MemoryManager::get_dvmp_cpu_base() const {
 // Opaque keepalive container for DVMP pin leases held by a DirectWriteToken
 namespace {
 struct DwKeepalive {
-  std::vector<memory::DistributedMemoryPool::PinLease> leases;
+  std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> leases;
 };
 } // namespace
 
 absl::StatusOr<DirectWriteToken> MemoryManager::plan_direct_write(absl::Span<const VaRange> ranges) {
-  std::shared_ptr<memory::DistributedMemoryPool> dvmp;
+  std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp;
   void* base = nullptr;
   std::string model_id;
   uint64_t model_bytes = 0;
@@ -1295,8 +1295,8 @@ absl::Status MemoryManager::finalize_load(
   return uma->update_chunk_states(instance_key_, location, chunks, new_state, device_id);
 }
 
-absl::StatusOr<memory::DistributedMemoryPool::DvmpRegion> MemoryManager::get_dvmp_region() const {
-  std::shared_ptr<memory::DistributedMemoryPool> dvmp;
+absl::StatusOr<memory::DistributedVirtualMemoryPool::DvmpRegion> MemoryManager::get_dvmp_region() const {
+  std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp;
   std::string model_id;
   {
     absl::MutexLock lock(&mutex_);
@@ -1311,7 +1311,7 @@ absl::StatusOr<memory::DistributedMemoryPool::DvmpRegion> MemoryManager::get_dvm
 
 // --- DVMP metadata snapshot -------------------------------------------------
 // Provides a lightweight, read-only view of per-chunk metadata stored inside
-// the DistributedMemoryPool (DVMP).  The span remains valid as long as the
+// the DistributedVirtualMemoryPool (DVMP).  The span remains valid as long as the
 // DVMP instance itself lives.  Callers must treat the returned ChunkMeta
 // objects as immutable and use the atomic accessors defined inside ChunkMeta
 // for state inspection.
@@ -1325,7 +1325,7 @@ absl::Span<const store::ChunkMeta> stepcast::store::MemoryManager::chunk_snapsho
 
 // --- NEW: Unified Memory Management implementations ---
 
-std::shared_ptr<UnifiedModelMemory> MemoryManager::get_unified_memory() const {
+std::shared_ptr<ModelMemoryCoordinator> MemoryManager::get_unified_memory() const {
   absl::MutexLock lock(&mutex_);
   return unified_memory_;
 }
@@ -1341,8 +1341,8 @@ absl::Status MemoryManager::allocate_unified() {
     return absl::FailedPreconditionError("Model size must be set before unified allocation");
   }
 
-  // Pass the shared DVMP instance directly to UnifiedModelMemory
-  unified_memory_ = std::make_shared<UnifiedModelMemory>(dvmp_);
+  // Pass the shared DVMP instance directly to ModelMemoryCoordinator
+  unified_memory_ = std::make_shared<ModelMemoryCoordinator>(dvmp_);
 
   // Allocate via unified memory (which will use DVMP internally)
   auto status = unified_memory_->allocate(instance_key_, model_size_);
@@ -1461,15 +1461,15 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp,
-    const std::shared_ptr<UnifiedModelMemory>& uma,
+    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<ModelMemoryCoordinator>& uma,
     const stepcast::store::InstanceKey& ikey) {
   // Required components must be present – enforce via CHECKKs
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU destination pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
-  const size_t dvmp_chunk = ::stepcast::memory::DistributedMemoryPool::kChunk;
+  const size_t dvmp_chunk = ::stepcast::memory::DistributedVirtualMemoryPool::kChunk;
   const size_t copy_chunk = streaming_buf->chunk_size();
 
   auto device_status = cuda::set_device(device_id);
@@ -1559,7 +1559,7 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedMemoryPool>& dvmp) {
+    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU source pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
@@ -1624,7 +1624,7 @@ absl::Status MemoryManager::ensure_streaming_buffer(size_t num_chunks) {
   // Alignment policy enforcement: ensure pool chunk size divides DVMP chunk size
   // and is O_DIRECT-friendly (multiple of 4 KiB).
   const size_t pool_chunk = pinned_pool_->chunk_size();
-  const size_t dvmp_chunk = ::stepcast::memory::DistributedMemoryPool::kChunk;
+  const size_t dvmp_chunk = ::stepcast::memory::DistributedVirtualMemoryPool::kChunk;
   if (pool_chunk == 0) {
     return absl::InvalidArgumentError("Pinned memory pool chunk size must be > 0");
   }

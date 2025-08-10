@@ -67,7 +67,7 @@ class P2PLoader : public IModelLoader {
    * 2. Remote GPU/CPU → Local PAGEABLE_CPU (new DVMP use case)
    *
    * For PAGEABLE_CPU targets, this loader implements chunk-aware transfer
-   * that integrates with the DistributedMemoryPool (DVMP) for zero-copy
+   * that integrates with the DistributedVirtualMemoryPool (DVMP) for zero-copy
    * and efficient memory management.
    *
    * @param mem_manager       Shared pointer to the `MemoryManager` handling the memory.
@@ -85,7 +85,7 @@ class P2PLoader : public IModelLoader {
    *
    * This method enables chunk-aware loading from remote peers, allowing selective
    * chunk transfer based on what's already available locally. It integrates with
-   * UnifiedModelMemory and supports both GPU and PAGEABLE_CPU targets.
+   * ModelMemoryCoordinator and supports both GPU and PAGEABLE_CPU targets.
    *
    * @param mem_manager Shared pointer to the MemoryManager handling the target memory.
    * @param target_location The destination for the data (PAGEABLE_CPU or GPU).

@@ -16,7 +16,7 @@
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/chunk_meta.h"
@@ -35,7 +35,7 @@ namespace stepcast::store {
  * The design enables efficient P2P transfers, intelligent memory eviction,
  * and automatic memory reclamation while maintaining zero-copy access.
  */
-class UnifiedModelMemory {
+class ModelMemoryCoordinator {
  public:
   /**
    * @brief Chunk mapping tracking state across memory locations.
@@ -62,12 +62,12 @@ class UnifiedModelMemory {
     std::string remote_node; // For REMOTE_P2P sources
   };
 
-  explicit UnifiedModelMemory(gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp);
-  ~UnifiedModelMemory() = default;
+  explicit ModelMemoryCoordinator(gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp);
+  ~ModelMemoryCoordinator() = default;
 
   // Disable copy/move
-  UnifiedModelMemory(const UnifiedModelMemory&) = delete;
-  UnifiedModelMemory& operator=(const UnifiedModelMemory&) = delete;
+  ModelMemoryCoordinator(const ModelMemoryCoordinator&) = delete;
+  ModelMemoryCoordinator& operator=(const ModelMemoryCoordinator&) = delete;
 
   /**
    * @brief Allocate unified memory for a model.
@@ -255,7 +255,7 @@ class UnifiedModelMemory {
  private:
   struct ModelAllocation {
     // DRAM allocation info from DVMP
-    stepcast::memory::DistributedMemoryPool::VirtualRegion dram_region;
+    stepcast::memory::DistributedVirtualMemoryPool::VirtualRegion dram_region;
 
     // GPU allocations per device (lazy creation)
     std::unordered_map<DeviceKey, std::shared_ptr<CudaMemory>, DeviceKeyHash> gpu_allocations;
@@ -273,7 +273,7 @@ class UnifiedModelMemory {
   };
 
   mutable std::mutex mutex_;
-  gsl::not_null<std::shared_ptr<stepcast::memory::DistributedMemoryPool>> dvmp_;
+  gsl::not_null<std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool>> dvmp_;
   std::unordered_map<InstanceKey, ModelAllocation, InstanceKeyHash> allocations_;
 
   // Helper to sync chunk states with DVMP

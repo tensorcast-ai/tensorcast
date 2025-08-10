@@ -11,7 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/model/model.h"
 #include "core/store/model/model_config.h"
@@ -51,7 +51,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -158,7 +158,7 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
     // First GPU load
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+      auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -197,7 +197,7 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
     // Second GPU load (different device)
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+      auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -265,7 +265,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     REQUIRE(create_dummy_file(model_file, model_size, 'T'));
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -313,7 +313,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     REQUIRE(create_dummy_file(model_file, model_size, 'C'));
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -360,7 +360,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     REQUIRE(create_dummy_file(model_file, model_size, 'O'));
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;

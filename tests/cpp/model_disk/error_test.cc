@@ -7,7 +7,7 @@
 #include <filesystem>
 
 #include "absl/status/status.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
@@ -31,7 +31,7 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::stepcast::memory::DistributedMemoryPool>();
+  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource

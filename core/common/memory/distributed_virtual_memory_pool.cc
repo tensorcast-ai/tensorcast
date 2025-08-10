@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -21,7 +21,7 @@
 
 namespace stepcast::memory {
 
-DistributedMemoryPool::~DistributedMemoryPool() {
+DistributedVirtualMemoryPool::~DistributedVirtualMemoryPool() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& [id, info_sp] : models_) {
     if (!info_sp) {
@@ -35,7 +35,7 @@ DistributedMemoryPool::~DistributedMemoryPool() {
   }
 }
 
-absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allocate(
+absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMemoryPool::allocate(
     std::string_view model_id,
     size_t bytes,
     int /*numa*/) {
@@ -74,7 +74,8 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::allo
   return region;
 }
 
-absl::Span<const store::ChunkMeta> DistributedMemoryPool::chunk_snapshot(std::string_view model_id) const noexcept {
+absl::Span<const store::ChunkMeta> DistributedVirtualMemoryPool::chunk_snapshot(
+    std::string_view model_id) const noexcept {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return {};
@@ -91,7 +92,7 @@ constexpr int kMadviseFlagsEvict = MADV_PAGEOUT; // Real page-out on modern kern
 constexpr int kMadviseFlagsFree = MADV_FREE; // Hints that pages can be reclaimed lazily
 } // namespace
 
-absl::Status DistributedMemoryPool::lock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
+absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
@@ -174,7 +175,7 @@ absl::Status DistributedMemoryPool::lock_chunks(std::string_view model_id, absl:
   return absl::OkStatus();
 }
 
-absl::Status DistributedMemoryPool::unlock_chunks(
+absl::Status DistributedVirtualMemoryPool::unlock_chunks(
     std::string_view model_id,
     absl::Span<const uint32_t> idx,
     bool copied_gpu) {
@@ -207,7 +208,7 @@ absl::Status DistributedMemoryPool::unlock_chunks(
   return absl::OkStatus();
 }
 
-size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t bytes) {
+size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id, size_t bytes) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return 0;
@@ -250,7 +251,7 @@ size_t DistributedMemoryPool::evict_tail_bytes(std::string_view model_id, size_t
   return freed;
 }
 
-void DistributedMemoryPool::refresh_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
+void DistributedVirtualMemoryPool::refresh_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return;
@@ -265,7 +266,7 @@ void DistributedMemoryPool::refresh_chunks(std::string_view model_id, absl::Span
   }
 }
 
-absl::Status DistributedMemoryPool::ensure_chunk_resident(std::string_view model_id, uint32_t chunk_idx) {
+absl::Status DistributedVirtualMemoryPool::ensure_chunk_resident(std::string_view model_id, uint32_t chunk_idx) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
@@ -282,7 +283,7 @@ absl::Status DistributedMemoryPool::ensure_chunk_resident(std::string_view model
   return absl::OkStatus();
 }
 
-absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, absl::Span<const uint32_t> idx) {
+absl::Status DistributedVirtualMemoryPool::mark_preemptible(std::string_view model_id, absl::Span<const uint32_t> idx) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
@@ -320,7 +321,7 @@ absl::Status DistributedMemoryPool::mark_preemptible(std::string_view model_id, 
   return absl::OkStatus();
 }
 
-absl::Status DistributedMemoryPool::write_at(
+absl::Status DistributedVirtualMemoryPool::write_at(
     std::string_view model_id,
     uint64_t va_offset,
     const void* src,
@@ -379,7 +380,9 @@ absl::Status DistributedMemoryPool::write_at(
   return absl::OkStatus();
 }
 
-absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id, absl::Span<const FileSegment> segs) {
+absl::Status DistributedVirtualMemoryPool::map_file_segments(
+    std::string_view model_id,
+    absl::Span<const FileSegment> segs) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
@@ -442,7 +445,7 @@ absl::Status DistributedMemoryPool::map_file_segments(std::string_view model_id,
   return absl::OkStatus();
 }
 
-absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::region_info(
+absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMemoryPool::region_info(
     std::string_view model_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = models_.find(std::string(model_id));
@@ -453,18 +456,18 @@ absl::StatusOr<DistributedMemoryPool::VirtualRegion> DistributedMemoryPool::regi
   return VirtualRegion{info_sp->base, nullptr, info_sp->bytes};
 }
 
-// PinLease impl --------------------------------------------------------------
-DistributedMemoryPool::PinLease::~PinLease() {
+// ChunkResidencyLease impl --------------------------------------------------------------
+DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
   if (!impl_) {
     return;
   }
 
   // Check if the lease has expired before releasing pins
   if (is_expired()) {
-    LOG(WARNING) << "PinLease expired before being destroyed for model: " << impl_->model_key;
+    LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for model: " << impl_->model_key;
   }
 
-  DistributedMemoryPool* dvmp = impl_->dvmp;
+  DistributedVirtualMemoryPool* dvmp = impl_->dvmp;
   if (!dvmp) {
     return;
   }
@@ -480,24 +483,25 @@ DistributedMemoryPool::PinLease::~PinLease() {
   release_pins_unlocked(*info_sp, impl_->chunks);
 }
 
-bool DistributedMemoryPool::PinLease::is_expired() const {
+bool DistributedVirtualMemoryPool::ChunkResidencyLease::is_expired() const {
   if (!impl_ || !impl_->expiry_time) {
     return false;
   }
   return std::chrono::steady_clock::now() > *impl_->expiry_time;
 }
 
-DistributedMemoryPool::PinLease::PinLease(PinLease&& other) noexcept {
+DistributedVirtualMemoryPool::ChunkResidencyLease::ChunkResidencyLease(ChunkResidencyLease&& other) noexcept {
   impl_ = std::move(other.impl_);
 }
-DistributedMemoryPool::PinLease& DistributedMemoryPool::PinLease::operator=(PinLease&& other) noexcept {
+DistributedVirtualMemoryPool::ChunkResidencyLease& DistributedVirtualMemoryPool::ChunkResidencyLease::operator=(
+    ChunkResidencyLease&& other) noexcept {
   if (this != &other) {
     impl_ = std::move(other.impl_);
   }
   return *this;
 }
 
-void DistributedMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks) {
+void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks) {
   for (uint32_t i : chunks) {
     if (i >= info.chunk_count) {
       continue;
@@ -514,7 +518,7 @@ void DistributedMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::S
   }
 }
 
-absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range(
+absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVirtualMemoryPool::pin_range(
     std::string_view model_id,
     uint64_t va_offset,
     uint64_t bytes,
@@ -522,7 +526,7 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
   return pin_range(model_id, va_offset, bytes, reason, std::nullopt);
 }
 
-absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range(
+absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVirtualMemoryPool::pin_range(
     std::string_view model_id,
     uint64_t va_offset,
     uint64_t bytes,
@@ -563,16 +567,17 @@ absl::StatusOr<DistributedMemoryPool::PinLease> DistributedMemoryPool::pin_range
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
-    kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
+    static const metrics::Counter kChunkResidencyLeasesTotal("dvmp_pin_leases_total");
+    kChunkResidencyLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
   } catch (...) {
   }
 
-  return PinLease(
-      PinLease::Impl{.dvmp = this, .model_key = key, .chunks = std::move(chunks), .expiry_time = expiry_time});
+  return ChunkResidencyLease(
+      ChunkResidencyLease::Impl{
+          .dvmp = this, .model_key = key, .chunks = std::move(chunks), .expiry_time = expiry_time});
 }
 
-absl::StatusOr<DistributedMemoryPool::DvmpRegion> DistributedMemoryPool::open(std::string_view model_id) {
+absl::StatusOr<DistributedVirtualMemoryPool::DvmpRegion> DistributedVirtualMemoryPool::open(std::string_view model_id) {
   auto info_sp_or = get_model_info(model_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();

@@ -18,7 +18,7 @@
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
@@ -29,7 +29,7 @@
 #include "core/store/model/chunk_meta.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
-#include "core/store/model/unified_model_memory.h"
+#include "core/store/model/model_memory_coordinator.h"
 
 namespace stepcast::store {
 
@@ -56,7 +56,7 @@ class MemoryManager {
       std::string model_identifier,
       int local_device_id,
       const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
-      const gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>>& dvmp,
+      const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
       bool require_dvmp_lock_success = true);
@@ -242,14 +242,14 @@ class MemoryManager {
    */
   size_t get_pool_chunk_size() const ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // NEW: Reserve a pageable CPU VA region via DistributedMemoryPool (DVMP).
+  // NEW: Reserve a pageable CPU VA region via DistributedVirtualMemoryPool (DVMP).
   // This wraps dvmp_->allocate() and records the base address internally.
   // If the region already exists, the returned Status will carry
   // absl::StatusCode::kAlreadyExists, mirroring DVMP semantics.
   // On success, the VirtualRegion structure contains the reserved base
   // address and size. The caller should treat kAlreadyExists as a signal
   // that the region has been allocated previously.
-  absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> allocate_pageable_cpu_region()
+  absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> allocate_pageable_cpu_region()
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   // --- Internal State Management ---
@@ -276,10 +276,10 @@ class MemoryManager {
 
   // --- New DVMP accessors ---------------------------------------------------
   /**
-   * @brief Exposes the underlying DistributedMemoryPool instance used by this
+   * @brief Exposes the underlying DistributedVirtualMemoryPool instance used by this
    *        MemoryManager. Loaders can use this to allocate or lock chunks.
    */
-  memory::DistributedMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
+  memory::DistributedVirtualMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Get the model identifier string.
@@ -307,13 +307,13 @@ class MemoryManager {
 
   /**
    * @brief Get the unified memory instance for chunk-aware operations.
-   * @return Pointer to UnifiedModelMemory or nullptr if not initialized.
+   * @return Pointer to ModelMemoryCoordinator or nullptr if not initialized.
    */
-  std::shared_ptr<UnifiedModelMemory> get_unified_memory() const ABSL_LOCKS_EXCLUDED(mutex_);
+  std::shared_ptr<ModelMemoryCoordinator> get_unified_memory() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Allocate unified memory for the model.
-   * Creates UnifiedModelMemory instance and reserves DRAM via DVMP.
+   * Creates ModelMemoryCoordinator instance and reserves DRAM via DVMP.
    * @return Status of allocation.
    */
   absl::Status allocate_unified() ABSL_LOCKS_EXCLUDED(mutex_);
@@ -347,7 +347,7 @@ class MemoryManager {
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Provide a per-model DVMP handle (region) for sinks and loaders.
-  absl::StatusOr<memory::DistributedMemoryPool::DvmpRegion> get_dvmp_region() const ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::StatusOr<memory::DistributedVirtualMemoryPool::DvmpRegion> get_dvmp_region() const ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   /**
@@ -396,7 +396,7 @@ class MemoryManager {
   // --- Internal copy refactor helpers (no behavior change) ---------------
   struct CopyLaunchParams {
     std::shared_ptr<StreamingPinnedBuffer> streaming_buffer;
-    std::shared_ptr<::stepcast::memory::DistributedMemoryPool> dvmp;
+    std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool> dvmp;
     void* dvmp_base = nullptr;
     std::shared_ptr<CudaMemory> cuda_mem;
     size_t total_size = 0;
@@ -426,7 +426,7 @@ class MemoryManager {
     absl::CondVar cond;
     bool comm_registered = false;
     CommRegistrationInfo comm_registration_info;
-    std::vector<memory::DistributedMemoryPool::PinLease> pin_leases;
+    std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> pin_leases;
     // DVMP-backed VA info
     void* dvmp_base = nullptr;
     size_t dvmp_bytes = 0;
@@ -466,14 +466,14 @@ class MemoryManager {
   // Whether to fail transfer if DVMP chunk locking fails
   [[maybe_unused]] const bool require_dvmp_lock_success_;
 
-  gsl::not_null<std::shared_ptr<memory::DistributedMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
+  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
 
   // Unified memory management instance
-  std::shared_ptr<UnifiedModelMemory> unified_memory_ ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<ModelMemoryCoordinator> unified_memory_ ABSL_GUARDED_BY(mutex_);
 
   // --- New: small internal helpers to reduce duplication -----------------
   // Reserve/open DVMP region and cache base/size. Expects mutex_ held.
-  absl::StatusOr<memory::DistributedMemoryPool::VirtualRegion> reserve_dvmp_region_locked_()
+  absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> reserve_dvmp_region_locked_()
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Ensure GPU stream is initialised (create if needed). Expects mutex_ held.

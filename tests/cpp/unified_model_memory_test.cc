@@ -1,20 +1,20 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include "core/store/model/unified_model_memory.h"
+#include "core/store/model/model_memory_coordinator.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 
 namespace stepcast::store {
 namespace {
 
-// Mock implementation of DistributedMemoryPool for testing
-class MockDistributedMemoryPool : public memory::DistributedMemoryPool {
+// Mock implementation of DistributedVirtualMemoryPool for testing
+class MockDistributedVirtualMemoryPool : public memory::DistributedVirtualMemoryPool {
  public:
   // === Configurable state ===
   VirtualRegion test_region_{};
@@ -71,9 +71,9 @@ class MockDistributedMemoryPool : public memory::DistributedMemoryPool {
   }
 };
 
-TEST_CASE("UnifiedModelMemory allocation", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator allocation", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   SECTION("successful allocation") {
     InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
@@ -99,9 +99,9 @@ TEST_CASE("UnifiedModelMemory allocation", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory get missing chunks", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator get missing chunks", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(768) * 1024 * 1024; // 768MB = 3 chunks of 256MB
@@ -130,9 +130,9 @@ TEST_CASE("UnifiedModelMemory get missing chunks", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory lock chunks for transfer", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator lock chunks for transfer", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(512) * 1024 * 1024; // 512MB = 2 chunks
@@ -165,9 +165,9 @@ TEST_CASE("UnifiedModelMemory lock chunks for transfer", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory update chunk states", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator update chunk states", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(512) * 1024 * 1024;
@@ -196,9 +196,9 @@ TEST_CASE("UnifiedModelMemory update chunk states", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory GPU allocation management", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator GPU allocation management", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(256) * 1024 * 1024;
@@ -225,9 +225,9 @@ TEST_CASE("UnifiedModelMemory GPU allocation management", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory mark CPU chunks preemptible", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator mark CPU chunks preemptible", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(1024) * 1024 * 1024; // 1GB = 4 chunks
@@ -265,9 +265,9 @@ TEST_CASE("UnifiedModelMemory mark CPU chunks preemptible", "[unified_memory]") 
   }
 }
 
-TEST_CASE("UnifiedModelMemory chunk calculations", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator chunk calculations", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   // Test chunk size
   size_t chunk_size = unified_memory.get_chunk_size();
@@ -293,7 +293,7 @@ TEST_CASE("UnifiedModelMemory chunk calculations", "[unified_memory]") {
 
         // Reset mock for each test
         mock_dvmp->test_region_.bytes = 0;
-        UnifiedModelMemory local_um(mock_dvmp);
+        ModelMemoryCoordinator local_um(mock_dvmp);
 
         REQUIRE(local_um.allocate(key, tc.model_size).ok());
         auto mappings = local_um.get_chunk_mappings(key);
@@ -303,9 +303,9 @@ TEST_CASE("UnifiedModelMemory chunk calculations", "[unified_memory]") {
   }
 }
 
-TEST_CASE("UnifiedModelMemory multi-GPU state tracking", "[unified_memory]") {
-  auto mock_dvmp = std::make_shared<MockDistributedMemoryPool>();
-  UnifiedModelMemory unified_memory(mock_dvmp);
+TEST_CASE("ModelMemoryCoordinator multi-GPU state tracking", "[unified_memory]") {
+  auto mock_dvmp = std::make_shared<MockDistributedVirtualMemoryPool>();
+  ModelMemoryCoordinator unified_memory(mock_dvmp);
 
   InstanceKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
   size_t size = size_t(512) * 1024 * 1024;

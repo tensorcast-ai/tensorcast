@@ -25,7 +25,7 @@
 
 #include <string_view>
 #include "absl/status/statusor.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
@@ -184,7 +184,7 @@ class CheckpointStore {
   std::unique_ptr<GlobalStoreClient> global_store_client_;
   std::shared_ptr<CommunicationManager> comm_manager_;
   std::shared_ptr<PinnedMemoryPool> memory_pool_;
-  std::shared_ptr<memory::DistributedMemoryPool> dvmp_; // NEW: System-wide DVMP instance
+  std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp_; // NEW: System-wide DVMP instance
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Configuration

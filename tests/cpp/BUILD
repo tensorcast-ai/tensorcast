@@ -221,10 +221,10 @@ cc_test(
 )
 
 cc_test(
-    name = "unified_model_memory_test",
-    srcs = ["unified_model_memory_test.cc"],
+    name = "model_memory_coordinator_test",
+    srcs = ["model_memory_coordinator_test.cc"],
     deps = [
-        "//core/store/model:unified_model_memory",
+        "//core/store/model:model_memory_coordinator",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
         "@catch2//:catch2_main",

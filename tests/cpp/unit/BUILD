@@ -100,7 +100,7 @@ cc_test(
 
 cc_test(
     name = "test_distributed_memory_pool",
-    srcs = ["test_distributed_memory_pool.cc"],
+    srcs = ["test_distributed_virtual_memory_pool.cc"],
     linkopts = [
         "-lm",
         "-lstdc++",

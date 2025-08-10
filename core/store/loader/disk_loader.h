@@ -90,7 +90,7 @@ class DiskLoader : public IModelLoader {
    *
    * This method enables chunk-aware loading, allowing the loader to skip chunks
    * that are already available in other memory tiers. It integrates with
-   * UnifiedModelMemory to provide fine-grained loading control.
+   * ModelMemoryCoordinator to provide fine-grained loading control.
    *
    * @param mem_manager Shared pointer to the MemoryManager handling the target memory.
    * @param target_location The destination for the data (PAGEABLE_CPU or GPU).

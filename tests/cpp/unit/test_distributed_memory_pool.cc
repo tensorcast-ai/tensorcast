@@ -8,14 +8,14 @@
 #include <thread>
 #include <vector>
 
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/model/chunk_meta.h"
 
 using namespace stepcast::memory;
 using namespace stepcast::store;
 
-TEST_CASE("DistributedMemoryPool basic operations", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool basic operations", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
 
   SECTION("Allocate and deallocate") {
     const size_t size_256mb = 256ULL * 1024 * 1024;
@@ -41,7 +41,9 @@ TEST_CASE("DistributedMemoryPool basic operations", "[dvmp]") {
 
     // Verify chunk count
     auto snapshot = dvmp.chunk_snapshot("large_model");
-    REQUIRE(snapshot.size() == (size_670gb + DistributedMemoryPool::kChunk - 1) / DistributedMemoryPool::kChunk);
+    REQUIRE(
+        snapshot.size() ==
+        (size_670gb + DistributedVirtualMemoryPool::kChunk - 1) / DistributedVirtualMemoryPool::kChunk);
   }
 
   SECTION("Chunk snapshot") {
@@ -64,8 +66,8 @@ TEST_CASE("DistributedMemoryPool basic operations", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool chunk locking", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool chunk locking", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_1gb = 1024ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("lock_test", size_1gb);
   REQUIRE(region_or.ok());
@@ -119,8 +121,8 @@ TEST_CASE("DistributedMemoryPool chunk locking", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool eviction", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool eviction", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_1gb = 1024ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("evict_test", size_1gb);
   REQUIRE(region_or.ok());
@@ -169,8 +171,8 @@ TEST_CASE("DistributedMemoryPool eviction", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool preemptible marking", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool preemptible marking", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_1gb = 1024ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("preempt_test", size_1gb);
   REQUIRE(region_or.ok());
@@ -206,8 +208,8 @@ TEST_CASE("DistributedMemoryPool preemptible marking", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool ensure resident", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool ensure resident", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_512mb = 512ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("resident_test", size_512mb);
   REQUIRE(region_or.ok());
@@ -223,12 +225,12 @@ TEST_CASE("DistributedMemoryPool ensure resident", "[dvmp]") {
 
   SECTION("Check evicted chunks") {
     // Evict first chunk
-    dvmp.evict_tail_bytes("resident_test", DistributedMemoryPool::kChunk);
+    dvmp.evict_tail_bytes("resident_test", DistributedVirtualMemoryPool::kChunk);
 
     // Check residency
     auto status = dvmp.ensure_chunk_resident("resident_test", 1); // Last chunk (evicted)
     REQUIRE(!status.ok());
-    REQUIRE(status.code() == DistributedMemoryPool::kErrChunkRemote);
+    REQUIRE(status.code() == DistributedVirtualMemoryPool::kErrChunkRemote);
 
     status = dvmp.ensure_chunk_resident("resident_test", 0); // First chunk (not evicted)
     REQUIRE(status.ok());
@@ -241,8 +243,8 @@ TEST_CASE("DistributedMemoryPool ensure resident", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool concurrent operations", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_1gb = 1024ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("concurrent_test", size_1gb);
   REQUIRE(region_or.ok());
@@ -294,7 +296,7 @@ TEST_CASE("DistributedMemoryPool concurrent operations", "[dvmp]") {
   SECTION("Concurrent eviction and refresh") {
     std::thread evict_thread([&]() {
       for (int i = 0; i < 10; ++i) {
-        dvmp.evict_tail_bytes("concurrent_test", DistributedMemoryPool::kChunk);
+        dvmp.evict_tail_bytes("concurrent_test", DistributedVirtualMemoryPool::kChunk);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
     });
@@ -316,8 +318,8 @@ TEST_CASE("DistributedMemoryPool concurrent operations", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool state transitions", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool state transitions", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
   const size_t size_512mb = 512ULL * 1024 * 1024;
   auto region_or = dvmp.allocate("state_test", size_512mb);
   REQUIRE(region_or.ok());
@@ -355,7 +357,7 @@ TEST_CASE("DistributedMemoryPool state transitions", "[dvmp]") {
 
     // COPIED_GPU -> EVICTED
     auto evicted = dvmp.evict_tail_bytes("state_test", 256ULL * 1024 * 1024);
-    REQUIRE(evicted >= DistributedMemoryPool::kChunk);
+    REQUIRE(evicted >= DistributedVirtualMemoryPool::kChunk);
     // Since eviction works from tail, check if any chunk is evicted
     bool has_evicted = false;
     snapshot = dvmp.chunk_snapshot("state_test");
@@ -369,8 +371,8 @@ TEST_CASE("DistributedMemoryPool state transitions", "[dvmp]") {
   }
 }
 
-TEST_CASE("DistributedMemoryPool error handling", "[dvmp]") {
-  DistributedMemoryPool dvmp;
+TEST_CASE("DistributedVirtualMemoryPool error handling", "[dvmp]") {
+  DistributedVirtualMemoryPool dvmp;
 
   SECTION("Operations on non-existent model") {
     auto status = dvmp.lock_chunks("nonexistent", {0});

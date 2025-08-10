@@ -12,13 +12,13 @@
 #include "core/store/communication_types.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model_location.h"
-#include "core/store/model/unified_model_memory.h"
+#include "core/store/model/model_memory_coordinator.h"
 
 namespace stepcast::store {
 
 // Forward declarations
 class GlobalStoreClient;
-class UnifiedModelMemory;
+class ModelMemoryCoordinator;
 class MemoryManager;
 class IModelLoader;
 
@@ -93,7 +93,7 @@ class ChunkAwareLoadingStrategy {
   static LoadPlan create_loading_plan(
       const InstanceKey& key,
       ModelLocation target,
-      const UnifiedModelMemory& memory,
+      const ModelMemoryCoordinator& memory,
       GlobalStoreClient& global_store);
 
   /**
@@ -106,7 +106,7 @@ class ChunkAwareLoadingStrategy {
    */
   static std::future<absl::Status> execute_plan(
       const LoadPlan& plan,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager);
 
   /**
@@ -120,7 +120,7 @@ class ChunkAwareLoadingStrategy {
    */
   static absl::Status execute_plan_with_progress(
       const LoadPlan& plan,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager,
       const ProgressCallback& progress_cb);
 
@@ -134,7 +134,7 @@ class ChunkAwareLoadingStrategy {
   // Execute a single load operation
   static absl::Status execute_operation(
       const LoadOperation& op,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager,
       const ProgressCallback& progress_cb);
 
@@ -142,14 +142,14 @@ class ChunkAwareLoadingStrategy {
   static absl::Status execute_local_cpu_copy(
       const std::vector<uint32_t>& chunks,
       ModelLocation target,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager,
       const ProgressCallback& progress_cb);
 
   // Execute P2P transfer
   static absl::Status execute_p2p_transfer(
       const LoadOperation& op,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager,
       const ProgressCallback& progress_cb);
 
@@ -157,7 +157,7 @@ class ChunkAwareLoadingStrategy {
   static absl::Status execute_disk_load(
       const std::vector<uint32_t>& chunks,
       ModelLocation target,
-      UnifiedModelMemory& memory,
+      ModelMemoryCoordinator& memory,
       const std::shared_ptr<MemoryManager>& mem_manager,
       const ProgressCallback& progress_cb);
 };

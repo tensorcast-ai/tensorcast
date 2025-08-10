@@ -16,14 +16,14 @@
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/p2p_loader.h"
 #include "core/store/model/memory_manager.h"
-#include "core/store/model/unified_model_memory.h"
+#include "core/store/model/model_memory_coordinator.h"
 
 namespace stepcast::store {
 
 ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_plan(
     const InstanceKey& key,
     ModelLocation target,
-    const UnifiedModelMemory& memory,
+    const ModelMemoryCoordinator& memory,
     GlobalStoreClient& global_store) {
   LoadPlan plan;
   plan.target = target;
@@ -144,7 +144,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
 
 std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
     const LoadPlan& plan,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager) {
   return std::async(std::launch::async, [plan, &memory, mem_manager]() {
     return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {}); // No-op progress callback
@@ -153,7 +153,7 @@ std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
 
 absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
     const LoadPlan& plan,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   if (plan.operations.empty()) {
@@ -218,7 +218,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
 
 absl::Status ChunkAwareLoadingStrategy::execute_operation(
     const LoadOperation& op,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   switch (op.source) {
@@ -243,7 +243,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_operation(
 absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     const std::vector<uint32_t>& chunks,
     ModelLocation target,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   if (target != ModelLocation::GPU) {
@@ -341,7 +341,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
 
 absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
     const LoadOperation& op,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Group chunks by remote source
@@ -400,7 +400,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
 absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     const std::vector<uint32_t>& chunks,
     ModelLocation target,
-    UnifiedModelMemory& memory,
+    ModelMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Create disk loader

@@ -21,9 +21,9 @@ cc_library(
 )
 
 cc_library(
-    name = "unified_model_memory",
-    srcs = ["unified_model_memory.cc"],
-    hdrs = ["unified_model_memory.h"],
+    name = "model_memory_coordinator",
+    srcs = ["model_memory_coordinator.cc"],
+    hdrs = ["model_memory_coordinator.h"],
     deps = [
         ":chunk_meta",
         ":model_location",
@@ -50,7 +50,7 @@ cc_library(
         ":chunk_meta",
         ":memory_state",
         ":model_location",
-        ":unified_model_memory",
+        ":model_memory_coordinator",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",

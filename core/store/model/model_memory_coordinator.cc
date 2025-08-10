@@ -13,10 +13,11 @@
 
 namespace stepcast::store {
 
-UnifiedModelMemory::UnifiedModelMemory(gsl::not_null<std::shared_ptr<stepcast::memory::DistributedMemoryPool>> dvmp)
+ModelMemoryCoordinator::ModelMemoryCoordinator(
+    gsl::not_null<std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool>> dvmp)
     : dvmp_(std::move(dvmp)) {}
 
-absl::Status UnifiedModelMemory::allocate(const InstanceKey& key, size_t bytes) {
+absl::Status ModelMemoryCoordinator::allocate(const InstanceKey& key, size_t bytes) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Check if already allocated
@@ -32,14 +33,14 @@ absl::Status UnifiedModelMemory::allocate(const InstanceKey& key, size_t bytes) 
   } else if (region_or.status().code() == absl::StatusCode::kAlreadyExists) {
     // Region already reserved elsewhere. Proceed to initialise UMA bookkeeping
     // without duplicating the reservation. We may not know the base pointer.
-    alloc.dram_region = stepcast::memory::DistributedMemoryPool::VirtualRegion{
+    alloc.dram_region = stepcast::memory::DistributedVirtualMemoryPool::VirtualRegion{
         .cpu_base = nullptr, .gpu_base = nullptr, .bytes = bytes};
   } else {
     return region_or.status();
   }
   alloc.total_bytes = bytes;
-  alloc.num_chunks =
-      (bytes + stepcast::memory::DistributedMemoryPool::kChunk - 1) / stepcast::memory::DistributedMemoryPool::kChunk;
+  alloc.num_chunks = (bytes + stepcast::memory::DistributedVirtualMemoryPool::kChunk - 1) /
+      stepcast::memory::DistributedVirtualMemoryPool::kChunk;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
 
@@ -57,13 +58,13 @@ absl::Status UnifiedModelMemory::allocate(const InstanceKey& key, size_t bytes) 
 
   allocations_[key] = std::move(alloc);
 
-  VLOG(1) << "UnifiedModelMemory: allocated " << bytes << " bytes for model " << key.model_id << " with "
+  VLOG(1) << "ModelMemoryCoordinator: allocated " << bytes << " bytes for model " << key.model_id << " with "
           << alloc.num_chunks << " chunks";
 
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::shared_ptr<CudaMemory>> UnifiedModelMemory::get_or_create_gpu_allocation(
+absl::StatusOr<std::shared_ptr<CudaMemory>> ModelMemoryCoordinator::get_or_create_gpu_allocation(
     const InstanceKey& key,
     int device_id) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -93,12 +94,12 @@ absl::StatusOr<std::shared_ptr<CudaMemory>> UnifiedModelMemory::get_or_create_gp
   gpu_allocs[dev_key] = cuda_mem;
   loaded_counts[dev_key] = 0; // Initialise counter
 
-  VLOG(1) << "UnifiedModelMemory: allocated GPU memory for model " << key.model_id << " on device " << device_id;
+  VLOG(1) << "ModelMemoryCoordinator: allocated GPU memory for model " << key.model_id << " on device " << device_id;
 
   return cuda_mem;
 }
 
-absl::Span<const UnifiedModelMemory::ChunkMapping> UnifiedModelMemory::get_chunk_mappings(
+absl::Span<const ModelMemoryCoordinator::ChunkMapping> ModelMemoryCoordinator::get_chunk_mappings(
     const InstanceKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -108,12 +109,12 @@ absl::Span<const UnifiedModelMemory::ChunkMapping> UnifiedModelMemory::get_chunk
   }
 
   // Sync CPU states from DVMP before returning
-  const_cast<UnifiedModelMemory*>(this)->sync_cpu_chunk_states(key);
+  const_cast<ModelMemoryCoordinator*>(this)->sync_cpu_chunk_states(key);
 
   return absl::MakeConstSpan(it->second.chunk_mappings);
 }
 
-std::vector<uint32_t> UnifiedModelMemory::get_missing_chunks(
+std::vector<uint32_t> ModelMemoryCoordinator::get_missing_chunks(
     const InstanceKey& key,
     ModelLocation target,
     std::optional<int> device_id) const {
@@ -125,7 +126,7 @@ std::vector<uint32_t> UnifiedModelMemory::get_missing_chunks(
   }
 
   // Sync CPU states from DVMP
-  const_cast<UnifiedModelMemory*>(this)->sync_cpu_chunk_states(key);
+  const_cast<ModelMemoryCoordinator*>(this)->sync_cpu_chunk_states(key);
 
   std::vector<uint32_t> missing;
   const auto& mappings = it->second.chunk_mappings;
@@ -161,7 +162,7 @@ std::vector<uint32_t> UnifiedModelMemory::get_missing_chunks(
   return missing;
 }
 
-absl::Status UnifiedModelMemory::lock_chunks_for_transfer(
+absl::Status ModelMemoryCoordinator::lock_chunks_for_transfer(
     const InstanceKey& key,
     ModelLocation source,
     ModelLocation target,
@@ -195,7 +196,7 @@ absl::Status UnifiedModelMemory::lock_chunks_for_transfer(
   return absl::OkStatus();
 }
 
-absl::Status UnifiedModelMemory::update_chunk_states(
+absl::Status ModelMemoryCoordinator::update_chunk_states(
     const InstanceKey& key,
     ModelLocation location,
     const std::vector<uint32_t>& chunks,
@@ -268,7 +269,7 @@ absl::Status UnifiedModelMemory::update_chunk_states(
   return absl::OkStatus();
 }
 
-UnifiedModelMemory::ChunkSource UnifiedModelMemory::get_best_source_for_chunk(
+ModelMemoryCoordinator::ChunkSource ModelMemoryCoordinator::get_best_source_for_chunk(
     const InstanceKey& key,
     uint32_t chunk_idx,
     ModelLocation target) const {
@@ -303,7 +304,7 @@ UnifiedModelMemory::ChunkSource UnifiedModelMemory::get_best_source_for_chunk(
   return {ChunkSource::DISK, -1, ""};
 }
 
-std::unordered_map<ModelLocation, size_t> UnifiedModelMemory::get_memory_stats(const InstanceKey& key) const {
+std::unordered_map<ModelLocation, size_t> ModelMemoryCoordinator::get_memory_stats(const InstanceKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   std::unordered_map<ModelLocation, size_t> stats;
@@ -326,12 +327,12 @@ std::unordered_map<ModelLocation, size_t> UnifiedModelMemory::get_memory_stats(c
   return stats;
 }
 
-bool UnifiedModelMemory::has_allocation(const InstanceKey& key) const {
+bool ModelMemoryCoordinator::has_allocation(const InstanceKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return allocations_.find(key) != allocations_.end();
 }
 
-absl::StatusOr<size_t> UnifiedModelMemory::get_model_size(const InstanceKey& key) const {
+absl::StatusOr<size_t> ModelMemoryCoordinator::get_model_size(const InstanceKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -342,7 +343,7 @@ absl::StatusOr<size_t> UnifiedModelMemory::get_model_size(const InstanceKey& key
   return it->second.total_bytes;
 }
 
-void* UnifiedModelMemory::get_cpu_base_ptr(const InstanceKey& key) const {
+void* ModelMemoryCoordinator::get_cpu_base_ptr(const InstanceKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -353,7 +354,7 @@ void* UnifiedModelMemory::get_cpu_base_ptr(const InstanceKey& key) const {
   return it->second.dram_region.cpu_base;
 }
 
-void* UnifiedModelMemory::get_gpu_base_ptr(const InstanceKey& key, int device_id) const {
+void* ModelMemoryCoordinator::get_gpu_base_ptr(const InstanceKey& key, int device_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -370,7 +371,7 @@ void* UnifiedModelMemory::get_gpu_base_ptr(const InstanceKey& key, int device_id
   return gpu_it->second->get();
 }
 
-absl::Status UnifiedModelMemory::release(const InstanceKey& key) {
+absl::Status ModelMemoryCoordinator::release(const InstanceKey& key) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -384,11 +385,11 @@ absl::Status UnifiedModelMemory::release(const InstanceKey& key) {
   return absl::OkStatus();
 }
 
-size_t UnifiedModelMemory::get_chunk_size() const {
-  return stepcast::memory::DistributedMemoryPool::kChunk;
+size_t ModelMemoryCoordinator::get_chunk_size() const {
+  return stepcast::memory::DistributedVirtualMemoryPool::kChunk;
 }
 
-absl::Status UnifiedModelMemory::mark_cpu_chunks_preemptible(const InstanceKey& key, float ratio) {
+absl::Status ModelMemoryCoordinator::mark_cpu_chunks_preemptible(const InstanceKey& key, float ratio) {
   if (ratio < 0.0F || ratio > 1.0F) {
     return absl::InvalidArgumentError("ratio must be between 0.0 and 1.0");
   }
@@ -429,7 +430,7 @@ absl::Status UnifiedModelMemory::mark_cpu_chunks_preemptible(const InstanceKey& 
   return absl::OkStatus();
 }
 
-void UnifiedModelMemory::sync_cpu_chunk_states(const InstanceKey& key) {
+void ModelMemoryCoordinator::sync_cpu_chunk_states(const InstanceKey& key) {
   auto it = allocations_.find(key);
   if (it == allocations_.end()) {
     return;
@@ -444,7 +445,7 @@ void UnifiedModelMemory::sync_cpu_chunk_states(const InstanceKey& key) {
   }
 }
 
-bool UnifiedModelMemory::is_gpu_loading_complete(const InstanceKey& key, int device_id) const {
+bool ModelMemoryCoordinator::is_gpu_loading_complete(const InstanceKey& key, int device_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -473,14 +474,17 @@ bool UnifiedModelMemory::is_gpu_loading_complete(const InstanceKey& key, int dev
 
   // Update counter for next fast-path check.
   if (loaded == it->second.num_chunks) {
-    const_cast<UnifiedModelMemory::ModelAllocation&>(it->second).loaded_chunk_counts[dev_key] = loaded;
+    const_cast<ModelMemoryCoordinator::ModelAllocation&>(it->second).loaded_chunk_counts[dev_key] = loaded;
     return true;
   }
-  const_cast<UnifiedModelMemory::ModelAllocation&>(it->second).loaded_chunk_counts[dev_key] = loaded;
+  const_cast<ModelMemoryCoordinator::ModelAllocation&>(it->second).loaded_chunk_counts[dev_key] = loaded;
   return false;
 }
 
-void UnifiedModelMemory::record_gpu_touch(const InstanceKey& key, int device_id, absl::Span<const uint32_t> chunks) {
+void ModelMemoryCoordinator::record_gpu_touch(
+    const InstanceKey& key,
+    int device_id,
+    absl::Span<const uint32_t> chunks) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);

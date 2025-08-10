@@ -6,7 +6,7 @@
 #include <memory>
 
 #include "absl/status/status.h"
-#include "core/common/memory/distributed_memory_pool.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loader/sink.h"
 #include "core/store/model/memory_manager.h"
 
@@ -18,7 +18,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
  public:
   struct Options {
     // Per‑model DVMP region handle (preferred for writes)
-    memory::DistributedMemoryPool::DvmpRegion region;
+    memory::DistributedVirtualMemoryPool::DvmpRegion region;
     // Optional: memory manager for capability planning (direct writes)
     std::shared_ptr<MemoryManager> memory_manager;
     uint64_t total_size = 0;
