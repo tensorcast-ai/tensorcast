@@ -31,6 +31,11 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
   const size_t size1 = 1024 * 3;
   const size_t total_size = size0 + size1;
 
+  // Skip if CUDA is not available on this system
+  if (!is_cuda_available()) {
+    SKIP("CUDA not available. Skipping streaming GPU test.");
+  }
+
   fs::path base = fs::temp_directory_path() / "streaming_disk_test";
   if (fs::exists(base)) {
     fs::remove_all(base);
@@ -53,7 +58,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
 
   // Pinned pool for streaming
   const size_t pool_total = 1024 * 1024;
-  const size_t pool_chunk = 1024;
+  const size_t pool_chunk = 4096; // Use 4 KiB-aligned chunk size per alignment requirements
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
@@ -68,7 +73,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
   ModelConfig cfg{
       .source = disk_src,
       .model_identifier = model_id,
-      .device_type = ::stepcast::DeviceType::CPU,
+      .device_type = ::stepcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,

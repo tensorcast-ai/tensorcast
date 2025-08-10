@@ -1521,19 +1521,26 @@ absl::Status MemoryManager::ensure_streaming_buffer(size_t num_chunks) {
   // Alignment policy enforcement: ensure pool chunk size divides DVMP chunk size
   // and is O_DIRECT-friendly (multiple of 4 KiB).
   const size_t pool_chunk = pinned_pool_->chunk_size();
-  const size_t dvmp_chunk = ::stepcast::memory::DistributedVirtualMemoryPool::kChunk;
+  const size_t dvmp_chunk = memory::DistributedVirtualMemoryPool::kChunk;
   if (pool_chunk == 0) {
-    return absl::InvalidArgumentError("Pinned memory pool chunk size must be > 0");
+    LOG(FATAL) << "Streaming buffer is required but pinned pool chunk size is 0.";
   }
   if (dvmp_chunk % pool_chunk != 0) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("Pinned pool chunk size (%zu) must divide DVMP chunk size (%zu)", pool_chunk, dvmp_chunk));
+    LOG(FATAL) << absl::StrFormat(
+        "Streaming buffer is required but pinned pool chunk size (%zu) must divide DVMP chunk size (%zu)",
+        pool_chunk,
+        dvmp_chunk);
   }
   if (pool_chunk % 4096 != 0) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("Pinned pool chunk size (%zu) must be a multiple of 4096 for O_DIRECT alignment", pool_chunk));
+    LOG(FATAL) << absl::StrFormat(
+        "Streaming buffer is required but pinned pool chunk size (%zu) must be a multiple of 4096 for O_DIRECT alignment",
+        pool_chunk);
   }
-  return allocate_buffer_pool(num_chunks);
+  absl::Status st = allocate_buffer_pool(num_chunks);
+  if (!st.ok()) {
+    LOG(FATAL) << "Streaming buffer allocation failed: " << st;
+  }
+  return st;
 }
 
 absl::StatusOr<std::unique_ptr<loader::PositionedSink>> MemoryManager::build_sink_(ModelLocation target_location) {
@@ -1679,8 +1686,7 @@ std::future<absl::Status> MemoryManager::load_async_from_source(
         // Build adapter and sink outside of lock
         auto spb = this->get_streaming_buffer();
         if (!spb) {
-          (void)this->set_state(target_location, MemoryState::FAILED);
-          return absl::InternalError("Streaming buffer not available");
+          LOG(FATAL) << "Streaming buffer not available – this application requires streaming for loading.";
         }
         loader::StreamingBufferAdapter adapter(spb);
 
