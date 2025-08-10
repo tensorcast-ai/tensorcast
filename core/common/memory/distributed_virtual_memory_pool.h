@@ -85,6 +85,23 @@ class DistributedVirtualMemoryPool {
 
   virtual absl::Status map_file_segments(std::string_view model_id, absl::Span<const FileSegment> segs);
 
+  /**
+   * @brief Write data to the DVMP region and update metadata.
+   *
+   * This method writes data to the CPU virtual address space managed by DVMP
+   * and automatically updates chunk metadata to reflect the write operation.
+   * It ensures CPU metadata visibility by updating chunk states to at least HOT
+   * and refreshing last_touch_s timestamps.
+   *
+   * @param model_id The model identifier
+   * @param va_offset Offset within the virtual address region
+   * @param src Source data pointer
+   * @param bytes Number of bytes to write
+   * @return Status indicating success or failure
+   *
+   * @note Updates chunk residency state (at least HOT) and last_touch_s for touched chunks
+   * @note Thread-safe and ensures metadata consistency
+   */
   virtual absl::Status write_at(std::string_view model_id, uint64_t va_offset, const void* src, size_t bytes);
 
   // ===== Pin Leases =====

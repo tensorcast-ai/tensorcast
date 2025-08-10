@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include "core/store/model/unified_model_memory.h"
+#include "core/store/model/model_memory_coordinator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -442,6 +442,26 @@ void ModelMemoryCoordinator::sync_cpu_chunk_states(const InstanceKey& key) {
   // Update our mappings with DVMP states
   for (size_t i = 0; i < std::min(chunk_snapshot.size(), it->second.chunk_mappings.size()); ++i) {
     it->second.chunk_mappings[i].cpu_state = chunk_snapshot[i].state.load();
+  }
+}
+
+void ModelMemoryCoordinator::sync_cpu_chunk_states(
+    const InstanceKey& key,
+    absl::Span<const std::pair<uint32_t, uint32_t>> ranges) {
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return;
+  }
+
+  // Get current chunk states from DVMP
+  auto chunk_snapshot = dvmp_->chunk_snapshot(key.model_id);
+
+  // Update only the specified ranges
+  for (const auto& [start_idx, end_idx] : ranges) {
+    for (uint32_t i = start_idx; i <= end_idx && i < chunk_snapshot.size() && i < it->second.chunk_mappings.size();
+         ++i) {
+      it->second.chunk_mappings[i].cpu_state = chunk_snapshot[i].state.load();
+    }
   }
 }
 

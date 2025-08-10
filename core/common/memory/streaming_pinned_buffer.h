@@ -65,6 +65,13 @@ class StreamingPinnedBuffer {
   absl::StatusOr<int> get_free_chunk() ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
+   * @brief Try to get a free chunk slot without blocking.
+   * Non-blocking variant that returns immediately.
+   * @return Slot ID or Unavailable error if no chunk is free
+   */
+  absl::StatusOr<int> try_get_free_chunk() ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
    * @brief Mark a chunk as ready with data for consumer.
    * @param slot_id The slot ID returned by get_free_chunk
    * @param global_chunk_id The global chunk ID in the model
@@ -121,6 +128,27 @@ class StreamingPinnedBuffer {
   size_t num_chunks() const {
     return num_chunks_;
   }
+
+  /**
+   * @brief Get the total capacity (number of chunks).
+   * @return Total number of chunks in the buffer
+   */
+  size_t capacity() const {
+    return num_chunks_;
+  }
+
+  /**
+   * @brief Get the number of chunks currently in flight.
+   * In-flight chunks are those that have been given out but not yet returned.
+   * @return Number of chunks in flight
+   */
+  size_t inflight() const ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
+   * @brief Check if production is complete.
+   * @return true if production has been signaled as complete
+   */
+  bool production_done() const ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   const size_t num_chunks_;

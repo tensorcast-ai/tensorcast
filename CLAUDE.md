@@ -148,14 +148,12 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 ### System Layer Responsibilities
 
 #### Global Store (Control Plane)
-- @web-docs/docs/developer-guides/architecture/global-store.md
 - Centralized model registry and metadata management
 - Load balancing across available replicas
 - P2P transport coordination between nodes
 - Worker health monitoring and failover
 
 #### Store Daemon (Storage Layer)
-- @web-docs/docs/developer-guides/architecture/store-daemon.md
 - Local model storage and memory management
 - CPU/GPU memory pool allocation
 - P2P server for peer-to-peer transfers (RDMA or TCP)
@@ -247,8 +245,6 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - Testing Strategy
 - Rollout Plan
 - Progress Tracking (using standardized table format)
-
-For complete template and guidelines, see @.cursor/rules/technical_design.mdc
 
 ## Coding Standards
 

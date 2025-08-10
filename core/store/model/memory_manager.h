@@ -25,7 +25,6 @@
 #include "core/store/communication_types.h"
 #include "core/store/direct_write.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/memory_types.h"
 #include "core/store/model/chunk_meta.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
@@ -50,7 +49,6 @@ class MemoryManager {
    * @param dvmp Shared Distributed Virtual Memory Pool.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
-   * @param require_dvmp_lock_success Whether to fail transfer if DVMP chunk locking fails.
    */
   MemoryManager(
       std::string model_identifier,
@@ -58,8 +56,7 @@ class MemoryManager {
       const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
       const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
       size_t max_buffer_bytes,
-      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero(),
-      bool require_dvmp_lock_success = true);
+      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero());
 
   ~MemoryManager();
 
@@ -140,13 +137,6 @@ class MemoryManager {
    * @return std::vector<void*> Vector with zero or one pointer.
    */
   std::vector<void*> get_pointer(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Gets access to the BatchVector used for CPU chunk status tracking during loading.
-   * Primarily used internally by Loaders.
-   * @return std::shared_ptr<BatchVector> Shared pointer to the BatchVector, or nullptr.
-   */
-  std::shared_ptr<BatchVector> get_host_chunk_queue() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Retrieves the CUDA IPC memory handle associated with the managed GPU
@@ -306,17 +296,18 @@ class MemoryManager {
   // --- NEW: Unified Memory Management ---
 
   /**
-   * @brief Get the unified memory instance for chunk-aware operations.
-   * @return Pointer to ModelMemoryCoordinator or nullptr if not initialized.
+   * @brief Get the memory coordinator instance for chunk-aware operations.
+   *        Always non-null.
+   * @return Pointer to ModelMemoryCoordinator.
    */
-  std::shared_ptr<ModelMemoryCoordinator> get_unified_memory() const ABSL_LOCKS_EXCLUDED(mutex_);
+  std::shared_ptr<ModelMemoryCoordinator> get_memory_coordinator() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Allocate unified memory for the model.
-   * Creates ModelMemoryCoordinator instance and reserves DRAM via DVMP.
+   * @brief Allocate per-model memory bookkeeping in the coordinator.
+   * Reserves DRAM via DVMP for this model. GPU allocations remain lazy.
    * @return Status of allocation.
    */
-  absl::Status allocate_unified() ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status allocate_model_memory() ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Mark CPU chunks as preemptible after GPU loading.
@@ -367,9 +358,8 @@ class MemoryManager {
       ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
   /**
-   * @brief Releases CPU resources (pinned memory, batch vector).
+   * @brief Releases CPU staging resources (streaming buffer and related state).
    */
-  // Updated: Also releases streaming buffer pool if allocated.
   void release_cpu_resources_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   /**
@@ -422,14 +412,12 @@ class MemoryManager {
   // ----------------------------------------------------------------------
   struct CpuPod {
     MemoryState state = MemoryState::UNINITIALIZED;
-    std::shared_ptr<BatchVector> host_chunk_queue = nullptr;
     absl::CondVar cond;
     bool comm_registered = false;
     CommRegistrationInfo comm_registration_info;
     std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> pin_leases;
     // DVMP-backed VA info
-    void* dvmp_base = nullptr;
-    size_t dvmp_bytes = 0;
+    [[deprecated("Use UMA's get_cpu_base_ptr() instead")]] void* dvmp_base = nullptr; // Now managed by UMA
     // Streaming buffer used for staged transfers
     std::shared_ptr<StreamingPinnedBuffer> streaming_buffer = nullptr;
   };
@@ -464,12 +452,12 @@ class MemoryManager {
   const std::chrono::milliseconds pinned_memory_timeout_;
 
   // Whether to fail transfer if DVMP chunk locking fails
-  [[maybe_unused]] const bool require_dvmp_lock_success_;
+  // [[maybe_unused]] const bool require_dvmp_lock_success_;
 
   gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
 
   // Unified memory management instance
-  std::shared_ptr<ModelMemoryCoordinator> unified_memory_ ABSL_GUARDED_BY(mutex_);
+  gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>> memory_coordinator_ ABSL_GUARDED_BY(mutex_);
 
   // --- New: small internal helpers to reduce duplication -----------------
   // Reserve/open DVMP region and cache base/size. Expects mutex_ held.

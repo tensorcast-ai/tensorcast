@@ -16,6 +16,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/trace/trace_macros.h"
+#include "core/communicator/misc/common.h"
 #include "core/store/loading/prepare_orchestrator.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_config.h"
@@ -44,8 +45,8 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
   VLOG(1) << "Initializing CheckpointStore with unified Options constructor";
   VLOG(1) << "Storage path: "
           << (storage_path_.empty() ? "<empty - model_identifier will be full path>" : storage_path_.string());
-  VLOG(1) << "Memory pool size: " << memory_pool_size_ / GB << "GB";
-  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / MB << "MB";
+  VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::GB << "GB";
+  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::MB << "MB";
 
   // ───── Component initialization ─────
   device_manager_ = std::make_unique<DeviceManager>();

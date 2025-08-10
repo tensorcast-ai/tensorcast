@@ -207,18 +207,7 @@ test_suite(
     ],
 )
 
-cc_test(
-    name = "loader_unit_tests",
-    srcs = [
-        "unit/mux_seekable_source_test.cc",
-    ],
-    deps = [
-        "//core/store/loader:mux_seekable_source",
-        "//core/store/loader:source",
-        "@abseil-cpp//absl/status:statusor",
-        "@catch2//:catch2_main",
-    ],
-)
+# loader_unit_tests moved to tests/cpp/unit/BUILD
 
 cc_test(
     name = "model_memory_coordinator_test",

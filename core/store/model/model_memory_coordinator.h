@@ -252,6 +252,28 @@ class ModelMemoryCoordinator {
    */
   absl::Status release(const InstanceKey& key);
 
+  /**
+   * @brief Sync CPU chunk states from DVMP metadata.
+   *
+   * Updates the internal CPU chunk mappings based on DVMP's authoritative
+   * metadata. This ensures consistency after operations that modify DVMP
+   * directly (e.g., GPU->CPU transfers using write_at).
+   *
+   * @param key Model instance key
+   */
+  void sync_cpu_chunk_states(const InstanceKey& key);
+
+  /**
+   * @brief Sync CPU chunk states for specific ranges from DVMP.
+   *
+   * Range-based variant that only syncs specified chunk ranges, reducing
+   * overhead when only a subset of chunks have been modified.
+   *
+   * @param key Model instance key
+   * @param ranges Vector of chunk range pairs (start_idx, end_idx inclusive)
+   */
+  void sync_cpu_chunk_states(const InstanceKey& key, absl::Span<const std::pair<uint32_t, uint32_t>> ranges);
+
  private:
   struct ModelAllocation {
     // DRAM allocation info from DVMP
@@ -275,9 +297,6 @@ class ModelMemoryCoordinator {
   mutable std::mutex mutex_;
   gsl::not_null<std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool>> dvmp_;
   std::unordered_map<InstanceKey, ModelAllocation, InstanceKeyHash> allocations_;
-
-  // Helper to sync chunk states with DVMP
-  void sync_cpu_chunk_states(const InstanceKey& key);
 };
 
 } // namespace stepcast::store

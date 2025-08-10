@@ -43,6 +43,22 @@ cc_library(
 )
 
 cc_library(
+    name = "transfer_helpers",
+    srcs = ["transfer_helpers.cc"],
+    hdrs = ["transfer_helpers.h"],
+    deps = [
+        ":chunk_meta",
+        ":model_location",
+        ":model_memory_coordinator",
+        "//core/common",
+        "//core/common:distributed_memory_pool",
+        "//core/store:device_types",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_library(
     name = "memory_manager",
     srcs = ["memory_manager.cc"],
     hdrs = ["memory_manager.h"],
@@ -51,6 +67,7 @@ cc_library(
         ":memory_state",
         ":model_location",
         ":model_memory_coordinator",
+        ":transfer_helpers",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",

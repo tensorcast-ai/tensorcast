@@ -35,8 +35,7 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
       config.pinned_memory_pool,
       config.dvmp,
       config.max_buffer_bytes,
-      config.pinned_memory_timeout,
-      config.require_dvmp_lock_success);
+      config.pinned_memory_timeout);
 
   // --- Create Loader based on Source ---
   std::unique_ptr<IModelLoader> loader;
@@ -350,7 +349,7 @@ std::shared_future<absl::Status> Model::ensure_loaded_async(
     // thread has finished allocation, leading to duplicate allocation and
     // duplicate load tasks (which can leave the MemoryManager in FAILED
     // state).  The allocation itself may be moderately expensive (e.g.
-    // cudaMalloc) but is still far cheaper than the full disk load we perform
+    // UMA allocation) but is still far cheaper than the full disk load we perform
     // later and only happens once per instance, so holding the mutex here is
     // acceptable.
     // ------------------------------------------------------------------

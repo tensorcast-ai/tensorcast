@@ -226,4 +226,35 @@ bool StreamingPinnedBuffer::is_consumption_complete() const {
   return production_complete_ && ready_queue_.empty() && chunks_consumed_ == chunks_produced_;
 }
 
+absl::StatusOr<int> StreamingPinnedBuffer::try_get_free_chunk() {
+  absl::MutexLock lock(&mutex_);
+
+  if (!initialized_) {
+    return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
+  }
+
+  // Non-blocking check - return immediately if no free chunks
+  if (free_queue_.empty()) {
+    return absl::UnavailableError("No free chunks available");
+  }
+
+  int slot_id = free_queue_.front();
+  free_queue_.pop();
+
+  return slot_id;
+}
+
+size_t StreamingPinnedBuffer::inflight() const {
+  absl::MutexLock lock(&mutex_);
+
+  // In-flight chunks are those that are neither free nor ready
+  // Total chunks - free chunks - ready chunks = in-flight chunks
+  return num_chunks_ - free_queue_.size() - ready_queue_.size();
+}
+
+bool StreamingPinnedBuffer::production_done() const {
+  absl::MutexLock lock(&mutex_);
+  return production_complete_;
+}
+
 } // namespace stepcast::store
