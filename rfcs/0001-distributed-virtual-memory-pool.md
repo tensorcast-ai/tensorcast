@@ -2,20 +2,21 @@
 
 Status: Completed
 Date: 2025‑08‑08
-Owner: StepCast Core
-Supersedes: 0002 (Unified Loader), 0003 (DVMP‑Unified IO), 0004 (DVMP 2.0)
 
 ## 0. Summary
 
-This RFC consolidates the DVMP line of work (0001–0004) into a single, canonical specification aligned with the current codebase. It defines DVMP 2.0 (per‑model handles and coherent state), DVMP‑owned IO (map/write), chunk‑scoped external exposure via pin leases, the unified loader architecture (Source→Pump→Sink with BufferPool), positioned writes for correctness, and an optional direct remote→DVMP fast path. All items described here are implemented and integrated.
+It defines DVMP 2.0 (per‑model handles and coherent state), DVMP‑owned IO (map/write), chunk‑scoped external exposure via pin leases, the unified loader architecture centered on a single positioned sink contract, and capability‑driven direct remote→DVMP writes. All items described here are implemented and integrated.
 
 Key outcomes:
 - DVMP exposes per‑model region handles, reducing global lock contention.
-- Loaders are refactored to Source/Pump/Sink with a single `StreamingPinnedBuffer` pool.
+- Single sink contract: all loader data paths use `PositionedSink`; `pump_ranges(...)` is the sole pumping API (the legacy `pump()` helper was removed).
 - CPU writes/mappings are owned by DVMP (`write_at`, `map_file_segments`).
 - Range pumping uses `PositionedSink::write_at(offset, ...)` to guarantee correctness.
+- Capability‑driven direct writes: negotiated via `DirectWritableSink` with automatic fallback to staged copies; no env flags or concrete type checks.
 - CPU remote exposure defaults to chunk‑scoped export with DVMP pin leases; GPU remains single‑range.
-- Optional direct remote→DVMP writes exist behind `SCSTORE_ENABLE_DIRECT_DVMP=1` when the source supports it.
+- `DVMPRegionSink` operates with a per‑model `DvmpRegion` handle (no string lookups on each write).
+- `UnifiedMemorySink` is removed from the hot path; loaders call `MemoryManager::finalize_load(...)` after `sink->close()`. UMA treats CPU state as a DVMP read‑through and remains the source of truth for GPU state.
+- Alignment policy is enforced once in the streaming buffer setup: the pool chunk must divide the DVMP chunk and be O_DIRECT‑friendly.
 
 ## 1. Goals
 
@@ -79,9 +80,9 @@ Lock→Copy→Unlock transitions report `HOT` or `COPIED_GPU` on unlock. Preempt
 
 - `PositionedSink::write_at(offset, ...)` is the destination contract for `pump_ranges` to ensure correct placement with concurrent producers.
 - Implementations:
-  - `DVMPRegionSink` computes `cpu_base + offset` and calls DVMP `write_at`.
+  - `DVMPRegionSink` uses a per‑model `DvmpRegion` to call DVMP `write_at`.
   - `GPUMemorySink` computes `gpu_base + offset` and issues async H2D copies.
-- UnifiedMemorySink wraps sinks to update UMA/DVMP chunk states after successful writes.
+- Finalization: after `sink->close()`, loaders call `MemoryManager::finalize_load(target, optional_chunk_list)` to apply UMA updates for GPU. CPU metadata is already authoritative in DVMP.
 
 ### 4.3 CPU→GPU Copy: Mandatory CPU Release
 
@@ -97,30 +98,41 @@ This matches comments and behavior in `MemoryManager::copy_data_async` and assoc
 - GPU: still exported as a single contiguous registration.
 - Metrics: `chunk_exports_total{location}`.
 
-### 4.5 Optional Direct Remote→DVMP Fast Path
+### 4.5 Capability‑Driven Direct Writes (Remote→DVMP)
 
-- When `SCSTORE_ENABLE_DIRECT_DVMP=1` and the `Source` reports `supports_direct_write()`, `pump_ranges` may call `Source::read_into(dest_addr, src_offset, bytes)` to write directly into DVMP VA.
-- Current implementation uses engine‑level direct writes from `RemoteKeySource` (RDMA enabled) to the DVMP CPU address; falls back to staged path otherwise.
-- A tokenized registration descriptor can be introduced later without breaking the current API.
+- When `SeekableSource::supports_direct_write()` and the destination sink implements `DirectWritableSink`, `pump_ranges` negotiates a `DirectWriteToken` via `DirectWritableSink::plan_direct_write(ranges)` and issues `Source::read_into(dest_addr, src_offset, bytes, token)` to write directly into DVMP VA. Fallback to the staged Source→Buffer→`write_at` path if negotiation fails.
+- `DVMPRegionSink` implements `DirectWritableSink` by delegating token planning to `MemoryManager::plan_direct_write(...)`. Tokens carry DVMP pin‑lease keepalives for the target VA ranges.
+- No env flags or concrete type checks are used in the pumping logic.
+
+### 4.6 UMA Read‑Through for CPU; UMA Owns GPU
+
+- UMA no longer mutates CPU chunk state; it reads CPU state via `dvmp->chunk_snapshot()` for scheduling/inspection.
+- UMA remains the sole owner of GPU chunk state and device‑specific counters.
+- Post‑load updates for GPU (full or partial) are applied only by `MemoryManager::finalize_load(...)` after sinks close.
+
+### 4.7 Alignment and Chunking Policy Enforcement
+
+- Alignment is enforced once in `ensure_streaming_buffer(...)`: the pool chunk size must divide the DVMP chunk size and be 4 KiB aligned/O_DIRECT‑friendly.
+- Mismatched settings fail fast with `InvalidArgument`.
 
 ## 5. Unified Loader Architecture (current code)
 
 Files: `core/store/loader/*`
 
-- Interfaces: `Source`, `SeekableSource`, `Sink`, `PositionedSink`, `BufferPool`.
-- Pump: `pump(...)` and `pump_ranges(...)` own threads and back‑pressure, guarantee single `close()` call, and use positioned writes for ranges.
+- Interfaces: `Source`, `SeekableSource`, `Sink`, `PositionedSink`, `DirectWritableSink`, `BufferPool`.
+- Pump: `pump_ranges(...)` owns threads and back‑pressure, guarantees a single `close()` call on the sink, and uses positioned writes for ranges. The legacy `pump()` helper was removed in favor of calling `pump_ranges({{0,total_bytes}})` explicitly when needed.
 - Buffer pool: `StreamingPinnedBuffer` is the sole concrete pool, adapted via `StreamingBufferAdapter`.
 - Sources: `FilePartitionSource` (DIRECT IO decisions), `RemoteKeySource` (RDMA/TCP; supports `read_at` and optional `read_into`).
-- Sinks: `DVMPRegionSink` (DVMP `write_at`) and `GPUMemorySink` (async H2D). `UnifiedMemorySink` updates chunk states around the inner sink.
+- Sinks: `DVMPRegionSink` (DVMP `write_at`, implements `DirectWritableSink`) and `GPUMemorySink` (async H2D).
 - Fallback: `MuxSeekableSource` tries P2P first, completes any remainder from disk per range.
-- Removed: legacy `dvmp_mapped_sink` and bespoke loader pipelines.
+- Removed from the hot path: `UnifiedMemorySink` (state updates occur in `MemoryManager::finalize_load(...)`).
 
 ## 6. Mapping to Code
 
 - DVMP: `core/common/memory/distributed_memory_pool.{h,cc}` (per‑model lock, `write_at`, `map_file_segments`, `ChunkResidencyLease`).
-- UMA and state: `core/store/model/model_memory_coordinator.{h,cc}`.
-- Memory manager: `core/store/model/memory_manager.{h,cc}` (unified allocation, CPU export APIs, DVMP accessors, mandatory CPU release after GPU copy).
-- Loader plumbing: `core/store/loader/{source.h, sink.h, pump.{h,cc}, dvmp_region_sink.{h,cc}, gpu_memory_sink.{h,cc}, remote_key_source.{h,cc}, mux_seekable_source.{h,cc}, streaming_buffer_adapter.{h,cc}}`.
+- UMA and state: `core/store/model/model_memory_coordinator.{h,cc}` (CPU read‑through via DVMP snapshot; UMA owns GPU state).
+- Memory manager: `core/store/model/memory_manager.{h,cc}` (unified allocation, CPU export APIs, DVMP accessors, mandatory CPU release after GPU copy, `finalize_load(...)`, `get_dvmp_region()` and `plan_direct_write(...)`).
+- Loader plumbing: `core/store/loader/{source.h, sink.h, pump.{h,cc}, dvmp_region_sink.{h,cc}, gpu_memory_sink.{h,cc}, remote_key_source.{h,cc}, mux_seekable_source.{h,cc}, streaming_buffer_adapter.{h,cc}}` (with `DirectWritableSink` declared in `sink.h`).
 
 ## 7. Success Criteria and Metrics
 
@@ -129,16 +141,16 @@ Files: `core/store/loader/*`
 - Observability:
   - DVMP: `dvmp_write_bytes_total`, `dvmp_map_bytes_total`, `dvmp_pin_leases_total{reason}`
   - Exposure: `chunk_exports_total{location}`
-  - Loader (as implemented): per‑loader bytes counters
+  - Loader: `loader_bytes_total{source,location,mode}` where `mode ∈ {staged,direct}`
 
 ## 8. Notes and Deviations
 
-- Direct‑write path: a minimal engine‑level `read_into` is implemented for RDMA; a future tokenized registration can enhance safety without API breaks.
+- Direct‑write path is negotiated via `DirectWritableSink` capability and falls back automatically when unsupported.
 - Page‑fault refill from remote (transparent) remains out of scope.
 
 ## 9. Migration and Clean‑ups
 
-- This RFC supersedes 0002–0004. The codebase has removed legacy mmap‑based default CPU sinks and bespoke loader loops, and defaults to chunk‑scoped CPU exposure.
+- This RFC supersedes 0002–0004. The codebase has removed legacy mmap‑based default CPU sinks and bespoke loader loops, adopted capability‑driven direct writes, standardized on a single positioned sink contract, and defaults to chunk‑scoped CPU exposure.
 
 ## 10. Appendix — Offset↔Chunk Mapping
 
@@ -160,18 +172,15 @@ flowchart LR
     MUX[MuxSeekableSource]
     S1 --> MUX
     S2 --> MUX
-    PUMP[Pump / Pump Ranges]
+    PUMP[Pump Ranges]
     BUF[StreamingPinnedBuffer\n(BufferPool via Adapter)]
     MUX --> PUMP
     PUMP -.producers/consumer.-> BUF
   end
 
   subgraph Sinks
-    UMS[UnifiedMemorySink]
-    DVS[DVMPRegionSink\n(PositionedSink)]
+    DVS[DVMPRegionSink\n(PositionedSink + DirectWritableSink)]
     GPS[GPUMemorySink\n(PositionedSink)]
-    UMS --> DVS
-    UMS --> GPS
   end
 
   subgraph Memory
@@ -180,17 +189,19 @@ flowchart LR
     DVMP[DistributedVirtualMemoryPool]
   end
 
-  PUMP -->|Positioned writes| UMS
-  UMS -->|update states| UMA
-  UMS -->|DVMP write_at| DVMP
+  PUMP -->|Positioned writes| DVS
+  PUMP -->|Positioned writes| GPS
+  DVS -->|DVMP write_at| DVMP
   MM <-->|alloc/export/evict| DVMP
-  MM -->|provide DVMP base, size| DVS
+  MM -->|provide DVMP region/base| DVS
   MM -->|GPU ptr/stream| GPS
+  PUMP -->|after close(): finalize_load()| MM
 ```
 
 Key points:
-- Only DVMP performs mappings/writes into model VA; `DVMPRegionSink` calls `write_at`.
-- `UnifiedMemorySink` wraps inner sinks and updates UMA/DVMP chunk states after successful writes.
+- Only DVMP performs mappings/writes into model VA; `DVMPRegionSink` calls `DvmpRegion::write_at`.
+- Direct remote→DVMP writes are negotiated via the `DirectWritableSink` capability when supported by the source.
+- State updates occur after `sink->close()` via `MemoryManager::finalize_load(...)` (UMA CPU is read‑through; UMA owns GPU state).
 - `StreamingPinnedBuffer` is the sole BufferPool implementation used by Pump.
 
 ### 11.2 Pump Ranges: Producer/Consumer Logic
@@ -202,7 +213,7 @@ sequenceDiagram
     participant SRC as SeekableSource (MUX)
     participant BUF as StreamingPinnedBuffer
     participant CN as Consumer Thread
-    participant DST as PositionedSink (via UnifiedMemorySink)
+    participant DST as PositionedSink
 
     loop for each range
         PR->>BUF: get_free_chunk()
@@ -302,33 +313,34 @@ sequenceDiagram
 Safety:
 - Pinned ranges are not evicted/preempted until unexport.
 
-### 11.6 Optional Direct Remote→DVMP Path
+### 11.6 Capability‑Driven Direct Remote→DVMP Path
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant P as pump_ranges()
     participant RS as RemoteKeySource
-    participant DS as DVMPRegionSink
+    participant DST as PositionedSink
+    participant CAP as DirectWritableSink
     participant MM as MemoryManager
 
-    P-->>P: if SCSTORE_ENABLE_DIRECT_DVMP=1
-    P->>DS: dynamic_cast to DVMPRegionSink
     P->>RS: supports_direct_write()? (RDMA)
-    alt direct supported
-        P->>MM: get_dvmp_cpu_base()
+    alt direct supported and DST implements capability
+        P->>DST: plan_direct_write(ranges)
+        DST-->>P: DirectWriteToken
         loop for each range
-            P->>RS: read_into(dvmp_base+off, off, len)
+            P->>RS: read_into(dest_addr+off, off, len, token)
             RS-->>P: bytes_written (≤ len)
         end
-        P->>DS: close()
+        P->>DST: close()
+        P->>MM: finalize_load(...)
     else fallback
         P-->>P: staged Source→Buffer→write_at via sink
     end
 ```
 
 Notes:
-- Direct path is an optimization; correctness is preserved via the staged path.
+- Direct path is an optimization negotiated by capability; correctness is preserved via the staged path.
 
 ### 11.7 Chunk State Machine
 
@@ -379,13 +391,16 @@ On accessing evicted chunks:
 
 ## 5. Implementation Status
 
-- **DVMP Core** (P0-A): Full implementation with 1 TiB VA support ✅
-- **MemoryManager Integration** (P0-B): DVMP integration with auto-release ✅
-- **DiskLoader Zero-Copy** (P1-A): mmap-based loading to DVMP ✅
-- **P2PLoader Extension** (P1-B): PAGEABLE_CPU support with pull_chunk() ✅
-- **Global Chunk Directory** (P1-C): Database schema and query service ✅
-- **Store Daemon Integration** (P1-D): Chunk state synchronization ✅
-- **Eviction & Preemption API** (P1-E): Tail-first eviction & MADV_FREE preemption ✅
+Summary: All planned items from this RFC (including the DVMP 3.2 capability, single sink contract, and lean MemoryManager) are implemented in the codebase.
+
+Completed
+- Capability: `DirectWritableSink` exists and `pump_ranges` negotiates direct writes when `SeekableSource::supports_direct_write()` is true. The old env/type‑gated branch has been removed.
+- Single sink contract: All loader paths run through `PositionedSink` (`DVMPRegionSink`, `GPUMemorySink`); `pump()` has been removed; `pump_ranges()` is the sole pumping API.
+- DVMP sink: `DVMPRegionSink` writes via `DistributedVirtualMemoryPool::DvmpRegion::write_at()` and implements `DirectWritableSink` delegating token planning to `MemoryManager::plan_direct_write()`.
+- Memory manager: Introduced internal pods to group CPU/GPU state with clear locking; added `finalize_load(ModelLocation, optional chunk span)` and `get_dvmp_region()`. `finalize_load()` updates UMA only for GPU (CPU is DVMP authoritative) and passes the correct device id.
+- Alignment policy: Enforced once in `ensure_streaming_buffer(...)` (pool chunk must divide DVMP chunk and be 4 KiB‑aligned).
+- Loaders: Disk and P2P loaders no longer wrap sinks with `UnifiedMemorySink`; they close sinks and call `memory_manager->finalize_load(...)` explicitly for full and chunked flows.
+- UMA: CPU mutation during finalize is no‑op; CPU state remains a DVMP read‑through. GPU states continue to be owned by UMA.
 
 ## 6. Configuration
 
