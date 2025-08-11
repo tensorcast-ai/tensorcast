@@ -19,6 +19,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model_location.h"
 #include "core/store/model/model_memory_coordinator.h"
+#include "core/store/model/transfer_constants.h"
 
 namespace stepcast::store {
 
@@ -31,7 +32,7 @@ class PositionedSink;
 class TransferService {
  public:
   struct Config {
-    size_t max_buffer_bytes{256ULL << 20};
+    size_t max_buffer_bytes{kDefaultMaxBufferBytes};
     std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds::zero()};
   };
 

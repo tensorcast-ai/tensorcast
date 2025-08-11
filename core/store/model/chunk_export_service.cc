@@ -7,6 +7,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 #include "core/communicator/engine/engine.h"
+#include "core/store/model/transfer_constants.h"
 
 namespace stepcast::store {
 
@@ -14,7 +15,9 @@ std::vector<std::pair<uint32_t, uint32_t>> ChunkExportService::coalesce_ranges(s
   std::vector<std::pair<uint32_t, uint32_t>> out;
   if (chunks.empty())
     return out;
+  // Remove duplicates and sort in one pass
   std::sort(chunks.begin(), chunks.end());
+  chunks.erase(std::unique(chunks.begin(), chunks.end()), chunks.end());
   uint32_t start = chunks.front();
   uint32_t prev = start;
   for (size_t i = 1; i < chunks.size(); ++i) {
@@ -34,8 +37,12 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     ModelLocation location,
     absl::Span<const uint32_t> chunks,
     communicator::CommunicateEngine& comm_engine) {
+  // Validate parameters
   if (chunks.empty()) {
     return absl::InvalidArgumentError("No chunks specified for export");
+  }
+  if (location != ModelLocation::PAGEABLE_CPU && location != ModelLocation::GPU) {
+    return absl::InvalidArgumentError("Invalid location for export");
   }
 
   CommRegistrationInfo info;
@@ -49,10 +56,13 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     if (!base)
       return absl::FailedPreconditionError("CPU base not available");
 
-    info.device_id = -1;
+    info.device_id = kCpuDeviceId;
     info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_CPU;
 
-    std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
+    // Move semantics to avoid copy
+    std::vector<uint32_t> chunk_vec;
+    chunk_vec.reserve(chunks.size());
+    chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
     constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
     size_t range_idx = 0;
@@ -71,6 +81,11 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
         return token_or.status();
       rec.cpu_tokens.push_back(std::move(*token_or));
 
+      // Bounds check before pointer arithmetic
+      if (va_off >= info.model_size) {
+        return absl::OutOfRangeError(absl::StrFormat(
+            "Offset %llu exceeds model size %llu", va_off, info.model_size));
+      }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.model_id, range_idx++);
       auto ret = comm_engine.register_tensor(tensor_key, addr, length, info.comm_dev_type, info.device_id);
@@ -101,7 +116,10 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     info.device_id = key.device.ordinal;
     info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_GPU;
 
-    std::vector<uint32_t> chunk_vec(chunks.begin(), chunks.end());
+    // Move semantics to avoid copy
+    std::vector<uint32_t> chunk_vec;
+    chunk_vec.reserve(chunks.size());
+    chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
     constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
     size_t range_idx = 0;
@@ -111,6 +129,11 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       uint64_t length = (va_end > off) ? (va_end - off) : 0;
       if (length == 0)
         continue;
+      // Bounds check before pointer arithmetic
+      if (off >= info.model_size) {
+        return absl::OutOfRangeError(absl::StrFormat(
+            "Offset %llu exceeds model size %llu", off, info.model_size));
+      }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.model_id, range_idx++);
       auto ret = comm_engine.register_tensor(tensor_key, addr, length, info.comm_dev_type, info.device_id);
@@ -140,12 +163,18 @@ absl::Status ChunkExportService::unexport_chunks(
     const InstanceKey& key,
     const CommRegistrationInfo& info,
     communicator::CommunicateEngine& comm_engine) {
+  // Validate parameters
+  if (info.remote_memory_keys.empty()) {
+    return absl::OkStatus();  // Nothing to unexport
+  }
+  
   // Use keys from provided info to unregister precisely
   absl::Status first_error;
   for (const auto& tensor_key : info.remote_memory_keys) {
     absl::Status st = comm_engine.unregister_tensor(tensor_key);
     if (!st.ok() && first_error.ok()) {
       first_error = st;
+      // Continue to try unregistering remaining tensors for best-effort cleanup
     }
   }
 

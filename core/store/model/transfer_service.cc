@@ -37,12 +37,17 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
     cudaStream_t stream,
     void* gpu_ptr,
     size_t total_bytes) {
+  // Validate parameters first
+  if (!gpu_ptr) {
+    return absl::InvalidArgumentError("GPU pointer is null");
+  }
+  if (total_bytes == 0) {
+    return absl::InvalidArgumentError("Total bytes must be greater than 0");
+  }
+  
   auto spb = get_streaming_buffer();
   if (!spb) {
     return absl::FailedPreconditionError("Streaming buffer not available");
-  }
-  if (!gpu_ptr || total_bytes == 0) {
-    return absl::InvalidArgumentError("Invalid GPU pointer or size");
   }
   void* dvmp_base = uma_ ? uma_->get_cpu_base_ptr(instance_key_) : nullptr;
   if (!dvmp_base) {
@@ -57,12 +62,17 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
     cudaStream_t stream,
     void* gpu_ptr,
     size_t total_bytes) {
+  // Validate parameters first
+  if (!gpu_ptr) {
+    return absl::InvalidArgumentError("GPU pointer is null");
+  }
+  if (total_bytes == 0) {
+    return absl::InvalidArgumentError("Total bytes must be greater than 0");
+  }
+  
   auto spb = get_streaming_buffer();
   if (!spb) {
     return absl::FailedPreconditionError("Streaming buffer not available");
-  }
-  if (!gpu_ptr || total_bytes == 0) {
-    return absl::InvalidArgumentError("Invalid GPU pointer or size");
   }
   void* dvmp_base = uma_ ? uma_->get_cpu_base_ptr(instance_key_) : nullptr;
   if (!dvmp_base) {
@@ -113,8 +123,10 @@ std::vector<std::pair<uint64_t, size_t>> TransferService::build_ranges_(
     return ranges;
   }
 
+  // Remove duplicates and sort in one pass
   std::vector<uint32_t> sorted(chunk_indices->begin(), chunk_indices->end());
   std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
   uint32_t run_start = sorted.front();
   uint32_t prev = run_start;
   for (size_t i = 1; i < sorted.size(); ++i) {
@@ -145,8 +157,15 @@ absl::Status TransferService::load_from_source(
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     void* gpu_ptr_or_null,
     int device_id) {
+  // Validate parameters
   if (!source) {
-    return absl::InvalidArgumentError("source is null");
+    return absl::InvalidArgumentError("Source is null");
+  }
+  if (concurrency <= 0) {
+    return absl::InvalidArgumentError("Concurrency must be positive");
+  }
+  if (target_location == ModelLocation::GPU && !gpu_ptr_or_null) {
+    return absl::InvalidArgumentError("GPU pointer required for GPU target location");
   }
 
   const size_t chunk_size = get_pool_chunk_size();

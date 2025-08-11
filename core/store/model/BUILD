@@ -60,10 +60,17 @@ cc_library(
 )
 
 cc_library(
+    name = "transfer_constants",
+    hdrs = ["transfer_constants.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "transfer_service",
     srcs = ["transfer_service.cc"],
     hdrs = ["transfer_service.h"],
     deps = [
+        ":transfer_constants",
         ":model_memory_coordinator",
         ":transfer_helpers",
         "//core/common",
@@ -88,6 +95,7 @@ cc_library(
     srcs = ["chunk_export_service.cc"],
     hdrs = ["chunk_export_service.h"],
     deps = [
+        ":transfer_constants",
         ":model_memory_coordinator",
         "//core/common",
         "//core/common:distributed_memory_pool",
