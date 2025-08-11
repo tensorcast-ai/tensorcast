@@ -522,4 +522,72 @@ void ModelMemoryCoordinator::record_gpu_touch(
   }
 }
 
+absl::StatusOr<DirectWriteToken> ModelMemoryCoordinator::create_direct_write_token(
+    const InstanceKey& key,
+    absl::Span<const VaRange> ranges) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::FailedPreconditionError("UMA allocation not found for model");
+  }
+  const auto& alloc = it->second;
+  if (alloc.dram_region.cpu_base == nullptr) {
+    return absl::FailedPreconditionError("CPU base not available for direct write");
+  }
+
+  struct DwKeep {
+    std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> leases;
+  };
+  auto keep = std::make_shared<DwKeep>();
+
+  DirectWriteToken token;
+  token.segments.reserve(ranges.size());
+
+  for (const auto& r : ranges) {
+    if (r.offset + r.length > alloc.total_bytes) {
+      return absl::OutOfRangeError("Direct write range exceeds model bounds");
+    }
+    auto lease_or = dvmp_->pin_range(key.model_id, r.offset, r.length, "DirectWrite");
+    if (!lease_or.ok()) {
+      return lease_or.status();
+    }
+    keep->leases.emplace_back(std::move(*lease_or));
+    token.segments.push_back(
+        DirectWriteToken::Segment{
+            .va_offset = r.offset,
+            .local_addr = reinterpret_cast<uint64_t>(static_cast<char*>(alloc.dram_region.cpu_base) + r.offset),
+            .length = r.length});
+  }
+  token.keepalive = keep;
+  return token;
+}
+
+absl::Status ModelMemoryCoordinator::post_gpu_load_policy(
+    const InstanceKey& key,
+    size_t bytes,
+    PostGpuLoadPolicy policy) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::FailedPreconditionError("UMA allocation not found for model");
+  }
+  switch (policy) {
+    case PostGpuLoadPolicy::EvictCPU: {
+      (void)dvmp_->evict_tail_bytes(key.model_id, bytes);
+      return absl::OkStatus();
+    }
+    case PostGpuLoadPolicy::MarkPreemptible: {
+      // Mark all chunks preemptible as a conservative default
+      const size_t chunks = it->second.num_chunks;
+      std::vector<uint32_t> all(chunks);
+      for (uint32_t i = 0; i < chunks; ++i)
+        all[i] = i;
+      return dvmp_->mark_preemptible(key.model_id, all);
+    }
+    case PostGpuLoadPolicy::Keep:
+    default:
+      return absl::OkStatus();
+  }
+}
+
 } // namespace stepcast::store

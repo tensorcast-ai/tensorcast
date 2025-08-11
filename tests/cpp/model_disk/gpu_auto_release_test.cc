@@ -53,6 +53,11 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+    // Create and initialize streaming buffer
+    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+    REQUIRE(spb != nullptr);
+    REQUIRE(spb->initialize().ok());
+
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / model_subdir;
@@ -66,6 +71,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .streaming_buffer = spb,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -160,6 +166,11 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
       // Create DVMP
       auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+      // Create and initialize streaming buffer
+      auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+      REQUIRE(spb != nullptr);
+      REQUIRE(spb->initialize().ok());
+
       // Use new DiskSource
       DiskSource disk_src;
       disk_src.path = base / model_subdir;
@@ -171,7 +182,8 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
           .device_type = ::stepcast::DeviceType::CPU,
           .local_device_id = 0,
           .pinned_memory_pool = pool,
-          .dvmp = dvmp};
+          .dvmp = dvmp,
+          .streaming_buffer = spb};
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -199,6 +211,11 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
       // Create DVMP
       auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+      // Create and initialize streaming buffer
+      auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+      REQUIRE(spb != nullptr);
+      REQUIRE(spb->initialize().ok());
+
       // Use new DiskSource
       DiskSource disk_src;
       disk_src.path = base / model_subdir;
@@ -210,7 +227,8 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
           .device_type = ::stepcast::DeviceType::CPU,
           .local_device_id = 1,
           .pinned_memory_pool = pool,
-          .dvmp = dvmp};
+          .dvmp = dvmp,
+          .streaming_buffer = spb};
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -267,6 +285,11 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+    // Create and initialize streaming buffer
+    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+    REQUIRE(spb != nullptr);
+    REQUIRE(spb->initialize().ok());
+
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / model_subdir;
@@ -280,6 +303,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .streaming_buffer = spb,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -315,6 +339,11 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+    // Create and initialize streaming buffer
+    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+    REQUIRE(spb != nullptr);
+    REQUIRE(spb->initialize().ok());
+
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / model_subdir;
@@ -328,6 +357,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .streaming_buffer = spb,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -362,6 +392,11 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
+    // Create and initialize streaming buffer
+    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
+    REQUIRE(spb != nullptr);
+    REQUIRE(spb->initialize().ok());
+
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / model_subdir;
@@ -375,6 +410,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .streaming_buffer = spb,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);

@@ -29,15 +29,7 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
     return absl::InvalidArgumentError("Model identifier cannot be empty.");
   }
 
-  // --- Create MemoryManager ---
-  // Pass the obtained communicator engine (can be nullptr if not needed/initialized)
-  auto memory_manager = std::make_shared<MemoryManager>(
-      config.model_identifier,
-      config.local_device_id,
-      config.pinned_memory_pool,
-      config.dvmp,
-      config.max_buffer_bytes,
-      config.pinned_memory_timeout);
+  // MemoryManager will be constructed after resolving model size
 
   // --- Create Loader based on Source ---
   std::unique_ptr<IModelLoader> loader;
@@ -112,7 +104,16 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
     return absl::FailedPreconditionError("Model size mismatch between loader and config expectation.");
   }
 
-  memory_manager->set_model_size(model_size);
+  // --- Create MemoryManager ---
+  auto memory_manager = std::make_shared<MemoryManager>(
+      config.model_identifier,
+      config.local_device_id,
+      config.pinned_memory_pool,
+      config.dvmp,
+      config.max_buffer_bytes,
+      config.pinned_memory_timeout,
+      model_size,
+      config.streaming_buffer);
 
   // --- Create Model Instance ---
   // Build InstanceKey for this model/device

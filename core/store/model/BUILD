@@ -31,6 +31,7 @@ cc_library(
         "//core/common:distributed_memory_pool",
         "//core/store:device_registry",
         "//core/store:device_types",
+        "//core/store:direct_write",
         "//core/store:loading_spec",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
@@ -59,15 +60,61 @@ cc_library(
 )
 
 cc_library(
+    name = "transfer_service",
+    srcs = ["transfer_service.cc"],
+    hdrs = ["transfer_service.h"],
+    deps = [
+        ":model_memory_coordinator",
+        ":transfer_helpers",
+        "//core/common",
+        "//core/common:distributed_memory_pool",
+        "//core/store:device_types",
+        "//core/store:loading_spec",
+        "//core/store/loader:dvmp_region_sink",
+        "//core/store/loader:gpu_memory_sink",
+        "//core/store/loader:pump",
+        "//core/store/loader:streaming_buffer_adapter",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+cc_library(
+    name = "chunk_export_service",
+    srcs = ["chunk_export_service.cc"],
+    hdrs = ["chunk_export_service.h"],
+    deps = [
+        ":model_memory_coordinator",
+        "//core/common",
+        "//core/common:distributed_memory_pool",
+        "//core/communicator",
+        "//core/store:communication_types",
+        "@abseil-cpp//absl/hash",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+cc_library(
     name = "memory_manager",
     srcs = ["memory_manager.cc"],
     hdrs = ["memory_manager.h"],
     deps = [
+        ":chunk_export_service",
         ":chunk_meta",
         ":memory_state",
         ":model_location",
         ":model_memory_coordinator",
         ":transfer_helpers",
+        ":transfer_service",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",
