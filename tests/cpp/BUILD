@@ -185,7 +185,7 @@ test_suite(
 
 cc_test(
     name = "model_memory_coordinator_test",
-    srcs = ["model_memory_coordinator_test.cc"],
+    srcs = ["unified_model_memory_test.cc"],
     deps = [
         "//core/store/model:model_memory_coordinator",
         "@abseil-cpp//absl/status",

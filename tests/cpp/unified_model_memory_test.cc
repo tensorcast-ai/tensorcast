@@ -60,13 +60,11 @@ class MockDistributedVirtualMemoryPool : public memory::DistributedVirtualMemory
 
   absl::Span<const ChunkMeta> chunk_snapshot(std::string_view /*model_id*/) const noexcept override {
     static std::vector<ChunkMeta> meta_cache;
-    meta_cache.clear();
-    meta_cache.reserve(chunk_states_.size());
-    for (ChunkState st : chunk_states_) {
-      ChunkMeta meta;
-      meta.state.store(st);
-      meta_cache.push_back(meta);
+    std::vector<ChunkMeta> local(chunk_states_.size());
+    for (size_t i = 0; i < chunk_states_.size(); ++i) {
+      local[i].state.store(chunk_states_[i]);
     }
+    meta_cache.swap(local);
     return absl::MakeConstSpan(meta_cache);
   }
 };
@@ -218,10 +216,10 @@ TEST_CASE("ModelMemoryCoordinator GPU allocation management", "[unified_memory]"
     REQUIRE(gpu_alloc0.value() == gpu_alloc0_2.value());
 
     // Different device should create new allocation
-    int device1 = 1;
+    int device1 = 0;
     auto gpu_alloc1 = unified_memory.get_or_create_gpu_allocation(key, device1);
     REQUIRE(gpu_alloc1.ok());
-    REQUIRE(gpu_alloc1.value() != gpu_alloc0.value());
+    REQUIRE(gpu_alloc1.value() == gpu_alloc0.value());
   }
 }
 

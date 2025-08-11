@@ -18,6 +18,7 @@
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/device_types.h"
+#include "core/store/direct_write.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/chunk_meta.h"
 #include "core/store/model/model_location.h"
@@ -273,6 +274,19 @@ class ModelMemoryCoordinator {
    * @param ranges Vector of chunk range pairs (start_idx, end_idx inclusive)
    */
   void sync_cpu_chunk_states(const InstanceKey& key, absl::Span<const std::pair<uint32_t, uint32_t>> ranges);
+
+  /**
+   * @brief Encapsulate DVMP pin and VA translation for direct writes into CPU region.
+   * Returns a DirectWriteToken with keepalive to hold leases.
+   */
+  absl::StatusOr<DirectWriteToken> create_direct_write_token(const InstanceKey& key, absl::Span<const VaRange> ranges);
+
+  enum class PostGpuLoadPolicy : std::uint8_t { EvictCPU, MarkPreemptible, Keep };
+
+  /**
+   * @brief Apply post-GPU-load policy affecting CPU residency.
+   */
+  absl::Status post_gpu_load_policy(const InstanceKey& key, size_t bytes, PostGpuLoadPolicy policy);
 
  private:
   struct ModelAllocation {

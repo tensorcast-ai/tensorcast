@@ -70,7 +70,6 @@ Diagnostics:
       - fuchsia-statically-constructed-objects
 
     CheckOptions:
-      # 命名规范（与项目风格一致）
       readability-identifier-naming.VariableCase: lower_case
       readability-identifier-naming.FunctionCase: lower_case
       readability-identifier-naming.ClassCase: PascalCase
@@ -81,23 +80,18 @@ Diagnostics:
       readability-identifier-naming.ParameterCase: lower_case
       readability-identifier-naming.MemberCase: lower_case
       readability-identifier-naming.PrivateMemberSuffix: _
-
-      # Constexpr 和常量命名规范（Google 风格）
+      readability-identifier-naming.PrivateMethodCase: lower_case
+      readability-identifier-naming.PrivateMethodIgnoredRegexp: "^[a-z][a-z0-9_]*_$"
       readability-identifier-naming.ConstexprVariableCase: CamelCase
       readability-identifier-naming.ConstexprVariablePrefix: k
       readability-identifier-naming.StaticConstantCase: CamelCase
       readability-identifier-naming.StaticConstantPrefix: k
       readability-identifier-naming.GlobalConstantCase: CamelCase
       readability-identifier-naming.GlobalConstantPrefix: k
-
-      # 性能相关选项
       performance-move-const-arg.CheckTriviallyCopyableMove: false
       performance-unnecessary-value-param.IncludeStyle: google
-
-      # Abseil 相关选项
       abseil-string-find-str-contains.StringLikeClasses: "std::string;std::string_view;absl::string_view"
 
-    # 快速检查过滤器 - 只运行快速检查
     FastCheckFilter: None
 
   # Include Cleaner 配置

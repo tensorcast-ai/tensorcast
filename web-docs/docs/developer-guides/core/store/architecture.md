@@ -567,7 +567,8 @@ sequenceDiagram
 
     User->>CS: load_model_from_disk(id)
     CS->>M: create(DiskModelSource)
-    M->>MM: set_model_size(size)
+    M->>L: initialize_and_get_size()
+    M->>MM: construct_with_size(size)
     M->>MM: allocate_memory(CPU)
 
     MM->>MM: transition to ALLOCATED

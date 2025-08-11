@@ -24,17 +24,12 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
 #include "core/store/direct_write.h"
+#include "core/store/loader/source.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/chunk_meta.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
 #include "core/store/model/model_memory_coordinator.h"
-
-// Forward declare loader types to avoid header dependency cycles
-namespace stepcast::store::loader {
-class SeekableSource;
-class PositionedSink;
-} // namespace stepcast::store::loader
 
 namespace stepcast::store {
 
@@ -55,6 +50,11 @@ class MemoryManager {
    * @param dvmp Shared Distributed Virtual Memory Pool.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
+   * @param model_size Total model size in bytes. Must be non-zero.
+   *
+   * Note: UMA (DVMP-backed virtual address space) is allocated eagerly during
+   * construction. This does not consume physical memory and simplifies later
+   * code paths by avoiding conditional UMA allocation.
    */
   MemoryManager(
       std::string model_identifier,
@@ -62,9 +62,11 @@ class MemoryManager {
       const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
       const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
       size_t max_buffer_bytes,
-      std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero());
+      std::chrono::milliseconds pinned_memory_timeout,
+      uint64_t model_size,
+      const gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>>& streaming_buffer);
 
-  ~MemoryManager();
+  ~MemoryManager() noexcept;
 
   // Disable copy and move
   MemoryManager(const MemoryManager&) = delete;
@@ -73,21 +75,17 @@ class MemoryManager {
   MemoryManager& operator=(MemoryManager&&) = delete;
 
   /**
-   * @brief Sets the expected total size of the model data. Must be called before allocation/borrowing.
-   * @param size Size in bytes.
-   */
-  void set_model_size(uint64_t size);
-
-  /**
    * @brief Gets the configured model size.
    * @return uint64_t Model size in bytes, or 0 if not set.
    */
-  uint64_t get_model_size() const;
+  [[nodiscard]] uint64_t get_model_size() const noexcept;
 
   /**
    * @brief Gets the configured local CUDA device ID (or -1 if not yet set).
    */
-  int get_local_device_id() const;
+  [[nodiscard]] int get_local_device_id() const noexcept {
+    return instance_key_.device.ordinal;
+  }
 
   /**
    * @brief Sets the CUDA device that this memory manager should use. This will lazily
@@ -109,7 +107,7 @@ class MemoryManager {
    * @brief Copies data from a peer MemoryManager located on another device.
    *        This enables GPU↔GPU direct P2P transfers.
    */
-  absl::Status copy_from_peer(const MemoryManager& source, cudaStream_t stream = nullptr);
+  [[nodiscard]] absl::Status copy_from_peer(const MemoryManager& source, cudaStream_t stream = nullptr);
 
   /**
    * @brief Allocates memory at the specified location using the configured memory pools.
@@ -117,7 +115,7 @@ class MemoryManager {
    * @param location ModelLocation::PAGEABLE_CPU or GPU.
    * @return absl::Status OkStatus on success, or an error status.
    */
-  absl::Status allocate_memory(ModelLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status allocate_memory(ModelLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Releases memory at the specified location.
@@ -127,12 +125,13 @@ class MemoryManager {
    * @param safe_release If true, refuses to release if state is LOADING.
    * @return absl::Status OkStatus or error (e.g., if safe_release is true and state is LOADING).
    */
-  absl::Status release_memory(ModelLocation location, bool safe_release = false) ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status release_memory(ModelLocation location, bool safe_release = false)
+      ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets the current memory state for the specified location.
    */
-  MemoryState get_state(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] MemoryState get_state(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets raw pointer(s) for the specified location.
@@ -142,7 +141,7 @@ class MemoryManager {
    * @param location PAGEABLE_CPU or GPU.
    * @return std::vector<void*> Vector with zero or one pointer.
    */
-  std::vector<void*> get_pointer(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] std::vector<void*> get_pointer(ModelLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Retrieves the CUDA IPC memory handle associated with the managed GPU
@@ -155,7 +154,7 @@ class MemoryManager {
    * @return absl::StatusOr<cudaIpcMemHandle_t>  The CUDA IPC handle on success
    *         or an error status if the memory is not available.
    */
-  absl::StatusOr<cudaIpcMemHandle_t> get_cuda_ipc_handle() const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::StatusOr<cudaIpcMemHandle_t> get_cuda_ipc_handle() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Asynchronously copies data between PAGEABLE_CPU and GPU memory managed by this instance.
@@ -167,14 +166,14 @@ class MemoryManager {
    * @param destination The destination memory location (must be ALLOCATED).
    * @return std::future<absl::Status> Future indicating the completion status of the copy.
    */
-  std::future<absl::Status> copy_data_async(ModelLocation source, ModelLocation destination)
+  [[nodiscard]] std::future<absl::Status> copy_data_async(ModelLocation source, ModelLocation destination)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief NEW: Orchestrate DISK/REMOTE → CPU/GPU using a provided source.
    * Performs allocation, state transitions, buffer setup, pumping, and finalization.
    */
-  std::future<absl::Status> load_async_from_source(
+  [[nodiscard]] std::future<absl::Status> load_async_from_source(
       std::unique_ptr<loader::SeekableSource> source,
       ModelLocation target_location,
       int concurrency,
@@ -187,7 +186,7 @@ class MemoryManager {
    * @return absl::Status OkStatus if LOADED, DeadlineExceeded if timeout, FailedPrecondition if FAILED state reached,
    * Cancelled if interrupted.
    */
-  absl::Status wait_for_state(
+  [[nodiscard]] absl::Status wait_for_state(
       ModelLocation location,
       MemoryState target_state,
       absl::Duration timeout = absl::InfiniteDuration()) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -201,13 +200,11 @@ class MemoryManager {
    * @return absl::StatusOr<CommRegistrationInfo> Information needed by remote peers to access the memory, or an error.
    */
 
-  /**
-   * @brief Gets the size of individual chunks used for CPU pinned memory.
-   * Returns 0 if CPU memory is not allocated or managed in chunks.
-   */
-  // Updated: If full pinned memory is not allocated, falls back to streaming
-  // buffer chunk size. Returns 0 if neither is available.
-  size_t get_cpu_chunk_size() const ABSL_LOCKS_EXCLUDED(mutex_);
+  // Convenience wrappers for buffer sizing
+  // These are lock-free since members are immutable after construction.
+  [[nodiscard]] size_t get_pool_chunk_size() const noexcept {
+    return pinned_pool_->chunk_size();
+  }
 
   /**
    * @brief Attempts to finalize the state of a location after an asynchronous load/copy.
@@ -218,45 +215,12 @@ class MemoryManager {
    * @param final_status The status of the completed load/copy operation.
    * @return absl::Status OkStatus, or the final_status if the state transition failed.
    */
-  absl::Status finalize_load_state(ModelLocation location, const absl::Status& final_status)
+  [[nodiscard]] absl::Status finalize_load_state(ModelLocation location, const absl::Status& final_status)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // Streaming buffer helpers -------------------------------------------------
-  /**
-   * @brief Ensures a streaming buffer pool is allocated with at least the
-   *        specified number of chunks. Thread-safe and idempotent.
-   */
-  absl::Status ensure_streaming_buffer(size_t num_chunks) ABSL_LOCKS_EXCLUDED(mutex_);
+  // Streaming buffer helpers moved to TransferService
 
-  /**
-   * @brief Release the streaming buffer pool (if allocated).
-   */
-  absl::Status release_buffer_pool() ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Accessor to the allocated StreamingPinnedBuffer (may return nullptr).
-   */
-  std::shared_ptr<StreamingPinnedBuffer> get_streaming_buffer() const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Get the configured maximum buffer size in bytes.
-   */
-  size_t get_max_buffer_bytes() const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Get chunk size of the underlying pinned memory pool (0 if pool null).
-   */
-  size_t get_pool_chunk_size() const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  // NEW: Reserve a pageable CPU VA region via DistributedVirtualMemoryPool (DVMP).
-  // This wraps dvmp_->allocate() and records the base address internally.
-  // If the region already exists, the returned Status will carry
-  // absl::StatusCode::kAlreadyExists, mirroring DVMP semantics.
-  // On success, the VirtualRegion structure contains the reserved base
-  // address and size. The caller should treat kAlreadyExists as a signal
-  // that the region has been allocated previously.
-  absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> allocate_pageable_cpu_region()
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  // (Deprecated) DVMP region reservation moved to UMA
 
   // --- Internal State Management ---
   // These might be called by Loaders or copy operations.
@@ -267,15 +231,14 @@ class MemoryManager {
    * @param new_state The target state.
    * @return absl::Status Ok if transition is valid, error otherwise.
    */
-  absl::Status set_state(ModelLocation location, MemoryState new_state) ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status set_state(ModelLocation location, MemoryState new_state) ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // Chunk-scoped export APIs using DVMP pin leases (now supports CPU and GPU)
-  absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
+  // Thin wrappers delegating to services -------------------------------------
+  [[nodiscard]] absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
       ModelLocation location,
       absl::Span<const uint32_t> chunks,
       communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
-
-  absl::Status unexport_chunks_for_p2p(
+  [[nodiscard]] absl::Status unexport_chunks_for_p2p(
       ModelLocation location,
       absl::Span<const uint32_t> chunks,
       communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -285,52 +248,38 @@ class MemoryManager {
    * @brief Exposes the underlying DistributedVirtualMemoryPool instance used by this
    *        MemoryManager. Loaders can use this to allocate or lock chunks.
    */
-  memory::DistributedVirtualMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Get the model identifier string.
-   * @return The model identifier used by this MemoryManager.
-   */
-  const std::string& get_model_id() const {
-    return instance_key_.model_id;
-  }
+  [[nodiscard]] memory::DistributedVirtualMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] const memory::DistributedVirtualMemoryPool* get_dvmp() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Returns an immutable snapshot view of ChunkMeta for the model.
    *        Empty span if DVMP not available or model not allocated.
    */
-  absl::Span<const store::ChunkMeta> chunk_snapshot() const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Span<const store::ChunkMeta> chunk_snapshot() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Globally-unique key identifying this model replica (model_id + device + replica).
   store::InstanceKey instance_key_;
 
   // Accessor for callers needing the replica key (e.g. schedulers, metrics).
-  const store::InstanceKey& instance_key() const {
+  [[nodiscard]] const store::InstanceKey& instance_key() const noexcept {
     return instance_key_;
   }
 
   // --- NEW: Unified Memory Management ---
 
   /**
-   * @brief Get the memory coordinator instance for chunk-aware operations.
-   *        Always non-null.
-   * @return Pointer to ModelMemoryCoordinator.
-   */
-  std::shared_ptr<ModelMemoryCoordinator> get_memory_coordinator() const ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
    * @brief Allocate per-model memory bookkeeping in the coordinator.
    * Reserves DRAM via DVMP for this model. GPU allocations remain lazy.
    * @return Status of allocation.
    */
-  absl::Status allocate_model_memory() ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status allocate_model_memory() ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Mark CPU chunks as preemptible after GPU loading.
    * @param ratio Fraction of chunks to mark as preemptible (0.0-1.0).
    * @return Status of operation.
    */
-  absl::Status mark_cpu_preemptible(float ratio = 1.0F) ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status mark_cpu_preemptible(float ratio = 1.0F) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Get missing chunks for a target location.
@@ -338,35 +287,21 @@ class MemoryManager {
    * @param device_id Device ID for GPU targets.
    * @return Vector of missing chunk indices.
    */
-  std::vector<uint32_t> get_missing_chunks(ModelLocation target, std::optional<int> device_id = std::nullopt) const
-      ABSL_LOCKS_EXCLUDED(mutex_);
-
-  // NEW: Expose base address of DVMP region reserved for PAGEABLE_CPU. Returns nullptr if region not allocated.
-  void* get_dvmp_cpu_base() const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] std::vector<uint32_t> get_missing_chunks(
+      ModelLocation target,
+      std::optional<int> device_id = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Plan a direct-write token for destination VA ranges (PAGEABLE_CPU).
-  absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges)
+      ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Explicit finalize hook to update UMA states after a load into a location
   // completes (replaces UnifiedMemorySink close-time updates).
-  absl::Status finalize_load(
+  [[nodiscard]] absl::Status finalize_load(
       ModelLocation location,
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // Provide a per-model DVMP handle (region) for sinks and loaders.
-  absl::StatusOr<memory::DistributedVirtualMemoryPool::DvmpRegion> get_dvmp_region() const ABSL_LOCKS_EXCLUDED(mutex_);
-
  private:
-  /**
-   * @brief Helper to perform the asynchronous CPU -> GPU copy.
-   */
-  absl::Status perform_copy_cpu_to_gpu_async() ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Helper to perform the asynchronous GPU -> CPU copy.
-   */
-  absl::Status perform_copy_gpu_to_cpu_async() ABSL_LOCKS_EXCLUDED(mutex_);
-
   /**
    * @brief Logs state transitions.
    */
@@ -374,30 +309,38 @@ class MemoryManager {
       ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
   /**
-   * @brief Releases CPU staging resources (streaming buffer and related state).
+   * @brief Returns base pointer for PAGEABLE_CPU or GPU using UMA/local cache.
+   * Expects mutex_ to be held by the caller.
+   * Returns nullptr if state is not eligible or pointer unavailable.
    */
-  void release_cpu_resources_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  [[nodiscard]] void* get_base_ptr_locked(ModelLocation location) const ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
   /**
    * @brief Releases GPU resources (cuda memory).
    */
-  void release_gpu_resources_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void release_gpu_resources_locked() noexcept ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   /**
    * @brief Internal helper that assumes mutex_ is already held.
    * Only to be used by methods that already acquired the lock to avoid
    * re‑entrant locking.
    */
-  absl::Status set_state_locked(ModelLocation location, MemoryState new_state) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  [[nodiscard]] absl::Status set_state_locked(ModelLocation location, MemoryState new_state)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Helper to retrieve state and condition variable pointers under lock
-  absl::Status get_state_and_cond_locked_(ModelLocation location, MemoryState** state_ptr, absl::CondVar** cond_ptr)
+  struct StateCond {
+    MemoryState* state;
+    absl::CondVar* cond;
+  };
+
+  // New helper returning StatusOr for cleaner call-sites
+  [[nodiscard]] absl::StatusOr<StateCond> get_state_cond_locked(ModelLocation location)
       ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
-  /**
-   * @brief Internal helper: allocate streaming buffer pool (caller must hold mutex_)
-   */
-  absl::Status allocate_buffer_pool(size_t num_chunks) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  // --- Refactor helpers (split allocate_memory) ---------------------------
+  [[nodiscard]] absl::Status allocate_pageable_cpu() ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status allocate_gpu_memory() ABSL_LOCKS_EXCLUDED(mutex_);
 
   // --- Internal copy refactor helpers (no behavior change) ---------------
   struct CopyLaunchParams {
@@ -424,6 +367,14 @@ class MemoryManager {
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   // ----------------------------------------------------------------------
+  // Small internal helpers for error recording (behavior-preserving)------
+  // ----------------------------------------------------------------------
+  void set_failure_locked_(ModelLocation location, std::string message) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  [[nodiscard]] std::string get_last_error_locked_(ModelLocation location) const ABSL_SHARED_LOCKS_REQUIRED(mutex_);
+  // Consolidated helper: atomically record failure message and transition to FAILED.
+  void record_failure_and_fail_(ModelLocation location, std::string message) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // ----------------------------------------------------------------------
   // Refactor: CPU/GPU pods to group related members under a single lock
   // ----------------------------------------------------------------------
   struct CpuPod {
@@ -434,8 +385,8 @@ class MemoryManager {
     std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> pin_leases;
     // DVMP-backed VA info
     [[deprecated("Use UMA's get_cpu_base_ptr() instead")]] void* dvmp_base = nullptr; // Now managed by UMA
-    // Streaming buffer used for staged transfers
-    std::shared_ptr<StreamingPinnedBuffer> streaming_buffer = nullptr;
+    // Last failure reason for observability
+    std::string last_error;
   };
 
   struct GpuPod {
@@ -448,6 +399,8 @@ class MemoryManager {
     // Communication registration
     bool comm_registered = false;
     CommRegistrationInfo comm_registration_info;
+    // Last failure reason for observability
+    std::string last_error;
   };
 
   mutable absl::Mutex mutex_; // Protects all member variables below
@@ -456,10 +409,10 @@ class MemoryManager {
   CpuPod cpu_ ABSL_GUARDED_BY(mutex_);
   GpuPod gpu_ ABSL_GUARDED_BY(mutex_);
 
-  uint64_t model_size_ = 0;
+  const uint64_t model_size_;
 
-  // Memory Pools
-  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_pool_ ABSL_GUARDED_BY(mutex_);
+  // Memory Pools (immutable handles; lock-free reads)
+  const gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_pool_;
 
   // Streaming buffer configuration
   const size_t max_buffer_bytes_; // 1 GB default
@@ -470,27 +423,17 @@ class MemoryManager {
   // Whether to fail transfer if DVMP chunk locking fails
   // [[maybe_unused]] const bool require_dvmp_lock_success_;
 
-  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_ ABSL_GUARDED_BY(mutex_);
+  const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_;
 
   // Unified memory management instance
-  gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>> memory_coordinator_ ABSL_GUARDED_BY(mutex_);
+  const gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>> memory_coordinator_;
 
-  // --- New: small internal helpers to reduce duplication -----------------
-  // Reserve/open DVMP region and cache base/size. Expects mutex_ held.
-  absl::StatusOr<memory::DistributedVirtualMemoryPool::VirtualRegion> reserve_dvmp_region_locked_()
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  // New services introduced by RFC 0004
+  const gsl::not_null<std::shared_ptr<class TransferService>> transfer_service_;
+  const gsl::not_null<std::shared_ptr<class ChunkExportService>> export_service_;
 
   // Ensure GPU stream is initialised (create if needed). Expects mutex_ held.
-  absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-
-  // Build a sink for the target location (CPU DVMPRegionSink or GPU GPUMemorySink)
-  absl::StatusOr<std::unique_ptr<loader::PositionedSink>> build_sink_(ModelLocation target_location)
-      ABSL_LOCKS_EXCLUDED(mutex_);
-
-  // Build byte ranges either for full model or specified chunks
-  std::vector<std::pair<uint64_t, size_t>> build_ranges_(
-      std::optional<absl::Span<const uint32_t>> chunk_indices,
-      size_t chunk_size) const;
+  [[nodiscard]] absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 };
 
 } // namespace stepcast::store

@@ -9,12 +9,13 @@
 #include "core/common/device_types.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/loading/loading_spec.h"
 #include "gsl/pointers"
 
 namespace stepcast::communicator {
 class CommunicateEngine;
-}
+} // namespace stepcast::communicator
 
 namespace stepcast::store {
 
@@ -43,6 +44,9 @@ struct ModelConfig {
   gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_memory_pool;
   // Shared Distributed Virtual Memory Pool for managing virtual address spaces
   gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp;
+
+  // Shared streaming buffer used by all models/memory managers (pre-initialized, not null)
+  gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> streaming_buffer;
 
   // Optional: Explicitly provide model size if known.
   std::optional<uint64_t> expected_model_size;

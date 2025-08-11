@@ -27,6 +27,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
@@ -185,6 +186,7 @@ class CheckpointStore {
   std::shared_ptr<CommunicationManager> comm_manager_;
   std::shared_ptr<PinnedMemoryPool> memory_pool_;
   std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp_; // NEW: System-wide DVMP instance
+  std::shared_ptr<StreamingPinnedBuffer> shared_streaming_buffer_;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Configuration
@@ -225,6 +227,7 @@ class CheckpointStore {
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
+  gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> get_or_create_streaming_buffer_();
 };
 
 } // namespace stepcast::store

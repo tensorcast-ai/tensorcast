@@ -15,6 +15,7 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/loading/prepare_orchestrator.h"
@@ -222,7 +223,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
       .source = resolved_source,
       .model_identifier = model_identifier,
       .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_};
+      .dvmp = dvmp_,
+      .streaming_buffer = get_or_create_streaming_buffer_()};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   if (target_location == ModelLocation::GPU) {
@@ -349,7 +351,11 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
   ModelConfig config{
-      .source = p2p_source, .model_identifier = model_identifier, .pinned_memory_pool = memory_pool_, .dvmp = dvmp_};
+      .source = p2p_source,
+      .model_identifier = model_identifier,
+      .pinned_memory_pool = memory_pool_,
+      .dvmp = dvmp_,
+      .streaming_buffer = get_or_create_streaming_buffer_()};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
@@ -630,7 +636,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_memory_pool = memory_pool_,
-            .dvmp = dvmp_};
+            .dvmp = dvmp_,
+            .streaming_buffer = get_or_create_streaming_buffer_()};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
         auto dst_or = Model::create(cfg);
@@ -998,6 +1005,23 @@ absl::Status CheckpointStore::unlock_chunks(
 
   // Forward the call to DVMP.
   return dvmp->unlock_chunks(instance_key.model_id, chunk_indices, copied_gpu);
+}
+
+gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> CheckpointStore::get_or_create_streaming_buffer_() {
+  if (!shared_streaming_buffer_) {
+    // Use 2 chunks by default; chunk_size_ comes from options
+    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, chunk_size_, memory_pool_);
+    auto st = spb->initialize(pinned_memory_timeout_);
+    if (!st.ok()) {
+      // Fallback to a minimal buffer to avoid nullptr; caller may still fail later on usage
+      auto fallback = std::make_shared<StreamingPinnedBuffer>(16, chunk_size_, memory_pool_);
+      (void)fallback->initialize(std::chrono::milliseconds::zero());
+      shared_streaming_buffer_ = fallback;
+    } else {
+      shared_streaming_buffer_ = spb;
+    }
+  }
+  return {shared_streaming_buffer_};
 }
 
 } // namespace stepcast::store
