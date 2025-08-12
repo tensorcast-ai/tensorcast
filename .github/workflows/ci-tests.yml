@@ -1,0 +1,129 @@
+name: CI Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  cpp-tests:
+    name: C++ Tests
+    runs-on: ubuntu-latest
+    env:
+      USE_FAKE_CUDA: "1"
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+          bazelisk-version: 1.16.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtinfo5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.5.14"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install Python dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Build C++ core with fake CUDA
+        run: |
+          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+      - name: Run non-stress C++ tests
+        run: |
+          bazel test //tests/cpp/... \
+            --test_tag_filters="-stress" \
+            --define use_fake_cuda=true \
+            --test_output=errors \
+            --test_summary=detailed
+
+      - name: Run stress C++ tests
+        run: |
+          bazel test //tests/cpp/... \
+            --test_tag_filters="stress" \
+            --define use_fake_cuda=true \
+            --test_output=errors \
+            --test_summary=detailed \
+            --test_timeout=600
+
+  python-tests:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    env:
+      USE_FAKE_CUDA: "1"
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+          bazelisk-version: 1.16.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtinfo5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.5.14"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install Python dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Build C++ extensions with fake CUDA
+        run: |
+          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+      - name: Generate Protocol Buffers
+        run: |
+          bash tools/build_proto_python.sh
+
+      - name: Run Python tests
+        run: |
+          uv run pytest tests/python/ -v --tb=short
+
+      - name: Run Python linting
+        run: |
+          uv run ruff check .
+          uv run ruff format . --check
+
+      - name: Run type checking
+        run: |
+          uv run mypy ./scstore
