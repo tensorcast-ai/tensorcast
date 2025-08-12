@@ -22,8 +22,12 @@ StepCast Store is a high-performance, distributed model storage and loading syst
 # you want to test the changes in the python code.
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
-# Build and run tests, xxx is the target in tests/cpp/BUILD
-bazel test //tests/cpp:xxxx
+# Build and run tests
+# Tests are now colocated with their implementation
+# Examples:
+bazel test //core/store:checkpoint_store_test
+bazel test //core/communicator/engine:tcp_engine_test
+bazel test //core/store/loader:disk_loader_streaming_buffer_test
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
@@ -34,7 +38,9 @@ The project supports a fake CUDA backend for development and testing without GPU
 USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
-bazel test //tests/cpp:xxxx --define use_fake_cuda=true
+# Example for specific component tests:
+bazel test //core/store:checkpoint_store_test --define use_fake_cuda=true
+bazel test //core/communicator/engine:gpu_ce_test --define use_fake_cuda=true
 ```
 
 **Fake CUDA Mode Features:**
@@ -289,7 +295,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 #### Development Environment
 - use `uv run xxx.py` to run python scripts instead of `python xxx.py`
 - use `uv run pytest tests/python/xxxx` to run python tests
-- use `bazel test //tests/cpp:xxxx` to run cxx tests
+- use `bazel test //core/component:xxx_test` to run cxx tests (e.g., `bazel test //core/store:checkpoint_store_test`)
 
 #### Core Principles
 - **Functional programming**: Prefer functional, declarative style over classes where possible
