@@ -23,7 +23,7 @@
 
 common --enable_platform_specific_config
 
-common --remote_cache=grpc://100.96.105.36:9092
+# common --remote_cache=grpc://100.96.105.36:9092
 
 build --cxxopt="-std=c++20"
 build --cxxopt="-Werror=thread-safety-analysis"
