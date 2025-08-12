@@ -1,11 +1,11 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
 #include <atomic>
 #include <future>
 #include <memory>
 #include <thread>
 #include <vector>
+#include "core/common/cuda_api.h"
 
 #include "absl/log/check.h"
 #include "absl/log/globals.h"
@@ -35,11 +35,11 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Create a large GPU tensor
     const std::size_t tensor_size = 64 * 1024 * 1024; // 64MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Fill with test pattern
     auto test_data = create_test_pattern(tensor_size, 77);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register the tensor
     REQUIRE(
@@ -93,7 +93,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     for (auto* buffer : target_buffers) {
       std::free(buffer);
     }
@@ -108,10 +108,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const std::size_t tensor_size = 128 * 1024 * 1024; // 128MB - large to ensure slow transfer
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 88);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(
         source_engine
@@ -146,7 +146,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE_FALSE(result.status.ok());
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     std::free(target_buffer);
   }
 
@@ -182,9 +182,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     for (const auto& spec : transfers) {
       void* ptr = nullptr;
       if (spec.source_type == COMMUNICATE_ENGINE_DEV_GPU) {
-        REQUIRE(cudaMalloc(&ptr, spec.size) == cudaSuccess);
+        REQUIRE(stepcast::cuda::malloc(&ptr, spec.size).ok());
         auto pattern = create_test_pattern(spec.size, spec.pattern_seed);
-        REQUIRE(cudaMemcpy(ptr, pattern.data(), spec.size, cudaMemcpyHostToDevice) == cudaSuccess);
+        REQUIRE(stepcast::cuda::memcpy(ptr, pattern.data(), spec.size, cudaMemcpyHostToDevice).ok());
       } else {
         ptr = std::malloc(spec.size);
         REQUIRE(ptr != nullptr);
@@ -205,7 +205,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     for (const auto& spec : transfers) {
       void* ptr = nullptr;
       if (spec.target_type == COMMUNICATE_ENGINE_DEV_GPU) {
-        REQUIRE(cudaMalloc(&ptr, spec.size) == cudaSuccess);
+        REQUIRE(stepcast::cuda::malloc(&ptr, spec.size).ok());
       } else {
         ptr = std::malloc(spec.size);
         REQUIRE(ptr != nullptr);
@@ -225,7 +225,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       if (transfers[i].target_type == COMMUNICATE_ENGINE_DEV_GPU) {
         std::vector<uint8_t> verify_data(transfers[i].size);
         REQUIRE(
-            cudaMemcpy(verify_data.data(), target_ptrs[i], transfers[i].size, cudaMemcpyDeviceToHost) == cudaSuccess);
+            stepcast::cuda::memcpy(verify_data.data(), target_ptrs[i], transfers[i].size, cudaMemcpyDeviceToHost).ok());
         REQUIRE(verify_pattern(verify_data.data(), transfers[i].size, transfers[i].pattern_seed));
       } else {
         REQUIRE(verify_pattern(target_ptrs[i], transfers[i].size, transfers[i].pattern_seed));
@@ -235,13 +235,13 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Cleanup
     for (std::size_t i = 0; i < transfers.size(); ++i) {
       if (transfers[i].source_type == COMMUNICATE_ENGINE_DEV_GPU) {
-        cudaFree(source_ptrs[i]);
+        REQUIRE(stepcast::cuda::free(source_ptrs[i]).ok());
       } else {
         std::free(source_ptrs[i]);
       }
 
       if (transfers[i].target_type == COMMUNICATE_ENGINE_DEV_GPU) {
-        cudaFree(target_ptrs[i]);
+        REQUIRE(stepcast::cuda::free(target_ptrs[i]).ok());
       } else {
         std::free(target_ptrs[i]);
       }
@@ -262,9 +262,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Note: Default staging chunk size is 64MB
 
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
     auto test_data = create_test_pattern(tensor_size, 99);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(source_engine
                 ->register_tensor(
@@ -353,7 +353,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     LOG(INFO) << "All reads completed. Started: " << reads_started.load() << ", Completed: " << reads_completed.load();
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     for (auto* buffer : target_buffers) {
       std::free(buffer);
     }
@@ -370,14 +370,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const std::size_t tensor_size = 128 * 1024 * 1024; // 128MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Fill with different patterns in different regions
     std::vector<uint8_t> test_data(tensor_size);
     for (size_t i = 0; i < tensor_size; i += 1024 * 1024) {
       std::fill(test_data.begin() + i, test_data.begin() + i + 1024 * 1024, static_cast<uint8_t>(i / (1024 * 1024)));
     }
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(
         source_engine
@@ -457,7 +457,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     for (auto* buffer : buffers) {
       std::free(buffer);
     }
@@ -474,10 +474,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const std::size_t tensor_size = 16 * 1024 * 1024; // 16MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 111);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(
         source_engine
@@ -546,7 +546,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(successful_cycles.load() == num_cycles);
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Concurrent GPU-to-GPU transfers with staging buffer contention") {
@@ -554,7 +554,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Check if we have at least 2 GPUs
     int device_count = 0;
-    REQUIRE(cudaGetDeviceCount(&device_count) == cudaSuccess);
+    REQUIRE(stepcast::cuda::get_device_count(&device_count).ok());
     if (device_count < 2) {
       LOG(INFO) << "Skipping multi-GPU test - only " << device_count << " GPU(s) available";
       return;
@@ -571,12 +571,12 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     std::vector<void*> gpu_ptrs;
 
     for (int gpu_id = 0; gpu_id < std::min(2, device_count); ++gpu_id) {
-      REQUIRE(cudaSetDevice(gpu_id) == cudaSuccess);
+      REQUIRE(stepcast::cuda::set_device(gpu_id).ok());
       void* gpu_ptr;
-      REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+      REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
       auto test_data = create_test_pattern(tensor_size, 100 + gpu_id);
-      REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+      REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
       gpu_ptrs.push_back(gpu_ptr);
 
@@ -612,9 +612,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
         REQUIRE(engine->init("127.0.0.1", target_port).ok());
 
-        REQUIRE(cudaSetDevice(dst_gpu) == cudaSuccess);
+        REQUIRE(stepcast::cuda::set_device(dst_gpu).ok());
         void* dst_ptr;
-        REQUIRE(cudaMalloc(&dst_ptr, tensor_size) == cudaSuccess);
+        REQUIRE(stepcast::cuda::malloc(&dst_ptr, tensor_size).ok());
 
         std::string tensor_name = "gpu_tensor_" + std::to_string(src_gpu);
         auto result = engine
@@ -632,12 +632,12 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         // Verify data
         std::vector<uint8_t> verify_data(tensor_size);
-        REQUIRE(cudaMemcpy(verify_data.data(), dst_ptr, tensor_size, cudaMemcpyDeviceToHost) == cudaSuccess);
+        REQUIRE(stepcast::cuda::memcpy(verify_data.data(), dst_ptr, tensor_size, cudaMemcpyDeviceToHost).ok());
         REQUIRE(verify_pattern(verify_data.data(), tensor_size, 100 + src_gpu));
 
         LOG(INFO) << "Transfer " << i << " completed successfully";
 
-        cudaFree(dst_ptr);
+        REQUIRE(stepcast::cuda::free(dst_ptr).ok());
       }));
     }
 
@@ -648,8 +648,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Cleanup
     for (int gpu_id = 0; gpu_id < gpu_ptrs.size(); ++gpu_id) {
-      REQUIRE(cudaSetDevice(gpu_id) == cudaSuccess);
-      cudaFree(gpu_ptrs[gpu_id]);
+      REQUIRE(stepcast::cuda::set_device(gpu_id).ok());
+      REQUIRE(stepcast::cuda::free(gpu_ptrs[gpu_id]).ok());
     }
   }
 
@@ -669,14 +669,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     for (int i = 0; i < num_tensors; ++i) {
       void* gpu_ptr;
-      auto alloc_result = cudaMalloc(&gpu_ptr, tensor_size);
-      if (alloc_result != cudaSuccess) {
+      auto alloc_status = stepcast::cuda::malloc(&gpu_ptr, tensor_size);
+      if (!alloc_status.ok()) {
         LOG(WARNING) << "Failed to allocate tensor " << i << " - testing with " << i << " tensors";
         break;
       }
 
       auto test_data = create_test_pattern(tensor_size, 200 + i);
-      REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+      REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
       gpu_ptrs.push_back(gpu_ptr);
 
@@ -752,7 +752,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
-      cudaFree(ptr);
+      REQUIRE(stepcast::cuda::free(ptr).ok());
     }
   }
 
@@ -770,9 +770,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     const std::size_t tensor_size = chunk_size; // Exactly one chunk
 
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
     auto test_data = create_test_pattern(tensor_size, 123);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(
         source_engine
@@ -883,7 +883,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     for (auto* buffer : holder_buffers)
       std::free(buffer);
     for (auto* buffer : waiter_buffers)
@@ -916,10 +916,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Create tensors with different sizes
     for (size_t i = 0; i < test_sizes.size(); ++i) {
       void* gpu_ptr;
-      REQUIRE(cudaMalloc(&gpu_ptr, test_sizes[i]) == cudaSuccess);
+      REQUIRE(stepcast::cuda::malloc(&gpu_ptr, test_sizes[i]).ok());
 
       auto test_data = create_test_pattern(test_sizes[i], 150 + i);
-      REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), test_sizes[i], cudaMemcpyHostToDevice) == cudaSuccess);
+      REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), test_sizes[i], cudaMemcpyHostToDevice).ok());
 
       gpu_ptrs.push_back(gpu_ptr);
 
@@ -979,7 +979,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
-      cudaFree(ptr);
+      REQUIRE(stepcast::cuda::free(ptr).ok());
     }
   }
 
@@ -999,10 +999,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     std::vector<void*> gpu_ptrs;
     for (int i = 0; i < num_tensors; ++i) {
       void* gpu_ptr;
-      REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+      REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
       auto test_data = create_test_pattern(tensor_size, 170 + i);
-      REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+      REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
       gpu_ptrs.push_back(gpu_ptr);
 
@@ -1081,7 +1081,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         // Re-register with new data
         auto test_data = create_test_pattern(tensor_size, 170 + i + cycle * 10);
-        REQUIRE(cudaMemcpy(gpu_ptrs[i], test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+        REQUIRE(stepcast::cuda::memcpy(gpu_ptrs[i], test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
         REQUIRE(source_engine
                     ->register_tensor(
@@ -1112,7 +1112,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
-      cudaFree(ptr);
+      REQUIRE(stepcast::cuda::free(ptr).ok());
     }
   }
 
@@ -1130,10 +1130,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const std::size_t tensor_size = 32 * 1024 * 1024; // 32MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 180);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(source_engine
                 ->register_tensor(
@@ -1240,6 +1240,6 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 }

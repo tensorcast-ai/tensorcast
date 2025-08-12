@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
+#include "core/common/cuda_api.h"
 #include "core/store/checkpoint_store.h"
 #include "tests/cpp/common.h"
 
@@ -29,7 +30,10 @@ inline void skip_if_insufficient_gpus(int required_gpus, const std::string& test
     SKIP();
   }
   int device_count = 0;
-  cudaGetDeviceCount(&device_count);
+  {
+    auto st = stepcast::cuda::get_device_count(&device_count);
+    ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
+  }
   if (device_count < required_gpus) {
     WARN(
         "Insufficient GPUs (" + std::to_string(device_count) + " < " + std::to_string(required_gpus) + ") - skipping " +

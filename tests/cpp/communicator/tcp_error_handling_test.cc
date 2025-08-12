@@ -1,6 +1,5 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -41,7 +40,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Allocate GPU memory
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, 1024 * 1024) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, 1024 * 1024).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), 1024 * 1024, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -82,7 +81,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // No manual release needed - RAII handles it automatically
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Zero-size transfer handling") {
@@ -90,7 +89,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, 1024) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, 1024).ok());
 
     // Register with zero size should fail
     auto status = engine->register_tensor(
@@ -103,7 +102,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     CAPTURE(status.message());
     REQUIRE_FALSE(status.ok());
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Out of bounds staging") {
@@ -111,7 +110,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     void* gpu_ptr;
     const std::size_t tensor_size = 1024 * 1024;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -122,6 +121,6 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     REQUIRE_FALSE(result.ok());
     REQUIRE(absl::IsInvalidArgument(result.status()));
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 }

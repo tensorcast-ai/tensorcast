@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
+#include "core/common/cuda_api.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
@@ -22,11 +22,11 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     // Allocate GPU memory
     std::size_t tensor_size = 1024 * 1024; // 1MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Create test data
     auto test_data = create_test_pattern(tensor_size, 42);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register GPU tensor
     auto status = engine->register_tensor(
@@ -40,6 +40,6 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     REQUIRE(status.ok());
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 }

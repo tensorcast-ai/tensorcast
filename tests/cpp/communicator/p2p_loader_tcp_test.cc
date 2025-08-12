@@ -1,8 +1,8 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
 #include <cstring>
 #include <vector>
+#include "core/common/cuda_api.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
@@ -31,11 +31,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     const std::size_t model_size = 16 * 1024 * 1024; // 16MB
     void* source_gpu_ptr;
-    REQUIRE(cudaMalloc(&source_gpu_ptr, model_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, model_size).ok());
 
     // Fill with test data
     auto test_data = create_test_pattern(model_size, 123);
-    REQUIRE(cudaMemcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
     REQUIRE(source_engine
@@ -94,12 +94,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(gpu_ptrs[0] != nullptr);
 
     std::vector<uint8_t> verify_data(model_size);
-    REQUIRE(cudaMemcpy(verify_data.data(), gpu_ptrs[0], model_size, cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(verify_data.data(), gpu_ptrs[0], model_size, cudaMemcpyDeviceToHost).ok());
     REQUIRE(verify_pattern(verify_data.data(), model_size, 123));
 
     // Cleanup
     REQUIRE(mem_manager->release_memory(ModelLocation::GPU).ok());
-    cudaFree(source_gpu_ptr);
+    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
   }
 
   SECTION("Remote GPU to Local CPU via TCP") {
@@ -109,10 +109,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     const std::size_t model_size = 8 * 1024 * 1024; // 8MB
     void* source_gpu_ptr;
-    REQUIRE(cudaMalloc(&source_gpu_ptr, model_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, model_size).ok());
 
     auto test_data = create_test_pattern(model_size, 99);
-    REQUIRE(cudaMemcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice).ok());
 
     REQUIRE(source_engine
                 ->register_tensor(
@@ -167,6 +167,6 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Release any allocated CPU memory regardless of failure.
     REQUIRE(mem_manager->release_memory(ModelLocation::PAGEABLE_CPU).ok());
-    cudaFree(source_gpu_ptr);
+    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
   }
 }

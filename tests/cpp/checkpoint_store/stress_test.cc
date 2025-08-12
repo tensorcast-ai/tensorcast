@@ -657,7 +657,10 @@ TEST_CASE("C4: Multi-GPU stress", "[checkpoint_store][stress][c4][multi_gpu]") {
 
   // Get actual GPU count
   int gpu_count = 0;
-  cudaGetDeviceCount(&gpu_count);
+  {
+    auto st = stepcast::cuda::get_device_count(&gpu_count);
+    ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
+  }
   config.max_gpu_ordinal = std::min(gpu_count - 1, 3);
 
   TempModelFixture fixture("stress_c4");

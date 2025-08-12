@@ -8,7 +8,7 @@
 using stepcast::memory::DistributedVirtualMemoryPool;
 
 TEST_CASE("DvmpRegion handle open and basic delegation") {
-  DistributedVirtualMemoryPool dvmp;
+  DistributedVirtualMemoryPool dvmp(DistributedVirtualMemoryPool::kDefaultChunkSize);
   auto not_found = dvmp.open("missing");
   REQUIRE(!not_found.ok());
 

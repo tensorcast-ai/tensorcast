@@ -1,14 +1,12 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
 #include <cstring>
 #include <vector>
 
-#include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_format.h"
 #include "catch2/catch_test_macros.hpp"
 
+#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
 #include "tests/cpp/communicator/test_helpers.h"
 
@@ -29,11 +27,11 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     // Allocate source GPU tensor
     const std::size_t tensor_size = 4 * 1024 * 1024; // 4MB
     void* source_gpu_ptr;
-    REQUIRE(cudaMalloc(&source_gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, tensor_size).ok());
 
     // Fill with test pattern
     auto test_data = create_test_pattern(tensor_size, 42);
-    REQUIRE(cudaMemcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
     auto status = source_engine->register_tensor(
@@ -48,7 +46,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
 
     // Allocate target GPU memory
     void* target_gpu_ptr;
-    REQUIRE(cudaMalloc(&target_gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&target_gpu_ptr, tensor_size).ok());
 
     // Perform remote read
     auto future = target_engine->read_tensor(
@@ -66,12 +64,12 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
 
     // Verify data
     std::vector<uint8_t> verify_data(tensor_size);
-    REQUIRE(cudaMemcpy(verify_data.data(), target_gpu_ptr, tensor_size, cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(verify_data.data(), target_gpu_ptr, tensor_size, cudaMemcpyDeviceToHost).ok());
     REQUIRE(verify_pattern(verify_data.data(), tensor_size, 42));
 
     // Cleanup
-    cudaFree(source_gpu_ptr);
-    cudaFree(target_gpu_ptr);
+    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
+    REQUIRE(stepcast::cuda::free(target_gpu_ptr).ok());
   }
 
   SECTION("GPU to CPU transfer via TCP") {
@@ -85,11 +83,11 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     // Allocate source GPU tensor
     const std::size_t tensor_size = 2 * 1024 * 1024; // 2MB
     void* source_gpu_ptr;
-    REQUIRE(cudaMalloc(&source_gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, tensor_size).ok());
 
     // Fill with test pattern
     auto test_data = create_test_pattern(tensor_size, 99);
-    REQUIRE(cudaMemcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
     REQUIRE(source_engine
@@ -124,7 +122,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(verify_pattern(target_cpu_ptr, tensor_size, 99));
 
     // Cleanup
-    cudaFree(source_gpu_ptr);
+    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
     std::free(target_cpu_ptr);
   }
 }
@@ -144,8 +142,8 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     void* source_gpu_ptr;
     void* target_gpu_ptr;
 
-    REQUIRE(cudaMalloc(&source_gpu_ptr, tensor_size) == cudaSuccess);
-    REQUIRE(cudaMalloc(&target_gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, tensor_size).ok());
+    REQUIRE(stepcast::cuda::malloc(&target_gpu_ptr, tensor_size).ok());
 
     // Fill with pattern (use simpler pattern for large data)
     std::vector<uint8_t> pattern(1024 * 1024); // 1MB pattern
@@ -157,9 +155,9 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     for (std::size_t offset = 0; offset < tensor_size; offset += pattern.size()) {
       std::size_t copy_size = std::min(pattern.size(), tensor_size - offset);
       REQUIRE(
-          cudaMemcpy(
-              static_cast<uint8_t*>(source_gpu_ptr) + offset, pattern.data(), copy_size, cudaMemcpyHostToDevice) ==
-          cudaSuccess);
+          stepcast::cuda::memcpy(
+              static_cast<uint8_t*>(source_gpu_ptr) + offset, pattern.data(), copy_size, cudaMemcpyHostToDevice)
+              .ok());
     }
 
     // Register and transfer
@@ -191,14 +189,15 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     std::vector<uint8_t> verify_end(1024 * 1024);
 
     REQUIRE(
-        cudaMemcpy(verify_start.data(), target_gpu_ptr, verify_start.size(), cudaMemcpyDeviceToHost) == cudaSuccess);
+        stepcast::cuda::memcpy(verify_start.data(), target_gpu_ptr, verify_start.size(), cudaMemcpyDeviceToHost).ok());
 
     REQUIRE(
-        cudaMemcpy(
+        stepcast::cuda::memcpy(
             verify_end.data(),
             static_cast<uint8_t*>(target_gpu_ptr) + tensor_size - verify_end.size(),
             verify_end.size(),
-            cudaMemcpyDeviceToHost) == cudaSuccess);
+            cudaMemcpyDeviceToHost)
+            .ok());
 
     // Check patterns
     for (std::size_t i = 0; i < verify_start.size(); ++i) {
@@ -208,7 +207,7 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
       REQUIRE(verify_end[i] == static_cast<uint8_t>(i % 256));
     }
 
-    cudaFree(source_gpu_ptr);
-    cudaFree(target_gpu_ptr);
+    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
+    REQUIRE(stepcast::cuda::free(target_gpu_ptr).ok());
   }
 }
