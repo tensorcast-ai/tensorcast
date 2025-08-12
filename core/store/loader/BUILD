@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Base interfaces
@@ -160,5 +161,297 @@ sc_cc_library(
         "//core/store:loading_spec",
         "//core/store/model:model_location",
         "@abseil-cpp//absl/strings",
+    ],
+)
+
+# Config for using fake CUDA backend
+config_setting(
+    name = "use_fake_cuda",
+    define_values = {"use_fake_cuda": "true"},
+)
+
+# Tests
+cc_test(
+    name = "disk_model_mmap_test",
+    srcs = ["disk_model_mmap_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_model_cpu_load_test",
+    srcs = ["disk_model_cpu_load_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_model_cpu_gpu_transfer_test",
+    srcs = ["disk_model_cpu_gpu_transfer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":file_partition_source",
+        ":gpu_memory_sink",
+        ":pump",
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_loader_streaming_buffer_test",
+    srcs = ["disk_loader_streaming_buffer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":disk_loader",
+        ":source",
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model:memory_manager",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_model_error_test",
+    srcs = ["disk_model_error_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "file_partition_source_test",
+    srcs = ["file_partition_source_test.cc"],
+    deps = [
+        ":file_partition_source",
+        "//core/checkpoint:aligned_buffer_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_gpu_auto_release_test",
+    srcs = ["model_gpu_auto_release_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":file_partition_source",
+        ":gpu_memory_sink",
+        ":pump",
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_memory_sink_test",
+    srcs = ["gpu_memory_sink_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":file_partition_source",
+        ":gpu_memory_sink",
+        ":pump",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_verification_test",
+    srcs = ["model_verification_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:model_verification_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_verifier_direct_test",
+    srcs = ["model_verifier_direct_test.cc"],
+    deps = [
+        "//core/common:model_verification_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_model_multi_gpu_test",
+    srcs = ["disk_model_multi_gpu_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":file_partition_source",
+        ":gpu_memory_sink",
+        ":pump",
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "mux_seekable_source_test",
+    srcs = ["mux_seekable_source_test.cc"],
+    deps = [
+        ":mux_seekable_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "pump_direct_test",
+    srcs = ["pump_direct_test.cc"],
+    deps = [
+        ":pump",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "pump_test",
+    srcs = ["pump_test.cc"],
+    deps = [
+        ":pump",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_streaming_buffer_test",
+    srcs = ["model_streaming_buffer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":streaming_buffer_adapter",
+        "//core/common:cuda_api_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/store:loading_spec",
+        "//core/store/model",
+        "//core/store/model:model_config",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "p2p_loader_tcp_test",
+    srcs = ["p2p_loader_tcp_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":p2p_loader",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/communicator:engine_lib",
+        "//core/store/model:memory_manager",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
     ],
 )

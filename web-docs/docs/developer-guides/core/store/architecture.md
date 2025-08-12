@@ -8,7 +8,7 @@ sidebar_position: 2
 
 ## System Architecture
 
-The Core Store module adopts a layered architectural design, with clear responsibility boundaries from external interfaces to low-level memory management.
+The Core Store module adopts a layered architectural design with clear responsibility boundaries from external interfaces to low-level memory management. The architecture has evolved to support multi-device binding, distributed virtual memory pools (DVMP), and unified type systems for model sources and targets.
 
 ## Overall Architecture Diagram
 
@@ -16,32 +16,47 @@ The Core Store module adopts a layered architectural design, with clear responsi
 graph TB
     subgraph "External Interface Layer"
         CS[CheckpointStore]
+        PO[PrepareOrchestrator]
     end
 
-    subgraph "Model Management Layer"
-        M[Model]
-        MC[ModelConfig]
+    subgraph "Core Components"
         MR[ModelRegistry]
         DM[DeviceManager]
+        GSC[GlobalStoreClient]
+        MC[MetricsCollector]
+    end
+
+    subgraph "Model Layer"
+        M[Model]
+        MCF[ModelConfig]
+        IK[InstanceKey]
+    end
+
+    subgraph "Memory Management"
+        MM[MemoryManager]
+        TS[TransferService]
+        CES[ChunkExportService]
+        MS[MemoryState]
+        ML[ModelLocation]
     end
 
     subgraph "Data Loading Layer"
         IL[IModelLoader]
         DL[DiskLoader]
-        RL[P2PLoader]
+        PL[P2PLoader]
+        SS[SeekableSource]
+        P[Pump]
     end
 
-    subgraph "Memory Management Layer"
-        MM[MemoryManager]
-        MS1[MemoryState]
-        ML[ModelLocation]
-    end
-
-    subgraph "Memory Implementation Layer"
-        PM[PinnedMemory]
-        CM[CudaMemory]
+    subgraph "Memory Pools"
         PMP[PinnedMemoryPool]
-        BV[BatchVector]
+        DVMP[DistributedVirtualMemoryPool]
+        SPB[StreamingPinnedBuffer]
+    end
+
+    subgraph "GPU Memory"
+        CM[CudaMemory]
+        IPC[IPC Handle]
     end
 
     subgraph "Communication Layer"
@@ -50,23 +65,40 @@ graph TB
         CRI[CommRegistrationInfo]
     end
 
+    CS --> PO
     CS --> MR
     CS --> DM
+    CS --> GSC
+    CS --> MC
+    PO --> GSC
+    PO --> MR
+
     MR --> M
-    M --> IL
+    M --> IK
     M --> MM
-    M --> MC
-    DL --> IL
-    RL --> IL
-    MM --> PM
-    MM --> CM
-    MM --> MS1
+    M --> IL
+    M --> MCF
+
+    MM --> TS
+    MM --> CES
+    MM --> MS
     MM --> ML
-    PM --> PMP
-    MM --> BV
-    MM --> CMN
+    MM --> PMP
+    MM --> DVMP
+    MM --> SPB
+    MM --> CM
+
+    IL --> DL
+    IL --> PL
+    DL --> SS
+    PL --> SS
+    SS --> P
+
+    CES --> CMN
     CMN --> CE
     CE --> CRI
+
+    CM --> IPC
 ```
 
 ## Layer Details
@@ -75,21 +107,45 @@ graph TB
 
 **CheckpointStore** is the entry point of the entire system, providing:
 
-- Model registration and management
-- GPU device management
-- Global resource coordination
-- High-level API encapsulation
+- Model registration and management via ModelRegistry
+- GPU device management via DeviceManager
+- Global resource coordination through GlobalStoreClient
+- High-level API encapsulation with prepare() method
+- Metrics collection through MetricsCollector
+
+**PrepareOrchestrator** handles the prepare() API workflow:
+
+- Remote replica selection from Global Store
+- P2P transport setup and coordination
+- Disk fallback when P2P unavailable
+- Replica registration after successful loading
 
 ```cpp
 class CheckpointStore {
 public:
-    int load_model();
+    // Multi-device binding API
+    absl::StatusOr<ModelHandle> prepare(
+        std::string_view model_id,
+        const DeviceKey& target_device,
+        PrepareMode mode = PrepareMode::AUTO,
+        const LoadingHints& hints = {});
+
+    // Instance-based management
+    int wait_instance_ready(const InstanceKey& key);
+    int unload_instance(const InstanceKey& key);
+
+    // DVMP chunk locking for H2D/P2P transfers
+    absl::Status lock_chunks(const InstanceKey& instance_key,
+                             absl::Span<const uint32_t> chunk_indices);
+    absl::Status unlock_chunks(const InstanceKey& instance_key,
+                               absl::Span<const uint32_t> chunk_indices,
+                               bool copied_gpu);
 };
 ```
 
 ### 2. Model Management Layer
 
-**Model** class encapsulates the complete lifecycle of a single model:
+**Model** class encapsulates the complete lifecycle of a single model instance bound to a specific device:
 
 ```mermaid
 graph LR
@@ -108,13 +164,15 @@ graph LR
 ```
 
 **Design Features**:
-- Uses Factory pattern for instance creation
-- Asynchronous operation management
-- Intelligent source selection strategy
+- Factory pattern with `Model::create()` for instance creation
+- Each Model instance is uniquely identified by `InstanceKey` (model_id + device + replica)
+- Asynchronous operation management via `std::shared_future`
+- Supports GPU↔GPU direct P2P transfers via `copy_from()` method
+- Integrated model verification capabilities
 
 ### 3. Data Loading Layer
 
-Adopts strategy pattern design, supporting multiple data sources:
+Adopts strategy pattern design with pump-based streaming architecture:
 
 ```mermaid
 classDiagram
@@ -122,19 +180,19 @@ classDiagram
         <<interface>>
         +initialize() Status
         +get_model_size() StatusOr~uint64_t~
-        +load_async() future~Status~
+        +open_source() StatusOr~SeekableSource~
     }
 
     class DiskLoader {
+        -source_: DiskSource
         -partition_paths_: vector~path~
         -partition_sizes_: vector~size_t~
-        +load_async() future~Status~
+        +open_source() StatusOr~SeekableSource~
     }
 
     class P2PLoader {
-        -source_config_: P2PModelSource
-        -comm_engine_: shared_ptr~Engine~
-        +load_async() future~Status~
+        -source_: P2PSource
+        +open_source() StatusOr~SeekableSource~
     }
 
     IModelLoader <|-- DiskLoader
@@ -142,20 +200,22 @@ classDiagram
 ```
 
 **DiskLoader Workflow**:
-1. Scan partition files (`tensor.data_0`, `tensor.data_1`, ...)
-2. Multi-threaded parallel reading
-3. Write to PinnedMemory buffers
-4. Synchronize status through BatchVector
+1. Scan partition files (`tensor.data_0`, `tensor.data_1`, ...) from DiskSource path
+2. Create `FilePartitionSource` that implements `SeekableSource` interface
+3. Return source handle for pump-based streaming
+4. Actual loading handled by `MemoryManager::load_async_from_source()` using Pump
+5. Data flows: FilePartitionSource → Pump → MemorySink (DvmpRegionSink or GpuMemorySink)
 
 **P2PLoader Workflow**:
-1. Connect to remote CommunicationManager (internally wraps CommunicateEngine)
-2. Read data based on configured memory keys
-3. Support CPU-CPU and GPU-GPU transfers
-4. Optional data integrity verification
+1. Validate P2PSource configuration (IP, port, memory keys)
+2. Create `RemoteKeySource` that wraps remote memory access via CommunicateEngine
+3. Can be muxed with DiskLoader as fallback via `MuxSeekableSource`
+4. Support various transfer scenarios (CPU↔CPU, GPU↔GPU, CPU↔GPU)
+5. Optional checksum verification during transfer
 
 ### 4. Memory Management Layer
 
-**MemoryManager** is the core of memory management, managing memory at both CPU and GPU locations:
+**MemoryManager** manages memory for a single model instance at both CPU and GPU locations, integrating with Distributed Virtual Memory Pool (DVMP) for pageable CPU memory:
 
 ```mermaid
 stateDiagram-v2
@@ -171,51 +231,82 @@ stateDiagram-v2
 ```
 
 **Memory Transfer Support**:
-- CPU ↔ GPU: Asynchronous cudaMemcpyAsync
-- DISK → CPU: Multi-threaded file reading
-- REMOTE → CPU/GPU: Direct P2P transfer
+- CPU ↔ GPU: Asynchronous cudaMemcpyAsync via dedicated CUDA stream
+- DISK → CPU/GPU: Pump-based streaming with `load_async_from_source()`
+- REMOTE → CPU/GPU: Direct P2P transfer via CommunicateEngine
+- GPU ↔ GPU: Direct peer-to-peer copy via `copy_from_peer()`
 
 ### 5. Memory Implementation Layer
 
+The memory implementation layer provides the low-level memory management and data transfer mechanisms:
+
 ```mermaid
 graph TB
-    subgraph "CPU Memory"
+    subgraph "CPU Memory Management"
         PMP[PinnedMemoryPool]
-        PM[PinnedMemory]
-        BV[BatchVector]
+        DVMP[DistributedVirtualMemoryPool]
+        SPB[StreamingPinnedBuffer]
 
-        PMP --> PM
-        PM --> BV
+        PMP -->|Allocates chunks| SPB
+        DVMP -->|Virtual pages| UMA[UMA Space]
     end
 
-    subgraph "GPU Memory"
+    subgraph "GPU Memory Management"
         CM[CudaMemory]
+        CS[CUDA Stream]
         IPC[IPC Handle]
 
-        CM --> IPC
+        CM -->|Manages| CS
+        CM -->|Exports| IPC
     end
 
-    subgraph "Allocation Types"
-        DIRECT[Direct Allocation]
-        POOLED[Pool Allocation]
+    subgraph "Data Transfer Components"
+        SS[SeekableSource]
+        Sink[MemorySink]
+        P[Pump]
+        BP[BufferPool]
+
+        SS -->|Reads from| P
+        P -->|Writes to| Sink
+        P -->|Uses| BP
+    end
+
+    subgraph "Service Layer"
+        TS[TransferService]
+        CES[ChunkExportService]
+        MMC[ModelMemoryCoordinator]
+
+        TS -->|Orchestrates| P
+        CES -->|Manages| CRI[CommRegistrationInfo]
+        MMC -->|Coordinates| TS
     end
 ```
 
 **Memory Pool Design**:
-- Pre-allocate fixed-size memory blocks
-- Support CUDA host pinned memory
-- Automatic alignment and NUMA optimization
+- **PinnedMemoryPool**: Pre-allocated CUDA host pinned memory chunks with 4KB alignment for optimal performance
+- **DistributedVirtualMemoryPool (DVMP)**: System-wide virtual address space for pageable CPU memory with lazy physical page binding
+- **StreamingPinnedBuffer**: Circular buffer pool for streaming data transfers using producer-consumer pattern
+- **BufferPool**: Reusable buffer management for pump-based transfers
+- Automatic alignment (4KB for memory pages, 512B for DIRECT_IO) and NUMA optimization
+
+**Pump-Based Transfer Architecture**:
+- **SeekableSource**: Abstract interface for data sources (disk files, remote memory)
+- **MemorySink**: Abstract interface for data destinations (DVMP regions, GPU memory)
+- **Pump**: Core transfer engine that streams data from source to sink
+- **DirectWriteToken**: Enables zero-copy transfers when supported by source and sink
 
 **GPU Memory Features**:
-- Support direct allocation
-- Automatic CUDA context management
-- Cross-process memory sharing via IPC handles
+- Direct allocation via `CudaMemory` class with device-specific management
+- Automatic CUDA context and non-blocking stream management
+- Cross-process memory sharing via IPC handles (`get_cuda_ipc_handle()`)
+- Device-bound memory management (each MemoryManager tied to specific device via InstanceKey)
+- Support for peer-to-peer transfers between different GPU devices
 
 ## 内存传输机制详解
 
-### CPU 与 GPU 内存布局差异
+### CPU and GPU Memory Layout Differences
 
-CPU 和 GPU 使用不同的内存布局策略来优化各自的访问模式：
+CPU and GPU use different memory layout strategies to optimize their respective access patterns:
 
 ```mermaid
 graph TB
@@ -253,13 +344,14 @@ graph TB
     end
 ```
 
-**设计原理**:
-- **CPU 分块设计**: 支持并行I/O，减少内存碎片，便于池化管理
-- **GPU 连续设计**: 最大化GPU带宽利用率，简化kernel访问模式
+**Design Principles**:
+- **CPU Chunked Design**: Enables parallel I/O, reduces memory fragmentation, simplifies pool management
+- **GPU Contiguous Design**: Maximizes GPU bandwidth utilization, simplifies kernel access patterns
+- **DVMP Integration**: CPU chunks can now be backed by virtual memory pages for better scalability
 
-### 内存状态管理
+### Memory State Management
 
-每个内存位置都有独立的状态管理：
+Each memory location maintains independent state management with thread-safe transitions:
 
 ```mermaid
 stateDiagram-v2
@@ -287,21 +379,20 @@ stateDiagram-v2
     FAILED_GPU --> UNALLOCATED_GPU: release_memory(GPU)
 ```
 
-### 磁盘到CPU加载机制
+### Disk to CPU Loading Mechanism
 
-从磁盘加载到CPU时，数据被分块并行处理：
+When loading from disk to CPU, data is processed in chunks using a pump-based streaming approach:
 
 ```mermaid
 sequenceDiagram
     participant DL as DiskLoader
     participant MM as MemoryManager
     participant PM as PinnedMemory
-    participant BV as BatchVector
     participant T1 as Thread1
     participant T2 as Thread2
     participant TN as ThreadN
 
-    Note over DL,TN: 多线程并行磁盘读取
+    Note over DL,TN: Multi-threaded parallel disk reading
 
     DL->>MM: get_pinned_memory()
     MM->>PM: return shared_ptr
@@ -324,13 +415,13 @@ sequenceDiagram
         TN->>BV: enqueue(chunk_id, batch_info)
     end
 
-    Note over T1,TN: 所有线程完成
+    Note over T1,TN: All threads complete
     DL->>MM: finalize_load_state(CPU, LOADED)
 ```
 
-### CPU到GPU传输机制
+### CPU to GPU Transfer Mechanism
 
-CPU到GPU的传输是将分块的CPU内存重新组合成GPU的连续内存：
+CPU to GPU transfer reassembles chunked CPU memory into contiguous GPU memory:
 
 ```mermaid
 graph TB
@@ -431,9 +522,9 @@ graph TB
     end
 ```
 
-### P2P传输支持
+### P2P Transfer Support
 
-P2P传输根据源和目标的内存布局采用不同策略：
+P2P transfer adopts different strategies based on source and destination memory layouts:
 
 ```mermaid
 graph TB
@@ -485,10 +576,12 @@ graph TB
     end
 ```
 
-**P2P Transfer Limitations**:
+**P2P Transfer Capabilities**:
 - **CPU↔CPU**: Fully supported, 1:1 chunk-to-chunk mapping
 - **GPU↔GPU**: Fully supported, single buffer to single buffer transfer
-- **CPU↔GPU**: Fully supported, multiple chunks to single buffer transfer
+- **CPU→GPU**: Fully supported, multiple chunks assembled to single buffer
+- **GPU→CPU**: Fully supported, single buffer split to multiple chunks
+- **Cross-device GPU↔GPU**: Supported via `copy_from_peer()` method
 
 ### Memory Transfer Performance Optimization
 
@@ -553,50 +646,48 @@ stateDiagram-v2
 
 ## Core Interaction Flows
 
-### Model Loading Flow
+### New Unified Loading Flow with prepare() API
 
 ```mermaid
 sequenceDiagram
     participant User
     participant CS as CheckpointStore
+    participant PO as PrepareOrchestrator
+    participant MR as ModelRegistry
     participant M as Model
     participant MM as MemoryManager
     participant L as Loader
-    participant PM as PinnedMemory
-    participant BV as BatchVector
+    participant DVMP
 
-    User->>CS: load_model_from_disk(id)
-    CS->>M: create(DiskModelSource)
-    M->>L: initialize_and_get_size()
-    M->>MM: construct_with_size(size)
-    M->>MM: allocate_memory(CPU)
+    User->>CS: prepare(model_id, target_device)
+    CS->>PO: orchestrate loading
+    PO->>MR: get_or_create_model(instance_key)
 
-    MM->>MM: transition to ALLOCATED
-    Note over MM: CPU chunked memory allocation completed
-
-    M->>L: load_async(CPU)
-    L->>MM: get_pinned_memory()
-    MM->>PM: return chunks vector
-    L->>MM: get_host_chunk_queue()
-    MM->>BV: return batch tracker
-
-    L->>MM: set_state(CPU, LOADING)
-
-    Note over L: Multi-threaded parallel reading of disk partitions
-    loop Each disk partition file
-        L->>L: multi_thread_read(partition_i)
-        L->>PM: write_chunk(chunk_id, data)
-        L->>BV: enqueue(chunk_id, batch_info)
+    alt Model not exists
+        MR->>M: Model::create(config)
+        M->>L: create appropriate loader
+        M->>MM: initialize with DVMP
+        MM->>DVMP: reserve virtual address space
     end
 
-    L->>MM: finalize_load_state(CPU, LOADED)
-    MM->>M: notify completion
-    M->>CS: return success
+    PO->>M: ensure_loaded_async(target_location)
+    M->>MM: allocate_memory(location)
+    M->>L: open_source()
+    L-->>M: return SeekableSource
+    M->>MM: load_async_from_source(source)
+
+    MM->>MM: setup streaming buffers
+    MM->>MM: pump data from source
+    MM->>MM: finalize_load_state(LOADED)
+
+    M-->>PO: return future
+    PO->>CS: return ModelHandle
+    CS->>User: ModelHandle{instance_key, ready_future}
 ```
 
-### P2P Loading Flow
+### P2P Loading Flow with CommunicateEngine
 
-Different P2P transfer scenarios adopt different handling approaches:
+P2P transfers leverage the CommunicateEngine for efficient remote memory access:
 
 ```mermaid
 sequenceDiagram
@@ -682,8 +773,9 @@ sequenceDiagram
 
 ### 1. Asynchronous First
 - All I/O operations are asynchronous
-- Use `std::future` and `std::shared_future`
-- Avoid blocking the main thread
+- Use `std::future` and `std::shared_future` for operation tracking
+- Non-blocking CUDA streams for GPU operations
+- Pump-based streaming for data transfers
 
 ### 2. State-Driven
 - Clear state transition rules
@@ -701,9 +793,10 @@ sequenceDiagram
 - Detailed logging
 
 ### 5. Extensibility
-- Plugin-style Loader design
-- Configuration-driven behavior
-- Modular component structure
+- Plugin-style Loader design via `IModelLoader` interface
+- Unified type system (`ModelSource`, `ModelTarget`, `DeviceKey`)
+- Configuration-driven behavior via `LoadingHints`
+- Modular component structure with clear service boundaries
 
 ## Performance Optimization
 
@@ -718,9 +811,10 @@ sequenceDiagram
 - Zero-copy IPC sharing
 
 ### 3. Caching Strategy
-- LRU policy for model eviction
-- Intelligent location selection
-- Locality-aware data access
+- DVMP-based chunk-level eviction policies
+- Intelligent location selection based on device capabilities
+- Locality-aware data access with NUMA optimization
+- Chunk locking mechanism to prevent eviction during transfers
 
 ## Security Considerations
 
@@ -743,10 +837,37 @@ sequenceDiagram
 
 The system is designed with multiple extension points to support future requirements:
 
-1. **New Loader Types**: Implement `IModelLoader` interface
-2. **New Memory Types**: Extend `MemoryManager` support
-3. **New Transfer Protocols**: Extend communication engine
-4. **New Verification Methods**: Extend verification framework
+1. **New Loader Types**: Implement `IModelLoader` interface and provide `SeekableSource`
+2. **New Source Types**: Add variants to `ModelSource` (e.g., S3Source, AzureBlobSource)
+3. **New Memory Types**: Extend `MemoryManager` and `ModelLocation` enum
+4. **New Transfer Protocols**: Extend `CommunicateEngine` implementations
+5. **New Verification Methods**: Extend `ModelVerificationInfo` framework
+6. **Custom Device Types**: Extend `DeviceKey` and device registry
+
+## Key Implementation Details
+
+### Multi-Device Binding
+- Each model instance is uniquely identified by `InstanceKey` (model_id + device + replica)
+- Supports multiple replicas of the same model on different devices
+- Device abstraction via `DeviceKey` for stable device references
+
+### Distributed Virtual Memory Pool (DVMP)
+- System-wide virtual address space management
+- Chunk-based memory allocation with lazy physical page binding
+- Supports chunk locking during H2D/P2P transfers
+- Enables efficient memory sharing across processes
+
+### Unified Type System
+- `ModelSource`: Describes where data comes from (Disk, P2P, Buffer)
+- `ModelTarget`: Describes where data goes (Location with device info)
+- `LoadingHints`: Tuning parameters for loading operations
+- `ModelHandle`: Returned from loading operations with instance info
+
+### Service Architecture
+- **TransferService**: Manages data transfers between locations
+- **ChunkExportService**: Handles P2P memory registration/export
+- **PrepareOrchestrator**: Coordinates the prepare() API workflow
+- **MetricsCollector**: Tracks performance and resource usage
 
 ## Related Guides
 

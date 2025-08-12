@@ -10,8 +10,8 @@
 #include <thread>
 #include <unordered_set>
 
-#include "concurrency_utils.h"
 #include "core/common/logging_init.h"
+#include "core/store/concurrency_utils.h"
 
 using namespace stepcast::tests::checkpoint_store;
 using namespace stepcast::store;

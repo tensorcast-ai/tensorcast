@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
@@ -46,13 +47,13 @@ sc_cc_library(
     srcs = ["misc/epoll_wrap.cc"],
     hdrs = ["misc/epoll_wrap.h"],
     includes = ["."],
-    visibility = ["//:__pkg__"],  # Package-private
+    visibility = ["//core/communicator:__subpackages__"],
 )
 
 sc_header_only_library(
     name = "ibv_mock_lib",
     hdrs = ["misc/ibv_mock.h"],
-    visibility = ["//:__pkg__"],  # Package-private
+    visibility = ["//core/communicator:__subpackages__"],
 )
 
 sc_cc_library(
@@ -69,13 +70,13 @@ sc_cc_library(
 sc_header_only_library(
     name = "map_lib",
     hdrs = ["misc/map.h"],
-    visibility = ["//:__pkg__"],  # Package-private
+    visibility = ["//core/communicator:__subpackages__"],
 )
 
 sc_header_only_library(
     name = "queue_lib",
     hdrs = ["misc/queue.h"],
-    visibility = ["//:__pkg__"],  # Package-private
+    visibility = ["//core/communicator:__subpackages__"],
     deps = [
         ":common_lib",
     ],
@@ -269,17 +270,31 @@ sc_cc_library(
     ],
 )
 
-# MTCP engine components (mtcp_transport + gpu_tcp_stager)
+# MTCP transport (without gpu_tcp_stager which is now in engine subpackage)
 sc_cc_library(
-    name = "mtcp_engine_lib",
-    srcs = [
-        "engine/gpu_tcp_stager.cc",
-        "transport/mtcp_transport.cc",
+    name = "mtcp_transport_lib",
+    srcs = ["transport/mtcp_transport.cc"],
+    hdrs = ["transport/mtcp_transport.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":base_transport_lib",
+        ":constants_lib",
+        ":gpu_tcp_stager_lib",
+        ":partition_tensor_lib",
+        ":tcp_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:device_guard_lib",
+        "//core/common:error_handling_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/common:streaming_pinned_buffer_lib",
     ],
-    hdrs = [
-        "engine/gpu_tcp_stager.h",
-        "transport/mtcp_transport.h",
-    ],
+)
+
+# GPU TCP Stager
+sc_cc_library(
+    name = "gpu_tcp_stager_lib",
+    srcs = ["engine/gpu_tcp_stager.cc"],
+    hdrs = ["engine/gpu_tcp_stager.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":base_transport_lib",
@@ -294,26 +309,14 @@ sc_cc_library(
     ],
 )
 
-# Alias for backward compatibility
-alias(
-    name = "mtcp_transport_lib",
-    actual = ":mtcp_engine_lib",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "gpu_tcp_stager_lib",
-    actual = ":mtcp_engine_lib",
-    visibility = ["//visibility:public"],
-)
-
 sc_cc_library(
     name = "channel_lib",
     srcs = ["engine/channel.cc"],
     hdrs = ["engine/channel.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":mtcp_engine_lib",
+        ":gpu_tcp_stager_lib",
+        ":mtcp_transport_lib",
         ":rdma_lib",
     ],
 )
@@ -328,13 +331,15 @@ sc_cc_library(
         ":constants_lib",
         ":envs_lib",
         ":message_lib",
-        ":mtcp_engine_lib",
+        ":mtcp_transport_lib",
         ":protocol_lib",
         ":rdma_lib",
         ":store_lib",
         ":tcp_lib",
         ":utils_lib",
         "//core/common:cuda_api_lib",
+        "//core/common:device_guard_lib",
+        "//core/common:error_handling_lib",
         "//core/common:pinned_memory_pool_lib",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
@@ -374,4 +379,111 @@ sc_cc_library(
         ":utils_lib",
     ],
     alwayslink = True,
+)
+
+# Tests
+cc_test(
+    name = "rdma_engine_test",
+    srcs = ["engine/rdma_engine_test.cc"],
+    tags = ["rdma"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "tcp_engine_test",
+    srcs = ["engine/tcp_engine_test.cc"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_tcp_stager_test",
+    srcs = ["engine/gpu_tcp_stager_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":gpu_tcp_stager_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_tensor_registration_test",
+    srcs = ["engine/gpu_tensor_registration_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "tcp_transfer_test",
+    srcs = ["engine/tcp_transfer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "tcp_concurrent_test",
+    srcs = ["engine/tcp_concurrent_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "tcp_error_handling_test",
+    srcs = ["engine/tcp_error_handling_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
 )

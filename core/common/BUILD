@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
@@ -20,6 +21,7 @@ sc_cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        ":error_handling_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
     ] + select({
         ":use_fake_cuda": [],
@@ -252,6 +254,67 @@ sc_cc_library(
         ":trace_ctx_lib",
         ":trace_manager_lib",
         "@abseil-cpp//absl/time",
+    ],
+)
+
+# Tests for memory components
+cc_test(
+    name = "distributed_virtual_memory_pool_test",
+    srcs = ["memory/distributed_virtual_memory_pool_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":distributed_virtual_memory_pool_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "dvmp_region_handle_test",
+    srcs = ["memory/dvmp_region_handle_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":distributed_virtual_memory_pool_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+# Test for cuda_api
+cc_test(
+    name = "cuda_api_test",
+    srcs = ["cuda_api_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+# Test for metrics
+cc_test(
+    name = "metrics_test",
+    srcs = ["metrics/metrics_test.cc"],
+    deps = [
+        ":metric_objects_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

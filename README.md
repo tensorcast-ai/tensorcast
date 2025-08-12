@@ -50,16 +50,23 @@ ln -s $(bazel info output_base)/external external
 
 ## Run test
 
-### Run all tests
+### C++ Tests
 ```bash
-# Run all tests except stress tests (stress tests are slow)
-bazel test //tests/cpp/... --test_tag_filters="-stress"
+# Run all tests except stress, rdma, and multi_gpu tests
+# (stress tests are slow, rdma and multi_gpu tests need to be run manually with specific hardware)
+bazel test //core/... --test_tag_filters="-stress,-rdma,-multi_gpu"
 
-# Run only stress tests
-bazel test //tests/cpp/... --test_tag_filters="stress"
+# Run only stress tests (stress tests are slow)
+bazel test //core/... --test_tag_filters="+stress"
+
+# Run only rdma tests
+bazel test //core/... --test_tag_filters="+rdma"
+
+# Run only multi_gpu tests
+bazel test //core/... --test_tag_filters="+multi_gpu"
 ```
 
-### Communicator Test
+### Communicator P2P Test
 ```bash
 # Terminal 1 (Server)
 $ ./bazel-bin/tests/cpp/gpu_ce_test -a server -i <SERVER_IP> -p 19099 -c 743838020 -k 4 -g 1 -r 0

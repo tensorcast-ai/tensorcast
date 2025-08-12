@@ -14,7 +14,7 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/communicator/engine/engine.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
 using namespace stepcast::communicator::test;

@@ -1,4 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
+
+# Config for using fake CUDA backend
+config_setting(
+    name = "use_fake_cuda",
+    define_values = {"use_fake_cuda": "true"},
+)
 
 # Basic type definitions
 sc_header_only_library(
@@ -200,5 +207,65 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
+    ],
+)
+
+# Tests
+cc_test(
+    name = "chunk_state_machine_test",
+    srcs = ["chunk_state_machine_test.cc"],
+    deps = [
+        ":chunk_meta",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_memory_coordinator_test",
+    srcs = ["model_memory_coordinator_test.cc"],
+    deps = [
+        ":model_memory_coordinator",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_p2p_registration_test",
+    srcs = ["model_p2p_registration_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": [
+            "-lcuda",
+            "-lrt",
+        ],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common",
+        "//core/communicator",
+        "//core/store:checkpoint_store",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "model_p2p_transfer_test",
+    srcs = ["model_p2p_transfer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        "//core/common",
+        "//core/communicator",
+        "//core/store:checkpoint_store",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
     ],
 )

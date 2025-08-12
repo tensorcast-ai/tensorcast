@@ -10,9 +10,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "common/device_types.h"
-#include "concurrency_utils.h"
 #include "core/common/cuda_api.h"
+#include "core/common/device_types.h"
+#include "core/store/concurrency_utils.h"
 
 using namespace stepcast::tests::checkpoint_store;
 using namespace stepcast::store;

@@ -22,7 +22,7 @@
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 namespace fs = std::filesystem;
 using namespace stepcast::store;

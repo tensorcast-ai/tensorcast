@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
@@ -42,22 +43,8 @@ sc_header_only_library(
     hdrs = ["memory_types.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":concurrent_queue",
-        ":concurrent_vector",
         ":device_types",
     ],
-)
-
-sc_header_only_library(
-    name = "concurrent_queue",
-    hdrs = ["concurrent_queue.h"],
-    visibility = ["//visibility:public"],
-)
-
-sc_header_only_library(
-    name = "concurrent_vector",
-    hdrs = ["concurrent_vector.h"],
-    visibility = ["//visibility:public"],
 )
 
 # ========== Core store components ==========
@@ -251,6 +238,105 @@ sc_cc_library(
     }),
 )
 
+# Tests for checkpoint_store
+cc_test(
+    name = "checkpoint_store_test",
+    srcs = ["checkpoint_store_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":checkpoint_store",
+        "//core/common",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "checkpoint_store_p2p_loader_test",
+    srcs = ["checkpoint_store_p2p_loader_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":checkpoint_store",
+        "//core/common",
+        "//core/communicator",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "concurrency_test",
+    srcs = ["concurrency_test.cc"],
+    tags = ["checkpoint_store"],
+    deps = [
+        ":checkpoint_store",
+        ":concurrency_utils",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "edge_test",
+    srcs = ["edge_test.cc"],
+    tags = ["checkpoint_store"],
+    deps = [
+        ":checkpoint_store",
+        ":concurrency_utils",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "stress_test",
+    srcs = ["stress_test.cc"],
+    tags = [
+        "checkpoint_store",
+        "manual",
+        "stress",
+    ],
+    deps = [
+        ":checkpoint_store",
+        ":concurrency_utils",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "multi_gpu_test",
+    srcs = ["multi_gpu_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = [
+        "checkpoint_store",
+        "multi_gpu",
+        "requires_cuda",
+    ],
+    deps = [
+        ":checkpoint_store",
+        ":concurrency_utils",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Aggregate target for backward compatibility
 sc_cc_library(
     name = "store",
@@ -261,8 +347,6 @@ sc_cc_library(
         ":chunk_aware_loading_strategy",
         ":communication_manager",
         ":communication_types",
-        ":concurrent_queue",
-        ":concurrent_vector",
         ":device_manager",
         ":device_registry",
         ":device_types",
@@ -277,4 +361,15 @@ sc_cc_library(
         "//core/store/model",
     ],
     alwayslink = True,
+)
+
+# Concurrency utilities header for tests
+sc_header_only_library(
+    name = "concurrency_utils",
+    hdrs = ["concurrency_utils.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//core/testing:common",
+        "@abseil-cpp//absl/synchronization",
+    ],
 )

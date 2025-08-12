@@ -12,7 +12,7 @@
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
 #include "core/store/checkpoint_store.h"
-#include "tests/cpp/common.h"
+#include "core/testing/common.h"
 
 namespace stepcast::tests::checkpoint_store {
 

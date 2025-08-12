@@ -11,7 +11,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/engine/gpu_tcp_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
 using namespace stepcast::communicator::test;
@@ -31,11 +31,12 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
         COMMUNICATE_ENGINE_DEV_GPU,
         999, // Invalid device ID
         false);
-    REQUIRE_MESSAGE(!status.ok(), 
-                    "Expected tensor registration to fail with invalid device ID 999, but it succeeded");
-    REQUIRE_MESSAGE(status.message().find("device") != std::string::npos || 
-                    status.message().find("Device") != std::string::npos,
-                    "Error message should mention invalid device, but got: " << status.message());
+    REQUIRE(!status.ok());
+    INFO("Error message should mention invalid device, but got: " << status.message());
+    // Accept various error messages about invalid GPU/device
+    REQUIRE(
+        (status.message().find("device") != std::string::npos || status.message().find("Device") != std::string::npos ||
+         status.message().find("gpu") != std::string::npos || status.message().find("GPU") != std::string::npos));
   }
 
   SECTION("Staging buffer exhaustion recovery") {
@@ -71,8 +72,8 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
       // Wait a bit - staging should be blocked
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      REQUIRE_MESSAGE(!staging_completed, 
-                      "Second staging request should be blocked while first buffer is in use, but it completed immediately");
+      INFO("Second staging request should be blocked while first buffer is in use, but it completed immediately");
+      REQUIRE(!staging_completed);
 
       // Buffer is automatically released when staged1 goes out of scope
     }
@@ -82,9 +83,10 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     REQUIRE(staging_completed);
 
     // The second staging should have succeeded after the first buffer was released
-    REQUIRE_MESSAGE(staged2_result.ok(), 
-                    "Second staging should succeed after first buffer release, but failed with: " 
-                    << (staged2_result.ok() ? "OK" : staged2_result.status().message()));
+    INFO(
+        "Second staging should succeed after first buffer release, but failed with: "
+        << (staged2_result.ok() ? "OK" : staged2_result.status().message()));
+    REQUIRE(staged2_result.ok());
 
     // No manual release needed - RAII handles it automatically
 
@@ -106,12 +108,12 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
         COMMUNICATE_ENGINE_DEV_GPU,
         0,
         false);
-    REQUIRE_MESSAGE(!status.ok(),
-                    "Expected tensor registration to fail with zero size, but it succeeded");
-    REQUIRE_MESSAGE(status.message().find("size") != std::string::npos || 
-                    status.message().find("zero") != std::string::npos ||
-                    status.message().find("empty") != std::string::npos,
-                    "Error message should mention zero/empty size issue, but got: " << status.message());
+    INFO("Expected tensor registration to fail with zero size, but it succeeded");
+    REQUIRE(!status.ok());
+    INFO("Error message should mention zero/empty size issue, but got: " << status.message());
+    REQUIRE(
+        (status.message().find("size") != std::string::npos || status.message().find("zero") != std::string::npos ||
+         status.message().find("empty") != std::string::npos));
 
     REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
@@ -129,12 +131,12 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Try to stage beyond tensor bounds
     auto result = stager.stage(tensor, tensor_size - 100, 200); // 100 bytes past end
-    REQUIRE_MESSAGE(!result.ok(),
-                    "Expected staging to fail when accessing beyond tensor bounds (offset " 
-                    << (tensor_size - 100) << " + size 200 > tensor_size " << tensor_size << "), but it succeeded");
-    REQUIRE_MESSAGE(absl::IsInvalidArgument(result.status()),
-                    "Expected InvalidArgument status for out-of-bounds staging, but got: " 
-                    << result.status().ToString());
+    INFO(
+        "Expected staging to fail when accessing beyond tensor bounds (offset "
+        << (tensor_size - 100) << " + size 200 > tensor_size " << tensor_size << "), but it succeeded");
+    REQUIRE(!result.ok());
+    INFO("Expected InvalidArgument status for out-of-bounds staging, but got: " << result.status().ToString());
+    REQUIRE(absl::IsInvalidArgument(result.status()));
 
     REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }

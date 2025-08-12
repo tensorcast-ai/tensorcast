@@ -12,7 +12,7 @@
 
 #include "core/communicator/engine/gpu_tcp_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
 using namespace stepcast::communicator::test;

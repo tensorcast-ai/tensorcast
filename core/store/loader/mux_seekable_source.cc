@@ -2,8 +2,6 @@
 
 #include "core/store/loader/mux_seekable_source.h"
 
-#include <algorithm>
-
 #include "absl/log/log.h"
 #include "core/common/metrics/metric_objects.h"
 
@@ -33,8 +31,9 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
   size_t total_read = 0;
   char* ptr = static_cast<char*>(dst);
 
-  if (bytes == 0)
+  if (bytes == 0) {
     return static_cast<size_t>(0);
+  }
 
   // Try primary for the whole request
   if (primary_) {
@@ -62,8 +61,9 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
                    << bytes << " bytes. Fallback error: " << fst.status();
 
       // If both primary and fallback failed to deliver any data, return fallback error.
-      if (total_read == 0)
+      if (total_read == 0) {
         return fst.status();
+      }
       // Partial success from primary; propagate bytes read so far.
       return total_read;
     }

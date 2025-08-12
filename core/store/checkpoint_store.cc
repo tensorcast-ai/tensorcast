@@ -15,7 +15,6 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
-#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/loading/loading_spec.h"
