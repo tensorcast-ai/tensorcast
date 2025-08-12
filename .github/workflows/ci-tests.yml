@@ -50,6 +50,7 @@ jobs:
         id: cuda-toolkit
         with:
           cuda: '12.4.0'
+          linux-local-args: '["--toolkit","--defaultroot=/home/runner/cuda-12.4"]'
 
       - name: Build C++ core with fake CUDA
         run: |
