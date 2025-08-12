@@ -1,72 +1,72 @@
 CompileFlags:
-  # 基本编译选项
+  # Basic compilation options
   Add:
-    - -xc++                          # 将所有文件视为 C++
-    - -std=c++20                     # 使用 C++20 标准
-    - -Wall                          # 启用所有常见警告
-    - -Wextra                        # 额外的警告
-    - -Wthread-safety                # 线程安全分析（项目使用多线程）
-    - -Wself-assign                  # 自赋值警告
-    - -Wunused-result                # 未使用结果警告
-    - -fcolor-diagnostics            # 彩色诊断输出
-    - -ferror-limit=100              # 错误限制，避免过多错误淹没有用信息
+    - -xc++                          # Treat all files as C++
+    - -std=c++20                     # Use the C++20 standard
+    - -Wall                          # Enable common warnings
+    - -Wextra                        # Extra warnings
+    - -Wthread-safety                # Thread-safety analysis (project uses multithreading)
+    - -Wself-assign                  # Self-assignment warning
+    - -Wunused-result                # Unused result warning
+    - -fcolor-diagnostics            # Colored diagnostics
+    - -ferror-limit=100              # Limit errors to avoid overwhelming noise
     - -Wno-sign-compare
 
-  # 移除可能冲突的选项
+  # Remove potentially conflicting options
   Remove:
-    - -W*                           # 移除所有其他警告相关标志
-    - -stdlib=libc++                # 移除 libc++ 相关标志，避免与系统库冲突
-    - -Xclang                       # 移除 clang 特定标志
-    - -fno-cxx-modules              # 移除模块相关标志
-    - --gcc-toolchain=*             # 移除 GCC 工具链路径
-  # 指定编译器
-  Compiler: ./external/toolchains_llvm++llvm+llvm_toolchain_llvm/bin/clang++  # 使用项目内的 clang++
+    - -W*                           # Remove all other warning-related flags
+    - -stdlib=libc++                # Remove libc++ flags to avoid conflicts with system libs
+    - -Xclang                       # Remove clang-specific flags
+    - -fno-cxx-modules              # Remove module-related flags
+    - --gcc-toolchain=*             # Remove GCC toolchain path
+  # Specify the compiler
+  Compiler: ./external/toolchains_llvm++llvm+llvm_toolchain_llvm/bin/clang++  # Use the project-provided clang++
 
-  # 编译数据库搜索策略
-  CompilationDatabase: Ancestors    # 在父目录中搜索 compile_commands.json
+  # Compilation database search strategy
+  CompilationDatabase: Ancestors    # Search for compile_commands.json in parent directories
 
-# 索引配置
+# Index configuration
 Index:
-  Background: Build                 # 启用后台索引
-  StandardLibrary: true             # 索引标准库
+  Background: Build                 # Enable background indexing
+  StandardLibrary: true             # Index the standard library
 
-# 诊断配置
+# Diagnostics configuration
 Diagnostics:
-  # 抑制特定的诊断
+  # Suppress specific diagnostics
   Suppress:
-    - bugprone-easily-swappable-parameters  # 避免过多的参数交换警告
-    - bugprone-narrowing-conversions        # GPU 代码中常见的类型转换
-    - cert-err58-cpp                        # 静态对象构造函数可能抛出异常
-    - cppcoreguidelines-pro-type-vararg     # C 风格可变参数（日志宏可能使用）
+    - bugprone-easily-swappable-parameters  # Avoid noisy parameter-swappable warnings
+    - bugprone-narrowing-conversions        # Common in GPU code
+    - cert-err58-cpp                        # Static object constructors may throw
+    - cppcoreguidelines-pro-type-vararg     # C-style varargs (used by logging macros)
 
-  # Clang-Tidy 配置（优化的性能子集）
+  # Clang-Tidy configuration (performance-focused subset)
   ClangTidy:
     Add:
-      # 关键检查类别
-      - bugprone-*                          # Bug 倾向检查
-      - performance-*                       # 性能检查（重要）
-      - readability-identifier-naming       # 命名规范
-      - readability-redundant-*             # 冗余代码
-      - modernize-use-nullptr              # 使用 nullptr
-      - modernize-use-override             # 使用 override
-      - modernize-use-using                # 使用 using 替代 typedef
-      - modernize-deprecated-headers       # 弃用的头文件
-      - google-runtime-int                 # 整数类型检查
-      - misc-unused-*                      # 未使用的代码
-      - abseil-*                           # Abseil 库相关检查
-      - concurrency-*                      # 并发相关检查
+      # Key check categories
+      - bugprone-*                          # Bug-prone checks
+      - performance-*                       # Performance checks (important)
+      - readability-identifier-naming       # Naming conventions
+      - readability-redundant-*             # Redundant code
+      - modernize-use-nullptr              # Use nullptr
+      - modernize-use-override             # Use override
+      - modernize-use-using                # Prefer using over typedef
+      - modernize-deprecated-headers       # Deprecated headers
+      - google-runtime-int                 # Integer type checks
+      - misc-unused-*                      # Unused code
+      - abseil-*                           # Abseil-related checks
+      - concurrency-*                      # Concurrency-related checks
 
     Remove:
-      # 在编辑时禁用的检查（太慢或噪音太多）
+      # Checks disabled during editing (too slow or too noisy)
       - bugprone-easily-swappable-parameters
       - bugprone-implicit-widening-of-multiplication-result
-      - performance-no-int-to-ptr          # CUDA 代码中常见
-      - readability-magic-numbers          # 不强制魔数检查
-      - readability-function-cognitive-complexity  # 复杂度检查太慢
-      - abseil-string-find-startswith      # 可能有误报
-      - modernize-use-trailing-return-type # 不强制尾置返回类型
-      - modernize-avoid-c-arrays           # C 数组在 CUDA 代码中常见
-      - cppcoreguidelines-*                # 太严格，使用特定规则代替
+      - performance-no-int-to-ptr          # Common in CUDA code
+      - readability-magic-numbers          # Do not enforce magic-number checks
+      - readability-function-cognitive-complexity  # Complexity check is too slow
+      - abseil-string-find-startswith      # May have false positives
+      - modernize-use-trailing-return-type # Do not enforce trailing return type
+      - modernize-avoid-c-arrays           # C arrays are common in CUDA code
+      - cppcoreguidelines-*                # Too strict; prefer specific rules instead
       - fuchsia-statically-constructed-objects
       - misc-use-anonymous-namespace
 
@@ -95,38 +95,38 @@ Diagnostics:
 
     FastCheckFilter: None
 
-  # Include Cleaner 配置
-  UnusedIncludes: Strict           # 严格检查未使用的包含
-  MissingIncludes: None            # 暂时不检查缺失的包含（可能产生误报）
+  # Include Cleaner configuration
+  UnusedIncludes: Strict           # Strictly check unused includes
+  MissingIncludes: None            # Do not check missing includes for now (may be false positives)
 
-# 代码补全配置
+# Code completion configuration
 Completion:
-  AllScopes: true                  # 包含所有作用域的补全
+  AllScopes: true                  # Include all scopes in completion
 
-# 内联提示配置
+# Inlay hints configuration
 InlayHints:
   Enabled: true
-  ParameterNames: true             # 显示参数名称
-  DeducedTypes: true               # 显示推导类型
-  Designators: true                # 显示指定初始化器
-  BlockEnd: false                  # 不显示块结束注释（避免视觉混乱）
+  ParameterNames: true             # Show parameter names
+  DeducedTypes: true               # Show deduced types
+  Designators: true                # Show designated initializers
+  BlockEnd: false                  # Do not show block end comments (avoid visual clutter)
 
-# Hover 配置
+# Hover configuration
 Hover:
-  ShowAKA: true                    # 显示类型别名
+  ShowAKA: true                    # Show type aliases
 
-# 条件配置 - 测试文件特定配置
+# Conditional configuration - test-specific settings
 ---
 If:
-  PathMatch: ".*test.*\\.(cc|cpp)" # 匹配测试文件
+  PathMatch: ".*test.*\\.(cc|cpp)" # Match test files
 CompileFlags:
   Add:
-    - -DUNIT_TEST                  # 定义单元测试宏
-    - -DDEBUG                      # 启用调试
+    - -DUNIT_TEST                  # Define unit test macro
+    - -DDEBUG                      # Enable debug
 Diagnostics:
   ClangTidy:
     Remove:
-      - readability-identifier-naming              # 测试中命名可以更灵活
+      - readability-identifier-naming              # Relax naming rules in tests
       - readability-function-cognitive-complexity
     CheckOptions:
       readability-function-cognitive-complexity: 50
