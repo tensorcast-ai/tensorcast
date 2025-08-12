@@ -2,7 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-#include "tests/cpp/common.h"
+#include "core/testing/common.h"
 
 #include <filesystem>
 #include <future>

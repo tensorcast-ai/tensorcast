@@ -7,15 +7,13 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
-#include "absl/strings/str_format.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/p2p_loader.h"
-#include "core/store/loader/source.h"
 #include "core/store/model/memory_manager.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
 using namespace stepcast::store;
@@ -67,8 +65,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(loader->initialize().ok());
 
     // Create memory manager for target with pinned pool for streaming
-    const std::size_t chunk_size = 64 * 1024 * 1024; // 64MB chunks for streaming
-    const std::size_t pool_size = 128 * 1024 * 1024; // 128MB pool (2 chunks)
+    const std::size_t chunk_size = 1 * 1024 * 1024; // 1MB chunks for streaming
+    const std::size_t pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
@@ -105,27 +103,27 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
   SECTION("Remote GPU to Local CPU via TCP") {
     // Find available ports for GPU to CPU P2P communication
     int source_port = find_available_port();
-    REQUIRE_MESSAGE(source_port > 0, "Failed to find available port for GPU-to-CPU P2P source engine");
-    
+    REQUIRE(source_port > 0); // "Failed to find available port for GPU-to-CPU P2P source engine"
+
     int target_port = find_available_port(source_port + 1);
-    REQUIRE_MESSAGE(target_port > 0, "Failed to find available port for GPU-to-CPU P2P target engine");
+    REQUIRE(target_port > 0); // "Failed to find available port for GPU-to-CPU P2P target engine"
 
     // Similar test but with CPU target
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
-    REQUIRE_MESSAGE(source_init_status.ok(),
-                    "Failed to initialize GPU-to-CPU source engine on port " << source_port << ": " << source_init_status.message());
+    CAPTURE(source_port, source_init_status.message());
+    REQUIRE(source_init_status.ok());
 
     const std::size_t model_size = 8 * 1024 * 1024; // 8MB
     void* source_gpu_ptr;
     auto malloc_status = stepcast::cuda::malloc(&source_gpu_ptr, model_size);
-    REQUIRE_MESSAGE(malloc_status.ok(),
-                    "Failed to allocate " << model_size << " bytes of GPU memory for CPU target test: " << malloc_status.message());
+    CAPTURE(model_size, malloc_status.message());
+    REQUIRE(malloc_status.ok());
 
     auto test_data = create_test_pattern(model_size, 99);
     auto memcpy_status = stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice);
-    REQUIRE_MESSAGE(memcpy_status.ok(),
-                    "Failed to copy test pattern to GPU for CPU target test: " << memcpy_status.message());
+    CAPTURE(memcpy_status.message());
+    REQUIRE(memcpy_status.ok());
 
     auto register_status = source_engine->register_tensor(
         "model_weights_cpu",
@@ -134,13 +132,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         COMMUNICATE_ENGINE_DEV_GPU,
         0,
         false);
-    REQUIRE_MESSAGE(register_status.ok(),
-                    "Failed to register GPU tensor 'model_weights_cpu' for CPU target: " << register_status.message());
+    CAPTURE(register_status.message());
+    REQUIRE(register_status.ok());
 
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
-    REQUIRE_MESSAGE(target_init_status.ok(),
-                    "Failed to initialize GPU-to-CPU target engine on port " << target_port << ": " << target_init_status.message());
+    CAPTURE(target_port, target_init_status.message());
+    REQUIRE(target_init_status.ok());
 
     P2PSource source_config;
     source_config.size_bytes = model_size;
@@ -154,12 +152,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     auto loader = std::make_shared<P2PLoader>(source_config);
     auto loader_init_status = loader->initialize();
-    REQUIRE_MESSAGE(loader_init_status.ok(),
-                    "Failed to initialize P2PLoader for GPU-to-CPU transfer: " << loader_init_status.message());
+    CAPTURE(loader_init_status.message());
+    REQUIRE(loader_init_status.ok());
 
     // Create pinned memory pool with 4MB chunk size
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
-    const std::size_t total_pool_size = model_size; // Allocate enough for the full model
+    const std::size_t total_pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
@@ -179,10 +177,16 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto load_future = mem_manager->load_async_from_source(std::move(*src_or), ModelLocation::PAGEABLE_CPU, 1);
     auto load_status = load_future.get();
     CAPTURE(load_status.message());
-    // Remote GPU -> Local CPU is currently unsupported and should fail.
-    REQUIRE(!load_status.ok());
+    // Remote GPU -> Local CPU is now supported; expect success.
+    REQUIRE(load_status.ok());
 
-    // Release any allocated CPU memory regardless of failure.
+    // Verify data in PAGEABLE_CPU UMA region
+    auto cpu_ptrs = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
+    REQUIRE(cpu_ptrs.size() == 1);
+    REQUIRE(cpu_ptrs[0] != nullptr);
+    REQUIRE(std::memcmp(cpu_ptrs[0], test_data.data(), model_size) == 0);
+
+    // Release allocated CPU memory and GPU source
     REQUIRE(mem_manager->release_memory(ModelLocation::PAGEABLE_CPU).ok());
     REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
   }

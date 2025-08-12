@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "core/store/concurrent_vector.h"
+#include <cstddef>
 
 namespace stepcast::store {
 
@@ -25,7 +25,5 @@ struct Batch {
   size_t chunk_id = 0;
   size_t size = 0;
 } __attribute__((aligned(16)));
-
-using BatchVector = ConcurrentVector<Batch>;
 
 } // namespace stepcast::store

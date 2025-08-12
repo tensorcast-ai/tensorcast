@@ -12,7 +12,7 @@
 #include "absl/time/time.h"
 #include "core/store/checkpoint_store.h"
 #include "core/store/checkpoint_store_options.h"
-#include "tests/cpp/common.h"
+#include "core/testing/common.h"
 
 namespace fs = std::filesystem;
 using stepcast::DeviceType;

@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>

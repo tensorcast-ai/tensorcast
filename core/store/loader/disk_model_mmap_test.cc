@@ -4,7 +4,7 @@
 // New test to verify DiskLoader zero-copy mmap path when partition sizes are page-aligned.
 
 #include <catch2/catch_test_macros.hpp>
-#include "tests/cpp/common.h"
+#include "core/testing/common.h"
 
 #include <unistd.h>
 #include <filesystem>

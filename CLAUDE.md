@@ -250,7 +250,14 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ### C++ Guidelines (Simplified)
 
-#### Build & Dependencies
+### Bazel BUILD Rules
+- **One logical unit per target** - Each class or related functions group gets its own `cc_library`
+- **Default private visibility** - Only expose true public APIs
+- **Explicit file lists** - Never use `glob()`, list all files explicitly
+- **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
+- Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
+
+### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
 - **Build System**: Bazel with Clang18
 - **Common Deps**: absl, catch2, nlohmann_json

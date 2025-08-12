@@ -8,7 +8,7 @@
 
 #include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
 using namespace stepcast::communicator::test;
@@ -19,21 +19,23 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
   SECTION("Basic GPU to GPU transfer via TCP") {
     // Find available ports for source and target engines
     int source_port = find_available_port();
-    REQUIRE_MESSAGE(source_port > 0, "Failed to find available port for source engine");
-    
+    CAPTURE(source_port);
+    REQUIRE(source_port > 0);
+
     int target_port = find_available_port(source_port + 1);
-    REQUIRE_MESSAGE(target_port > 0, "Failed to find available port for target engine");
+    CAPTURE(target_port);
+    REQUIRE(target_port > 0);
 
     // Create source and target engines in TCP mode
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
-    REQUIRE_MESSAGE(source_init_status.ok(), 
-                    "Failed to initialize source engine on port " << source_port << ": " << source_init_status.message());
+    CAPTURE(source_port, source_init_status.message());
+    REQUIRE(source_init_status.ok());
 
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
-    REQUIRE_MESSAGE(target_init_status.ok(),
-                    "Failed to initialize target engine on port " << target_port << ": " << target_init_status.message());
+    CAPTURE(target_port, target_init_status.message());
+    REQUIRE(target_init_status.ok());
 
     // Allocate source GPU tensor
     const std::size_t tensor_size = 4 * 1024 * 1024; // 4MB
@@ -86,21 +88,23 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
   SECTION("GPU to CPU transfer via TCP") {
     // Find available ports for source and target engines
     int source_port = find_available_port();
-    REQUIRE_MESSAGE(source_port > 0, "Failed to find available port for source engine in GPU to CPU test");
-    
+    CAPTURE(source_port);
+    REQUIRE(source_port > 0);
+
     int target_port = find_available_port(source_port + 1);
-    REQUIRE_MESSAGE(target_port > 0, "Failed to find available port for target engine in GPU to CPU test");
+    CAPTURE(target_port);
+    REQUIRE(target_port > 0);
 
     // Create source engine in TCP mode
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
-    REQUIRE_MESSAGE(source_init_status.ok(),
-                    "Failed to initialize source engine for GPU to CPU transfer on port " << source_port << ": " << source_init_status.message());
+    CAPTURE(source_port, source_init_status.message());
+    REQUIRE(source_init_status.ok());
 
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
-    REQUIRE_MESSAGE(target_init_status.ok(),
-                    "Failed to initialize target engine for GPU to CPU transfer on port " << target_port << ": " << target_init_status.message());
+    CAPTURE(target_port, target_init_status.message());
+    REQUIRE(target_init_status.ok());
 
     // Allocate source GPU tensor
     const std::size_t tensor_size = 2 * 1024 * 1024; // 2MB
@@ -155,20 +159,22 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
   SECTION("Large GPU to GPU transfer") {
     // Find available ports for large transfer test
     int source_port = find_available_port();
-    REQUIRE_MESSAGE(source_port > 0, "Failed to find available port for source engine in large transfer test");
-    
+    CAPTURE(source_port);
+    REQUIRE(source_port > 0);
+
     int target_port = find_available_port(source_port + 1);
-    REQUIRE_MESSAGE(target_port > 0, "Failed to find available port for target engine in large transfer test");
+    CAPTURE(target_port);
+    REQUIRE(target_port > 0);
 
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
-    REQUIRE_MESSAGE(source_init_status.ok(),
-                    "Failed to initialize source engine for large transfer on port " << source_port << ": " << source_init_status.message());
+    CAPTURE(source_port, source_init_status.message());
+    REQUIRE(source_init_status.ok());
 
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
-    REQUIRE_MESSAGE(target_init_status.ok(),
-                    "Failed to initialize target engine for large transfer on port " << target_port << ": " << target_init_status.message());
+    CAPTURE(target_port, target_init_status.message());
+    REQUIRE(target_init_status.ok());
 
     // Test with 256MB tensor
     const std::size_t tensor_size = 256 * 1024 * 1024;

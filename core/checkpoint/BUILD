@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
@@ -106,4 +107,21 @@ sc_cc_library(
         ":tensor_writer_lib",
     ],
     alwayslink = True,
+)
+
+# Tests
+cc_test(
+    name = "duplicate_buffer_test",
+    srcs = ["duplicate_buffer_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":checkpoint",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
 )

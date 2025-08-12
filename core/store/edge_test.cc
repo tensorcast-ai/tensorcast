@@ -9,10 +9,10 @@
 #include <thread>
 
 #include "absl/status/status.h"
-#include "concurrency_utils.h"
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
-#include "tests/cpp/communicator/test_helpers.h"
+#include "core/store/concurrency_utils.h"
+#include "core/testing/test_helpers.h"
 
 using namespace stepcast::tests::checkpoint_store;
 using namespace stepcast::store;
