@@ -30,26 +30,6 @@ jobs:
           repository-cache: true
           bazelisk-version: 1.16.0
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.6.11"
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install
-
-      - name: Install Python dependencies
-        run: uv sync --locked --all-extras --dev
-
-      - name: Build C++ core with fake CUDA
-        run: |
-          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
-
       - name: Run non-stress C++ tests
         run: |
           bazel test //core/... \
