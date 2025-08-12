@@ -26,7 +26,7 @@ namespace stepcast::memory {
 
 class DistributedVirtualMemoryPool {
  public:
-  static constexpr size_t kChunk = 256ULL * 1024ULL * 1024ULL; // 256 MiB
+  static constexpr size_t kDefaultChunkSize = 256ULL * 1024ULL * 1024ULL; // 256 MiB
   static constexpr absl::StatusCode kErrChunkRemote = absl::StatusCode::kUnavailable;
 
   struct VirtualRegion {
@@ -35,7 +35,8 @@ class DistributedVirtualMemoryPool {
     size_t bytes{0};
   };
 
-  DistributedVirtualMemoryPool() = default;
+  explicit DistributedVirtualMemoryPool(size_t chunk_size = kDefaultChunkSize);
+  DistributedVirtualMemoryPool() : DistributedVirtualMemoryPool(kDefaultChunkSize) {}
   virtual ~DistributedVirtualMemoryPool();
 
   DistributedVirtualMemoryPool(const DistributedVirtualMemoryPool&) = delete;
@@ -157,6 +158,7 @@ class DistributedVirtualMemoryPool {
     mutable std::mutex model_mu;
   };
 
+  const size_t chunk_size_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<DvmpRegionState>> models_;
 

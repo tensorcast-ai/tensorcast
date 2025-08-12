@@ -59,6 +59,11 @@ struct CheckpointStoreOptions {
   // streaming pinned buffer pool. Each transfer receives an isolated buffer
   // instance (lease). Defaults to 1 (fully serialized).
   int streaming_buffer_max_concurrent_sessions{1};
+
+  // Chunk size for Distributed Virtual Memory Pool (DVMP) allocations.
+  // This controls the granularity of memory allocations for model chunks.
+  // Default: 256 MiB for optimal GPU transfer performance.
+  size_t dvmp_chunk_size{256ULL << 20}; // 256 MiB
 };
 
 } // namespace store

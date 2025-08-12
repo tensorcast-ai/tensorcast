@@ -48,7 +48,7 @@ class CheckpointStore {
 
  public:
   // ═══════════════════════════════════════════════════════════════════════════
-  // Type Definitions (使用新的统一类型系统)
+  // Type Definitions (using new unified type system)
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Legacy AsyncLoadResult and load() interface have been fully removed;
@@ -201,7 +201,12 @@ class CheckpointStore {
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Model loading helpers - 使用新的统一类型
+  // Constructor helpers
+  void initialize_components();
+  void initialize_global_store(const CheckpointStoreOptions& opts);
+  void initialize_communication_manager(const CheckpointStoreOptions& opts);
+
+  // Model loading helpers - using new unified types
   absl::StatusOr<::stepcast::store::ModelHandle> load_from_disk_internal(
       const std::string& model_identifier,
       const DiskSource& source,

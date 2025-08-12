@@ -51,23 +51,31 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
               std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_))),
       dvmp_(
           gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>(
-              std::make_shared<memory::DistributedVirtualMemoryPool>())) {
+              std::make_shared<memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
   VLOG(1) << "Initializing CheckpointStore with unified Options constructor";
   VLOG(1) << "Storage path: "
           << (storage_path_.empty() ? "<empty - model_identifier will be full path>" : storage_path_.string());
   VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::GB << "GB";
   VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::MB << "MB";
 
-  // ───── Component initialization ─────
+  initialize_components();
+  initialize_global_store(opts);
+  initialize_communication_manager(opts);
+
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
+}
+
+void CheckpointStore::initialize_components() {
+  // Initialize core components
   absl::Status status = device_manager_->initialize();
   CHECK(status.ok()) << "Failed to initialize DeviceManager: " << status.message();
+}
 
-  // ------------------------------------------------------------
+void CheckpointStore::initialize_global_store(const CheckpointStoreOptions& opts) {
   // Global Store client (remote coordination).  If a non-empty
   // global_store_address is provided via CheckpointStoreOptions, attempt to
   // connect immediately so that PrepareOrchestrator can leverage it for remote
   // replica discovery.
-  // ------------------------------------------------------------
   if (!opts.global_store_address.empty()) {
     GlobalStoreClientConfig gs_cfg;
     gs_cfg.global_store_address = opts.global_store_address;
@@ -80,17 +88,16 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
       LOG(INFO) << "CheckpointStore: connected to Global Store at " << gs_cfg.global_store_address;
     }
   }
+}
 
-  // Initialize system-wide DVMP instance
-  // CommunicationManager handling
+void CheckpointStore::initialize_communication_manager(const CheckpointStoreOptions& opts) {
+  // Initialize system-wide DVMP instance and CommunicationManager handling
   if (opts.comm_manager) {
     // Use externally supplied manager (already initialised by caller)
     comm_manager_ = opts.comm_manager;
   } else {
     LOG(INFO) << "CommunicateEngine is not provided, will disable P2P loading/registration";
   }
-
-  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 }
 
 CheckpointStore::~CheckpointStore() {
@@ -180,7 +187,7 @@ std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() c
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Internal Implementation - 使用新的统一类型
+// Internal Implementation - using new unified types
 // ═══════════════════════════════════════════════════════════════════════════
 
 absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
@@ -192,7 +199,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, model_identifier, "load_from_disk_internal");
 
-  // 转换 Location 到旧的 ModelLocation
+  // Convert Location to legacy ModelLocation
   ModelLocation target_location = ModelLocation::PAGEABLE_CPU;
   if (target.location.type == ModelLocation::GPU) {
     target_location = ModelLocation::GPU;
@@ -438,8 +445,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
     const InlineBufferSource& source,
     const ModelTarget& target,
     const LoadingHints& hints) {
-  // InlineBufferSource 是新增的类型，暂时返回未实现错误
-  // 未来可以实现直接从内存缓冲区加载模型的功能
+  // InlineBufferSource is a newly added type, temporarily returning unimplemented error
+  // Future: implement direct model loading from memory buffer
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
@@ -959,25 +966,37 @@ absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& 
 
 int CheckpointStore::clear_mem() {
   auto models = model_registry_->clear_all();
-  int fail_count = 0;
+  std::vector<absl::Status> errors;
 
   for (const auto& [inst_key, model] : models) {
+    // Release CPU memory with proper error tracking
     auto cpu_status = model->release_memory(ModelLocation::PAGEABLE_CPU);
     if (!cpu_status.ok()) {
-      LOG(WARNING) << "Failed to release CPU memory: " << cpu_status.message();
-      fail_count++;
+      LOG(WARNING) << "Failed to release CPU memory for " << inst_key.to_string() 
+                   << ": " << cpu_status.message();
+      errors.push_back(cpu_status);
     }
 
+    // Release GPU memory, ignoring NotFound errors (expected when no GPU memory allocated)
     auto gpu_status = model->release_memory(ModelLocation::GPU);
     if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
-      LOG(WARNING) << "Failed to release GPU memory: " << gpu_status.message();
-      fail_count++;
+      LOG(WARNING) << "Failed to release GPU memory for " << inst_key.to_string() 
+                   << ": " << gpu_status.message();
+      errors.push_back(gpu_status);
     }
   }
 
+  // Update metrics even if some releases failed
   metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 
-  return fail_count > 0 ? -1 : 0;
+  // Log aggregated error summary if failures occurred
+  if (!errors.empty()) {
+    LOG(ERROR) << "Failed to release memory for " << errors.size() 
+               << " model(s) during shutdown";
+    return -1;
+  }
+
+  return 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
