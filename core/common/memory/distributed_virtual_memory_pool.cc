@@ -21,8 +21,7 @@
 
 namespace stepcast::memory {
 
-DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size)
-    : chunk_size_(chunk_size) {
+DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : chunk_size_(chunk_size) {
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
 }
 
@@ -499,7 +498,7 @@ DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
     return;
   }
   std::lock_guard<std::mutex> model_lock(info_sp->model_mu);
-  release_pins_unlocked(*info_sp, impl_->chunks);
+  dvmp->release_pins_unlocked(*info_sp, impl_->chunks);
 }
 
 bool DistributedVirtualMemoryPool::ChunkResidencyLease::is_expired() const {

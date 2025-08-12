@@ -12,6 +12,7 @@
 
 #include "common/device_types.h"
 #include "concurrency_utils.h"
+#include "core/common/cuda_api.h"
 
 using namespace stepcast::tests::checkpoint_store;
 using namespace stepcast::store;
@@ -31,7 +32,10 @@ TEST_CASE("B1: Same model on multiple GPUs", "[checkpoint_store][multi_gpu][b1]"
 
   // Get actual GPU count
   int gpu_count = 0;
-  cudaGetDeviceCount(&gpu_count);
+  {
+    auto st = stepcast::cuda::get_device_count(&gpu_count);
+    ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
+  }
   gpu_count = std::min(gpu_count, 4); // Test up to 4 GPUs
   REQUIRE(gpu_count >= 1);
 
@@ -210,7 +214,10 @@ TEST_CASE("B4: Multi-GPU load balancing", "[checkpoint_store][multi_gpu][b4]") {
 
   // Get GPU count
   int gpu_count = 0;
-  cudaGetDeviceCount(&gpu_count);
+  {
+    auto _st2 = stepcast::cuda::get_device_count(&gpu_count);
+    (void)_st2;
+  }
   gpu_count = std::min(gpu_count, 4);
   REQUIRE(gpu_count > 0);
 

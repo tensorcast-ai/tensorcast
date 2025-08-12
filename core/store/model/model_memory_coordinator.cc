@@ -41,8 +41,8 @@ absl::Status ModelMemoryCoordinator::allocate(const InstanceKey& key, size_t byt
     return region_or.status();
   }
   alloc.total_bytes = bytes;
-  alloc.num_chunks = (bytes + stepcast::memory::DistributedVirtualMemoryPool::kChunk - 1) /
-      stepcast::memory::DistributedVirtualMemoryPool::kChunk;
+  alloc.num_chunks = (bytes + stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
+      stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
 
@@ -388,7 +388,7 @@ absl::Status ModelMemoryCoordinator::release(const InstanceKey& key) {
 }
 
 size_t ModelMemoryCoordinator::get_chunk_size() const {
-  return stepcast::memory::DistributedVirtualMemoryPool::kChunk;
+  return stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
 }
 
 absl::Status ModelMemoryCoordinator::mark_cpu_chunks_preemptible(const InstanceKey& key, float ratio) {

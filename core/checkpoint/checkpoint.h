@@ -26,9 +26,29 @@
 #ifdef TORCH_EXTENSION_NAME
 #include <torch/torch.h>
 #else
+#include <memory>
 // For non-Python builds, provide minimal torch types needed
 namespace torch {
-class Tensor {};
+class Tensor {
+ public:
+  Tensor() = default;
+  explicit Tensor(void* data_ptr, std::shared_ptr<void> owner = nullptr)
+      : data_ptr_(data_ptr), owner_(std::move(owner)) {}
+
+  template <typename T>
+  T* data_ptr() {
+    return reinterpret_cast<T*>(data_ptr_);
+  }
+
+  template <typename T>
+  T* data_ptr() const {
+    return reinterpret_cast<T*>(data_ptr_);
+  }
+
+ private:
+  void* data_ptr_ = nullptr;
+  std::shared_ptr<void> owner_;
+};
 } // namespace torch
 #endif
 #endif

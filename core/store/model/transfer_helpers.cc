@@ -20,15 +20,15 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ModelMemoryCoordinator>& uma,
-    const stepcast::store::InstanceKey& ikey) {
+    const InstanceKey& ikey) {
   // Required components must be present – enforce via CHECKKs
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU destination pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
-  const size_t dvmp_chunk = ::stepcast::memory::DistributedVirtualMemoryPool::kChunk;
+  const size_t dvmp_chunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
   const size_t copy_chunk = streaming_buf->chunk_size();
 
   auto device_status = cuda::set_device(device_id);
@@ -114,7 +114,7 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp) {
+    const std::shared_ptr<memory::DistributedVirtualMemoryPool>& dvmp) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU source pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";

@@ -70,11 +70,15 @@ cc_test(
         # "common.cc", # Add if common helpers are used
         # "common.h",
     ],
-    linkopts = [
-        "-lcuda",  # Link against CUDA runtime
-        "-lrt",  # Needed for filesystem or time?
-    ],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": [
+            "-lcuda",
+            "-lrt",
+        ],
+    }),
     deps = [
+        "//core/common",
         "//core/communicator",
         "//core/store",
         "@catch2//:catch2_main",
@@ -86,11 +90,15 @@ cc_test(
     srcs = [
         "model_p2p_transfer_test.cc",
     ],
-    linkopts = [
-        "-lcuda",  # Link against CUDA runtime
-        "-lrt",
-    ],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": [
+            "-lcuda",
+            "-lrt",
+        ],
+    }),
     deps = [
+        "//core/common",
         "//core/communicator",
         "//core/store",
         "@abseil-cpp//absl/flags:flag",
@@ -105,12 +113,14 @@ cc_test(
     srcs = [
         "checkpoint_store_test.cc",
     ],
-    linkopts = [
-        "-lcuda",
-    ],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
     tags = ["requires_cuda"],
     deps = [
         ":common",
+        "//core/common",
         "//core/store",
         "@catch2//:catch2_main",
     ],
@@ -121,11 +131,13 @@ cc_test(
     srcs = [
         "checkpoint_store_p2p_loader_test.cc",
     ],
-    linkopts = [
-        "-lcuda",
-    ],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
     deps = [
         ":common",
+        "//core/common",
         "//core/store",
         "//tests/cpp/communicator:test_helpers",
         "@catch2//:catch2_main",
@@ -190,4 +202,9 @@ cc_library(
         "@abseil-cpp//absl/log:initialize",
         "@catch2//:catch2_main",
     ],
+)
+
+config_setting(
+    name = "use_fake_cuda",
+    define_values = {"use_fake_cuda": "true"},
 )
