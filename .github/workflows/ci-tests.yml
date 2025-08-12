@@ -46,6 +46,11 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked --all-extras --dev
 
+      - uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.0'
+
       - name: Build C++ core with fake CUDA
         run: |
           USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext

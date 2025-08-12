@@ -30,11 +30,9 @@ protoc.toolchain(
 
 new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 
-new_local_repository(
-    name = "cuda",
-    build_file = "@//third_party/cuda:BUILD",
-    path = "/data/cuda/cuda-12.4",
-)
+# CUDA repo now provided by module extension reading CUDA_PATH/CUDA_HOME
+cuda_ext = use_extension("//tools/extensions:cuda.bzl", "cuda_env")
+use_repo(cuda_ext, "cuda")
 
 new_local_repository(
     name = "cudnn",
