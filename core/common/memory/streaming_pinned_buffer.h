@@ -122,6 +122,12 @@ class StreamingPinnedBuffer {
    */
   bool is_consumption_complete() const ABSL_LOCKS_EXCLUDED(mutex_);
 
+  /**
+   * @brief Reset internal producer/consumer state for a new production session.
+   *        Safe to call only when no threads are using the buffer.
+   */
+  absl::Status reset_for_new_production() ABSL_LOCKS_EXCLUDED(mutex_);
+
   size_t chunk_size() const {
     return chunk_size_;
   }

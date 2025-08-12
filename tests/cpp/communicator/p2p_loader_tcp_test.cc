@@ -71,8 +71,6 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t pool_size = 128 * 1024 * 1024; // 128MB pool (2 chunks)
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
-    auto shared_spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/2, chunk_size, pinned_pool);
-    REQUIRE(shared_spb->initialize(std::chrono::milliseconds::zero()).ok());
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_model", // model_identifier
         0, // local_device_id (GPU device 0)
@@ -80,8 +78,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
-        model_size,
-        shared_spb);
+        model_size);
 
     // Load asynchronously
     auto src_or = loader->open_source();
@@ -148,8 +145,6 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t total_pool_size = model_size; // Allocate enough for the full model
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
-    auto shared_spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/2, chunk_size, pinned_pool);
-    REQUIRE(shared_spb->initialize(std::chrono::milliseconds::zero()).ok());
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_model", // model_identifier
         -1, // local_device_id (-1 for CPU)
@@ -157,8 +152,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
-        model_size,
-        shared_spb);
+        model_size);
 
     // Allocate CPU memory before loading
     REQUIRE(mem_manager->allocate_memory(ModelLocation::PAGEABLE_CPU).ok());

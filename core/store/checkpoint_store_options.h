@@ -54,6 +54,11 @@ struct CheckpointStoreOptions {
   // and listen socket.  When provided, the CheckpointStore will reuse this
   // manager instead of creating its own internal instance.
   std::shared_ptr<stepcast::store::CommunicationManager> comm_manager{nullptr};
+
+  // Maximum number of concurrent model transfers that can use the shared
+  // streaming pinned buffer pool. Each transfer receives an isolated buffer
+  // instance (lease). Defaults to 1 (fully serialized).
+  int streaming_buffer_max_concurrent_sessions{1};
 };
 
 } // namespace store

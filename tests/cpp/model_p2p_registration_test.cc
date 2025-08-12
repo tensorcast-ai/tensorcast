@@ -10,11 +10,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-// #include "absl/log/check.h" // Avoid macro conflict with Catch2
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
+#include "core/common/memory/distributed_virtual_memory_pool.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
@@ -74,6 +75,9 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
   const size_t pool_chunk_size = 64UL * 1024; // 64 KiB chunk size
   std::shared_ptr<PinnedMemoryPool> pinned_pool = std::make_shared<PinnedMemoryPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
+  // Create DVMP and StreamingPinnedBuffer required by ModelConfig
+  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+  REQUIRE(dvmp != nullptr);
 
   // --- Test GPU Registration --- (Requires CUDA device)
   SECTION("Load to GPU and Register for Communication") {
@@ -98,17 +102,18 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     REQUIRE(device_count > 0);
     REQUIRE(device_id < device_count);
 
-    ModelConfig config;
-    config.model_identifier = model_id;
-
-    // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = temp_dir / model_subdir_base;
-    config.source = disk_src;
 
-    config.pinned_memory_pool = pinned_pool;
-    config.local_device_id = device_id;
-    config.p2p_comm_enabled = true; // Communicator engine will be injected where required
+    ModelConfig config{
+        .source = disk_src,
+        .model_identifier = model_id,
+        .device_type = ::stepcast::DeviceType::GPU,
+        .local_device_id = device_id,
+        .pinned_memory_pool = pinned_pool,
+        .dvmp = dvmp,
+        .expected_model_size = model_size,
+        .p2p_comm_enabled = true};
 
     LOG(INFO) << "Creating Model instance for GPU test...";
     absl::StatusOr<std::unique_ptr<Model>> model_status = Model::create(config);
@@ -153,7 +158,7 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     // Register GPU memory for communication
     LOG(INFO) << "Registering GPU memory for communication...";
     absl::StatusOr<CommRegistrationInfo> reg_info_status =
-        model->enable_remote_memory_access(ModelLocation::GPU, *comm_mgr->get_shared_engine());
+        model->enable_remote_memory_access(ModelLocation::GPU, comm_mgr->get_engine());
     INFO("Comm registration status (GPU): " << reg_info_status.status());
     REQUIRE(reg_info_status.ok()); // Expect registration to succeed
     const auto& reg_info = *reg_info_status;
@@ -169,7 +174,7 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     REQUIRE(reinterpret_cast<void*>(reg_info.buffer_addresses[0]) == gpu_data_ptr);
     REQUIRE(reg_info.remote_memory_keys[0].find(model_id) != std::string::npos);
     REQUIRE(absl::StrContains(reg_info.remote_memory_keys[0], "GPU"));
-    REQUIRE(absl::StrContains(reg_info.remote_memory_keys[0], "chunk0"));
+    REQUIRE(absl::StrContains(reg_info.remote_memory_keys[0], "chunk_0"));
 
     LOG(INFO) << "GPU communication registration successful.";
 
@@ -202,17 +207,18 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     // Note: No CUDA pool needed for CPU-only test
     int dummy_device_id = 0; // Still need a device ID for config
 
-    ModelConfig config;
-    config.model_identifier = model_id;
-
-    // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = temp_dir / model_subdir_base;
-    config.source = disk_src;
 
-    config.pinned_memory_pool = pinned_pool;
-    config.local_device_id = dummy_device_id;
-    config.p2p_comm_enabled = true; // Communicator engine will be injected where required
+    ModelConfig config{
+        .source = disk_src,
+        .model_identifier = model_id,
+        .device_type = ::stepcast::DeviceType::CPU,
+        .local_device_id = dummy_device_id,
+        .pinned_memory_pool = pinned_pool,
+        .dvmp = dvmp,
+        .expected_model_size = model_size,
+        .p2p_comm_enabled = true};
 
     LOG(INFO) << "Creating Model instance for CPU test...";
     absl::StatusOr<std::unique_ptr<Model>> model_status = Model::create(config);
@@ -247,7 +253,7 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     // Register CPU memory for communication
     LOG(INFO) << "Registering CPU memory for communication...";
     absl::StatusOr<CommRegistrationInfo> reg_info_status =
-        model->enable_remote_memory_access(ModelLocation::PAGEABLE_CPU, *comm_mgr->get_shared_engine());
+        model->enable_remote_memory_access(ModelLocation::PAGEABLE_CPU, comm_mgr->get_engine());
     INFO("Comm registration status (CPU): " << reg_info_status.status());
     REQUIRE(reg_info_status.ok()); // Expect registration to succeed
     const auto& reg_info = *reg_info_status;
@@ -255,7 +261,7 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     // Verify returned registration info
     REQUIRE(reg_info.model_size == model_size);
     REQUIRE(reg_info.location == ModelLocation::PAGEABLE_CPU);
-    REQUIRE(reg_info.device_id == 1); // Explicitly 1 for CPU
+    REQUIRE(reg_info.device_id == -1); // CPU device ID is -1
     REQUIRE_FALSE(reg_info.buffer_addresses.empty());
     REQUIRE(reg_info.buffer_addresses.size() == reg_info.buffer_sizes.size());
     REQUIRE(reg_info.buffer_addresses.size() == reg_info.remote_memory_keys.size());
@@ -266,7 +272,8 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
       total_registered_size += reg_info.buffer_sizes[i];
       REQUIRE(reg_info.remote_memory_keys[i].find(model_id) != std::string::npos);
       REQUIRE(absl::StrContains(reg_info.remote_memory_keys[i], "CPU"));
-      REQUIRE(reg_info.remote_memory_keys[i].find(absl::StrFormat("chunk_%d", i)) != std::string::npos);
+      REQUIRE(
+          reg_info.remote_memory_keys[i].find(absl::StrFormat("chunk_%d", static_cast<int>(i))) != std::string::npos);
     }
     REQUIRE(total_registered_size == model_size);
     REQUIRE(reinterpret_cast<void*>(reg_info.buffer_addresses[0]) == cpu_data_ptr); // First chunk should match

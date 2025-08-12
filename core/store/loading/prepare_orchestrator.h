@@ -20,11 +20,7 @@ class CheckpointStore;
 // CheckpointStore::prepare() when mode == AUTO.
 class PrepareOrchestrator {
  public:
-  PrepareOrchestrator(
-      CheckpointStore* store,
-      GlobalStoreClient* gs_client,
-      ModelRegistry* registry,
-      DeviceManager* device_manager);
+  PrepareOrchestrator(CheckpointStore* store, GlobalStoreClient* gs_client);
 
   // Execute the preparation logic.
   absl::StatusOr<ModelHandle> run(std::string_view model_id, const DeviceKey& target_device, const LoadingHints& hints);
@@ -32,8 +28,6 @@ class PrepareOrchestrator {
  private:
   CheckpointStore* store_;
   GlobalStoreClient* gs_client_;
-  ModelRegistry* registry_;
-  DeviceManager* device_manager_;
 };
 
 } // namespace stepcast::store

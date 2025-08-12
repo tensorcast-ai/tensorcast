@@ -13,6 +13,9 @@
         ".*.txt": true,
         "*.lock": true,
     },
+    "files.associations": {
+        "*.cc": "cpp"
+    },
     "bazel.enableCodeLens": true,
     "cursor.general.disableHttp2": true,
     "ruff.configuration": "${workspaceFolder}/pyproject.toml",
@@ -31,4 +34,8 @@
     },
     "clangd.path": "${workspaceFolder}/external/toolchains_llvm++llvm+llvm_toolchain/bin/clangd",
     "python.pythonPath": ".venv/bin/python3.10",
+    "clangd.arguments": [
+        "--background-index",
+    ]
+
 }

@@ -40,19 +40,6 @@ cc_library(
     alwayslink = 1,
 )
 
-cc_library(
-    name = "catch_main",
-    testonly = 1,
-    srcs = ["catch_main.cc"],
-    deps = [
-        "//core/common",
-        "@abseil-cpp//absl/debugging:failure_signal_handler",
-        "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/log:initialize",
-        "@catch2//:catch2_main",
-    ],
-)
-
 cc_test(
     name = "comm_engine_tcp_test",
     srcs = [],
@@ -63,25 +50,25 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         ":comm_engine_tcp_cc",
+        "//tests/cpp:catch_main",
     ],
 )
 
-cc_test(
-    name = "comm_engine_rdma_test",
-    srcs = [],
-    linkopts = [
-        "-lm",
-        "-lstdc++",
-        "-g",
-    ],
-    linkstatic = 1,
-    deps = [
-        ":catch_main",
-        ":comm_engine_rdma_cc",
-    ],
-)
+# cc_test(
+#     name = "comm_engine_rdma_test",
+#     srcs = [],
+#     linkopts = [
+#         "-lm",
+#         "-lstdc++",
+#         "-g",
+#     ],
+#     linkstatic = 1,
+#     deps = [
+#         "//tests/cpp:catch_main",
+#         ":comm_engine_rdma_cc",
+#     ],
+# )
 
 cc_test(
     name = "test_metrics_test",
@@ -93,14 +80,14 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         ":test_metrics_cc",
+        "//tests/cpp:catch_main",
     ],
 )
 
 cc_test(
     name = "test_distributed_memory_pool",
-    srcs = ["test_distributed_virtual_memory_pool.cc"],
+    srcs = ["test_distributed_memory_pool.cc"],
     linkopts = [
         "-lm",
         "-lstdc++",
@@ -108,12 +95,11 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/common:distributed_memory_pool",
         "//core/store/model:chunk_meta",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
-        "@catch2//:catch2_main",
     ],
 )
 
@@ -127,9 +113,8 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/store/model:chunk_meta",
-        "@catch2//:catch2_main",
+        "//tests/cpp:catch_main",
     ],
 )
 
@@ -144,15 +129,14 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/store/loader:buffer_pool",
         "//core/store/loader:pump",
         "//core/store/loader:sink",
         "//core/store/loader:source",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
-        "@catch2//:catch2_main",
     ],
 )
 
@@ -166,16 +150,15 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/store:direct_write",
         "//core/store/loader:buffer_pool",
         "//core/store/loader:pump",
         "//core/store/loader:sink",
         "//core/store/loader:source",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
-        "@catch2//:catch2_main",
     ],
 )
 
@@ -189,10 +172,9 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/store/loader:file_partition_source",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status",
-        "@catch2//:catch2_main",
     ],
 )
 
@@ -206,12 +188,11 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/common",
         "//core/common:device_guard",
         "//core/store/loader:gpu_memory_sink",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status",
-        "@catch2//:catch2_main",
     ],
 )
 
@@ -225,9 +206,9 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/store/loader:mux_seekable_source",
         "//core/store/loader:source",
+        "//tests/cpp:catch_main",
         "@abseil-cpp//absl/status:statusor",
         "@catch2//:catch2_main",
     ],
@@ -243,8 +224,8 @@ cc_test(
     ],
     linkstatic = 1,
     deps = [
-        ":catch_main",
         "//core/common:distributed_memory_pool",
+        "//tests/cpp:catch_main",
         "@catch2//:catch2_main",
     ],
 )

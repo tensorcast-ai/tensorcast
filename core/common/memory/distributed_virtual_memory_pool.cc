@@ -185,16 +185,30 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
   }
   DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
-  store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
+
+  // No-op for empty input per test expectation
+  if (idx.empty()) {
+    return absl::OkStatus();
+  }
+
+  // First pass: validate all indices are in range and currently LOCKED_TX to
+  // ensure all-or-nothing semantics without needing rollback.
   for (uint32_t i : idx) {
     if (i >= info.chunk_count) {
       return absl::OutOfRangeError("Chunk index out of range");
     }
-    auto& meta = info.metadata[i];
-    store::ChunkState expected = store::ChunkState::LOCKED_TX;
-    if (!meta.state.compare_exchange_strong(expected, new_state, std::memory_order_acq_rel)) {
-      return absl::FailedPreconditionError("unlock_chunks: chunk not in LOCKED_TX state");
+    const auto state = info.metadata[i].state.load(std::memory_order_acquire);
+    if (state != store::ChunkState::LOCKED_TX) {
+      return absl::FailedPreconditionError("Chunk not locked for transfer");
     }
+  }
+
+  store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
+
+  // Second pass: perform the unlock transition and housekeeping.
+  for (uint32_t i : idx) {
+    auto& meta = info.metadata[i];
+    meta.state.store(new_state, std::memory_order_release);
 
     // Release the page lock so that it can be evicted/preempted again if necessary.
     void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
@@ -467,7 +481,7 @@ DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
     LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for model: " << impl_->model_key;
   }
 
-  DistributedVirtualMemoryPool* dvmp = impl_->dvmp;
+  gsl::not_null<DistributedVirtualMemoryPool*> dvmp = impl_->dvmp;
   if (!dvmp) {
     return;
   }

@@ -112,8 +112,7 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
       config.dvmp,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
-      model_size,
-      config.streaming_buffer);
+      model_size);
 
   // --- Create Model Instance ---
   // Build InstanceKey for this model/device

@@ -56,9 +56,6 @@ cc_test(
     srcs = [
         "checkpoint/duplicate_buffer_test.cc",
     ],
-    env = {
-        "LD_LIBRARY_PATH": "$$LD_LIBRARY_PATH:external/+_repo_rules2+libtorch/lib:/data/cuda/cuda-12.6/lib64",
-    },
     tags = ["requires_cuda"],
     deps = [
         "//core/checkpoint",
@@ -111,6 +108,7 @@ cc_test(
     linkopts = [
         "-lcuda",
     ],
+    tags = ["requires_cuda"],
     deps = [
         ":common",
         "//core/store",
@@ -135,20 +133,6 @@ cc_test(
 )
 
 cc_test(
-    name = "checkpoint_store_eviction_test",
-    srcs = [
-        "checkpoint_store_eviction_test.cc",
-    ],
-    linkopts = [
-        "-lcuda",
-    ],
-    deps = [
-        "//core/store",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "test_cuda_api",
     srcs = ["test_cuda_api.cc"],
     # The `tags` attribute cannot be made configurable. Use a static tag list instead.
@@ -163,29 +147,15 @@ cc_test(
 test_suite(
     name = "checkpoint_store_all_tests",
     tests = [
-        ":checkpoint_store_eviction_test",
         ":checkpoint_store_p2p_loader_test",
         ":checkpoint_store_test",
         "//tests/cpp/checkpoint_store:all_tests",
     ],
 )
 
-# Quick CheckpointStore test suite (excludes stress tests)
-test_suite(
-    name = "checkpoint_store_quick_tests",
-    tests = [
-        ":checkpoint_store_eviction_test",
-        ":checkpoint_store_p2p_loader_test",
-        ":checkpoint_store_test",
-        "//tests/cpp/checkpoint_store:quick_tests",
-    ],
-)
-
-# loader_unit_tests moved to tests/cpp/unit/BUILD
-
 cc_test(
     name = "model_memory_coordinator_test",
-    srcs = ["unified_model_memory_test.cc"],
+    srcs = ["model_memory_coordinator_test.cc"],
     deps = [
         "//core/store/model:model_memory_coordinator",
         "@abseil-cpp//absl/status",
@@ -206,6 +176,18 @@ cc_library(
         "//core/common",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_library(
+    name = "catch_main",
+    testonly = 1,
+    srcs = ["catch_main.cc"],
+    deps = [
+        "//core/common",
+        "@abseil-cpp//absl/debugging:failure_signal_handler",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/log:initialize",
         "@catch2//:catch2_main",
     ],
 )

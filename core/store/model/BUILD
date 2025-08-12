@@ -5,7 +5,9 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "chunk_meta",
     hdrs = ["chunk_meta.h"],
-    deps = [],
+    deps = [
+        "@abseil-cpp//absl/status",
+    ],
 )
 
 cc_library(
@@ -70,14 +72,15 @@ cc_library(
     srcs = ["transfer_service.cc"],
     hdrs = ["transfer_service.h"],
     deps = [
-        ":transfer_constants",
         ":model_memory_coordinator",
+        ":transfer_constants",
         ":transfer_helpers",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/store:device_types",
         "//core/store:loading_spec",
         "//core/store/loader:dvmp_region_sink",
+        "//core/store/loader:file_partition_source",
         "//core/store/loader:gpu_memory_sink",
         "//core/store/loader:pump",
         "//core/store/loader:streaming_buffer_adapter",
@@ -95,8 +98,8 @@ cc_library(
     srcs = ["chunk_export_service.cc"],
     hdrs = ["chunk_export_service.h"],
     deps = [
-        ":transfer_constants",
         ":model_memory_coordinator",
+        ":transfer_constants",
         "//core/common",
         "//core/common:distributed_memory_pool",
         "//core/communicator",
@@ -136,6 +139,7 @@ cc_library(
         "//core/store/loader:streaming_buffer_adapter",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/functional:overload",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",

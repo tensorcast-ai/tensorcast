@@ -18,6 +18,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "gsl/pointers"
 
 #include "core/store/model/chunk_meta.h"
 
@@ -120,7 +121,7 @@ class DistributedVirtualMemoryPool {
    private:
     friend class DistributedVirtualMemoryPool;
     struct Impl {
-      DistributedVirtualMemoryPool* dvmp;
+      gsl::not_null<DistributedVirtualMemoryPool*> dvmp;
       std::string model_key;
       std::vector<uint32_t> chunks;
       std::optional<std::chrono::steady_clock::time_point> expiry_time;
@@ -203,8 +204,9 @@ class DistributedVirtualMemoryPool::DvmpRegion {
     return dvmp_ ? dvmp_->evict_tail_bytes(model_key_, bytes) : 0;
   }
   void refresh_chunks(absl::Span<const uint32_t> idx) {
-    if (dvmp_)
+    if (dvmp_) {
       dvmp_->refresh_chunks(model_key_, idx);
+    }
   }
   absl::Status map_file_segments(absl::Span<const FileSegment> segs) {
     return dvmp_ ? dvmp_->map_file_segments(model_key_, segs) : absl::FailedPreconditionError("null dvmp region");

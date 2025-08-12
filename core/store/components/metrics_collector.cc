@@ -41,13 +41,9 @@ MetricsCollector::MetricsCollector()
   memory_evictions_total_.inc(0.0);
 }
 
-void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool* memory_pool) {
-  if (memory_pool == nullptr) {
-    return;
-  }
-
+void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool& memory_pool) {
   // For now, we can only track available size
-  size_t available_size = memory_pool->get_available_size();
+  size_t available_size = memory_pool.get_available_size();
 
   // We'll need to track total size externally or modify PinnedMemoryPool
   // For now, just update available size
@@ -88,7 +84,7 @@ void MetricsCollector::record_memory_eviction() {
 }
 
 void MetricsCollector::update_all_metrics(
-    const PinnedMemoryPool* memory_pool,
+    const PinnedMemoryPool& memory_pool,
     const ModelRegistry& model_registry,
     DeviceManager& device_manager) {
   update_memory_pool_metrics(memory_pool);

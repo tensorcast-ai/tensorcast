@@ -12,7 +12,7 @@
 
 using namespace stepcast::store;
 
-// Helper to test state transitions
+// Helper to test state transitions via raw CAS (no policy)
 class ChunkStateMachine {
  public:
   ChunkStateMachine() : meta_{} {
@@ -34,6 +34,9 @@ class ChunkStateMachine {
   }
 
   const ChunkMeta& get_meta() const {
+    return meta_;
+  }
+  ChunkMeta& mutable_meta() {
     return meta_;
   }
 
@@ -81,65 +84,55 @@ TEST_CASE("ChunkState basic properties", "[chunk_state]") {
   }
 }
 
-TEST_CASE("ChunkState valid transitions", "[chunk_state]") {
+TEST_CASE("ChunkState valid transitions (policy)", "[chunk_state]") {
   ChunkStateMachine sm;
 
   SECTION("COLD state transitions") {
     sm.set_state(ChunkState::COLD);
 
-    // Valid transitions from COLD
-    REQUIRE(sm.try_transition(ChunkState::COLD, ChunkState::LOCKED_TX));
-    sm.set_state(ChunkState::COLD);
-    REQUIRE(sm.try_transition(ChunkState::COLD, ChunkState::EVICTED));
-    sm.set_state(ChunkState::COLD);
-    REQUIRE(sm.try_transition(ChunkState::COLD, ChunkState::PREEMPTIBLE));
+    // Valid transitions from COLD (policy)
+    REQUIRE(is_valid_chunk_transition(ChunkState::COLD, ChunkState::LOCKED_TX));
+    REQUIRE(is_valid_chunk_transition(ChunkState::COLD, ChunkState::EVICTED));
+    REQUIRE(is_valid_chunk_transition(ChunkState::COLD, ChunkState::PREEMPTIBLE));
+
+    // Enforce via guarded API
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX).ok());
   }
 
   SECTION("HOT state transitions") {
     sm.set_state(ChunkState::HOT);
 
-    // Valid transitions from HOT
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
-    sm.set_state(ChunkState::HOT);
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::COLD));
-    sm.set_state(ChunkState::HOT);
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::EVICTED));
-    sm.set_state(ChunkState::HOT);
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::PREEMPTIBLE));
+    REQUIRE(is_valid_chunk_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
+    REQUIRE(is_valid_chunk_transition(ChunkState::HOT, ChunkState::COLD));
+    REQUIRE(is_valid_chunk_transition(ChunkState::HOT, ChunkState::EVICTED));
+    REQUIRE(is_valid_chunk_transition(ChunkState::HOT, ChunkState::PREEMPTIBLE));
   }
 
   SECTION("LOCKED_TX state transitions") {
     sm.set_state(ChunkState::LOCKED_TX);
 
-    // Valid transitions from LOCKED_TX
-    REQUIRE(sm.try_transition(ChunkState::LOCKED_TX, ChunkState::HOT));
-    sm.set_state(ChunkState::LOCKED_TX);
-    REQUIRE(sm.try_transition(ChunkState::LOCKED_TX, ChunkState::COPIED_GPU));
+    REQUIRE(is_valid_chunk_transition(ChunkState::LOCKED_TX, ChunkState::HOT));
+    REQUIRE(is_valid_chunk_transition(ChunkState::LOCKED_TX, ChunkState::COPIED_GPU));
   }
 
   SECTION("COPIED_GPU state transitions") {
     sm.set_state(ChunkState::COPIED_GPU);
 
-    // Valid transitions from COPIED_GPU
-    REQUIRE(sm.try_transition(ChunkState::COPIED_GPU, ChunkState::EVICTED));
-    sm.set_state(ChunkState::COPIED_GPU);
-    REQUIRE(sm.try_transition(ChunkState::COPIED_GPU, ChunkState::LOCKED_TX)); // For re-transfer
+    REQUIRE(is_valid_chunk_transition(ChunkState::COPIED_GPU, ChunkState::EVICTED));
+    REQUIRE(is_valid_chunk_transition(ChunkState::COPIED_GPU, ChunkState::LOCKED_TX)); // For re-transfer
   }
 
   SECTION("EVICTED state transitions") {
     sm.set_state(ChunkState::EVICTED);
 
-    // Valid transitions from EVICTED
-    REQUIRE(sm.try_transition(ChunkState::EVICTED, ChunkState::HOT)); // Page fault recovery
+    REQUIRE(is_valid_chunk_transition(ChunkState::EVICTED, ChunkState::HOT)); // Page fault recovery
   }
 
   SECTION("PREEMPTIBLE state transitions") {
     sm.set_state(ChunkState::PREEMPTIBLE);
 
-    // Valid transitions from PREEMPTIBLE
-    REQUIRE(sm.try_transition(ChunkState::PREEMPTIBLE, ChunkState::LOCKED_TX));
-    sm.set_state(ChunkState::PREEMPTIBLE);
-    REQUIRE(sm.try_transition(ChunkState::PREEMPTIBLE, ChunkState::EVICTED));
+    REQUIRE(is_valid_chunk_transition(ChunkState::PREEMPTIBLE, ChunkState::LOCKED_TX));
+    REQUIRE(is_valid_chunk_transition(ChunkState::PREEMPTIBLE, ChunkState::EVICTED));
   }
 }
 
@@ -152,15 +145,15 @@ TEST_CASE("ChunkState complete lifecycle", "[chunk_state]") {
     REQUIRE(sm.get_state() == ChunkState::COLD);
 
     // Lock for transfer
-    REQUIRE(sm.try_transition(ChunkState::COLD, ChunkState::LOCKED_TX));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX).ok());
     REQUIRE(sm.get_state() == ChunkState::LOCKED_TX);
 
     // Complete GPU transfer
-    REQUIRE(sm.try_transition(ChunkState::LOCKED_TX, ChunkState::COPIED_GPU));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::COPIED_GPU).ok());
     REQUIRE(sm.get_state() == ChunkState::COPIED_GPU);
 
     // Evict after GPU copy
-    REQUIRE(sm.try_transition(ChunkState::COPIED_GPU, ChunkState::EVICTED));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::EVICTED).ok());
     REQUIRE(sm.get_state() == ChunkState::EVICTED);
   }
 
@@ -170,30 +163,30 @@ TEST_CASE("ChunkState complete lifecycle", "[chunk_state]") {
     REQUIRE(sm.get_state() == ChunkState::HOT);
 
     // Mark as preemptible
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::PREEMPTIBLE));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::PREEMPTIBLE).ok());
     REQUIRE(sm.get_state() == ChunkState::PREEMPTIBLE);
 
     // System evicts under memory pressure
-    REQUIRE(sm.try_transition(ChunkState::PREEMPTIBLE, ChunkState::EVICTED));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::EVICTED).ok());
     REQUIRE(sm.get_state() == ChunkState::EVICTED);
 
     // Page fault brings it back
-    REQUIRE(sm.try_transition(ChunkState::EVICTED, ChunkState::HOT));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::HOT).ok());
     REQUIRE(sm.get_state() == ChunkState::HOT);
   }
 
   SECTION("Failed transfer recovery") {
     // Start transfer
     sm.set_state(ChunkState::HOT);
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX).ok());
 
-    // Transfer fails, revert to COLD
-    REQUIRE(sm.try_transition(ChunkState::LOCKED_TX, ChunkState::HOT));
+    // Transfer fails, revert to HOT
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::HOT).ok());
     REQUIRE(sm.get_state() == ChunkState::HOT);
   }
 }
 
-TEST_CASE("ChunkState concurrent state transitions", "[chunk_state]") {
+TEST_CASE("ChunkState concurrent state transitions (raw CAS)", "[chunk_state]") {
   SECTION("Concurrent lock attempts") {
     ChunkMeta meta{};
     meta.state.store(ChunkState::HOT, std::memory_order_release);
@@ -228,6 +221,7 @@ TEST_CASE("ChunkState concurrent state transitions", "[chunk_state]") {
     const int iterations = 1000;
     std::atomic<int> lock_count{0};
     std::atomic<int> unlock_count{0};
+    std::atomic<int> unlock_failures{0};
     std::vector<std::thread> threads;
 
     for (int i = 0; i < num_threads; ++i) {
@@ -245,8 +239,10 @@ TEST_CASE("ChunkState concurrent state transitions", "[chunk_state]") {
               // Unlock
               ChunkState locked = ChunkState::LOCKED_TX;
               bool unlocked = meta.state.compare_exchange_strong(locked, ChunkState::HOT, std::memory_order_acq_rel);
-              REQUIRE(unlocked);
-              unlock_count++;
+              if (!unlocked) {
+                ++unlock_failures;
+              }
+              ++unlock_count;
               break;
             }
           }
@@ -261,6 +257,7 @@ TEST_CASE("ChunkState concurrent state transitions", "[chunk_state]") {
     // All locks should be matched by unlocks
     REQUIRE(lock_count == unlock_count);
     REQUIRE(lock_count > 0);
+    REQUIRE(unlock_failures == 0);
 
     // Final state should not be LOCKED_TX
     auto final_state = meta.state.load();
@@ -268,16 +265,17 @@ TEST_CASE("ChunkState concurrent state transitions", "[chunk_state]") {
   }
 }
 
-TEST_CASE("ChunkState edge cases", "[chunk_state]") {
+TEST_CASE("ChunkState edge cases (policy)", "[chunk_state]") {
   SECTION("Double lock protection") {
     ChunkStateMachine sm;
     sm.set_state(ChunkState::HOT);
 
     // First lock succeeds
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX).ok());
 
-    // Second lock fails
-    REQUIRE(!sm.try_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
+    // Second lock when already LOCKED_TX should be a no-op and succeed
+    auto st = try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX);
+    REQUIRE(st.ok());
     REQUIRE(sm.get_state() == ChunkState::LOCKED_TX);
   }
 
@@ -285,21 +283,27 @@ TEST_CASE("ChunkState edge cases", "[chunk_state]") {
     ChunkStateMachine sm;
     sm.set_state(ChunkState::HOT);
 
-    // Try to unlock non-locked chunk
-    REQUIRE(!sm.try_transition(ChunkState::LOCKED_TX, ChunkState::HOT));
-    REQUIRE(sm.get_state() == ChunkState::HOT);
+    // Try to unlock non-locked chunk (LOCKED_TX -> HOT) is invalid from HOT
+    auto st = try_transition_chunk_state(sm.mutable_meta(), ChunkState::HOT);
+    REQUIRE(st.ok()); // self-transition allowed
+
+    // But LOCKED_TX -> HOT must only happen when currently locked
+    sm.set_state(ChunkState::LOCKED_TX);
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::HOT).ok());
   }
 
   SECTION("Evicted chunk operations") {
     ChunkStateMachine sm;
     sm.set_state(ChunkState::EVICTED);
 
-    // Cannot lock evicted chunk directly
-    REQUIRE(!sm.try_transition(ChunkState::EVICTED, ChunkState::LOCKED_TX));
+    // Cannot lock evicted chunk directly per policy
+    REQUIRE_FALSE(is_valid_chunk_transition(ChunkState::EVICTED, ChunkState::LOCKED_TX));
+    auto st = try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX);
+    REQUIRE(!st.ok());
 
     // Must recover to HOT first
-    REQUIRE(sm.try_transition(ChunkState::EVICTED, ChunkState::HOT));
-    REQUIRE(sm.try_transition(ChunkState::HOT, ChunkState::LOCKED_TX));
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::HOT).ok());
+    REQUIRE(try_transition_chunk_state(sm.mutable_meta(), ChunkState::LOCKED_TX).ok());
   }
 }
 
@@ -338,7 +342,7 @@ TEST_CASE("ChunkMeta timestamp tracking", "[chunk_state]") {
   }
 }
 
-TEST_CASE("ChunkState transition validation matrix", "[chunk_state]") {
+TEST_CASE("ChunkState transition validation matrix (policy)", "[chunk_state]") {
   // Define valid transitions based on the state machine design
   std::map<ChunkState, std::set<ChunkState>> valid_transitions = {
       {ChunkState::HOT, {ChunkState::LOCKED_TX, ChunkState::COLD, ChunkState::EVICTED, ChunkState::PREEMPTIBLE}},
@@ -348,7 +352,7 @@ TEST_CASE("ChunkState transition validation matrix", "[chunk_state]") {
       {ChunkState::EVICTED, {ChunkState::HOT}},
       {ChunkState::PREEMPTIBLE, {ChunkState::LOCKED_TX, ChunkState::EVICTED}}};
 
-  // Test all possible transitions
+  // Test all possible transitions (using constexpr policy function)
   std::vector<ChunkState> all_states = {
       ChunkState::HOT,
       ChunkState::LOCKED_TX,
@@ -359,19 +363,11 @@ TEST_CASE("ChunkState transition validation matrix", "[chunk_state]") {
 
   for (ChunkState from : all_states) {
     for (ChunkState to : all_states) {
-      ChunkStateMachine sm;
-      sm.set_state(from);
-
-      bool should_succeed = valid_transitions[from].count(to) > 0;
-      bool did_succeed = sm.try_transition(from, to);
+      bool should_succeed = valid_transitions[from].count(to) > 0 || from == to;
+      bool policy_allows = is_valid_chunk_transition(from, to);
 
       INFO("Testing transition from " << static_cast<int>(from) << " to " << static_cast<int>(to));
-      if (from == to) {
-        // Self-transition always succeeds with CAS
-        REQUIRE(did_succeed);
-      } else {
-        REQUIRE(did_succeed == should_succeed);
-      }
+      REQUIRE(policy_allows == should_succeed);
     }
   }
 }

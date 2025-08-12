@@ -68,6 +68,7 @@ Diagnostics:
       - modernize-avoid-c-arrays           # C 数组在 CUDA 代码中常见
       - cppcoreguidelines-*                # 太严格，使用特定规则代替
       - fuchsia-statically-constructed-objects
+      - misc-use-anonymous-namespace
 
     CheckOptions:
       readability-identifier-naming.VariableCase: lower_case

@@ -37,6 +37,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model.h"
+#include "gsl/pointers"
 
 namespace stepcast::store {
 
@@ -176,19 +177,6 @@ class CheckpointStore {
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
-  // Core Components
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  std::unique_ptr<DeviceManager> device_manager_;
-  std::unique_ptr<ModelRegistry> model_registry_;
-  std::unique_ptr<MetricsCollector> metrics_collector_;
-  std::unique_ptr<GlobalStoreClient> global_store_client_;
-  std::shared_ptr<CommunicationManager> comm_manager_;
-  std::shared_ptr<PinnedMemoryPool> memory_pool_;
-  std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp_; // NEW: System-wide DVMP instance
-  std::shared_ptr<StreamingPinnedBuffer> shared_streaming_buffer_;
-
-  // ═══════════════════════════════════════════════════════════════════════════
   // Configuration
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -198,6 +186,17 @@ class CheckpointStore {
   const size_t chunk_size_;
   const std::chrono::milliseconds pinned_memory_timeout_;
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Core Components
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  gsl::not_null<std::unique_ptr<DeviceManager>> device_manager_;
+  gsl::not_null<std::unique_ptr<ModelRegistry>> model_registry_;
+  gsl::not_null<std::unique_ptr<MetricsCollector>> metrics_collector_;
+  std::unique_ptr<GlobalStoreClient> global_store_client_;
+  std::shared_ptr<CommunicationManager> comm_manager_;
+  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> memory_pool_;
+  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
   // ═══════════════════════════════════════════════════════════════════════════
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════
@@ -227,7 +226,6 @@ class CheckpointStore {
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
-  gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> get_or_create_streaming_buffer_();
 };
 
 } // namespace stepcast::store
