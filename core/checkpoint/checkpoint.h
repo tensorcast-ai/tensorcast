@@ -18,9 +18,10 @@
 //  ----------------------------------------------------------------------------
 #pragma once
 
-#ifndef USE_FAKE_CUDA
+// Always include torch headers - they're needed for torch types even in fake CUDA mode
 #include <torch/torch.h>
-#else
+
+#if 0 // Disabled - always use real torch headers
 // For fake CUDA, still include torch headers when building Python extensions
 // The Python extension needs real PyTorch types even in fake CUDA mode
 #ifdef TORCH_EXTENSION_NAME
@@ -51,7 +52,7 @@ class Tensor {
 };
 } // namespace torch
 #endif
-#endif
+#endif // Disabled section
 #include <string>
 #include <unordered_map>
 #include <vector>

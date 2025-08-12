@@ -64,3 +64,16 @@ alwaysApply: false
 - Use Doxygen style for public APIs
 - Document preconditions and postconditions
 - Include usage examples in header comments
+
+## Bazel BUILD Rules
+
+### Core Principles
+- **One logical unit per target** - Each class or related functions group gets its own `cc_library`
+- **Default private visibility** - Only expose true public APIs
+- **Explicit file lists** - Never use `glob()`, list all files explicitly
+- **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
+
+### Key Rules
+- Always use `sc_cc_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
+- Always use `sc_header_only_library` for header-only libraries
+- Use `visibility = ["//:__pkg__"]` for package-private targets

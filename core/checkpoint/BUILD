@@ -1,13 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
-
-package(default_visibility = ["//visibility:public"])
-
-config_setting(
-    name = "use_pre_cxx11_abi",
-    values = {
-        "define": "abi=pre_cxx11_abi",
-    },
-)
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
 config_setting(
@@ -15,21 +6,104 @@ config_setting(
     define_values = {"use_fake_cuda": "true"},
 )
 
-cc_library(
-    name = "checkpoint",
-    srcs = glob(["*.cc"]),
-    hdrs = glob(["*.h"]),
+# Aligned buffer utilities
+sc_cc_library(
+    name = "aligned_buffer_lib",
+    srcs = ["aligned_buffer.cc"],
+    hdrs = ["aligned_buffer.h"],
+    visibility = ["//visibility:public"],
     deps = [
-        "//core/common",
+        "@abseil-cpp//absl/log:check",
+    ],
+)
+
+# Progress bar for streaming operations
+sc_header_only_library(
+    name = "progress_bar_lib",
+    hdrs = ["progress_bar.h"],
+    visibility = ["//:__pkg__"],  # Package-private
+)
+
+# Base tensor writer interface
+sc_cc_library(
+    name = "tensor_writer_lib",
+    srcs = ["tensor_writer.cc"],
+    hdrs = ["tensor_writer.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":aligned_buffer_lib",
+    ],
+)
+
+# Streaming tensor writer implementation
+sc_cc_library(
+    name = "streaming_tensor_writer_lib",
+    srcs = ["streaming_tensor_writer.cc"],
+    hdrs = ["streaming_tensor_writer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tensor_writer_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:streaming_pinned_buffer_lib",
+        "@abseil-cpp//absl/log:check",
+    ] + select({
+        ":use_fake_cuda": [],
+        "//conditions:default": [
+            "@libtorch",
+        ],
+    }),
+)
+
+# Checkpoint streaming functionality
+sc_cc_library(
+    name = "checkpoint_streaming_lib",
+    srcs = ["checkpoint_streaming.cc"],
+    hdrs = ["checkpoint_streaming.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":progress_bar_lib",
+        ":streaming_tensor_writer_lib",
+        "//core/common:cuda_api_lib",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
-        "@abseil-cpp//absl/log:log",
+    ],
+)
+
+# Main checkpoint library
+sc_cc_library(
+    name = "checkpoint_lib",
+    srcs = ["checkpoint.cc"],
+    hdrs = ["checkpoint.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":aligned_buffer_lib",
+        ":checkpoint_streaming_lib",
+        ":tensor_writer_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:model_verification_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "@abseil-cpp//absl/log:absl_check",
+        "@abseil-cpp//absl/log:check",
+        "@libtorch",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [
             "@cuda//:cublas",
-            "@libtorch",
         ],
-    }),  # todo: add cuda
+    }),
+)
+
+# Aggregate target for backward compatibility
+sc_cc_library(
+    name = "checkpoint",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":aligned_buffer_lib",
+        ":checkpoint_lib",
+        ":checkpoint_streaming_lib",
+        ":streaming_tensor_writer_lib",
+        ":tensor_writer_lib",
+    ],
     alwayslink = True,
 )

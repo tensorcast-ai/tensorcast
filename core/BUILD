@@ -1,16 +1,9 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
-package(default_visibility = ["//visibility:public"])
-
-config_setting(
-    name = "use_pre_cxx11_abi",
-    values = {
-        "define": "abi=pre_cxx11_abi",
-    },
-)
-
+# Aggregate library that includes all core components
 cc_library(
     name = "core",
+    visibility = ["//visibility:public"],
     deps = [
         "//core/checkpoint",
         "//core/communicator",
@@ -19,10 +12,12 @@ cc_library(
     alwayslink = True,
 )
 
+# Main shared library target
 cc_binary(
     name = "libscstore.so",
     linkshared = True,
     linkstatic = True,
+    visibility = ["//visibility:public"],
     deps = [
         ":core",
     ],

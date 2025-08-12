@@ -18,10 +18,10 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
+#include "core/store/loading/loading_spec.h"
 #include "core/store/loading/prepare_orchestrator.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_config.h"
-#include "store/loading/loading_spec.h"
 
 namespace stepcast::store {
 // Forward declaration for GPU eviction helper defined later in this file.

@@ -1,179 +1,164 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
-
-package(default_visibility = ["//visibility:public"])
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Base interfaces
-cc_library(
+sc_header_only_library(
     name = "loader",
     hdrs = ["loader.h"],
+    visibility = ["//visibility:public"],
     deps = [
         "//core/store:loading_spec",
         "//core/store/model:model_location",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
-cc_library(
+sc_header_only_library(
     name = "source",
-    hdrs = [
-        "source.h",
-    ],
+    hdrs = ["source.h"],
+    visibility = ["//visibility:public"],
     deps = [
         "//core/store:direct_write",
-        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
-cc_library(
+sc_header_only_library(
     name = "sink",
     hdrs = ["sink.h"],
+    visibility = ["//visibility:public"],
     deps = [
         "//core/store:direct_write",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
     ],
 )
 
-cc_library(
+sc_header_only_library(
     name = "buffer_pool",
     hdrs = ["buffer_pool.h"],
-    deps = [
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-    ],
+    visibility = ["//visibility:public"],
 )
 
 # Pump orchestration
-cc_library(
+sc_cc_library(
     name = "pump",
     srcs = ["pump.cc"],
     hdrs = ["pump.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":buffer_pool",
         ":sink",
         ":source",
         ":streaming_buffer_adapter",
         "//core/store:direct_write",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
     ],
 )
 
 # Source implementations
-cc_library(
+sc_cc_library(
     name = "file_partition_source",
     srcs = ["file_partition_source.cc"],
     hdrs = ["file_partition_source.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":source",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
 )
 
-cc_library(
+sc_cc_library(
     name = "remote_key_source",
     srcs = ["remote_key_source.cc"],
     hdrs = ["remote_key_source.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":source",
-        "//core/communicator",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status:statusor",
+        "//core/communicator:engine_lib",
     ],
 )
 
-cc_library(
+sc_cc_library(
     name = "mux_seekable_source",
     srcs = ["mux_seekable_source.cc"],
     hdrs = ["mux_seekable_source.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":source",
-        "//core/common",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status:statusor",
+        "//core/common:error_handling_lib",
+        "//core/common:metric_objects_lib",
     ],
 )
 
 # Sink implementations
-cc_library(
+sc_cc_library(
     name = "gpu_memory_sink",
     srcs = ["gpu_memory_sink.cc"],
     hdrs = ["gpu_memory_sink.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":sink",
-        "//core/common",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
+        "//core/common:cuda_api_lib",
+        "//core/common:device_guard_lib",
     ],
 )
 
-cc_library(
+sc_cc_library(
     name = "dvmp_region_sink",
     srcs = ["dvmp_region_sink.cc"],
     hdrs = ["dvmp_region_sink.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":sink",
-        "//core/common:distributed_memory_pool",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
+        "//core/common:distributed_virtual_memory_pool_lib",
         "@abseil-cpp//absl/types:span",
     ],
 )
 
 # Buffer pool adapter
-cc_library(
+sc_cc_library(
     name = "streaming_buffer_adapter",
     srcs = ["streaming_buffer_adapter.cc"],
     hdrs = ["streaming_buffer_adapter.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":buffer_pool",
-        "//core/common",
-        "@abseil-cpp//absl/log",
+        "//core/common:streaming_pinned_buffer_lib",
     ],
 )
 
 # Main loaders (refactored to use new abstractions)
-cc_library(
+sc_cc_library(
     name = "disk_loader",
     srcs = ["disk_loader.cc"],
     hdrs = ["disk_loader.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
         ":loader",
-        "//core/common",
+        "//core/common:error_handling_lib",
+        "//core/common:model_verification_lib",
         "//core/store:loading_spec",
         "//core/store/model:model_location",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/strings",
     ],
 )
 
-cc_library(
+sc_cc_library(
     name = "p2p_loader",
     srcs = ["p2p_loader.cc"],
     hdrs = ["p2p_loader.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
         ":loader",
         ":mux_seekable_source",
         ":remote_key_source",
-        "//core/common",
-        "//core/communicator",
+        "//core/common:error_handling_lib",
+        "//core/common:metric_objects_lib",
+        "//core/communicator:engine_lib",
         "//core/store:communication_types",
         "//core/store:loading_spec",
         "//core/store/model:model_location",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
     ],
 )
-
-# FilePartitionReader removed - replaced by file_partition_source and pump pipeline
