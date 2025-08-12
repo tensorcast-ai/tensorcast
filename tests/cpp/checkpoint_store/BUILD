@@ -4,6 +4,11 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_test")
 
+config_setting(
+    name = "use_fake_cuda",
+    define_values = {"use_fake_cuda": "true"},
+)
+
 cc_test(
     name = "concurrency_test",
     srcs = [
@@ -16,6 +21,7 @@ cc_test(
         "requires_cuda",
     ],
     deps = [
+        "//core/common",
         "//core/store",
         "//tests/cpp:common",
         "@catch2//:catch2_main",
@@ -33,6 +39,7 @@ cc_test(
         "multi_gpu",
     ],
     deps = [
+        "//core/common",
         "//core/store",
         "//tests/cpp:common",
         "@catch2//:catch2_main",
@@ -46,13 +53,17 @@ cc_test(
         "concurrency_utils.h",
         "stress_test.cc",
     ],
-    linkopts = ["-lcuda"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
     tags = [
         "checkpoint_store",
         "manual",
         "stress",
     ],  # manual tag for long-running tests
     deps = [
+        "//core/common",
         "//core/store",
         "//tests/cpp:common",
         "@catch2//:catch2_main",
@@ -65,12 +76,16 @@ cc_test(
         "concurrency_utils.h",
         "edge_test.cc",
     ],
-    linkopts = ["-lcuda"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
     tags = [
         "checkpoint_store",
         "edge",
     ],
     deps = [
+        "//core/common",
         "//core/store",
         "//tests/cpp:common",
         "//tests/cpp/communicator:test_helpers",

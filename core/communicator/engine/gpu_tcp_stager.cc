@@ -8,7 +8,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 #include "core/common/device_guard.h"
-#include "core/communicator/engine/engine.h" // For COMMUNICATE_ENGINE_DEV_GPU
+#include "core/communicator/base/constants.h" // For COMMUNICATE_ENGINE_DEV_GPU
 #include "core/communicator/transport/partition_tensor.h" // For PartitionTensor
 
 namespace stepcast::communicator {

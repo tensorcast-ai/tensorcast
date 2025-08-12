@@ -2,12 +2,12 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
 #include <arpa/inet.h>
-#include <error_handling.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <cerrno>
+#include "core/common/error_handling.h"
 
 #include <algorithm>
 #include <future>
@@ -20,7 +20,7 @@
 
 #include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
-#include "core/communicator/engine/engine.h"
+#include "core/communicator/base/constants.h"
 #include "core/communicator/engine/gpu_tcp_stager.h"
 #include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"

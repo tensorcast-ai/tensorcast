@@ -17,6 +17,7 @@ extern "C" {
 #include <string>
 
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/communicator/base/constants.h"
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/request.h"
@@ -25,9 +26,6 @@ namespace stepcast::communicator {
 
 // Forward declaration
 class GpuTcpStager;
-
-constexpr int kMaxTcpConns = 32;
-constexpr int kMaxFd = 32;
 
 using chunk_result_t = struct MTcpTransportChunkResult {
   result_t status = SUCCESS;

@@ -1,6 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
-
-package(default_visibility = ["//visibility:public"])
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
 config_setting(
@@ -8,50 +6,21 @@ config_setting(
     define_values = {"use_fake_cuda": "true"},
 )
 
-cc_library(
-    name = "common",
-    srcs = glob(
-        [
-            "**/*.cc",
-            "**/*.h",
-        ],
-        exclude = [
-            "cuda_api.h",
-            "cuda_real.cc",
-            "cuda_fake.cc",
-            "memory/distributed_virtual_memory_pool.cc",
-            "memory/distributed_virtual_memory_pool.h",
-        ],
-    ) + select({
+# Core CUDA API abstraction
+sc_cc_library(
+    name = "cuda_api_lib",
+    srcs = select({
         ":use_fake_cuda": ["cuda_fake.cc"],
         "//conditions:default": ["cuda_real.cc"],
     }),
-    hdrs = [
-        "cuda_api.h",
-        "device_guard.h",
-        "error_handling.h",
-        "logging_init.h",
-        "model_verification.h",
-    ],
+    hdrs = ["cuda_api.h"],
     defines = select({
         ":use_fake_cuda": ["USE_FAKE_CUDA"],
         "//conditions:default": [],
     }),
-    includes = ["."],
+    visibility = ["//visibility:public"],
     deps = [
-        "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/log:absl_check",
-        "@abseil-cpp//absl/log:check",
-        "@abseil-cpp//absl/log:initialize",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/synchronization",
-        "@abseil-cpp//absl/time",
-        "@gsl",
-        "@nlohmann_json//:json",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [
@@ -62,7 +31,6 @@ cc_library(
             "@cuda//:cupti",
             "@cuda//:curand",
             "@cuda//:cusparse",
-            # "@cuda//:nvToolsExt",
             "@cuda//:nvJitLink",
             "@cudnn",
             "@cuparselt//:cusparselt",
@@ -72,27 +40,247 @@ cc_library(
     alwayslink = True,
 )
 
-cc_library(
-    name = "distributed_memory_pool",
-    srcs = ["memory/distributed_virtual_memory_pool.cc"],
-    hdrs = ["memory/distributed_virtual_memory_pool.h"],
+# Device management utilities
+sc_header_only_library(
+    name = "device_guard_lib",
+    hdrs = ["device_guard.h"],
+    visibility = ["//visibility:public"],
     deps = [
-        "//core/common",
-        "//core/store/model:chunk_meta",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
+        ":cuda_api_lib",
+        "@abseil-cpp//absl/log:absl_check",
     ],
 )
 
-cc_library(
-    name = "device_guard",
-    hdrs = [
-        "device_guard.h",
-    ],
+sc_header_only_library(
+    name = "device_types_lib",
+    hdrs = ["device_types.h"],
+    visibility = ["//visibility:public"],
+)
+
+# Error handling utilities
+sc_header_only_library(
+    name = "error_handling_lib",
+    hdrs = ["error_handling.h"],
+    visibility = ["//visibility:public"],
     deps = [
-        "//core/common",
+        "@abseil-cpp//absl/log:check",
     ],
+)
+
+# Logging initialization
+sc_cc_library(
+    name = "logging_init_lib",
+    srcs = ["logging_init.cc"],
+    hdrs = ["logging_init.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+# Model verification utilities
+sc_cc_library(
+    name = "model_verification_lib",
+    srcs = ["model_verification.cc"],
+    hdrs = ["model_verification.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# Memory management - CUDA memory utilities
+sc_cc_library(
+    name = "cuda_memory_lib",
+    srcs = ["memory/cuda_memory.cc"],
+    hdrs = ["memory/cuda_memory.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+    ],
+)
+
+# Memory management - Pinned memory pool (must come before pinned_memory)
+sc_cc_library(
+    name = "pinned_memory_pool_lib",
+    srcs = ["memory/pinned_memory_pool.cc"],
+    hdrs = ["memory/pinned_memory_pool.h"],
+    includes = ["memory"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+# Memory management - Pinned memory
+sc_cc_library(
+    name = "pinned_memory_lib",
+    srcs = ["memory/pinned_memory.cc"],
+    hdrs = ["memory/pinned_memory.h"],
+    includes = ["memory"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        ":pinned_memory_pool_lib",
+    ],
+)
+
+# Memory management - Streaming pinned buffer
+sc_cc_library(
+    name = "streaming_pinned_buffer_lib",
+    srcs = ["memory/streaming_pinned_buffer.cc"],
+    hdrs = ["memory/streaming_pinned_buffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        ":pinned_memory_pool_lib",
+    ],
+)
+
+# Memory management - Distributed virtual memory pool
+sc_cc_library(
+    name = "distributed_virtual_memory_pool_lib",
+    srcs = ["memory/distributed_virtual_memory_pool.cc"],
+    hdrs = ["memory/distributed_virtual_memory_pool.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        ":metric_objects_lib",
+        "//core/store/model:chunk_meta",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+# Metrics - Registry (must come first as metric_objects.h includes it)
+sc_cc_library(
+    name = "metrics_registry_lib",
+    srcs = ["metrics/metrics_registry.cc"],
+    hdrs = ["metrics/metrics_registry.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+# Metrics - Metric objects
+sc_header_only_library(
+    name = "metric_objects_lib",
+    hdrs = ["metrics/metric_objects.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":metrics_registry_lib",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+# Metrics - Export
+sc_cc_library(
+    name = "metrics_export_lib",
+    srcs = ["metrics/metrics_export.cc"],
+    hdrs = ["metrics/metrics_export.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":metrics_registry_lib",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# Tracing - Context
+sc_header_only_library(
+    name = "trace_ctx_lib",
+    hdrs = ["trace/trace_ctx.h"],
+    visibility = ["//visibility:public"],
+)
+
+# Tracing - CUDA async functions
+sc_header_only_library(
+    name = "trace_cuda_async_fn_lib",
+    hdrs = ["trace/trace_cuda_async_fn.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+    ],
+)
+
+# Tracing - Macros
+sc_header_only_library(
+    name = "trace_macros_lib",
+    hdrs = ["trace/trace_macros.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":trace_manager_lib",
+        ":trace_scope_lib",
+    ],
+)
+
+# Tracing - Manager
+sc_cc_library(
+    name = "trace_manager_lib",
+    srcs = ["trace/trace_manager.cc"],
+    hdrs = ["trace/trace_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":trace_ctx_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# Tracing - Scope
+sc_cc_library(
+    name = "trace_scope_lib",
+    srcs = ["trace/trace_scope.cc"],
+    hdrs = ["trace/trace_scope.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":trace_ctx_lib",
+        ":trace_manager_lib",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+# Aggregate target for backward compatibility
+# This should be phased out in favor of specific dependencies
+sc_cc_library(
+    name = "common",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":cuda_memory_lib",
+        ":device_guard_lib",
+        ":device_types_lib",
+        ":distributed_virtual_memory_pool_lib",
+        ":error_handling_lib",
+        ":logging_init_lib",
+        ":metric_objects_lib",
+        ":metrics_export_lib",
+        ":metrics_registry_lib",
+        ":model_verification_lib",
+        ":pinned_memory_lib",
+        ":pinned_memory_pool_lib",
+        ":streaming_pinned_buffer_lib",
+        ":trace_ctx_lib",
+        ":trace_cuda_async_fn_lib",
+        ":trace_macros_lib",
+        ":trace_manager_lib",
+        ":trace_scope_lib",
+        "@gsl",
+    ],
+    alwayslink = True,
 )

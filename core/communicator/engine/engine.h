@@ -7,6 +7,7 @@
 
 #include "absl/status/status.h"
 
+#include "core/communicator/base/constants.h"
 #include "core/communicator/misc/queue.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/request.h"
@@ -19,13 +20,6 @@
 #include "core/communicator/engine/store.h"
 
 namespace stepcast::communicator {
-
-constexpr int kMTcpConnCount = 8;
-
-enum {
-  COMMUNICATE_ENGINE_DEV_CPU = 0,
-  COMMUNICATE_ENGINE_DEV_GPU = 1,
-};
 
 class CommunicateEngine {
  public:

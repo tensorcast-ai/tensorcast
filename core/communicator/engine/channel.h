@@ -6,16 +6,12 @@
 #include <memory>
 #include <string>
 
+#include "core/communicator/base/constants.h"
 #include "core/communicator/transport/mtcp_transport.h"
 #include "core/communicator/transport/rdma_transport.h"
 #include "core/communicator/transport/tcp_transport.h"
 
 namespace stepcast::communicator {
-
-enum {
-  CHANNEL_RDMA = 0,
-  CHANNEL_MTCP = 1,
-};
 
 class Channel {
  public:

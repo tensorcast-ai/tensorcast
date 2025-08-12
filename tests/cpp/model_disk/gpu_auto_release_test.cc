@@ -31,7 +31,6 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
   const std::string p1 = "tensor.data_1";
   const size_t size0 = 64 * 1024 * 1024; // 64 MB
   const size_t size1 = 128 * 1024 * 1024; // 128 MB
-  const size_t total_size = size0 + size1;
 
   fs::path base = fs::temp_directory_path() / "gpu_auto_release_test";
   if (fs::exists(base))

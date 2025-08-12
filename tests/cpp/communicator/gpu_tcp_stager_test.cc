@@ -1,11 +1,11 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include <cuda_runtime.h>
-#include <engine/engine.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
 #include <vector>
+#include "core/common/cuda_api.h"
+#include "core/communicator/engine/engine.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
@@ -26,10 +26,10 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
     // Create a GPU tensor
     std::size_t tensor_size = 512 * 1024; // 512KB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 99);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Create PartitionTensor
     auto tensor = std::make_shared<PartitionTensor>(
@@ -55,7 +55,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
     REQUIRE(stats.total_stage_calls == 1);
 
     // Cleanup
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Chunk size exceeded") {
@@ -66,7 +66,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
     // Allocate GPU memory
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -77,7 +77,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
     REQUIRE_FALSE(result.ok());
     REQUIRE(absl::IsInvalidArgument(result.status()));
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Buffer exhaustion and recovery") {
@@ -89,7 +89,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
     // Allocate GPU memory
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -116,7 +116,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
       REQUIRE(stager.release_staged_buffer(staged_ptrs[i]).ok());
     }
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Concurrent staging stress test") {
@@ -129,11 +129,11 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
     // Allocate GPU memory
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Fill with test pattern
     auto test_data = create_test_pattern(tensor_size, 42);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -180,12 +180,12 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
     REQUIRE(success_count == num_threads * iterations);
     REQUIRE(error_count == 0);
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Multi-GPU support") {
     int device_count;
-    cudaGetDeviceCount(&device_count);
+    REQUIRE(stepcast::cuda::get_device_count(&device_count).ok());
     if (device_count < 2) {
       SKIP("Multi-GPU test requires at least 2 GPUs");
     }
@@ -197,14 +197,14 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
     // Test staging from different GPUs
     for (int device_id = 0; device_id < std::min(device_count, 2); ++device_id) {
-      REQUIRE(cudaSetDevice(device_id) == cudaSuccess);
+      REQUIRE(stepcast::cuda::set_device(device_id).ok());
 
       void* gpu_ptr;
-      REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+      REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
       // Fill with device-specific pattern
       auto test_data = create_test_pattern(tensor_size, device_id * 100);
-      REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+      REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
       auto tensor = std::make_shared<PartitionTensor>(
           "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -220,7 +220,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
       // Release and cleanup
       REQUIRE(stager.release_staged_buffer(staged_ptr).ok());
-      cudaFree(gpu_ptr);
+      REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
     }
   }
 }
@@ -236,10 +236,10 @@ TEST_CASE("GpuTcpStager Advanced Tests", "[communicator][tcp][gpu][stager][advan
     // Allocate GPU memory
     const std::size_t tensor_size = 10 * 1024 * 1024; // 10MB
     void* gpu_ptr;
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 55);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -290,7 +290,7 @@ TEST_CASE("GpuTcpStager Advanced Tests", "[communicator][tcp][gpu][stager][advan
     auto stats = stager.get_stats();
     REQUIRE(stats.buffer_wait_count == 0);
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Async staging with out-of-order completion") {
@@ -299,10 +299,10 @@ TEST_CASE("GpuTcpStager Advanced Tests", "[communicator][tcp][gpu][stager][advan
 
     void* gpu_ptr;
     const std::size_t tensor_size = 8 * 1024 * 1024; // 8MB
-    REQUIRE(cudaMalloc(&gpu_ptr, tensor_size) == cudaSuccess);
+    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto test_data = create_test_pattern(tensor_size, 66);
-    REQUIRE(cudaMemcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -329,6 +329,6 @@ TEST_CASE("GpuTcpStager Advanced Tests", "[communicator][tcp][gpu][stager][advan
       REQUIRE(stager.release_staged_buffer(staged_ptr).ok());
     }
 
-    cudaFree(gpu_ptr);
+    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
   }
 }

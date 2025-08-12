@@ -18,10 +18,10 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
+#include "core/store/loading/loading_spec.h"
 #include "core/store/loading/prepare_orchestrator.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_config.h"
-#include "store/loading/loading_spec.h"
 
 namespace stepcast::store {
 // Forward declaration for GPU eviction helper defined later in this file.
@@ -972,16 +972,14 @@ int CheckpointStore::clear_mem() {
     // Release CPU memory with proper error tracking
     auto cpu_status = model->release_memory(ModelLocation::PAGEABLE_CPU);
     if (!cpu_status.ok()) {
-      LOG(WARNING) << "Failed to release CPU memory for " << inst_key.to_string() 
-                   << ": " << cpu_status.message();
+      LOG(WARNING) << "Failed to release CPU memory for " << inst_key << ": " << cpu_status.message();
       errors.push_back(cpu_status);
     }
 
     // Release GPU memory, ignoring NotFound errors (expected when no GPU memory allocated)
     auto gpu_status = model->release_memory(ModelLocation::GPU);
     if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
-      LOG(WARNING) << "Failed to release GPU memory for " << inst_key.to_string() 
-                   << ": " << gpu_status.message();
+      LOG(WARNING) << "Failed to release GPU memory for " << inst_key << ": " << gpu_status.message();
       errors.push_back(gpu_status);
     }
   }
@@ -991,8 +989,7 @@ int CheckpointStore::clear_mem() {
 
   // Log aggregated error summary if failures occurred
   if (!errors.empty()) {
-    LOG(ERROR) << "Failed to release memory for " << errors.size() 
-               << " model(s) during shutdown";
+    LOG(ERROR) << "Failed to release memory for " << errors.size() << " model(s) during shutdown";
     return -1;
   }
 

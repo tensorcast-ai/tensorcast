@@ -35,7 +35,7 @@ class DistributedVirtualMemoryPool {
     size_t bytes{0};
   };
 
-  explicit DistributedVirtualMemoryPool(size_t chunk_size = kDefaultChunkSize);
+  explicit DistributedVirtualMemoryPool(size_t chunk_size);
   DistributedVirtualMemoryPool() : DistributedVirtualMemoryPool(kDefaultChunkSize) {}
   virtual ~DistributedVirtualMemoryPool();
 
@@ -163,7 +163,7 @@ class DistributedVirtualMemoryPool {
   std::unordered_map<std::string, std::shared_ptr<DvmpRegionState>> models_;
 
   // Helpers for ChunkResidencyLease
-  static void release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks);
+  void release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks);
 
   // Lookup helper to reduce boilerplate in public methods. Returns shared_ptr
   // to ModelInfo or NotFound status.

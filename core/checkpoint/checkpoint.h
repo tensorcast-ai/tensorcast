@@ -18,20 +18,41 @@
 //  ----------------------------------------------------------------------------
 #pragma once
 
-#ifndef USE_FAKE_CUDA
+// Always include torch headers - they're needed for torch types even in fake CUDA mode
 #include <torch/torch.h>
-#else
+
+#if 0 // Disabled - always use real torch headers
 // For fake CUDA, still include torch headers when building Python extensions
 // The Python extension needs real PyTorch types even in fake CUDA mode
 #ifdef TORCH_EXTENSION_NAME
 #include <torch/torch.h>
 #else
+#include <memory>
 // For non-Python builds, provide minimal torch types needed
 namespace torch {
-class Tensor {};
+class Tensor {
+ public:
+  Tensor() = default;
+  explicit Tensor(void* data_ptr, std::shared_ptr<void> owner = nullptr)
+      : data_ptr_(data_ptr), owner_(std::move(owner)) {}
+
+  template <typename T>
+  T* data_ptr() {
+    return reinterpret_cast<T*>(data_ptr_);
+  }
+
+  template <typename T>
+  T* data_ptr() const {
+    return reinterpret_cast<T*>(data_ptr_);
+  }
+
+ private:
+  void* data_ptr_ = nullptr;
+  std::shared_ptr<void> owner_;
+};
 } // namespace torch
 #endif
-#endif
+#endif // Disabled section
 #include <string>
 #include <unordered_map>
 #include <vector>

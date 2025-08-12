@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <variant>
 #include "absl/hash/hash.h"
@@ -106,6 +107,29 @@ struct InstanceKey {
 
   bool operator==(const InstanceKey&) const = default;
 };
+
+// Stream operator for convenient logging: LOG(INFO) << instance_key;
+inline std::ostream& operator<<(std::ostream& os, const InstanceKey& key) {
+  os << "InstanceKey{"
+     << "model_id=" << key.model_id << ", device=";
+  switch (key.device.type) {
+    case DeviceType::GPU:
+      os << "GPU";
+      break;
+    case DeviceType::CPU:
+      os << "CPU";
+      break;
+    default:
+      os << static_cast<int>(key.device.type);
+      break;
+  }
+  os << ":" << key.device.ordinal;
+  if (!key.device.uuid.empty()) {
+    os << "(" << key.device.uuid << ")";
+  }
+  os << ", replica=" << key.replica << "}";
+  return os;
+}
 
 /**
  * @brief Hash functor so we can use InstanceKey in absl::flat_hash_map.

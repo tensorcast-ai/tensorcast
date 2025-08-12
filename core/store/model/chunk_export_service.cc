@@ -64,7 +64,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     chunk_vec.reserve(chunks.size());
     chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
-    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
+    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
     size_t range_idx = 0;
     rec.cpu_tokens.reserve(ranges.size());
     for (const auto& [start, end] : ranges) {
@@ -83,8 +83,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 
       // Bounds check before pointer arithmetic
       if (va_off >= info.model_size) {
-        return absl::OutOfRangeError(absl::StrFormat(
-            "Offset %llu exceeds model size %llu", va_off, info.model_size));
+        return absl::OutOfRangeError(absl::StrFormat("Offset %llu exceeds model size %llu", va_off, info.model_size));
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.model_id, range_idx++);
@@ -121,7 +120,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     chunk_vec.reserve(chunks.size());
     chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
-    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kChunk;
+    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
     size_t range_idx = 0;
     for (const auto& [start, end] : ranges) {
       uint64_t off = static_cast<uint64_t>(start) * kChunk;
@@ -131,8 +130,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
         continue;
       // Bounds check before pointer arithmetic
       if (off >= info.model_size) {
-        return absl::OutOfRangeError(absl::StrFormat(
-            "Offset %llu exceeds model size %llu", off, info.model_size));
+        return absl::OutOfRangeError(absl::StrFormat("Offset %llu exceeds model size %llu", off, info.model_size));
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.model_id, range_idx++);
@@ -165,9 +163,9 @@ absl::Status ChunkExportService::unexport_chunks(
     communicator::CommunicateEngine& comm_engine) {
   // Validate parameters
   if (info.remote_memory_keys.empty()) {
-    return absl::OkStatus();  // Nothing to unexport
+    return absl::OkStatus(); // Nothing to unexport
   }
-  
+
   // Use keys from provided info to unregister precisely
   absl::Status first_error;
   for (const auto& tensor_key : info.remote_memory_keys) {

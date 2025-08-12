@@ -377,7 +377,6 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
   return verification_result.value();
 }
 
-#ifndef USE_FAKE_CUDA
 // Mapping from string to at::ScalarType
 at::ScalarType string_to_scalar_type(const std::string& dtype_str) {
   static const std::unordered_map<std::string, at::ScalarType> dtype_map = {
@@ -399,7 +398,6 @@ at::ScalarType string_to_scalar_type(const std::string& dtype_str) {
 
   LOG(FATAL) << "Unknown dtype string: " << dtype_str;
 }
-#endif
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const std::unordered_map<
@@ -481,11 +479,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
     const std::string& model_path,
     const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
     int device_id) {
-#ifdef USE_FAKE_CUDA
-  // Stub implementation for fake CUDA
-  LOG(FATAL) << "restore_tensors_from_model_path is not supported in fake CUDA mode";
-  return {};
-#else
+  // USE_FAKE_CUDA: CPU restore path enforced below; GPU path is compiled out.
   std::vector<std::filesystem::path> partition_paths;
   std::vector<uint64_t> partition_sizes;
   uint64_t total_model_size = 0;
@@ -541,6 +535,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
   // ------------------------------------------------------------------
   // GPU PATH (device_id >= 0)
   // ------------------------------------------------------------------
+#ifndef USE_FAKE_CUDA
   if (device_id >= 0) {
     // Resolve configuration from environment variables (reuse streaming writer envs)
     const char* chunk_size_env = std::getenv("STREAMING_CHUNK_SIZE_MB");
@@ -632,6 +627,11 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
     // Reuse restore_tensors to build actual torch::Tensors on GPU
     return restore_tensors(meta_state_dict, memory_base_address, device_offsets_map, /*from_ipc_shm=*/false);
   }
+#else
+  if (device_id >= 0) {
+    LOG(WARNING) << "USE_FAKE_CUDA enabled; forcing CPU restore; ignoring device_id=" << device_id;
+  }
+#endif
 
   // ------------------------------------------------------------------
   // CPU PATH (device_id < 0) - original implementation continues below
@@ -725,7 +725,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
   }
 
   return state_dict;
-#endif
 }
 
 std::unordered_map<std::string, int> get_gpu_uuid() {
