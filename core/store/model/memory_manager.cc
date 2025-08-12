@@ -32,8 +32,7 @@ MemoryManager::MemoryManager(
     const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
-    uint64_t model_size,
-    const gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>>& streaming_buffer)
+    uint64_t model_size)
     : model_size_(model_size),
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
@@ -49,8 +48,7 @@ MemoryManager::MemoryManager(
                   .model_id = model_identifier,
                   .device = {.type = ::stepcast::DeviceType::GPU, .ordinal = local_device_id},
                   .replica = 0},
-              TransferService::Config{max_buffer_bytes_, pinned_memory_timeout_},
-              streaming_buffer)),
+              TransferService::Config{max_buffer_bytes_, pinned_memory_timeout_})),
       export_service_(std::make_shared<ChunkExportService>(memory_coordinator_, dvmp_)) {
   // Populate instance_key_ using constructor inputs
   instance_key_.model_id = std::move(model_identifier);
@@ -837,12 +835,12 @@ absl::Status MemoryManager::unexport_chunks_for_p2p(
 }
 
 // --- DVMP accessor implementation ---
-memory::DistributedVirtualMemoryPool* stepcast::store::MemoryManager::get_dvmp() {
-  return dvmp_.get().get();
+gsl::not_null<memory::DistributedVirtualMemoryPool*> stepcast::store::MemoryManager::get_dvmp() {
+  return gsl::not_null<memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
-const memory::DistributedVirtualMemoryPool* stepcast::store::MemoryManager::get_dvmp() const {
-  return dvmp_.get().get();
+gsl::not_null<const memory::DistributedVirtualMemoryPool*> stepcast::store::MemoryManager::get_dvmp() const {
+  return gsl::not_null<const memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
 // Opaque keepalive container for DVMP pin leases held by a DirectWriteToken

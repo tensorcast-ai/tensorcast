@@ -29,15 +29,15 @@ class TempFileFixture {
   fs::path create_file(const std::string& name, size_t size, char fill_char = 'A') {
     fs::path file_path = temp_dir_ / name;
     std::ofstream file(file_path, std::ios::binary);
-    
+
     std::vector<char> data(size, fill_char);
     for (size_t i = 0; i < size; ++i) {
       data[i] = static_cast<char>(fill_char + (i % 26));
     }
-    
+
     file.write(data.data(), size);
     file.close();
-    
+
     return file_path;
   }
 
@@ -47,7 +47,9 @@ class TempFileFixture {
     return create_file(name, aligned_size);
   }
 
-  const fs::path& temp_dir() const { return temp_dir_; }
+  [[nodiscard]] const fs::path& temp_dir() const {
+    return temp_dir_;
+  }
 
  private:
   fs::path temp_dir_;
@@ -57,7 +59,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
   TempFileFixture fixture;
 
   SECTION("Single partition read") {
-    size_t file_size = 10 * 1024;  // 10KB
+    size_t file_size = 10 * 1024; // 10KB
     auto file_path = fixture.create_file("test.bin", file_size);
 
     FilePartitionSource::Options options;
@@ -65,17 +67,17 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_sizes = {file_size};
     options.total_size = file_size;
     options.chunk_size = 1024;
-    options.use_direct_io = false;  // Disable for simplicity
+    options.use_direct_io = false; // Disable for simplicity
 
     FilePartitionSource source(options);
 
     // Read entire file
     std::vector<char> buffer(file_size);
     auto result = source.read(buffer.data(), file_size);
-    
+
     REQUIRE(result.ok());
     REQUIRE(result.value() == file_size);
-    
+
     // Verify content
     for (size_t i = 0; i < file_size; ++i) {
       REQUIRE(buffer[i] == static_cast<char>('A' + (i % 26)));
@@ -86,7 +88,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     size_t part1_size = 5 * 1024;
     size_t part2_size = 3 * 1024;
     size_t part3_size = 2 * 1024;
-    
+
     auto file1 = fixture.create_file("part1.bin", part1_size, 'A');
     auto file2 = fixture.create_file("part2.bin", part2_size, 'B');
     auto file3 = fixture.create_file("part3.bin", part3_size, 'C');
@@ -103,16 +105,17 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     // Read all data
     std::vector<char> buffer(options.total_size);
     size_t total_read = 0;
-    
+
     while (total_read < options.total_size) {
       auto result = source.read(buffer.data() + total_read, 1024);
       REQUIRE(result.ok());
-      if (result.value() == 0) break;  // EOF
+      if (result.value() == 0)
+        break; // EOF
       total_read += result.value();
     }
-    
+
     REQUIRE(total_read == options.total_size);
-    
+
     // Verify each partition's content
     for (size_t i = 0; i < part1_size; ++i) {
       REQUIRE(buffer[i] == static_cast<char>('A' + (i % 26)));
@@ -141,12 +144,12 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     size_t offset = 5 * 1024;
     size_t read_size = 2 * 1024;
     std::vector<char> buffer(read_size);
-    
+
     auto result = source.read_at(offset, buffer.data(), read_size);
-    
+
     REQUIRE(result.ok());
     REQUIRE(result.value() == read_size);
-    
+
     // Verify content
     for (size_t i = 0; i < read_size; ++i) {
       REQUIRE(buffer[i] == static_cast<char>('A' + ((offset + i) % 26)));
@@ -156,7 +159,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
   SECTION("Read across partition boundaries") {
     size_t part1_size = 5 * 1024;
     size_t part2_size = 5 * 1024;
-    
+
     auto file1 = fixture.create_file("part1.bin", part1_size, 'A');
     auto file2 = fixture.create_file("part2.bin", part2_size, 'B');
 
@@ -169,15 +172,15 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     FilePartitionSource source(options);
 
     // Read across boundary
-    size_t offset = 4 * 1024;  // Start 1KB before end of first partition
-    size_t read_size = 2 * 1024;  // Read 2KB (spans both partitions)
+    size_t offset = 4 * 1024; // Start 1KB before end of first partition
+    size_t read_size = 2 * 1024; // Read 2KB (spans both partitions)
     std::vector<char> buffer(read_size);
-    
+
     auto result = source.read_at(offset, buffer.data(), read_size);
-    
+
     REQUIRE(result.ok());
     REQUIRE(result.value() == read_size);
-    
+
     // Verify content from first partition
     for (size_t i = 0; i < 1024; ++i) {
       REQUIRE(buffer[i] == static_cast<char>('A' + ((offset + i) % 26)));
@@ -199,10 +202,10 @@ TEST_CASE("FilePartitionSource error handling", "[file_partition_source]") {
     options.total_size = 1024;
 
     FilePartitionSource source(options);
-    
+
     std::vector<char> buffer(1024);
     auto result = source.read(buffer.data(), 1024);
-    
+
     REQUIRE(!result.ok());
   }
 
@@ -211,14 +214,14 @@ TEST_CASE("FilePartitionSource error handling", "[file_partition_source]") {
 
     FilePartitionSource::Options options;
     options.partition_paths = {file};
-    options.partition_sizes = {2048};  // Wrong size
+    options.partition_sizes = {2048}; // Wrong size
     options.total_size = 2048;
 
     FilePartitionSource source(options);
-    
+
     std::vector<char> buffer(2048);
     auto result = source.read(buffer.data(), 2048);
-    
+
     // Should read only what's available
     if (result.ok()) {
       REQUIRE(result.value() <= 1024);
@@ -232,12 +235,12 @@ TEST_CASE("FilePartitionSource error handling", "[file_partition_source]") {
     options.total_size = 0;
 
     FilePartitionSource source(options);
-    
+
     std::vector<char> buffer(1024);
     auto result = source.read(buffer.data(), 1024);
-    
+
     REQUIRE(result.ok());
-    REQUIRE(result.value() == 0);  // EOF
+    REQUIRE(result.value() == 0); // EOF
   }
 
   SECTION("Read beyond file size") {
@@ -250,13 +253,13 @@ TEST_CASE("FilePartitionSource error handling", "[file_partition_source]") {
     options.total_size = file_size;
 
     FilePartitionSource source(options);
-    
+
     // Try to read at offset beyond file
     std::vector<char> buffer(1024);
     auto result = source.read_at(2048, buffer.data(), 1024);
-    
+
     REQUIRE(result.ok());
-    REQUIRE(result.value() == 0);  // EOF
+    REQUIRE(result.value() == 0); // EOF
   }
 }
 
@@ -264,7 +267,7 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
   TempFileFixture fixture;
 
   SECTION("Concurrent reads with read()") {
-    size_t file_size = 100 * 1024;  // 100KB
+    size_t file_size = 100 * 1024; // 100KB
     auto file = fixture.create_file("test.bin", file_size);
 
     FilePartitionSource::Options options;
@@ -323,10 +326,10 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
       threads.emplace_back([&source, &success, i, file_size]() {
         std::vector<char> buffer(1024);
         size_t offset = (i * file_size) / 4;
-        
+
         auto result = source.read_at(offset, buffer.data(), 1024);
         success[i] = result.ok() && result.value() > 0;
-        
+
         // Verify content
         if (success[i]) {
           for (size_t j = 0; j < result.value(); ++j) {
@@ -401,7 +404,7 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
 
   SECTION("Direct I/O alignment handling") {
     // Direct I/O requires aligned sizes
-    size_t aligned_size = 4 * 512;  // 2KB, aligned to 512 bytes
+    size_t aligned_size = 4 * 512; // 2KB, aligned to 512 bytes
     auto file = fixture.create_aligned_file("test.bin", aligned_size, 512);
 
     FilePartitionSource::Options options;
@@ -409,16 +412,16 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     options.partition_sizes = {aligned_size};
     options.total_size = aligned_size;
     options.chunk_size = 512;
-    options.use_direct_io = true;  // Request Direct I/O
+    options.use_direct_io = true; // Request Direct I/O
 
     FilePartitionSource source(options);
 
     // Note: Direct I/O may not be supported on all filesystems
     // The implementation should fall back gracefully
-    
+
     std::vector<char> buffer(aligned_size);
     auto result = source.read(buffer.data(), aligned_size);
-    
+
     REQUIRE(result.ok());
     // Either we read the full amount, or Direct I/O wasn't supported
     if (result.value() > 0) {
@@ -427,7 +430,7 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
   }
 
   SECTION("Unaligned read with Direct I/O") {
-    size_t file_size = 10 * 1024 + 100;  // Intentionally unaligned
+    size_t file_size = 10 * 1024 + 100; // Intentionally unaligned
     auto file = fixture.create_file("test.bin", file_size);
 
     FilePartitionSource::Options options;
@@ -439,9 +442,9 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     FilePartitionSource source(options);
 
     // Should handle unaligned reads gracefully
-    std::vector<char> buffer(1234);  // Unaligned size
+    std::vector<char> buffer(1234); // Unaligned size
     auto result = source.read(buffer.data(), 1234);
-    
+
     // Should either succeed or fail gracefully
     if (result.ok()) {
       REQUIRE(result.value() <= 1234);

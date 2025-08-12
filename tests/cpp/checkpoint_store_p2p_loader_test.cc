@@ -69,7 +69,9 @@ TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][
   // ---------------------------------------------------------------------------
   // 2. Instantiate the target CheckpointStore with communication enabled.
   // ---------------------------------------------------------------------------
-  const std::size_t pool_size = 32 * 1024 * 1024; // 32 MiB pinned pool (not heavily used here)
+  // TransferService creates a per-session StreamingPinnedBuffer (16 chunks).
+  // Store no longer pre-allocates a shared buffer, so 16 * chunk_size is sufficient.
+  const std::size_t pool_size = 128 * 1024 * 1024; // 128 MiB pinned pool to satisfy 16 x 8 MiB chunks
   const std::size_t chunk_size = 8 * 1024 * 1024; // 8 MiB to match remote buffer size
   const int io_threads = 2;
 

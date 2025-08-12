@@ -33,11 +33,6 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
   // Create DVMP
   auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
 
-  // Create and initialize streaming buffer (keep within pool capacity)
-  auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/2, pool_chunk, pool);
-  REQUIRE(spb != nullptr);
-  REQUIRE(spb->initialize().ok());
-
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource
     DiskSource disk_src;
@@ -52,7 +47,6 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
-        .streaming_buffer = spb,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -79,7 +73,6 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
-        .streaming_buffer = spb,
         .expected_model_size = 1024 // wrong expected size
     };
 

@@ -68,8 +68,6 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
   auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
-  auto shared_spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/4, pool_chunk, pool);
-  REQUIRE(shared_spb->initialize(std::chrono::milliseconds::zero()).ok());
   auto memmgr = std::make_shared<MemoryManager>(
       "loader_stream_model",
       /*device=*/0,
@@ -77,8 +75,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
       dvmp,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming
       std::chrono::milliseconds::zero(),
-      model_size,
-      shared_spb);
+      model_size);
 
   // Launch streaming load to GPU
   auto src_or = loader.open_source();

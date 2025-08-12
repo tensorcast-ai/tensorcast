@@ -64,12 +64,6 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
 
   // Create DVMP
   auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
-
-  // Create and initialize a streaming buffer matching the pool's chunk size
-  auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
-  REQUIRE(spb != nullptr);
-  REQUIRE(spb->initialize().ok());
-
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / model_subdir;
@@ -82,7 +76,6 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
-      .streaming_buffer = spb,
       .max_buffer_bytes = 1024 * 2 // 2 KB buffer to force streaming
   };
 

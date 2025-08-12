@@ -18,6 +18,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "gsl/pointers"
 
 #include "core/store/model/chunk_meta.h"
 
@@ -25,7 +26,7 @@ namespace stepcast::memory {
 
 class DistributedVirtualMemoryPool {
  public:
-  static constexpr size_t kChunk = 256ULL * 1024ULL * 1024ULL; // 256 MiB
+  static constexpr size_t kDefaultChunkSize = 256ULL * 1024ULL * 1024ULL; // 256 MiB
   static constexpr absl::StatusCode kErrChunkRemote = absl::StatusCode::kUnavailable;
 
   struct VirtualRegion {
@@ -34,7 +35,8 @@ class DistributedVirtualMemoryPool {
     size_t bytes{0};
   };
 
-  DistributedVirtualMemoryPool() = default;
+  explicit DistributedVirtualMemoryPool(size_t chunk_size = kDefaultChunkSize);
+  DistributedVirtualMemoryPool() : DistributedVirtualMemoryPool(kDefaultChunkSize) {}
   virtual ~DistributedVirtualMemoryPool();
 
   DistributedVirtualMemoryPool(const DistributedVirtualMemoryPool&) = delete;
@@ -120,7 +122,7 @@ class DistributedVirtualMemoryPool {
    private:
     friend class DistributedVirtualMemoryPool;
     struct Impl {
-      DistributedVirtualMemoryPool* dvmp;
+      gsl::not_null<DistributedVirtualMemoryPool*> dvmp;
       std::string model_key;
       std::vector<uint32_t> chunks;
       std::optional<std::chrono::steady_clock::time_point> expiry_time;
@@ -156,6 +158,7 @@ class DistributedVirtualMemoryPool {
     mutable std::mutex model_mu;
   };
 
+  const size_t chunk_size_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<DvmpRegionState>> models_;
 
@@ -203,8 +206,9 @@ class DistributedVirtualMemoryPool::DvmpRegion {
     return dvmp_ ? dvmp_->evict_tail_bytes(model_key_, bytes) : 0;
   }
   void refresh_chunks(absl::Span<const uint32_t> idx) {
-    if (dvmp_)
+    if (dvmp_) {
       dvmp_->refresh_chunks(model_key_, idx);
+    }
   }
   absl::Status map_file_segments(absl::Span<const FileSegment> segs) {
     return dvmp_ ? dvmp_->map_file_segments(model_key_, segs) : absl::FailedPreconditionError("null dvmp region");

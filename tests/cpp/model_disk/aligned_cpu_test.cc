@@ -61,11 +61,6 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
   // Create DVMP
   auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
-  // Create and initialize streaming buffer
-  auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pool_chunk, pool);
-  REQUIRE(spb != nullptr);
-  REQUIRE(spb->initialize().ok());
-
   // Create DiskSource
   DiskSource disk_src;
   disk_src.path = base / model_subdir;
@@ -79,7 +74,6 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
-      .streaming_buffer = spb,
       .max_buffer_bytes = pool_total};
 
   auto mstatus = Model::create(cfg);

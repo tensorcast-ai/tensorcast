@@ -120,6 +120,43 @@ bool StreamingPinnedBuffer::all_chunks_returned() const {
   return free_queue_.size() == num_chunks_;
 }
 
+absl::Status StreamingPinnedBuffer::reset_for_new_production() {
+  absl::MutexLock lock(&mutex_);
+
+  if (!initialized_) {
+    return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
+  }
+
+  // Reset producer/consumer coordination state.
+  production_complete_ = false;
+  chunks_produced_ = 0;
+  chunks_consumed_ = 0;
+
+  // Move any in-flight or ready chunks back to free. This is a best-effort
+  // reset and assumes no threads are actively using the buffer.
+  while (!ready_queue_.empty()) {
+    auto rc = ready_queue_.front();
+    ready_queue_.pop();
+    free_queue_.push(rc.slot_id);
+  }
+
+  // Ensure all slots are present in free_queue_. If some were lost due to
+  // previous error, we conservatively rebuild the free list.
+  if (free_queue_.size() != num_chunks_) {
+    std::queue<int> empty;
+    std::swap(free_queue_, empty);
+    for (size_t i = 0; i < num_chunks_; ++i) {
+      free_queue_.push(static_cast<int>(i));
+    }
+  }
+
+  // Wake up any potential waiters
+  ready_cv_.SignalAll();
+  free_cv_.SignalAll();
+
+  return absl::OkStatus();
+}
+
 absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
   absl::MutexLock lock(&mutex_);
 

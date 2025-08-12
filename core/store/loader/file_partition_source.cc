@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <cerrno>
 
 #include <algorithm>
 #include <cstring>
@@ -38,38 +39,73 @@ absl::Status FilePartitionSource::OpenFiles() {
             << " partition files, total_size=" << options_.total_size;
 
   if (options_.partition_paths.empty()) {
+    // If there are no partitions and total_size is zero, treat as empty source (EOF)
+    if (options_.total_size == 0) {
+      initialized_ = true;
+      return absl::OkStatus();
+    }
     return absl::InvalidArgumentError("No partition paths provided");
   }
 
   file_handles_.reserve(options_.partition_paths.size());
-  uint64_t offset = 0;
 
-  for (size_t i = 0; i < options_.partition_paths.size(); ++i) {
-    const auto& path = options_.partition_paths[i];
-    const auto size = options_.partition_sizes[i];
+  // Attempt to open with current direct I/O setting. If O_DIRECT is unsupported,
+  // fall back to regular I/O and retry once.
+  bool attempted_fallback = false;
+  while (true) {
+    file_handles_.clear();
+    uint64_t offset = 0;
 
-    int flags = O_RDONLY;
-    if (using_direct_io_) {
-      flags |= O_DIRECT;
+    bool open_failed = false;
+    int open_errno = 0;
+
+    for (size_t i = 0; i < options_.partition_paths.size(); ++i) {
+      const auto& path = options_.partition_paths[i];
+      const auto size = options_.partition_sizes[i];
+
+      int flags = O_RDONLY;
+      if (using_direct_io_) {
+        flags |= O_DIRECT;
+      }
+
+      int fd = ::open(path.c_str(), flags);
+      if (fd < 0) {
+        open_failed = true;
+        open_errno = errno;
+        break;
+      }
+
+      FileHandle handle;
+      handle.fd = fd;
+      handle.start_offset = offset;
+      handle.end_offset = offset + size;
+      file_handles_.push_back(handle);
+
+      offset += size;
     }
 
-    int fd = ::open(path.c_str(), flags);
-    if (fd < 0) {
+    if (!open_failed) {
+      initialized_ = true;
+      return absl::OkStatus();
+    }
+
+    // Handle fallback from O_DIRECT if unsupported
+    if (using_direct_io_ && !attempted_fallback &&
+        (open_errno == EINVAL || open_errno == EOPNOTSUPP || open_errno == ENOTSUP || open_errno == EPERM)) {
+      LOG(INFO) << "FilePartitionSource::OpenFiles falling back from O_DIRECT due to errno=" << open_errno;
+      // Close any partially opened file descriptors before retrying
       CloseFiles();
-      return absl::InternalError(absl::StrFormat("Failed to open partition %s: %s", path.string(), strerror(errno)));
+      using_direct_io_ = false;
+      attempted_fallback = true;
+      // Retry opening without O_DIRECT
+      continue;
     }
 
-    FileHandle handle;
-    handle.fd = fd;
-    handle.start_offset = offset;
-    handle.end_offset = offset + size;
-    file_handles_.push_back(handle);
-
-    offset += size;
+    // If we reach here, opening failed and fallback (if any) either not applicable or already attempted
+    CloseFiles();
+    return absl::InternalError(
+        absl::StrFormat("Failed to open partition(s) (errno=%d): %s", open_errno, strerror(open_errno)));
   }
-
-  initialized_ = true;
-  return absl::OkStatus();
 }
 
 void FilePartitionSource::CloseFiles() {

@@ -37,6 +37,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model.h"
+#include "gsl/pointers"
 
 namespace stepcast::store {
 
@@ -47,7 +48,7 @@ class CheckpointStore {
 
  public:
   // ═══════════════════════════════════════════════════════════════════════════
-  // Type Definitions (使用新的统一类型系统)
+  // Type Definitions (using new unified type system)
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Legacy AsyncLoadResult and load() interface have been fully removed;
@@ -176,19 +177,6 @@ class CheckpointStore {
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
-  // Core Components
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  std::unique_ptr<DeviceManager> device_manager_;
-  std::unique_ptr<ModelRegistry> model_registry_;
-  std::unique_ptr<MetricsCollector> metrics_collector_;
-  std::unique_ptr<GlobalStoreClient> global_store_client_;
-  std::shared_ptr<CommunicationManager> comm_manager_;
-  std::shared_ptr<PinnedMemoryPool> memory_pool_;
-  std::shared_ptr<memory::DistributedVirtualMemoryPool> dvmp_; // NEW: System-wide DVMP instance
-  std::shared_ptr<StreamingPinnedBuffer> shared_streaming_buffer_;
-
-  // ═══════════════════════════════════════════════════════════════════════════
   // Configuration
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -199,10 +187,26 @@ class CheckpointStore {
   const std::chrono::milliseconds pinned_memory_timeout_;
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Core Components
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  gsl::not_null<std::unique_ptr<DeviceManager>> device_manager_;
+  gsl::not_null<std::unique_ptr<ModelRegistry>> model_registry_;
+  gsl::not_null<std::unique_ptr<MetricsCollector>> metrics_collector_;
+  std::unique_ptr<GlobalStoreClient> global_store_client_;
+  std::shared_ptr<CommunicationManager> comm_manager_;
+  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> memory_pool_;
+  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
+  // ═══════════════════════════════════════════════════════════════════════════
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Model loading helpers - 使用新的统一类型
+  // Constructor helpers
+  void initialize_components();
+  void initialize_global_store(const CheckpointStoreOptions& opts);
+  void initialize_communication_manager(const CheckpointStoreOptions& opts);
+
+  // Model loading helpers - using new unified types
   absl::StatusOr<::stepcast::store::ModelHandle> load_from_disk_internal(
       const std::string& model_identifier,
       const DiskSource& source,
@@ -227,7 +231,6 @@ class CheckpointStore {
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
-  gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> get_or_create_streaming_buffer_();
 };
 
 } // namespace stepcast::store

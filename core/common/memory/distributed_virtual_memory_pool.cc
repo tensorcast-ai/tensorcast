@@ -21,6 +21,11 @@
 
 namespace stepcast::memory {
 
+DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size)
+    : chunk_size_(chunk_size) {
+  LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
+}
+
 DistributedVirtualMemoryPool::~DistributedVirtualMemoryPool() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& [id, info_sp] : models_) {
@@ -54,7 +59,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
     return absl::ErrnoToStatus(errno, "mmap failed while reserving VA space");
   }
 
-  const size_t num_chunks = (bytes + kChunk - 1) / kChunk;
+  const size_t num_chunks = (bytes + chunk_size_ - 1) / chunk_size_;
   auto info = std::make_shared<DvmpRegionState>();
   info->base = addr;
   info->bytes = bytes;
@@ -119,8 +124,8 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
     }
     for (const auto& [j_idx, prev] : locked) {
       info.metadata[j_idx].state.store(prev, std::memory_order_release);
-      void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * kChunk;
-      if (::munlock(j_addr, kChunk) != 0) {
+      void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * chunk_size_;
+      if (::munlock(j_addr, chunk_size_) != 0) {
         PLOG(WARNING) << "munlock failed during rollback for chunk " << j_idx;
       }
     }
@@ -151,8 +156,8 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
     }
 
     // Attempt to lock the corresponding memory pages so they cannot be reclaimed.
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
-    if (::mlock(addr, kChunk) != 0) {
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    if (::mlock(addr, chunk_size_) != 0) {
       const int err = errno;
       // If the failure is due to insufficient mlock limit or permissions, degrade
       // gracefully instead of aborting the entire load. In such cases we keep the
@@ -185,20 +190,34 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
   }
   DvmpRegionState& info = **info_sp_or;
   std::lock_guard<std::mutex> model_lock(info.model_mu);
-  store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
+
+  // No-op for empty input per test expectation
+  if (idx.empty()) {
+    return absl::OkStatus();
+  }
+
+  // First pass: validate all indices are in range and currently LOCKED_TX to
+  // ensure all-or-nothing semantics without needing rollback.
   for (uint32_t i : idx) {
     if (i >= info.chunk_count) {
       return absl::OutOfRangeError("Chunk index out of range");
     }
-    auto& meta = info.metadata[i];
-    store::ChunkState expected = store::ChunkState::LOCKED_TX;
-    if (!meta.state.compare_exchange_strong(expected, new_state, std::memory_order_acq_rel)) {
-      return absl::FailedPreconditionError("unlock_chunks: chunk not in LOCKED_TX state");
+    const auto state = info.metadata[i].state.load(std::memory_order_acquire);
+    if (state != store::ChunkState::LOCKED_TX) {
+      return absl::FailedPreconditionError("Chunk not locked for transfer");
     }
+  }
+
+  store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
+
+  // Second pass: perform the unlock transition and housekeeping.
+  for (uint32_t i : idx) {
+    auto& meta = info.metadata[i];
+    meta.state.store(new_state, std::memory_order_release);
 
     // Release the page lock so that it can be evicted/preempted again if necessary.
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
-    int rc = ::munlock(addr, kChunk);
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    int rc = ::munlock(addr, chunk_size_);
     if (rc != 0) {
       PLOG(WARNING) << "munlock failed for chunk " << i;
     }
@@ -234,8 +253,8 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id,
       if (!meta.state.compare_exchange_strong(expected, store::ChunkState::EVICTED, std::memory_order_acq_rel)) {
         continue; // state changed concurrently, skip
       }
-      void* addr = static_cast<char*>(info.base) + static_cast<size_t>(idx) * kChunk;
-      size_t advise_len = kChunk;
+      void* addr = static_cast<char*>(info.base) + static_cast<size_t>(idx) * chunk_size_;
+      size_t advise_len = chunk_size_;
       // Use MADV_PAGEOUT if available else MADV_DONTNEED
       int madv_flag = kMadviseFlagsEvict;
 #ifndef MADV_PAGEOUT
@@ -245,7 +264,7 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id,
       if (rc != 0) {
         PLOG(WARNING) << "madvise PAGEOUT failed";
       }
-      freed += kChunk;
+      freed += chunk_size_;
     }
   }
   return freed;
@@ -304,12 +323,12 @@ absl::Status DistributedVirtualMemoryPool::mark_preemptible(std::string_view mod
     if (expected == store::ChunkState::HOT || expected == store::ChunkState::COLD ||
         expected == store::ChunkState::COPIED_GPU) {
       if (meta.state.compare_exchange_strong(expected, store::ChunkState::PREEMPTIBLE, std::memory_order_acq_rel)) {
-        void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
-        int rc = ::madvise(addr, kChunk, kMadviseFlagsFree);
+        void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+        int rc = ::madvise(addr, chunk_size_, kMadviseFlagsFree);
         if (rc != 0) {
           // Kernel might not support MADV_FREE (EINVAL). Fallback to MADV_DONTNEED.
           if (errno == EINVAL) {
-            rc = ::madvise(addr, kChunk, MADV_DONTNEED);
+            rc = ::madvise(addr, chunk_size_, MADV_DONTNEED);
           }
           if (rc != 0) {
             PLOG(WARNING) << "madvise FREE/DONTNEED failed";
@@ -364,8 +383,8 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   std::memcpy(dst, src, bytes);
 
   // Update metadata for affected chunks
-  const uint64_t first = va_offset / kChunk;
-  const uint64_t last = (va_offset + bytes - 1) / kChunk;
+  const uint64_t first = va_offset / chunk_size_;
+  const uint64_t last = (va_offset + bytes - 1) / chunk_size_;
   uint64_t ts = now_s();
   for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
     info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
@@ -424,8 +443,8 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
     }
 
     // Update metadata for affected chunks
-    const uint64_t first = s.va_offset / kChunk;
-    const uint64_t last = (s.va_offset + s.length - 1) / kChunk;
+    const uint64_t first = s.va_offset / chunk_size_;
+    const uint64_t last = (s.va_offset + s.length - 1) / chunk_size_;
     uint64_t ts = now_s();
     for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
       info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
@@ -467,7 +486,7 @@ DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
     LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for model: " << impl_->model_key;
   }
 
-  DistributedVirtualMemoryPool* dvmp = impl_->dvmp;
+  gsl::not_null<DistributedVirtualMemoryPool*> dvmp = impl_->dvmp;
   if (!dvmp) {
     return;
   }
@@ -511,8 +530,8 @@ void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, 
     if (cnt > 0) {
       info.pin_refcnt[i].store(cnt - 1, std::memory_order_release);
     }
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
-    if (::munlock(addr, kChunk) != 0) {
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    if (::munlock(addr, chunk_size_) != 0) {
       // Ignore errors; best-effort only
     }
   }
@@ -547,8 +566,8 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
     return absl::OutOfRangeError("pin_range length zero");
   }
 
-  const uint32_t first = static_cast<uint32_t>(va_offset / kChunk);
-  const uint32_t last = static_cast<uint32_t>((va_offset + to_cover - 1) / kChunk);
+  const uint32_t first = static_cast<uint32_t>(va_offset / chunk_size_);
+  const uint32_t last = static_cast<uint32_t>((va_offset + to_cover - 1) / chunk_size_);
   std::vector<uint32_t> chunks;
   chunks.reserve(last - first + 1);
   for (uint32_t i = first; i <= last && i < info.chunk_count; ++i) {
@@ -556,8 +575,8 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
     // Inc refcount and best-effort mlock
     auto prev = info.pin_refcnt[i].load(std::memory_order_acquire);
     info.pin_refcnt[i].store(prev + 1, std::memory_order_release);
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * kChunk;
-    ::mlock(addr, kChunk);
+    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    ::mlock(addr, chunk_size_);
   }
   // Calculate expiry time if timeout is specified
   std::optional<std::chrono::steady_clock::time_point> expiry_time;
@@ -567,8 +586,8 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const metrics::Counter kChunkResidencyLeasesTotal("dvmp_pin_leases_total");
-    kChunkResidencyLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
+    static const metrics::Counter chunk_size_ResidencyLeasesTotal("dvmp_pin_leases_total");
+    chunk_size_ResidencyLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
   } catch (...) {
   }
 

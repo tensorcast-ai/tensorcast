@@ -23,7 +23,7 @@ struct LoggingInitializer {
   }
 };
 
-static const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
+const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
 } // namespace
 
 // A1: 32 threads calling prepare() on the same model
@@ -210,6 +210,7 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[checkpoint_store][
   std::vector<std::thread> threads;
 
   // Loader threads
+  threads.reserve(num_loaders);
   for (int i = 0; i < num_loaders; ++i) {
     threads.emplace_back([&]() {
       barrier.arrive_and_wait();

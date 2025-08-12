@@ -50,6 +50,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@gsl",
         "@nlohmann_json//:json",
     ] + select({
         ":use_fake_cuda": [],

@@ -39,10 +39,9 @@ class TransferService {
   TransferService(
       const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
       const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
-      const std::shared_ptr<ModelMemoryCoordinator>& uma,
+      const gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>>& uma,
       InstanceKey instance_key,
-      Config cfg,
-      const gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>>& streaming_buffer);
+      Config cfg);
 
   ~TransferService() = default;
 
@@ -66,6 +65,16 @@ class TransferService {
       int device_id);
 
  private:
+  // RAII permit for per-GPU concurrency limiter (max 1 per GPU)
+  class ScopedGpuPermit {
+   public:
+    explicit ScopedGpuPermit(int device_id);
+    ~ScopedGpuPermit();
+
+   private:
+    int device_id_;
+  };
+
   std::unique_ptr<loader::PositionedSink> build_sink_(ModelLocation target_location, void* gpu_ptr, int device_id);
 
   static std::vector<std::pair<uint64_t, size_t>> build_ranges_(
@@ -75,7 +84,7 @@ class TransferService {
 
   gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_pool_;
   gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_;
-  std::shared_ptr<ModelMemoryCoordinator> uma_;
+  gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>> uma_;
   InstanceKey instance_key_;
   Config cfg_;
 

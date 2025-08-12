@@ -39,9 +39,9 @@ class MetricsCollector {
 
   /**
    * @brief Update memory pool metrics.
-   * @param memory_pool Pointer to the memory pool
+   * @param memory_pool Reference to the memory pool
    */
-  void update_memory_pool_metrics(const PinnedMemoryPool* memory_pool);
+  void update_memory_pool_metrics(const PinnedMemoryPool& memory_pool);
 
   /**
    * @brief Update model-related metrics.
@@ -53,7 +53,7 @@ class MetricsCollector {
    * @brief Update GPU metrics.
    * @param device_manager Device manager to query
    */
-  void update_gpu_metrics(DeviceManager& device_manager);
+  static void update_gpu_metrics(DeviceManager& device_manager);
 
   /**
    * @brief Record an operation.
@@ -79,7 +79,7 @@ class MetricsCollector {
    * This is a convenience method that updates all metric types.
    */
   void update_all_metrics(
-      const PinnedMemoryPool* memory_pool,
+      const PinnedMemoryPool& memory_pool,
       const ModelRegistry& model_registry,
       DeviceManager& device_manager);
 

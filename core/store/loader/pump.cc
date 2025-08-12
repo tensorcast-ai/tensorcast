@@ -137,6 +137,14 @@ void RunRangeProducer(
       if (bytes_read == 0) {
         pool.return_chunk(slot_id);
         LOG(WARNING) << "Unexpected EOF at offset " << current_offset;
+        // Treat as error to propagate failure instead of silently succeeding
+        {
+          absl::MutexLock lock(&state.status_mutex);
+          if (state.producer_status.ok()) {
+            state.producer_status = absl::OutOfRangeError("Unexpected EOF while reading source");
+          }
+        }
+        state.should_stop.store(true, std::memory_order_release);
         break;
       }
 

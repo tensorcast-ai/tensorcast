@@ -35,6 +35,8 @@ class GPUMemorySink : public Sink, public PositionedSink {
   uint64_t current_offset_ = 0;
   bool stream_created_ = false;
   absl::Status overall_status_;
+  // Tracks total bytes successfully enqueued via write_at to validate completeness
+  uint64_t total_bytes_written_ = 0;
 };
 
 } // namespace stepcast::store::loader

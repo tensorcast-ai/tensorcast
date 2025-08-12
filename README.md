@@ -50,6 +50,15 @@ ln -s $(bazel info output_base)/external external
 
 ## Run test
 
+### Run all tests
+```bash
+# Run all tests except stress tests (stress tests are slow)
+bazel test //tests/cpp/... --test_tag_filters="-stress"
+
+# Run only stress tests
+bazel test //tests/cpp/... --test_tag_filters="stress"
+```
+
 ### Communicator Test
 ```bash
 # Terminal 1 (Server)

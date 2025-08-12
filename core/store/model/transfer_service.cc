@@ -6,7 +6,9 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/synchronization/mutex.h"
 #include "core/store/loader/dvmp_region_sink.h"
+#include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
 #include "core/store/loader/pump.h"
 #include "core/store/loader/streaming_buffer_adapter.h"
@@ -14,22 +16,50 @@
 
 namespace stepcast::store {
 
+namespace {
+// Per-GPU (device_id) concurrency limiter: at most 1 active session per GPU.
+ABSL_CONST_INIT absl::Mutex g_gpu_limit_mu(absl::kConstInit);
+struct GpuGate {
+  bool active{false};
+  absl::CondVar cv;
+};
+std::unordered_map<int, GpuGate> g_gpu_gates ABSL_GUARDED_BY(g_gpu_limit_mu);
+} // namespace
+
 TransferService::TransferService(
     const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
     const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
-    const std::shared_ptr<ModelMemoryCoordinator>& uma,
+    const gsl::not_null<std::shared_ptr<ModelMemoryCoordinator>>& uma,
     InstanceKey instance_key,
-    Config cfg,
-    const gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>>& streaming_buffer)
+    Config cfg)
     : pinned_pool_(pinned_pool),
       dvmp_(dvmp),
       uma_(uma),
       instance_key_(std::move(instance_key)),
       cfg_(cfg),
-      spb_(streaming_buffer) {}
+      spb_(std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pinned_pool_->chunk_size(), pinned_pool_)) {}
 
 size_t TransferService::get_pool_chunk_size() const {
   return pinned_pool_->chunk_size();
+}
+
+// ScopedGpuPermit implementation
+TransferService::ScopedGpuPermit::ScopedGpuPermit(int device_id) : device_id_(device_id) {
+  absl::MutexLock lock(&g_gpu_limit_mu);
+  GpuGate& gate = g_gpu_gates[device_id_];
+  while (gate.active) {
+    gate.cv.Wait(&g_gpu_limit_mu);
+  }
+  gate.active = true;
+}
+
+TransferService::ScopedGpuPermit::~ScopedGpuPermit() {
+  absl::MutexLock lock(&g_gpu_limit_mu);
+  auto it = g_gpu_gates.find(device_id_);
+  if (it != g_gpu_gates.end()) {
+    it->second.active = false;
+    it->second.cv.Signal();
+  }
 }
 
 absl::Status TransferService::copy_cpu_to_gpu_streaming(
@@ -44,17 +74,31 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   if (total_bytes == 0) {
     return absl::InvalidArgumentError("Total bytes must be greater than 0");
   }
-  
-  auto spb = get_streaming_buffer();
-  if (!spb) {
-    return absl::FailedPreconditionError("Streaming buffer not available");
-  }
-  void* dvmp_base = uma_ ? uma_->get_cpu_base_ptr(instance_key_) : nullptr;
+
+  void* dvmp_base = uma_->get_cpu_base_ptr(instance_key_);
   if (!dvmp_base) {
     return absl::FailedPreconditionError("DVMP base not available via UMA");
   }
+  // Acquire per-GPU permit (1 active session per GPU)
+  ScopedGpuPermit permit(static_cast<int>(device_id));
+  // Create a per-session streaming buffer backed by the shared pinned pool
+  auto session_spb = std::make_shared<StreamingPinnedBuffer>(
+      /*num_chunks=*/16, get_pool_chunk_size(), pinned_pool_);
+  auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
+  if (!init_status.ok()) {
+    return init_status;
+  }
   return perform_copy_cpu_to_gpu_streaming(
-      instance_key_.model_id, device_id, spb, gpu_ptr, total_bytes, stream, dvmp_base, dvmp_, uma_, instance_key_);
+      instance_key_.model_id,
+      device_id,
+      session_spb,
+      gpu_ptr,
+      total_bytes,
+      stream,
+      dvmp_base,
+      dvmp_,
+      uma_,
+      instance_key_);
 }
 
 absl::Status TransferService::copy_gpu_to_cpu_streaming(
@@ -69,12 +113,12 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
   if (total_bytes == 0) {
     return absl::InvalidArgumentError("Total bytes must be greater than 0");
   }
-  
+
   auto spb = get_streaming_buffer();
   if (!spb) {
     return absl::FailedPreconditionError("Streaming buffer not available");
   }
-  void* dvmp_base = uma_ ? uma_->get_cpu_base_ptr(instance_key_) : nullptr;
+  void* dvmp_base = uma_->get_cpu_base_ptr(instance_key_);
   if (!dvmp_base) {
     return absl::FailedPreconditionError("DVMP base not available via UMA");
   }
@@ -89,7 +133,7 @@ std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
   if (target_location == ModelLocation::GPU) {
     auto sink = std::make_unique<loader::GPUMemorySink>(loader::GPUMemorySink::Options{
         .gpu_base_ptr = gpu_ptr,
-        .total_size = uma_ && uma_->get_model_size(instance_key_).ok() ? *uma_->get_model_size(instance_key_) : 0,
+        .total_size = uma_->get_model_size(instance_key_).ok() ? *uma_->get_model_size(instance_key_) : 0,
         .chunk_size = get_pool_chunk_size(),
         .device_id = device_id});
     return sink;
@@ -101,12 +145,9 @@ std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
   }
   loader::DVMPRegionSink::Options opts;
   opts.region = *region_or;
-  opts.total_size = uma_ && uma_->get_model_size(instance_key_).ok() ? *uma_->get_model_size(instance_key_) : 0;
+  opts.total_size = uma_->get_model_size(instance_key_).ok() ? *uma_->get_model_size(instance_key_) : 0;
   opts.plan_direct_write_fn =
       [uma = uma_, key = instance_key_](absl::Span<const VaRange> ranges) -> absl::StatusOr<DirectWriteToken> {
-    if (!uma) {
-      return absl::FailedPreconditionError("UMA not available");
-    }
     return uma->create_direct_write_token(key, ranges);
   };
   auto sink = std::make_unique<loader::DVMPRegionSink>(std::move(opts));
@@ -145,7 +186,7 @@ std::vector<std::pair<uint64_t, size_t>> TransferService::build_ranges_(
   const uint64_t off = static_cast<uint64_t>(run_start) * chunk_size;
   const uint64_t end = static_cast<uint64_t>(prev + 1) * chunk_size;
   const uint64_t len64 = (end > total_bytes) ? (total_bytes - off) : (end - off);
-  const size_t len = static_cast<size_t>(len64);
+  const auto len = static_cast<size_t>(len64);
   ranges.emplace_back(off, len);
   return ranges;
 }
@@ -169,15 +210,30 @@ absl::Status TransferService::load_from_source(
   }
 
   const size_t chunk_size = get_pool_chunk_size();
-  const uint64_t total_size =
-      uma_ && uma_->get_model_size(instance_key_).ok() ? *uma_->get_model_size(instance_key_) : 0;
-
-  auto spb = get_streaming_buffer();
-  if (!spb) {
-    return absl::FailedPreconditionError("Streaming buffer not available");
+  uint64_t total_size = 0;
+  auto sz = uma_->get_model_size(instance_key_);
+  if (sz.ok()) {
+    total_size = *sz;
+  }
+  // Fallback: use source total size when UMA doesn't know
+  if (total_size == 0) {
+    if (auto* fps = dynamic_cast<loader::FilePartitionSource*>(source.get())) {
+      total_size = fps->total_size();
+    }
   }
 
-  loader::StreamingBufferAdapter adapter(spb);
+  // Acquire per-GPU permit (1 active session per GPU)
+  ScopedGpuPermit permit(device_id);
+
+  // Create a per-session streaming buffer backed by the shared pinned pool
+  auto session_spb = std::make_shared<StreamingPinnedBuffer>(
+      /*num_chunks=*/16, get_pool_chunk_size(), pinned_pool_);
+  auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
+  if (!init_status.ok()) {
+    return init_status;
+  }
+
+  loader::StreamingBufferAdapter adapter(session_spb);
   auto sink = build_sink_(target_location, gpu_ptr_or_null, device_id);
   if (!sink) {
     return absl::FailedPreconditionError("Failed to construct sink for target location");

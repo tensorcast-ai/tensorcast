@@ -28,7 +28,7 @@ namespace stepcast::store {
 absl::Status try_evict_gpu_memory_impl(
     ModelRegistry& registry,
     DeviceManager& device_manager,
-    MetricsCollector* metrics,
+    MetricsCollector& metrics,
     int device_id,
     size_t required_bytes);
 
@@ -42,27 +42,40 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
       memory_pool_size_(opts.memory_pool_size),
       num_thread_(opts.num_thread),
       chunk_size_(opts.chunk_size),
-      pinned_memory_timeout_(opts.pinned_memory_timeout) {
+      pinned_memory_timeout_(opts.pinned_memory_timeout),
+      device_manager_(gsl::not_null<std::unique_ptr<DeviceManager>>(std::make_unique<DeviceManager>())),
+      model_registry_(gsl::not_null<std::unique_ptr<ModelRegistry>>(std::make_unique<ModelRegistry>())),
+      metrics_collector_(gsl::not_null<std::unique_ptr<MetricsCollector>>(std::make_unique<MetricsCollector>())),
+      memory_pool_(
+          gsl::not_null<std::shared_ptr<PinnedMemoryPool>>(
+              std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_))),
+      dvmp_(
+          gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>(
+              std::make_shared<memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
   VLOG(1) << "Initializing CheckpointStore with unified Options constructor";
   VLOG(1) << "Storage path: "
           << (storage_path_.empty() ? "<empty - model_identifier will be full path>" : storage_path_.string());
   VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::GB << "GB";
   VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::MB << "MB";
 
-  // ───── Component initialization ─────
-  device_manager_ = std::make_unique<DeviceManager>();
+  initialize_components();
+  initialize_global_store(opts);
+  initialize_communication_manager(opts);
+
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
+}
+
+void CheckpointStore::initialize_components() {
+  // Initialize core components
   absl::Status status = device_manager_->initialize();
   CHECK(status.ok()) << "Failed to initialize DeviceManager: " << status.message();
+}
 
-  model_registry_ = std::make_unique<ModelRegistry>();
-  metrics_collector_ = std::make_unique<MetricsCollector>();
-
-  // ------------------------------------------------------------
+void CheckpointStore::initialize_global_store(const CheckpointStoreOptions& opts) {
   // Global Store client (remote coordination).  If a non-empty
   // global_store_address is provided via CheckpointStoreOptions, attempt to
   // connect immediately so that PrepareOrchestrator can leverage it for remote
   // replica discovery.
-  // ------------------------------------------------------------
   if (!opts.global_store_address.empty()) {
     GlobalStoreClientConfig gs_cfg;
     gs_cfg.global_store_address = opts.global_store_address;
@@ -75,21 +88,16 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
       LOG(INFO) << "CheckpointStore: connected to Global Store at " << gs_cfg.global_store_address;
     }
   }
+}
 
-  memory_pool_ = std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_);
-
-  // Initialize system-wide DVMP instance
-  dvmp_ = std::make_shared<memory::DistributedVirtualMemoryPool>();
-
-  // CommunicationManager handling
+void CheckpointStore::initialize_communication_manager(const CheckpointStoreOptions& opts) {
+  // Initialize system-wide DVMP instance and CommunicationManager handling
   if (opts.comm_manager) {
     // Use externally supplied manager (already initialised by caller)
     comm_manager_ = opts.comm_manager;
   } else {
     LOG(INFO) << "CommunicateEngine is not provided, will disable P2P loading/registration";
   }
-
-  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
 }
 
 CheckpointStore::~CheckpointStore() {
@@ -102,11 +110,11 @@ CheckpointStore::~CheckpointStore() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 size_t CheckpointStore::get_available_memory() const {
-  return memory_pool_ ? memory_pool_->get_available_size() : 0;
+  return memory_pool_->get_available_size();
 }
 
 void CheckpointStore::update_memory_pool_metrics() {
-  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 }
 
 std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() const {
@@ -179,7 +187,7 @@ std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() c
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Internal Implementation - 使用新的统一类型
+// Internal Implementation - using new unified types
 // ═══════════════════════════════════════════════════════════════════════════
 
 absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
@@ -191,7 +199,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, model_identifier, "load_from_disk_internal");
 
-  // 转换 Location 到旧的 ModelLocation
+  // Convert Location to legacy ModelLocation
   ModelLocation target_location = ModelLocation::PAGEABLE_CPU;
   if (target.location.type == ModelLocation::GPU) {
     target_location = ModelLocation::GPU;
@@ -205,6 +213,14 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
       return device_result.status();
     }
     target_device_id = device_result.value();
+  }
+
+  // Defensive check: ensure GPU ordinal is valid before proceeding.
+  if (target_location == ModelLocation::GPU) {
+    const int num_gpus = device_manager_->get_num_gpus();
+    if (target_device_id < 0 || target_device_id >= num_gpus) {
+      return absl::InvalidArgumentError(std::string("Invalid GPU device ordinal: ") + std::to_string(target_device_id));
+    }
   }
 
   // If CheckpointStore was initialised with a non-empty storage_path_ and the
@@ -223,8 +239,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
       .source = resolved_source,
       .model_identifier = model_identifier,
       .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
-      .streaming_buffer = get_or_create_streaming_buffer_()};
+      .dvmp = dvmp_};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   if (target_location == ModelLocation::GPU) {
@@ -270,7 +285,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
                  << " bytes.";
 
     auto evict_st = try_evict_gpu_memory_impl(
-        *model_registry_, *device_manager_, metrics_collector_.get(), target_device_id, required_bytes);
+        *model_registry_, *device_manager_, *metrics_collector_, target_device_id, required_bytes);
 
     if (evict_st.ok()) {
       // Reset model GPU memory state then retry loading.
@@ -324,7 +339,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   // Update metrics
   const auto duration = std::chrono::steady_clock::now() - start_time;
   metrics_collector_->record_operation("load_from_disk", std::chrono::duration<double>(duration).count());
-  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 
   return handle;
 }
@@ -351,11 +366,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
   ModelConfig config{
-      .source = p2p_source,
-      .model_identifier = model_identifier,
-      .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
-      .streaming_buffer = get_or_create_streaming_buffer_()};
+      .source = p2p_source, .model_identifier = model_identifier, .pinned_memory_pool = memory_pool_, .dvmp = dvmp_};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
@@ -424,7 +435,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   metrics_collector_->record_p2p_transfer(source.size_bytes, true);
   const auto duration = std::chrono::steady_clock::now() - start_time;
   metrics_collector_->record_operation("load_from_p2p", std::chrono::duration<double>(duration).count());
-  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 
   return handle;
 }
@@ -434,8 +445,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
     const InlineBufferSource& source,
     const ModelTarget& target,
     const LoadingHints& hints) {
-  // InlineBufferSource 是新增的类型，暂时返回未实现错误
-  // 未来可以实现直接从内存缓冲区加载模型的功能
+  // InlineBufferSource is a newly added type, temporarily returning unimplemented error
+  // Future: implement direct model loading from memory buffer
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
@@ -560,6 +571,24 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
     PrepareMode mode,
     const LoadingHints& hints) {
   // ────────────────────────────────────────────────────────────────────
+  // Validate target device early to avoid entering CUDA paths with
+  // invalid ordinals or unsupported device types.
+  // ────────────────────────────────────────────────────────────────────
+  if (target_device.type == DeviceType::CPU) {
+    return absl::InvalidArgumentError("CPU target device is not supported by prepare()");
+  }
+  if (target_device.type == DeviceType::GPU) {
+    const int num_gpus = device_manager_->get_num_gpus();
+    if (target_device.ordinal < 0 || target_device.ordinal >= num_gpus) {
+      return absl::InvalidArgumentError(
+          std::string("Invalid GPU device ordinal: ") + std::to_string(target_device.ordinal));
+    }
+  } else {
+    // For REMOTE/NONE/DISK etc. reject in this implementation.
+    return absl::InvalidArgumentError("Unsupported target device type for prepare()");
+  }
+
+  // ────────────────────────────────────────────────────────────────────
   // Fast-path: instance already present on the requested device.
   // ────────────────────────────────────────────────────────────────────
   const InstanceKey dst_key{std::string(model_id), target_device, /*replica=*/0};
@@ -629,15 +658,20 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
           continue;
         }
 
-        // Create destination model configuration.
+        // Create destination model configuration. Provide a valid DiskSource path so Model::create can
+        // initialize the loader to determine model size, even though data will be provided via GPU copy.
+        DiskSource disk_src;
+        disk_src.path = std::filesystem::path(std::string(model_id));
+        if (!storage_path_.empty() && !disk_src.path.is_absolute()) {
+          disk_src.path = storage_path_ / disk_src.path;
+        }
         ModelConfig cfg{
-            .source = DiskSource{}, // Placeholder – actual data comes from copy.
+            .source = disk_src,
             .model_identifier = std::string(model_id),
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_memory_pool = memory_pool_,
-            .dvmp = dvmp_,
-            .streaming_buffer = get_or_create_streaming_buffer_()};
+            .dvmp = dvmp_};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
         auto dst_or = Model::create(cfg);
@@ -677,8 +711,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
 
     case PrepareMode::AUTO: {
       if (global_store_client_ && global_store_client_->is_connected()) {
-        PrepareOrchestrator orchestrator(
-            this, global_store_client_.get(), model_registry_.get(), device_manager_.get());
+        PrepareOrchestrator orchestrator(this, global_store_client_.get());
         auto orchestrated_or = orchestrator.run(model_id, target_device, hints);
         if (orchestrated_or.ok()) {
           return *orchestrated_or;
@@ -784,7 +817,7 @@ std::vector<InstanceKey> CheckpointStore::list_device_models(const DeviceKey& de
 absl::Status try_evict_gpu_memory_impl(
     ModelRegistry& registry,
     DeviceManager& device_manager,
-    MetricsCollector* metrics,
+    MetricsCollector& metrics,
     int device_id,
     size_t required_bytes) {
   // Query initial free memory so we can track progress.
@@ -820,9 +853,7 @@ absl::Status try_evict_gpu_memory_impl(
       continue; // Couldn't free – maybe busy.
     }
 
-    if (metrics) {
-      metrics->record_memory_eviction();
-    }
+    metrics.record_memory_eviction();
 
     // Update free memory reading.
     auto free_now_or = device_manager.get_free_memory(device_id);
@@ -935,25 +966,37 @@ absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& 
 
 int CheckpointStore::clear_mem() {
   auto models = model_registry_->clear_all();
-  int fail_count = 0;
+  std::vector<absl::Status> errors;
 
   for (const auto& [inst_key, model] : models) {
+    // Release CPU memory with proper error tracking
     auto cpu_status = model->release_memory(ModelLocation::PAGEABLE_CPU);
     if (!cpu_status.ok()) {
-      LOG(WARNING) << "Failed to release CPU memory: " << cpu_status.message();
-      fail_count++;
+      LOG(WARNING) << "Failed to release CPU memory for " << inst_key.to_string() 
+                   << ": " << cpu_status.message();
+      errors.push_back(cpu_status);
     }
 
+    // Release GPU memory, ignoring NotFound errors (expected when no GPU memory allocated)
     auto gpu_status = model->release_memory(ModelLocation::GPU);
     if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
-      LOG(WARNING) << "Failed to release GPU memory: " << gpu_status.message();
-      fail_count++;
+      LOG(WARNING) << "Failed to release GPU memory for " << inst_key.to_string() 
+                   << ": " << gpu_status.message();
+      errors.push_back(gpu_status);
     }
   }
 
-  metrics_collector_->update_all_metrics(memory_pool_.get(), *model_registry_, *device_manager_);
+  // Update metrics even if some releases failed
+  metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 
-  return fail_count > 0 ? -1 : 0;
+  // Log aggregated error summary if failures occurred
+  if (!errors.empty()) {
+    LOG(ERROR) << "Failed to release memory for " << errors.size() 
+               << " model(s) during shutdown";
+    return -1;
+  }
+
+  return 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -973,11 +1016,7 @@ absl::Status CheckpointStore::lock_chunks(const InstanceKey& instance_key, absl:
   const auto& model = model_res.value();
 
   // Get the DVMP instance via MemoryManager.
-  auto* dvmp = model->get_memory_manager().get_dvmp();
-  if (!dvmp) {
-    return absl::InternalError(absl::StrCat("DVMP not available for model instance: ", instance_key.model_id));
-  }
-
+  const auto dvmp = model->get_memory_manager().get_dvmp();
   // Forward the call to DVMP – DVMP is still keyed by model_id (shared CPU VA).
   return dvmp->lock_chunks(instance_key.model_id, chunk_indices);
 }
@@ -998,30 +1037,10 @@ absl::Status CheckpointStore::unlock_chunks(
   const auto& model = model_res.value();
 
   // Get the DVMP instance via MemoryManager.
-  auto* dvmp = model->get_memory_manager().get_dvmp();
-  if (!dvmp) {
-    return absl::InternalError(absl::StrCat("DVMP not available for model instance: ", instance_key.model_id));
-  }
+  const auto dvmp = model->get_memory_manager().get_dvmp();
 
   // Forward the call to DVMP.
   return dvmp->unlock_chunks(instance_key.model_id, chunk_indices, copied_gpu);
-}
-
-gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> CheckpointStore::get_or_create_streaming_buffer_() {
-  if (!shared_streaming_buffer_) {
-    // Use 2 chunks by default; chunk_size_ comes from options
-    auto spb = std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, chunk_size_, memory_pool_);
-    auto st = spb->initialize(pinned_memory_timeout_);
-    if (!st.ok()) {
-      // Fallback to a minimal buffer to avoid nullptr; caller may still fail later on usage
-      auto fallback = std::make_shared<StreamingPinnedBuffer>(16, chunk_size_, memory_pool_);
-      (void)fallback->initialize(std::chrono::milliseconds::zero());
-      shared_streaming_buffer_ = fallback;
-    } else {
-      shared_streaming_buffer_ = spb;
-    }
-  }
-  return {shared_streaming_buffer_};
 }
 
 } // namespace stepcast::store

@@ -4,6 +4,7 @@
 
 #include "core/common/trace/trace_manager.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -70,9 +71,10 @@ std::shared_ptr<ModelTrace> TraceManager::get_or_create_model_trace_internal(con
   // Record insertion order for eviction.
   insertion_order_.push_back(key);
   if (insertion_order_.size() > kMaxTraces) {
-    const std::string& oldest = insertion_order_.front();
+    // Copy the key before popping to avoid dangling reference.
+    std::string oldest_key = insertion_order_.front();
     insertion_order_.pop_front();
-    traces_.erase(oldest);
+    traces_.erase(oldest_key);
   }
 
   return ptr;
@@ -261,6 +263,11 @@ void TraceManager::clear_trace(const std::string& model_id, const std::string& r
   const std::string key = make_key(model_id, request_id);
   absl::MutexLock lock(&global_mutex_);
   traces_.erase(key);
+  // Keep insertion_order_ consistent by removing the key if present.
+  auto it = std::find(insertion_order_.begin(), insertion_order_.end(), key);
+  if (it != insertion_order_.end()) {
+    insertion_order_.erase(it);
+  }
 }
 
 } // namespace stepcast::store

@@ -2,7 +2,6 @@
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <memory>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -27,6 +26,10 @@ class GPUMemoryFixture {
 
     // Allocate GPU memory
     DeviceGuard guard(0);
+    if (!guard.status().ok()) {
+      cuda_available_ = false;
+      return;
+    }
     status = stepcast::cuda::malloc(&gpu_ptr_, size_);
     if (!status.ok()) {
       gpu_ptr_ = nullptr;
@@ -71,8 +74,9 @@ class GPUMemoryFixture {
   }
 
   void fill_host_buffer(char pattern = 'A') {
-    if (!host_ptr_)
+    if (!host_ptr_) {
       return;
+    }
 
     char* buffer = static_cast<char*>(host_ptr_);
     for (size_t i = 0; i < size_; ++i) {
@@ -81,15 +85,23 @@ class GPUMemoryFixture {
   }
 
   bool verify_gpu_content(size_t bytes, char pattern = 'A') {
-    if (!gpu_ptr_ || !host_ptr_)
+    if (!gpu_ptr_ || !host_ptr_) {
       return false;
+    }
+
+    // Ensure device context is set before D2H copy
+    DeviceGuard guard(0);
+    if (!guard.status().ok()) {
+      return false;
+    }
 
     std::vector<char> temp(bytes);
 
     // Copy from GPU to host for verification
     auto status = stepcast::cuda::memcpy(temp.data(), gpu_ptr_, bytes, cudaMemcpyDeviceToHost);
-    if (!status.ok())
+    if (!status.ok()) {
       return false;
+    }
 
     // Verify content
     for (size_t i = 0; i < bytes; ++i) {
@@ -117,7 +129,7 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   SECTION("Simple write") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 1024; // matches write_size below
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -141,7 +153,7 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   SECTION("Multiple writes") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 1024 * 10; // chunk_size * num_chunks
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -152,7 +164,8 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
     fixture.fill_host_buffer('B');
 
     for (size_t i = 0; i < num_chunks; ++i) {
-      auto status = sink.write(fixture.host_ptr(), chunk_size);
+      const void* src = static_cast<const char*>(fixture.host_ptr()) + (i * chunk_size);
+      auto status = sink.write(src, chunk_size);
       REQUIRE(status.ok());
     }
 
@@ -186,7 +199,7 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   SECTION("Async transfer completion") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 5 * 1024 * 1024; // matches large_write below
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -307,7 +320,7 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   SECTION("Verify total bytes written on close") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 5 * 1024 * 1024; // matches expected_total below
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -318,7 +331,8 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
     fixture.fill_host_buffer('E');
 
     for (size_t written = 0; written < expected_total; written += chunk_size) {
-      auto status = sink.write(fixture.host_ptr(), chunk_size);
+      const void* src = static_cast<const char*>(fixture.host_ptr()) + written;
+      auto status = sink.write(src, chunk_size);
       REQUIRE(status.ok());
     }
 
@@ -334,7 +348,7 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   SECTION("Close without writes") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 0; // no writes expected
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -347,7 +361,7 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   SECTION("Stream synchronization on close") {
     GPUMemorySink::Options options;
     options.gpu_base_ptr = fixture.gpu_ptr();
-    options.total_size = fixture.size();
+    options.total_size = 2 * 1024 * 1024; // matches write_size below
     options.device_id = 0;
 
     GPUMemorySink sink(options);
@@ -394,14 +408,10 @@ TEST_CASE("GPUMemorySink proposed fix validation", "[gpu_memory_sink]") {
     REQUIRE(status.ok());
 
     // Close should detect incomplete transfer
-    // After implementing the fix, this should either:
-    // 1. Return an error indicating incomplete transfer
-    // 2. Log a warning about incomplete data
+    // After fix: should return an error indicating incomplete transfer
     status = sink.close();
-
-    // For now, it succeeds (current behavior)
-    // After fix, we might want to change this behavior
-    REQUIRE(status.ok());
+    REQUIRE(!status.ok());
+    REQUIRE(status.code() == absl::StatusCode::kOutOfRange);
 
     // Document expected behavior after fix
     // Option 1: Return error if not all expected data written

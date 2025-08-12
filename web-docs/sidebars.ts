@@ -88,9 +88,15 @@ const sidebars: SidebarsConfig = {
           ],
         },
         {
-          type: 'doc',
-          id: 'developer-guides/core/communicator/README',
+          type: 'category',
           label: 'Communicator',
+          link: {
+            type: 'doc',
+            id: 'developer-guides/core/communicator/README',
+          },
+          items: [
+            'developer-guides/core/communicator/engine-tensor-io',
+          ],
         },
       ],
     },

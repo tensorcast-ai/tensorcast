@@ -77,6 +77,7 @@ absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t by
     return copy_status;
   }
 
+  total_bytes_written_ += bytes;
   VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << offset;
 
   return absl::OkStatus();
@@ -92,10 +93,11 @@ absl::Status GPUMemorySink::close() {
   }
 
   // Validate that all expected data was written
-  if (current_offset_ != options_.total_size) {
-    LOG(WARNING) << "GPU memory sink closed with incomplete transfer. "
-                 << "Expected " << options_.total_size << " bytes, "
-                 << "but only " << current_offset_ << " bytes were written.";
+  if (total_bytes_written_ != options_.total_size) {
+    LOG(ERROR) << "GPU memory sink closed with incomplete transfer. "
+               << "Expected " << options_.total_size << " bytes, "
+               << "but only " << total_bytes_written_ << " bytes were written.";
+    return absl::OutOfRangeError("incomplete GPU transfer: bytes written do not match expected total");
   }
 
   // Set device context

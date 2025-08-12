@@ -6,20 +6,14 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "core/store/checkpoint_store.h"
-#include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/components/model_registry.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/loading/replica_registration_helper.h"
 
 namespace stepcast::store {
 
-PrepareOrchestrator::PrepareOrchestrator(
-    CheckpointStore* store,
-    GlobalStoreClient* gs_client,
-    ModelRegistry* registry,
-    DeviceManager* device_manager)
-    : store_(store), gs_client_(gs_client), registry_(registry), device_manager_(device_manager) {}
+PrepareOrchestrator::PrepareOrchestrator(CheckpointStore* store, GlobalStoreClient* gs_client)
+    : store_(store), gs_client_(gs_client) {}
 
 absl::StatusOr<ModelHandle> PrepareOrchestrator::run(
     std::string_view model_id,

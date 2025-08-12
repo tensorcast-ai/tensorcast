@@ -10,10 +10,10 @@ cc_test(
         "concurrency_test.cc",
         "concurrency_utils.h",
     ],
-    linkopts = ["-lcuda"],
     tags = [
         "checkpoint_store",
         "concurrency",
+        "requires_cuda",
     ],
     deps = [
         "//core/store",
@@ -28,7 +28,6 @@ cc_test(
         "concurrency_utils.h",
         "multi_gpu_test.cc",
     ],
-    linkopts = ["-lcuda"],
     tags = [
         "checkpoint_store",
         "multi_gpu",
@@ -74,6 +73,7 @@ cc_test(
     deps = [
         "//core/store",
         "//tests/cpp:common",
+        "//tests/cpp/communicator:test_helpers",
         "@catch2//:catch2_main",
     ],
 )

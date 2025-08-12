@@ -14,9 +14,7 @@
 #include "core/store/checkpoint_store_options.h"
 #include "tests/cpp/common.h"
 
-#ifdef __CUDACC__
 #include <cuda_runtime_api.h>
-#endif
 
 namespace fs = std::filesystem;
 using stepcast::DeviceType;

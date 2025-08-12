@@ -63,8 +63,7 @@ class MemoryManager {
       const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
-      uint64_t model_size,
-      const gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>>& streaming_buffer);
+      uint64_t model_size);
 
   ~MemoryManager() noexcept;
 
@@ -248,8 +247,8 @@ class MemoryManager {
    * @brief Exposes the underlying DistributedVirtualMemoryPool instance used by this
    *        MemoryManager. Loaders can use this to allocate or lock chunks.
    */
-  [[nodiscard]] memory::DistributedVirtualMemoryPool* get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
-  [[nodiscard]] const memory::DistributedVirtualMemoryPool* get_dvmp() const ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] gsl::not_null<memory::DistributedVirtualMemoryPool*> get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] gsl::not_null<const memory::DistributedVirtualMemoryPool*> get_dvmp() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Returns an immutable snapshot view of ChunkMeta for the model.

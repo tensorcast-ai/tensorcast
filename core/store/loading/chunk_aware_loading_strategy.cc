@@ -252,12 +252,6 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     return absl::InvalidArgumentError("Local CPU copy only supports GPU target");
   }
 
-  // Get DVMP for locking
-  auto* dvmp = mem_manager->get_dvmp();
-  if (!dvmp) {
-    return absl::InternalError("DVMP not available");
-  }
-
   // Lock chunks for transfer
   absl::Status lock_status =
       memory.lock_chunks_for_transfer(mem_manager->instance_key(), ModelLocation::PAGEABLE_CPU, target, chunks);

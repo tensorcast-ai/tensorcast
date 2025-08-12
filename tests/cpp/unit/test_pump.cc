@@ -568,7 +568,7 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
     // Create a positioned sink that tracks write order
     class OrderTrackingPositionedSink : public PositionedSink {
      public:
-      OrderTrackingPositionedSink(size_t expected_size) : buffer_(expected_size, 0), write_order_log_(), mutex_() {}
+      explicit OrderTrackingPositionedSink(size_t expected_size) : buffer_(expected_size, 0) {}
 
       absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -637,7 +637,7 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
     // Create seekable source
     class TestSeekableSource : public SeekableSource {
      public:
-      TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
+      explicit TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
 
       absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
         return read_at(offset_, dst, max_bytes);
@@ -694,7 +694,7 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
 
     class TestSeekableSource : public SeekableSource {
      public:
-      TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
+      explicit TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
 
       absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
         return read_at(offset_, dst, max_bytes);
@@ -721,13 +721,13 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
         {1024, 4096}, // 4KB
         {5120, 8192}, // 8KB
         {13312, 16384}, // 16KB
-        {29696, 34816} // ~34KB (rest of the data)
+        {29696, total_size - 29696} // remaining bytes
     };
 
     // Simple positioned sink that just collects data
     class SimplePositionedSink : public PositionedSink {
      public:
-      SimplePositionedSink(size_t size) : buffer_(size, 0) {}
+      explicit SimplePositionedSink(size_t size) : buffer_(size, 0) {}
 
       absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -758,6 +758,6 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
     auto status = pump_ranges(source, *sink, pool, ranges, 3);
 
     REQUIRE(status.ok());
-    REQUIRE(sink->get_buffer() == source_data);
+    REQUIRE(std::equal(sink->get_buffer().begin(), sink->get_buffer().end(), source_data.begin()));
   }
 }

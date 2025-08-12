@@ -14,6 +14,8 @@
 #include <vector>
 
 #include "core/common/cuda_api.h" // Use unified CUDA API
+#include "core/common/memory/distributed_virtual_memory_pool.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 
 // #include "absl/log/check.h" // Avoid macro conflict with Catch2
 #include "absl/log/globals.h"
@@ -90,6 +92,7 @@ struct TestResources {
   bool is_cuda_available = false;
   int device_count = 0;
   size_t pinned_pool_chunk_size_bytes = 0; // Store the chunk size used
+  std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool> dvmp;
 
   bool setup(int gpu_id, size_t model_size_bytes) {
     actual_model_size = model_size_bytes;
@@ -113,6 +116,13 @@ struct TestResources {
       return false;
     }
     LOG(INFO) << "PinnedMemoryPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
+
+    // Create DVMP and StreamingPinnedBuffer
+    dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
+    if (!dvmp) {
+      LOG(ERROR) << "Failed to create DistributedVirtualMemoryPool";
+      return false;
+    }
 
     // Check for CUDA devices and create pool if available
     absl::Status status = stepcast::cuda::get_device_count(&device_count);
@@ -233,18 +243,18 @@ class P2PTestServer {
     }
 
     // Configure Model
-    ModelConfig model_config;
-    model_config.model_identifier = model_id;
-
-    // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = resources.temp_dir / MODEL_SUBDIR;
-    model_config.source = disk_src;
-
-    model_config.pinned_memory_pool = resources.pinned_pool;
-    model_config.local_device_id = gpu_id;
-    model_config.p2p_comm_enabled = true;
-    model_config.expected_model_size = model_size;
+    ModelConfig model_config{
+        .source = disk_src,
+        .model_identifier = model_id,
+        .device_type =
+            (register_location == ModelLocation::GPU) ? ::stepcast::DeviceType::GPU : ::stepcast::DeviceType::CPU,
+        .local_device_id = (register_location == ModelLocation::GPU) ? gpu_id : -1,
+        .pinned_memory_pool = resources.pinned_pool,
+        .dvmp = resources.dvmp,
+        .expected_model_size = model_size,
+        .p2p_comm_enabled = true};
 
     absl::StatusOr<std::unique_ptr<Model>> model_status = Model::create(model_config);
 
@@ -439,9 +449,8 @@ class P2PTestClient {
     // Create a communication manager without initializing a server
     LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
     auto client_comm_engine = std::make_shared<stepcast::communicator::CommunicateEngine>(false);
-    // Initialize without binding to a port (client-only mode)
-    // The engine will create outgoing connections as needed
-    absl::Status client_engine_status = client_comm_engine->init("127.0.0.1", 0); // Port 0 means no server listening
+    // Bind to a dedicated client port to facilitate P2P connections
+    absl::Status client_engine_status = client_comm_engine->init("127.0.0.1", static_cast<uint16_t>(server_port + 1));
     if (!client_engine_status.ok()) {
       LOG(ERROR) << "Failed to initialize client communication engine: " << client_engine_status.message();
       resources.cleanup();
@@ -466,18 +475,9 @@ class P2PTestClient {
     }
 
     // Configure Model using P2P source
-    // Predict the server's registration details
-    // Assume server uses the same GPU ID flag if registering GPU memory
-    // Use the PinnedMemoryPool chunk size from the client's resources (assuming it matches server's)
-    size_t server_cpu_chunk_size = resources.pinned_pool_chunk_size_bytes; // Use actual chunk size from setup
-    int server_gpu_id_used = config_.gpu_id; // Assume server uses the same gpu_id flag value for registration if GPU
+    // Predict the server's registration details (new unified key format)
+    int server_gpu_id_used = config_.gpu_id; // server uses the same gpu_id flag value
 
-    ModelConfig config;
-    config.model_identifier = model_id + "_client"; // Use a different client-side ID
-    config.pinned_memory_pool = resources.pinned_pool; // Required for P2P transfers
-    config.local_device_id = gpu_id;
-    config.p2p_comm_enabled = true;
-    config.expected_model_size = model_size;
     P2PSource p2p_source;
     p2p_source.size_bytes = model_size;
     p2p_source.ip = server_ip;
@@ -485,38 +485,16 @@ class P2PTestClient {
 
     // Set the location of remote data
     p2p_source.location.type = server_registered_location;
-    p2p_source.location.device_id = (server_registered_location == ModelLocation::GPU)
-        ? server_gpu_id_used
-        : 1; // Fixed device ID used for CPU registration in MemoryManager
+    p2p_source.location.device_id = (server_registered_location == ModelLocation::GPU) ? server_gpu_id_used : -1;
 
+    // With new export APIs, both CPU and GPU registrations coalesce to ranges.
+    // For full-model export, expect a single range with index 0.
     if (server_registered_location == ModelLocation::GPU) {
-      // GPU registration involves a single buffer.
-      p2p_source.memory_keys.push_back(absl::StrFormat("%s_GPU_dev%d_chunk0", model_id, server_gpu_id_used));
+      p2p_source.memory_keys.push_back(absl::StrFormat("%s_GPU_chunk_%d", model_id, 0));
       p2p_source.buf_sizes.push_back(model_size);
-    } else { // CPU registration involves potentially multiple chunks.
-      size_t remaining_size = model_size;
-      int chunk_index = 0;
-      if (server_cpu_chunk_size == 0) {
-        LOG(ERROR) << "Server CPU chunk size must be positive.";
-        resources.cleanup();
-        return 1;
-      }
-      while (remaining_size > 0) {
-        size_t current_chunk_size = std::min(server_cpu_chunk_size, remaining_size);
-        // Key format must match the one generated by MemoryManager::enable_remote_memory_access for CPU
-        p2p_source.memory_keys.push_back(
-            absl::StrFormat("%s_CPU_dev%d_chunk%d", model_id, p2p_source.location.device_id, chunk_index));
-        p2p_source.buf_sizes.push_back(current_chunk_size);
-        remaining_size -= current_chunk_size;
-        chunk_index++;
-      }
-      // Sanity check
-      uint64_t sum_of_buffer_sizes = std::accumulate(p2p_source.buf_sizes.begin(), p2p_source.buf_sizes.end(), 0ULL);
-      if (sum_of_buffer_sizes != model_size) {
-        LOG(ERROR) << "Sum of predicted CPU chunk sizes does not match total model size.";
-        resources.cleanup();
-        return 1;
-      }
+    } else {
+      p2p_source.memory_keys.push_back(absl::StrFormat("%s_CPU_chunk_%d", model_id, 0));
+      p2p_source.buf_sizes.push_back(model_size);
     }
 
     // Add verification configuration (Note: P2PSource only has enable_checksum, not full verification info)
@@ -525,7 +503,18 @@ class P2PTestClient {
 
     // Attach communicator engine to the P2P source (required by P2PLoader)
     p2p_source.comm_engine = shared_engine;
-    config.source = p2p_source;
+
+    // Build ModelConfig via aggregate initialization (avoid default construction)
+    ModelConfig config{
+        .source = p2p_source,
+        .model_identifier = model_id + "_client",
+        .device_type =
+            (client_target_location == ModelLocation::GPU) ? ::stepcast::DeviceType::GPU : ::stepcast::DeviceType::CPU,
+        .local_device_id = (client_target_location == ModelLocation::GPU) ? static_cast<int>(gpu_id) : -1,
+        .pinned_memory_pool = resources.pinned_pool,
+        .dvmp = resources.dvmp,
+        .expected_model_size = model_size,
+        .p2p_comm_enabled = true};
 
     // Log predicted source info for debugging
     if (const auto* p2p_src = std::get_if<P2PSource>(&config.source)) {
@@ -550,8 +539,7 @@ class P2PTestClient {
       return 1;
     }
 
-    absl::StatusOr<std::unique_ptr<Model>> model_status =
-        Model::create(config); // Assuming Model::create wires up engine to MemoryManager
+    absl::StatusOr<std::unique_ptr<Model>> model_status = Model::create(config);
     if (!model_status.ok()) {
       LOG(ERROR) << "Failed to create model from P2P source: " << model_status.status();
       resources.cleanup();
@@ -656,49 +644,16 @@ class P2PTestClient {
 
       if (!host_verification_buffer.empty()) {
         if (client_target_location == ModelLocation::PAGEABLE_CPU) {
-          LOG(INFO) << "Copying data from client CPU chunks to host verification buffer...";
-          if (data_ptrs.empty()) {
-            LOG(ERROR) << "No data pointers available";
+          LOG(INFO) << "Copying data from client CPU buffer to host verification buffer...";
+          if (data_ptrs.size() != 1 || data_ptrs[0] == nullptr) {
+            LOG(ERROR) << "CPU should have exactly one valid pointer, got " << data_ptrs.size();
             cleanup_borrowed_memory();
             resources.cleanup();
             return 1;
           }
-          size_t chunk_size = model->get_memory_manager().get_cpu_chunk_size();
-          if (chunk_size == 0) {
-            LOG(ERROR) << "Invalid CPU chunk size";
-            cleanup_borrowed_memory();
-            resources.cleanup();
-            return 1;
-          }
-          size_t bytes_copied = 0;
-          char* dest_ptr = host_verification_buffer.data();
-          for (size_t i = 0; i < data_ptrs.size(); ++i) {
-            if (data_ptrs[i] == nullptr) {
-              LOG(ERROR) << "Null data pointer at index " << i;
-              cleanup_borrowed_memory();
-              resources.cleanup();
-              return 1;
-            }
-            size_t size_to_copy = (i == data_ptrs.size() - 1) ? (model_size - bytes_copied) : chunk_size;
-            if (bytes_copied + size_to_copy > model_size) {
-              LOG(ERROR) << "Buffer overflow: attempting to copy beyond model size";
-              cleanup_borrowed_memory();
-              resources.cleanup();
-              return 1;
-            }
-            memcpy(dest_ptr + bytes_copied, data_ptrs[i], size_to_copy);
-            bytes_copied += size_to_copy;
-          }
-          if (bytes_copied != model_size) {
-            LOG(ERROR) << "Did not copy expected number of bytes from CPU chunks. Expected: " << model_size
-                       << ", Got: " << bytes_copied;
-            cleanup_borrowed_memory();
-            resources.cleanup();
-            return 1;
-          }
+          std::memcpy(host_verification_buffer.data(), data_ptrs[0], model_size);
           verification_data_ready = true;
-          LOG(INFO) << "Successfully copied from " << data_ptrs.size() << " CPU chunks to host buffer.";
-
+          LOG(INFO) << "Successfully copied from CPU to host buffer.";
         } else { // client_target_location == ModelLocation::GPU
           LOG(INFO) << "Copying data from client GPU buffer to host verification buffer...";
           if (data_ptrs.size() != 1) {
