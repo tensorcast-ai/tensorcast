@@ -10,7 +10,7 @@ on:
 jobs:
   cpp-tests:
     name: C++ Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       USE_FAKE_CUDA: "1"
     permissions:
