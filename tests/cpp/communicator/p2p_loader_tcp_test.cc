@@ -103,34 +103,49 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
   }
 
   SECTION("Remote GPU to Local CPU via TCP") {
+    // Find available ports for GPU to CPU P2P communication
+    int source_port = find_available_port();
+    REQUIRE_MESSAGE(source_port > 0, "Failed to find available port for GPU-to-CPU P2P source engine");
+    
+    int target_port = find_available_port(source_port + 1);
+    REQUIRE_MESSAGE(target_port > 0, "Failed to find available port for GPU-to-CPU P2P target engine");
+
     // Similar test but with CPU target
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-    REQUIRE(source_engine->init("127.0.0.1", 50063).ok());
+    auto source_init_status = source_engine->init("127.0.0.1", source_port);
+    REQUIRE_MESSAGE(source_init_status.ok(),
+                    "Failed to initialize GPU-to-CPU source engine on port " << source_port << ": " << source_init_status.message());
 
     const std::size_t model_size = 8 * 1024 * 1024; // 8MB
     void* source_gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, model_size).ok());
+    auto malloc_status = stepcast::cuda::malloc(&source_gpu_ptr, model_size);
+    REQUIRE_MESSAGE(malloc_status.ok(),
+                    "Failed to allocate " << model_size << " bytes of GPU memory for CPU target test: " << malloc_status.message());
 
     auto test_data = create_test_pattern(model_size, 99);
-    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice).ok());
+    auto memcpy_status = stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice);
+    REQUIRE_MESSAGE(memcpy_status.ok(),
+                    "Failed to copy test pattern to GPU for CPU target test: " << memcpy_status.message());
 
-    REQUIRE(source_engine
-                ->register_tensor(
-                    "model_weights_cpu",
-                    reinterpret_cast<uint64_t>(source_gpu_ptr),
-                    model_size,
-                    COMMUNICATE_ENGINE_DEV_GPU,
-                    0,
-                    false)
-                .ok());
+    auto register_status = source_engine->register_tensor(
+        "model_weights_cpu",
+        reinterpret_cast<uint64_t>(source_gpu_ptr),
+        model_size,
+        COMMUNICATE_ENGINE_DEV_GPU,
+        0,
+        false);
+    REQUIRE_MESSAGE(register_status.ok(),
+                    "Failed to register GPU tensor 'model_weights_cpu' for CPU target: " << register_status.message());
 
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-    REQUIRE(target_engine->init("127.0.0.1", 50064).ok());
+    auto target_init_status = target_engine->init("127.0.0.1", target_port);
+    REQUIRE_MESSAGE(target_init_status.ok(),
+                    "Failed to initialize GPU-to-CPU target engine on port " << target_port << ": " << target_init_status.message());
 
     P2PSource source_config;
     source_config.size_bytes = model_size;
     source_config.ip = "127.0.0.1";
-    source_config.port = 50063;
+    source_config.port = source_port;
     source_config.memory_keys = {"model_weights_cpu"};
     source_config.buf_sizes = {model_size};
     source_config.location.type = ModelLocation::GPU; // Remote data on GPU
@@ -138,7 +153,9 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.comm_engine = target_engine;
 
     auto loader = std::make_shared<P2PLoader>(source_config);
-    REQUIRE(loader->initialize().ok());
+    auto loader_init_status = loader->initialize();
+    REQUIRE_MESSAGE(loader_init_status.ok(),
+                    "Failed to initialize P2PLoader for GPU-to-CPU transfer: " << loader_init_status.message());
 
     // Create pinned memory pool with 4MB chunk size
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
