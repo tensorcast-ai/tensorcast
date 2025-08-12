@@ -53,15 +53,15 @@ jobs:
 
       - name: Run non-stress C++ tests
         run: |
-          bazel test //tests/cpp/... \
-            --test_tag_filters="-stress" \
+          bazel test //core/... \
+            --test_tag_filters="-stress,-rdma,-multi_gpu" \
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed
 
       - name: Run stress C++ tests
         run: |
-          bazel test //tests/cpp/... \
+          bazel test //core/... \
             --test_tag_filters="stress" \
             --define use_fake_cuda=true \
             --test_output=errors \
