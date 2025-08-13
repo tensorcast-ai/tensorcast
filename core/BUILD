@@ -6,6 +6,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/checkpoint",
+        "//core/common",
         "//core/communicator",
         "//core/store",
     ],

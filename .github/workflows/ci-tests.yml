@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          apt-get update && apt-get install -y git
+          apt-get update && apt-get install -y git libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          apt-get update && apt-get install -y git
+          apt-get update && apt-get install -y git libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4

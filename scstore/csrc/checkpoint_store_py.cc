@@ -7,20 +7,7 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include <vector>
-
-// Undefine PyTorch/C10 logging macros to avoid redefinition warnings with Abseil
-#ifdef LOG
-#undef LOG
-#endif
-#ifdef DLOG
-#undef DLOG
-#endif
-#ifdef VLOG
-#undef VLOG
-#endif
-#ifdef LOG_IF
-#undef LOG_IF
-#endif
+#include "scstore/csrc/logging.h"
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -251,8 +238,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             LoadingHints hints;
             if (kwargs.contains("pinned_timeout_ms") && !kwargs["pinned_timeout_ms"].is_none()) {
               int t = kwargs["pinned_timeout_ms"].cast<int>();
-              if (t > 0)
+              if (t > 0) {
                 hints.pinned_timeout = std::chrono::milliseconds(t);
+              }
             }
 
             absl::StatusOr<ModelHandle> h_or;

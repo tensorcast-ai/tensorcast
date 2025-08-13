@@ -2,22 +2,10 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
 #include <torch/extension.h>
+#include "scstore/csrc/logging.h"
 
 #include <cstdint>
 
-#ifdef LOG
-#undef LOG
-#endif
-#ifdef DLOG
-#undef DLOG
-#endif
-#ifdef VLOG
-#undef VLOG
-#endif
-#ifdef LOG_IF
-#undef LOG_IF
-#endif
-#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/checkpoint/checkpoint.h"
@@ -149,7 +137,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming_wrapper(
     const std::vector<std::string>& tensor_names,
     std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>& tensor_data,
     const std::string& path,
-    py::dict config = py::dict()) {
+    const py::dict& config = py::dict()) {
   StreamingTensorWriter::Config writer_config;
 
   // Parse config from Python dict
