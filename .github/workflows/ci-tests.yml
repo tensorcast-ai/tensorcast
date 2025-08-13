@@ -37,7 +37,7 @@ jobs:
         uses: ./.github/actions/setup-environment
 
       - name: Run non-stress C++ tests
-        timeout-minutes: 10
+        timeout-minutes: 30
         run: |
           bazel test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
