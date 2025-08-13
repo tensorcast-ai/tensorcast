@@ -47,6 +47,7 @@ jobs:
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
     env:
       USE_FAKE_CUDA: "1"
+      CUDA_HOME: "/usr/local/cuda"
     permissions:
       contents: read
       pull-requests: read
