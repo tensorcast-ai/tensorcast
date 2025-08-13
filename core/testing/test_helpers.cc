@@ -23,7 +23,7 @@ std::vector<uint8_t> create_test_pattern(std::size_t size, uint8_t seed) {
 }
 
 bool verify_pattern(const void* data, std::size_t size, uint8_t seed) {
-  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  const auto* bytes = static_cast<const uint8_t*>(data);
   for (std::size_t i = 0; i < size; ++i) {
     if (bytes[i] != static_cast<uint8_t>((i + seed) % 256)) {
       LOG(ERROR) << "Mismatch at offset " << i << ": expected " << static_cast<int>((i + seed) % 256) << ", got "

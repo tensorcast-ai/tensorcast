@@ -467,7 +467,10 @@ cc_test(
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
-    tags = ["requires_cuda"],
+    tags = [
+        "requires_cuda",
+        "stress",
+    ],
     deps = [
         ":engine_lib",
         "//core/testing:catch_main",
