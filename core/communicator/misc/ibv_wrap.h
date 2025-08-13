@@ -8,8 +8,8 @@ extern "C" {
 #include <stdint.h>
 #include <unistd.h>
 
-#ifdef USE_MOCK_IBV
-#include "ibv_mock.h" // NOLINT
+#ifdef USE_FAKE_CUDA
+#include "core/communicator/misc/ibv_mock.h" // NOLINT
 }
 #else
 }
