@@ -19,44 +19,8 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update && apt-get install -y git
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.15.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-          bazelisk-version: 1.16.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.6.11"
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 50
-
-      - name: confirm repository checkout
-        run: |
-          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
-          git status
-
-      - name: Install Python dependencies
-        timeout-minutes: 30
-        run: uv sync --locked --all-extras --dev
-
-      - name: Build C++ core with fake CUDA
-        timeout-minutes: 10
-        run: |
-          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-environment
 
       - name: Run non-stress C++ tests
         timeout-minutes: 10
@@ -80,36 +44,15 @@ jobs:
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest
+    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
     env:
       USE_FAKE_CUDA: "1"
     permissions:
       contents: read
       pull-requests: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.15.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-          bazelisk-version: 1.16.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.6.11"
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install
-
-      - name: Install Python dependencies
-        run: uv sync --locked --all-extras --dev
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-environment
 
       - name: Build C++ extensions with fake CUDA
         run: |

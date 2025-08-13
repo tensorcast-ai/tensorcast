@@ -8,10 +8,22 @@
 #include <cstdint>
 #include <vector>
 
+// Undefine PyTorch/C10 logging macros to avoid redefinition warnings with Abseil
+#ifdef LOG
+#undef LOG
+#endif
+#ifdef DLOG
+#undef DLOG
+#endif
+#ifdef VLOG
+#undef VLOG
+#endif
+#ifdef LOG_IF
+#undef LOG_IF
+#endif
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmacro-redefined"
 #include "core/common/logging_init.h"
 #include "core/common/metrics/metrics_export.h"
 #include "core/store/checkpoint_store.h"
@@ -22,7 +34,6 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
-#pragma GCC diagnostic pop
 
 namespace py = pybind11;
 

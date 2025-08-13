@@ -4,6 +4,20 @@
 #include <torch/extension.h>
 
 #include <cstdint>
+
+#ifdef LOG
+#undef LOG
+#endif
+#ifdef DLOG
+#undef DLOG
+#endif
+#ifdef VLOG
+#undef VLOG
+#endif
+#ifdef LOG_IF
+#undef LOG_IF
+#endif
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/checkpoint/checkpoint.h"

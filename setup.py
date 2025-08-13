@@ -272,13 +272,14 @@ def copy_libscstore(debug: bool):
         os.remove(target)
 
 
+    print(f"Copying {dir_path + '/bazel-bin/core/libscstore.so'} to {target}")
     copyfile(
             dir_path + "/bazel-bin/core/libscstore.so",
             target
     )
 
 def copy_extensions():
-    files = glob.glob(dir_path + "/build/lib/scstore/*.so")
+    files = glob.glob(dir_path + "/build/lib.linux-*/scstore/*.so")
     for file in files:
         print(f"Copying {file} to {dir_path}/scstore/")
         copyfile(file, dir_path + "/scstore/" + os.path.basename(file))
@@ -477,12 +478,9 @@ if BUILD_EXTENSION:
                         "-std=c++20",
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
+                        "-Wno-macro-redefined",
+                        "-Wno-pragmas",
                     ]
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
                     + (
                         ["-DUSE_FAKE_CUDA"]
                         if USE_FAKE_CUDA
@@ -493,7 +491,6 @@ if BUILD_EXTENSION:
                     [
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
-                        "-Wno-macro-redefined",
                         "-Wl,--no-as-needed",
                         "-lscstore",
                         "-Wl,-rpath,$ORIGIN/lib",
@@ -505,11 +502,6 @@ if BUILD_EXTENSION:
                         "-Xlinker",
                         "-export-dynamic",
                     ]
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
                 ),
                 undef_macros=["NDEBUG"],
         )
@@ -530,7 +522,7 @@ cmd_class = {
 }
 
 if BuildExtension is not None:
-    cmd_class["build_ext"] = BuildExtension
+    cmd_class["build_ext"] = BuildExtensionCommand
 
 setup(
     name="scstore",
