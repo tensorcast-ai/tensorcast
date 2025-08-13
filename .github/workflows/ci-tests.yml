@@ -40,6 +40,10 @@ jobs:
       - name: Set up Python
         run: uv python install
 
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git
+
       - name: Install Python dependencies
         run: uv sync --locked --all-extras --dev
 
