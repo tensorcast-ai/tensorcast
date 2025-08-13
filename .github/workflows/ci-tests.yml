@@ -83,6 +83,11 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
+      - name: Create symlink to external packages
+        run: |
+          ln -s $(bazel info output_base)/external external
+          ls -l .venv/lib/python3.10/site-packages/cusparselt/lib/libcusparseLt.so.0
+
       - name: Build C++ extensions with fake CUDA
         run: |
           USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext

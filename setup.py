@@ -455,7 +455,7 @@ if BUILD_EXTENSION:
                 f"scstore.{name}",
                 sources,
                 library_dirs=[
-                    (dir_path + "/bazel-bin/core/"),
+                    (dir_path + "/scstore/lib"),
                 ],
                 libraries=["scstore"],
                 include_dirs=(

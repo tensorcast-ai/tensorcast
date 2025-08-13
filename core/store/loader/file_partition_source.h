@@ -52,10 +52,16 @@ class FilePartitionSource : public SeekableSource {
 
   absl::Status OpenFiles();
   void CloseFiles();
+  // Internal helper that assumes init_mutex_ is already held by caller.
+  void CloseFilesNoLock();
 
   absl::StatusOr<size_t> ReadFromPartition(size_t partition_idx, uint64_t partition_offset, void* dst, size_t bytes);
 
   Options options_;
+  // Guards initialization and all mutations to file_handles_, initialized_, and
+  // using_direct_io_ during OpenFiles()/CloseFiles(). Ensures read_at() sees a
+  // consistent snapshot after OpenFiles() returns.
+  absl::Mutex init_mutex_;
   std::vector<FileHandle> file_handles_;
 
   // Internal offset for sequential read() calls.
