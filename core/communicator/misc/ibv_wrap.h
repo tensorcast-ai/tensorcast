@@ -8,7 +8,7 @@ extern "C" {
 #include <stdint.h>
 #include <unistd.h>
 
-#ifdef __APPLE__
+#ifdef USE_MOCK_IBV
 #include "ibv_mock.h" // NOLINT
 }
 #else

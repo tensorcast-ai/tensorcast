@@ -60,11 +60,17 @@ sc_cc_library(
     name = "ibv_wrap_lib",
     srcs = ["misc/ibv_wrap.cc"],
     hdrs = ["misc/ibv_wrap.h"],
+    copts = select({
+        ":use_fake_cuda": ["-DUSE_FAKE_CUDA"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":common_lib",
-        ":ibv_mock_lib",
-    ],
+    ] + select({
+        ":use_fake_cuda": [":ibv_mock_lib"],
+        "//conditions:default": [],
+    }),
 )
 
 sc_header_only_library(
