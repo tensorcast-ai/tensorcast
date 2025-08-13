@@ -10,7 +10,7 @@ on:
 jobs:
   cpp-tests:
     name: C++ Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
     env:
       USE_FAKE_CUDA: "1"
@@ -57,7 +57,7 @@ jobs:
 
   python-tests:
     name: Python Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
     env:
       USE_FAKE_CUDA: "1"
