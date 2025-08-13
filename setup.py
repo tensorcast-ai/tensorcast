@@ -233,6 +233,9 @@ def build_libscstore_cxx11_abi(
         cmd.append("use_fake_cuda=true")
         print("Building with fake CUDA backend")
 
+    # get cuda path from CUDA_HOME or CUDA_PATH
+    cmd.append(f"--repo_env=CUDA_HOME={CUDA_DIR}")
+
     # if pre_cxx11_abi:
     #     cmd.append("--config=pre_cxx11_abi")
     #     print("using PRE CXX11 ABI build")
@@ -426,18 +429,12 @@ package_data = {}
 
 
 def cuda_dir():
-    return (
-        subprocess.check_output(
-            [BAZEL_EXE, "query", "@cuda//:cuda", "--output", "location"]
-        )
-        .decode("ascii")
-        .strip()
-        .split("/BUILD.bazel")[0]
-    )
+    return os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
 
 if BUILD_EXTENSION:
     CUDA_DIR = cuda_dir()
-    os.environ["CUDA_HOME"] = CUDA_DIR
+    if CUDA_DIR:
+        os.environ["CUDA_HOME"] = CUDA_DIR
 else:
     CUDA_DIR = None
 
