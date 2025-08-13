@@ -10,7 +10,7 @@ on:
 jobs:
   cpp-tests:
     name: C++ Tests
-    runs-on: ubuntu-22.04
+    runs-on: nvidia/cuda:12.4.0-devel-ubuntu22.04
     env:
       USE_FAKE_CUDA: "1"
     permissions:
@@ -45,12 +45,6 @@ jobs:
 
       - name: Install Python dependencies
         run: uv sync --locked --all-extras --dev
-
-      - uses: Jimver/cuda-toolkit@v0.2.24
-        id: cuda-toolkit
-        with:
-          cuda: '12.4.0'
-          linux-local-args: '["--toolkit","--defaultroot=/home/runner/cuda-12.4"]'
 
       - name: Build C++ core with fake CUDA
         run: |
