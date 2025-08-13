@@ -18,6 +18,10 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -39,10 +43,6 @@ jobs:
 
       - name: Set up Python
         run: uv python install
-
-      - name: Install system dependencies
-        run: |
-          apt-get update && apt-get install -y git
 
       - name: 🧐 Verify Environment and Working Directory
         run: |
