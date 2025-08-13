@@ -48,6 +48,7 @@ jobs:
         run: |
           pwd
           ls -la
+          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
           git status
           git rev-parse --show-toplevel
 
