@@ -19,6 +19,20 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: confirm repository checkout
+        run: |
+          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
+          git status
+
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
@@ -52,6 +66,20 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: confirm repository checkout
+        run: |
+          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
+          git status
+
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
