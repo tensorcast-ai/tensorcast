@@ -44,19 +44,6 @@ jobs:
       - name: Set up Python
         run: uv python install
 
-      - name: 🧐 Verify Environment and Working Directory
-        run: |
-          echo "--- Current Working Directory ---"
-          pwd
-          echo "--- Content of Current Directory ---"
-          ls -la
-          echo "--- Expected Workspace Directory ---"
-          echo "$GITHUB_WORKSPACE"
-          echo "--- Content of Workspace Directory ---"
-          ls -la "$GITHUB_WORKSPACE"
-          echo "--- Git Status Check ---"
-          git status
-
       - name: Debugging Git Status
         run: |
           pwd
