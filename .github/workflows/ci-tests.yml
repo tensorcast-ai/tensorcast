@@ -44,6 +44,26 @@ jobs:
         run: |
           apt-get update && apt-get install -y git
 
+      - name: 🧐 Verify Environment and Working Directory
+        run: |
+          echo "--- Current Working Directory ---"
+          pwd
+          echo "--- Content of Current Directory ---"
+          ls -la
+          echo "--- Expected Workspace Directory ---"
+          echo "$GITHUB_WORKSPACE"
+          echo "--- Content of Workspace Directory ---"
+          ls -la "$GITHUB_WORKSPACE"
+          echo "--- Git Status Check ---"
+          git status
+
+      - name: Debugging Git Status
+        run: |
+          pwd
+          ls -la
+          git status
+          git rev-parse --show-toplevel
+
       - name: Install Python dependencies
         run: uv sync --locked --all-extras --dev
 
