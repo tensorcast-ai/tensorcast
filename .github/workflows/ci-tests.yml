@@ -71,9 +71,6 @@ jobs:
             --test_summary=detailed \
             --test_timeout=600
 
-      - name: Minimize uv cache
-        run: uv cache prune --ci
-
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest-m
@@ -136,6 +133,3 @@ jobs:
       - name: Run type checking
         run: |
           uv run mypy ./scstore
-
-      - name: Minimize uv cache
-        run: uv cache prune --ci

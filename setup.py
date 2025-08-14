@@ -219,13 +219,16 @@ def build_proto():
     if status_code != 0:
         sys.exit(status_code)
 
-    # check file size
-    file_path = "/__w/stepcast-store/stepcast-store/bazel-bin/proto/global_store_grpc/proto/global_store.grpc.pb.h"
-    if os.path.exists(file_path):
-        file_size = os.path.getsize(file_path)
-        print(f"file size: {file_size} bytes")
-    else:
-        print(f"file not found: {file_path}")
+    target_dir = os.path.join(dir_path, "scstore/csrc/proto")
+    files = ["global_store.grpc.pb.h", "global_store.pb.h"]
+    for file in files:
+        source_file = os.path.join(dir_path, "bazel-bin/proto/global_store_grpc/proto", file)
+        target_file = os.path.join(target_dir, file)
+        print(f"copying {source_file} to {target_file}")
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+
+        copyfile(source_file, target_file)
 
 
 def build_libscstore_cxx11_abi(
@@ -332,10 +335,9 @@ class BuildExtensionCommand(BuildExtension):
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         # Ensure generated proto headers exist before compiling extensions
+        build_proto()
         build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
-        build_proto()
         copy_libscstore(debug=True)
-        build_proto()
         BuildExtension.run(self)
         copy_extensions()
 
@@ -489,7 +491,6 @@ if BUILD_EXTENSION:
                         dir_path + "/external/abseil-cpp+",
                         dir_path + "/external/grpc+/include",
                         dir_path + "/bazel-bin/proto/global_store_grpc_cpp_pb",
-                        dir_path + "/bazel-bin/proto/global_store_grpc",
                         dir_path + "/external/protobuf+/src",
                         dir_path + "/external/gsl+",
                     ]
