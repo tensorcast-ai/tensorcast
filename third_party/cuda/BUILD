@@ -76,13 +76,6 @@ cc_library(
 )
 
 cc_library(
-    name = "cupti",
-    srcs = [
-        "extras/CUPTI/lib64/libcupti.so.12",
-    ],
-)
-
-cc_library(
     name = "cusparse",
     srcs = [
         "lib64/libcusparse.so.12",

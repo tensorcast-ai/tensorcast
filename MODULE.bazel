@@ -57,3 +57,9 @@ new_local_repository(
     build_file = "@//third_party/cusparselt:BUILD",
     path = ".venv/lib/python3.10/site-packages/cusparselt",
 )
+
+new_local_repository(
+    name = "cupti",
+    build_file = "@//third_party/cupti:BUILD",
+    path = ".venv/lib/python3.10/site-packages/nvidia/cuda_cupti",
+)
