@@ -46,6 +46,7 @@ jobs:
 
       - name: Run non-stress C++ tests
         timeout-minutes: 30
+        shell: bash
         run: |
           tools/bazel.sh test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
@@ -55,6 +56,7 @@ jobs:
 
       - name: Run stress C++ tests
         timeout-minutes: 30
+        shell: bash
         run: |
           tools/bazel.sh test //core/... \
             --test_tag_filters="stress" \
@@ -98,7 +100,17 @@ jobs:
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
-          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
+          VALUE="${{ secrets.GCLOUD_SERVICE_ACCOUNT }}"
+          VALUE_STRIPPED=$(printf '%s' "$VALUE" | sed -e 's/^[[:space:]]*//')
+          case "$VALUE_STRIPPED" in
+            \{*)
+              printf '%s' "$VALUE" > credentials.json
+              ;;
+            *)
+              printf '%s' "$VALUE" | base64 -d > credentials.json
+              ;;
+          esac
+          tr -d '\r' < credentials.json > credentials.json.tmp && mv credentials.json.tmp credentials.json
 
       - name: Build C++ extensions with fake CUDA
         run: |
