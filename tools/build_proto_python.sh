@@ -23,3 +23,20 @@ echo "Python protobuf files generated successfully!"
 # Fix import paths in generated *_pb2_grpc.py files
 sed -i 's/^import store_daemon_pb2/import scstore.proto.store_daemon_pb2/' scstore/proto/store_daemon_pb2_grpc.py
 sed -i 's/^import global_store_pb2/import scstore.proto.global_store_pb2/' scstore/proto/global_store_pb2_grpc.py
+
+# get directory of this script
+current_dir=$(dirname "$0")
+root_dir=$(dirname "$current_dir")
+# build proto
+# build proto
+if ! $root_dir/tools/bazel.sh build //proto:global_store_grpc; then
+    echo "Error: Failed to build proto target" >&2
+    exit 1
+fi
+
+# copy proto files to scstore/proto
+if ! cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/scstore/csrc/proto; then
+    echo "Error: Failed to copy proto header files" >&2
+    exit 1
+fi
+cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/scstore/csrc/proto

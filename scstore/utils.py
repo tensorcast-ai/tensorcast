@@ -39,7 +39,6 @@ def send_module_buffers_to_device(
                     set_module_buffer_to_device(module, buffer_name, device_id)
 
 
-
 def get_total_parameter_size(module):
     total_param_size = 0
     for param in module.parameters():

@@ -68,6 +68,7 @@ from scstore._C import (  # noqa: E402
 def _get_uuid():
     return str(uuid.uuid4())
 
+
 def calculate_tensor_device_offsets(
     tensor_index: dict[str, tuple[int, int]],
     device_id: int | torch.device = 0,

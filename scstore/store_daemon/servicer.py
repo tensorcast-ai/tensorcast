@@ -852,7 +852,18 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             indices = list(request.chunk_indices)
 
             # Call checkpoint store to lock chunks
-            status = self.checkpoint_store.lock_chunks(request.model_id, indices)
+            from scstore import _checkpoint_store as _cs
+
+            dev = _cs.DeviceKey()
+            dev.type = _cs.DeviceType.NONE
+            dev.ordinal = -1
+            dev.uuid = ""
+            inst_key = _cs.InstanceKey()
+            inst_key.model_id = request.model_id
+            inst_key.device = dev
+            inst_key.replica = 0
+
+            status = self.checkpoint_store.lock_chunks(inst_key, indices)
 
             if status != 0:
                 context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
@@ -867,7 +878,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             # Store the lock information for later unlock
             if not hasattr(self, "_active_chunk_locks"):
                 self._active_chunk_locks = {}
-            self._active_chunk_locks[lock_token] = (request.model_id, indices)
+            self._active_chunk_locks[lock_token] = (inst_key, indices)
 
             logger.info(
                 f"Locked {len(indices)} chunks for model {request.model_id}, token: {lock_token}"
@@ -899,20 +910,20 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 context.set_details(f"Lock token not found: {request.lock_token}")
                 return store_daemon_pb2.UnlockChunksResponse()
 
-            model_id, indices = lock_info
+            inst_key, indices = lock_info
 
             # Call checkpoint store to unlock chunks
             # Note: We set copied_gpu=False here as this is called by Global Store
             # The actual GPU copy status will be updated by the target StoreDaemon
-            status = self.checkpoint_store.unlock_chunks(model_id, indices, False)
+            status = self.checkpoint_store.unlock_chunks(inst_key, indices, False)
 
             if status != 0:
                 logger.warning(
-                    f"Failed to unlock chunks for model {model_id}, token: {request.lock_token}"
+                    f"Failed to unlock chunks for model {inst_key.model_id}, token: {request.lock_token}"
                 )
             else:
                 logger.info(
-                    f"Unlocked {len(indices)} chunks for model {model_id}, token: {request.lock_token}"
+                    f"Unlocked {len(indices)} chunks for model {inst_key.model_id}, token: {request.lock_token}"
                 )
 
             return store_daemon_pb2.UnlockChunksResponse()
