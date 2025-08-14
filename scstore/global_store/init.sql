@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS chunk_directory (
 
     -- Metadata
     last_update_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    node_load_ratio FLOAT DEFAULT 0.0,  -- For intelligent source selection
+    -- For intelligent source selection
+    node_load_ratio FLOAT DEFAULT 0.0,
 
     -- InstanceKey uniquely identifies a model instance
     PRIMARY KEY (model_id, device_uuid, replica, chunk_idx, node_id)

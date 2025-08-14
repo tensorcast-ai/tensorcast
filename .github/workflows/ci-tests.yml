@@ -7,14 +7,24 @@ on:
     branches: [ main, develop ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cpp-tests:
     name: C++ Tests
     runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
     env:
       USE_FAKE_CUDA: "1"
       CUDA_HOME: "/usr/local/cuda"
+      UV_CACHE_DIR: /tmp/.uv-cache
+      BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
+      GOOGLE_APPLICATION_CREDENTIALS: credentials.json
     permissions:
       contents: read
       pull-requests: read
@@ -33,13 +43,22 @@ jobs:
           git config --global --add safe.directory /__w/stepcast-store/stepcast-store
           git status
 
+      - name: Create credentials file
+        run: |
+          printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
+
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
+      - name: Create symlink to external packages
+        run: |
+          ln -s $(tools/bazel.sh info output_base)/external external
+
       - name: Run non-stress C++ tests
         timeout-minutes: 30
+        shell: bash
         run: |
-          bazel test //core/... \
+          tools/bazel.sh test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
             --define use_fake_cuda=true \
             --test_output=errors \
@@ -47,8 +66,9 @@ jobs:
 
       - name: Run stress C++ tests
         timeout-minutes: 30
+        shell: bash
         run: |
-          bazel test //core/... \
+          tools/bazel.sh test //core/... \
             --test_tag_filters="stress" \
             --define use_fake_cuda=true \
             --test_output=errors \
@@ -59,9 +79,15 @@ jobs:
     name: Python Tests
     runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
     env:
       USE_FAKE_CUDA: "1"
       CUDA_HOME: "/usr/local/cuda"
+      UV_CACHE_DIR: /tmp/.uv-cache
+      BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
+      GOOGLE_APPLICATION_CREDENTIALS: credentials.json
     permissions:
       contents: read
       pull-requests: read
@@ -80,13 +106,16 @@ jobs:
           git config --global --add safe.directory /__w/stepcast-store/stepcast-store
           git status
 
+      - name: Create credentials file
+        run: |
+          printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
+
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
       - name: Create symlink to external packages
         run: |
-          ln -s $(bazel info output_base)/external external
-          ls -l .venv/lib/python3.10/site-packages/cusparselt/lib/libcusparseLt.so.0
+          ln -s $(tools/bazel.sh info output_base)/external external
 
       - name: Build C++ extensions with fake CUDA
         run: |

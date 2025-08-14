@@ -34,6 +34,7 @@ def _register_single_replica(gs, model: str, node_id: str, *, max_concurrency: i
         node_address="127.0.0.1",
         node_port=9000,
         remote_memory_keys=[f"key_{node_id}"],
+        buffer_sizes=[2 * 1024 * 1024],
         memory_size=2 * 1024 * 1024,
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,

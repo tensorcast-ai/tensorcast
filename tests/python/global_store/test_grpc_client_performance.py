@@ -53,7 +53,7 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
                     mem_pool_total_size=10737418240,  # 10GB
                     mem_pool_available_size=5368709120 + i * 1048576,  # 5GB + i MB
                     accepting_new_requests=i % 3 != 0,  # 2/3 active
-                    last_heartbeat_timestamp=int(time.time() * 1000) - i * 100,
+                    last_heartbeat_timestamp=int(time.time()) - i,
                 )
             )
 
@@ -66,13 +66,18 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
             # Each model has 1-5 replicas
             num_replicas = 1 + (i % 5)
             for j in range(num_replicas):
-                memory_type = j % 3  # GPU, RAM, DISK
+                # Map to enum values explicitly for type safety
+                memory_type = [
+                    global_store_pb2.MemoryType.GPU,
+                    global_store_pb2.MemoryType.RAM,
+                    global_store_pb2.MemoryType.DISK,
+                ][j % 3]
                 replicas.append(
                     global_store_pb2.MemoryInfo(
                         memory_type=memory_type,
                         memory_size=1073741824 * (1 + j),  # 1-5 GB
                         device_id=j
-                        if memory_type == 0
+                        if memory_type == global_store_pb2.MemoryType.GPU
                         else 0,  # device_id must be non-negative
                         node_id=f"node-{j % 10}",
                         node_address=f"192.168.1.{10 + j}",

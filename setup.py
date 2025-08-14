@@ -202,12 +202,33 @@ else:
     __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
 
 
-BAZEL_EXE = which("bazelisk")
+BAZEL_EXE = os.path.join(dir_path, "tools", "bazel.sh")
 
-if BAZEL_EXE is None:
-    BAZEL_EXE = which("bazel")
+if not os.path.exists(BAZEL_EXE):
+    BAZEL_EXE = which("bazelisk") or which("bazel")
     if BAZEL_EXE is None and BUILD_EXTENSION:
-        sys.exit("Could not find bazel in PATH")
+        sys.exit("Could not find bazel wrapper or bazel in PATH")
+
+
+# New: ensure proto headers are generated before compiling extensions
+
+def build_proto():
+    cmd = [BAZEL_EXE, "build", "//proto:global_store_grpc"]
+    print(f"building proto target {cmd=}")
+    status_code = subprocess.run(cmd).returncode
+    if status_code != 0:
+        sys.exit(status_code)
+
+    target_dir = os.path.join(dir_path, "scstore/csrc/proto")
+    files = ["global_store.grpc.pb.h", "global_store.pb.h"]
+    for file in files:
+        source_file = os.path.join(dir_path, "bazel-bin/proto/global_store_grpc/proto", file)
+        target_file = os.path.join(target_dir, file)
+        print(f"copying {source_file} to {target_file}")
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+
+        copyfile(source_file, target_file)
 
 
 def build_libscstore_cxx11_abi(
@@ -313,6 +334,8 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
+        # Ensure generated proto headers exist before compiling extensions
+        build_proto()
         build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
         copy_libscstore(debug=True)
         BuildExtension.run(self)
@@ -370,6 +393,8 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
+        # Ensure generated proto headers exist before compiling extensions
+        build_proto()
         build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
         gen_version_file()
         copy_libscstore(debug=True)

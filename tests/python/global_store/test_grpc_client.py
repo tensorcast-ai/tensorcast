@@ -41,7 +41,7 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
                 mem_pool_total_size=10737418240,  # 10GB
                 mem_pool_available_size=5368709120,  # 5GB
                 accepting_new_requests=True,
-                last_heartbeat_timestamp=int(time.time() * 1000),
+                last_heartbeat_timestamp=int(time.time()),
             ),
             global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
                 worker_id="worker-2",
@@ -52,7 +52,7 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
                 mem_pool_total_size=10737418240,  # 10GB
                 mem_pool_available_size=8589934592,  # 8GB
                 accepting_new_requests=False,
-                last_heartbeat_timestamp=int(time.time() * 1000) - 10000,
+                last_heartbeat_timestamp=int(time.time()) - 10,
             ),
         ]
 

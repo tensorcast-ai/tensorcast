@@ -29,21 +29,44 @@ logger = init_logger(__name__)
 
 
 class WorkerInfoWrapper:
-    """Wrapper for WorkerInfo that normalizes timestamp to datetime."""
+    """Wrapper for WorkerInfo with strict timestamp normalization.
+
+    This wrapper enforces that `last_heartbeat_timestamp` provided by the server
+    is a Unix timestamp in SECONDS, as specified in the proto definition.
+
+    Rules:
+    - Accept only values in [0, 4102444800] (0 or a sensible seconds-based epoch).
+      4102444800 corresponds to 2100-01-01 UTC to catch millisecond inputs.
+    - Value 0 means "unknown/not set".
+    - Expose both the raw seconds via `last_heartbeat_timestamp` (int) and
+      a convenience `last_heartbeat_datetime` (Optional[datetime]).
+    - Any value outside the valid range raises ValueError.
+    """
 
     def __init__(
         self, worker_info: global_store_pb2.ListActiveWorkersResponse.WorkerInfo
     ):
         self._worker_info = worker_info
-        # Convert Unix timestamp to datetime
-        self._last_heartbeat = datetime.fromtimestamp(
-            worker_info.last_heartbeat_timestamp, tz=timezone.utc
-        )
+
+        raw_ts = int(worker_info.last_heartbeat_timestamp)
+
+        # Validate strictly against seconds-based range; reject millisecond-style values
+        # 0 is allowed (unknown / not set)
+        upper_bound_seconds = 4102444800  # 2100-01-01 UTC
+        if raw_ts < 0 or raw_ts > upper_bound_seconds:
+            raise ValueError(
+                f"Invalid last_heartbeat_timestamp: {raw_ts}. Expected Unix seconds in [0, {upper_bound_seconds}]"
+            )
+
+        self._last_heartbeat_seconds: int = raw_ts
+        self._last_heartbeat_dt: Optional[datetime]
+        if raw_ts == 0:
+            self._last_heartbeat_dt = None
+        else:
+            self._last_heartbeat_dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
 
     def __getattr__(self, name: str):
         """Forward all other attributes to the underlying WorkerInfo."""
-        if name == "last_heartbeat_timestamp":
-            return self._last_heartbeat
         return getattr(self._worker_info, name)
 
     @property
@@ -59,8 +82,14 @@ class WorkerInfoWrapper:
         return self._worker_info.mem_pool_available_size
 
     @property
-    def last_heartbeat_timestamp(self) -> datetime:
-        return self._last_heartbeat
+    def last_heartbeat_timestamp(self) -> int:
+        """Return the last heartbeat as Unix seconds (strict)."""
+        return self._last_heartbeat_seconds
+
+    @property
+    def last_heartbeat_datetime(self) -> Optional[datetime]:
+        """Convenience accessor for the last heartbeat as datetime (UTC)."""
+        return self._last_heartbeat_dt
 
 
 @dataclass
@@ -88,7 +117,7 @@ class GlobalStoreClient:
         Parameters
         ----------
         config : GlobalStoreClientConfig
-            Client configuration
+                Client configuration
         """
         self.config = config
         self._channel: Optional[grpc.Channel] = None
@@ -188,12 +217,12 @@ class GlobalStoreClient:
         Parameters
         ----------
         include_unavailable : bool
-            Whether to include workers not accepting new requests
+                Whether to include workers not accepting new requests
 
         Returns
         -------
         list[WorkerInfoWrapper]
-            List of worker information with normalized timestamps
+                List of worker information with normalized timestamps
         """
 
         def _call():
@@ -203,7 +232,7 @@ class GlobalStoreClient:
             response = self._stub.ListActiveWorkers(  # type: ignore[union-attr]
                 request, timeout=self.config.timeout
             )
-            # Wrap each worker info to normalize timestamps
+            # Wrap each worker info to normalize and validate timestamps
             return [WorkerInfoWrapper(worker) for worker in response.workers]
 
         return await self._execute_with_retry(_call) or []
@@ -222,18 +251,18 @@ class GlobalStoreClient:
         Parameters
         ----------
         model_name : str, optional
-            Filter by model name
+                Filter by model name
         node_id : str, optional
-            Filter by node ID
+                Filter by node ID
         memory_type : MemoryType, optional
-            Filter by memory type (GPU, RAM, DISK)
+                Filter by memory type (GPU, RAM, DISK)
         device_id : int, optional
-            Filter by device ID
+                Filter by device ID
 
         Returns
         -------
         dict[str, list[MemoryInfo]]
-            Map of model names to their replica memory info
+                Map of model names to their replica memory info
         """
 
         def _call():
@@ -268,12 +297,12 @@ class GlobalStoreClient:
         Parameters
         ----------
         model_name : str
-            Name of the model
+                Name of the model
 
         Returns
         -------
         ModelInfo or None
-            Model information if found
+                Model information if found
         """
 
         def _call():
@@ -303,7 +332,7 @@ class GlobalStoreClient:
         Returns
         -------
         list[dict]
-            List of active transport operations
+                List of active transport operations
         """
         # TODO: Implement when ListTransports RPC is available
         logger.warning("get_active_transports not implemented - proto needs extension")
@@ -317,7 +346,7 @@ class GlobalStoreClient:
         Returns
         -------
         dict
-            Summary statistics including worker count, replica count, etc.
+                Summary statistics including worker count, replica count, etc.
         """
         # Get workers
         workers = await self.list_active_workers(include_unavailable=True)
@@ -364,12 +393,12 @@ async def get_global_store_client(config: GlobalStoreClientConfig) -> GlobalStor
     Parameters
     ----------
     config : GlobalStoreClientConfig
-        Client configuration
+            Client configuration
 
     Returns
     -------
     GlobalStoreClient
-        The singleton client instance
+            The singleton client instance
     """
     global _client
 

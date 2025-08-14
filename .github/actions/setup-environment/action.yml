@@ -17,6 +17,10 @@ runs:
       with:
         version: "0.6.11"
         enable-cache: true
+        prune-cache: false
+        cache-dependency-glob: |
+          **/pyproject.toml
+          **/uv.lock
 
     - name: Set up Python
       shell: bash
@@ -25,3 +29,8 @@ runs:
     - name: Install Python dependencies
       shell: bash
       run: uv sync --locked --all-extras --dev
+
+    - name: Do something if the cache was restored
+      if: steps.setup-uv.outputs.cache-hit == 'true'
+      shell: bash
+      run: echo "Cache was restored"

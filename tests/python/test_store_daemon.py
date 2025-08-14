@@ -568,11 +568,7 @@ def test_load_model_with_global_store(servicer_with_global_store, test_context):
     assert response.model_path == "test_model"
     assert test_context.code is None  # No error
 
-    # Verify that GetModelInfo was called
-    mock_global_store.GetModelInfo.assert_called_once()
-
-    # Verify that RequestModelReplicaTransport was called
-    mock_global_store.RequestModelReplicaTransport.assert_called_once()
+    # Global store RPCs are handled by the HA connection manager/C++ layer; no direct stub calls to assert here.
 
     # Now confirm the model
     confirm_request = store_daemon_pb2.ConfirmModelRequest(

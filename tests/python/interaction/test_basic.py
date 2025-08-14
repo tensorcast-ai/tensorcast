@@ -167,7 +167,8 @@ def test_remote_load_between_two_daemons(global_store_service):
         model_name = "mistral-7b.ckpt"
 
         # Create dummy model file on daemon A's local storage so that disk load succeeds
-        create_dummy_model(daemon_a.config.server.storage_path, model_name)
+        # Use 4 MiB to match the registered buffer size for P2P fallback consistency
+        create_dummy_model(daemon_a.config.server.storage_path, model_name, size_bytes=4 * 1024 * 1024)
 
         device_uuid_a = str(uuid.uuid4())
         replica_uuid_a = str(uuid.uuid4())
@@ -208,14 +209,32 @@ def test_remote_load_between_two_daemons(global_store_service):
         worker_resp_a = global_store_service.RegisterWorker(worker_req_a, ctx)
         assert worker_resp_a.status == global_store_pb2.Status.OK
 
+        # Export remote memory keys from daemon A's checkpoint store for P2P
+        from scstore import _checkpoint_store as _cs
+
+        dev = _cs.DeviceKey()
+        dev.type = _cs.DeviceType.GPU
+        dev.ordinal = 0
+        dev.uuid = ""
+
+        inst_key = _cs.InstanceKey()
+        inst_key.model_id = model_name
+        inst_key.device = dev
+        inst_key.replica = 0
+
+        comm_info = daemon_a.checkpoint_store.enable_remote_instance_access(
+            inst_key, _cs.ModelLocation.GPU
+        )
+
         mem_info = global_store_pb2.MemoryInfo(
             node_id="daemon_a",
             node_address="127.0.0.1",
-            node_port=daemon_a._grpc_port,
-            remote_memory_keys=["key_a"],
-            memory_size=4 * 1024 * 1024,
+            node_port=daemon_a._p2p_port,
+            remote_memory_keys=list(comm_info.remote_memory_keys),
+            buffer_sizes=list(comm_info.buffer_sizes),
+            memory_size=comm_info.model_size,
             memory_type=global_store_pb2.MemoryType.GPU,
-            device_id=0,
+            device_id=dev.ordinal,
         )
         reg_req = global_store_pb2.RegisterModelReplicaRequest(
             model_name=model_name,
@@ -251,6 +270,10 @@ def test_remote_load_between_two_daemons(global_store_service):
         )
         assert resp_b.mem_handle.cuda_ipc_handle != b""
 
+        # Ensure P2P path was used: GS recorded exactly one in-progress that is now completed
+        assert global_store_service.transport_repository.count_with_filters("in_progress") == 0
+        assert global_store_service.transport_repository.count_with_filters("completed") >= 1
+
         # Confirming should call CompleteModelReplicaTransport underneath.  We don't
         # test that directly but ensure confirmation passes.
         confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
@@ -270,11 +293,11 @@ def test_remote_load_between_two_daemons(global_store_service):
         # Replica count may include duplicates due to automatic registration from
         # both daemons.  Ensure *at least one* replica reports the expected size
         # (4 MiB) that we manually registered for Daemon-A.
-        expected_size = 4 * 1024 * 1024
+        expected_size = mem_info.memory_size
         assert any(
             rep.memory_size == expected_size
             for rep in model_info.model_info.available_replicas
-        ), "Expected replica with 4 MiB memory_size not found"
+        ), f"Expected replica with {expected_size} bytes memory_size not found"
 
         # All in-flight transports should be completed after confirmation – the
         # FakeGlobalStore keeps an internal dict, which must now be empty.
@@ -285,6 +308,132 @@ def test_remote_load_between_two_daemons(global_store_service):
             )
             == 0
         )
+
+    finally:
+        # Clean up daemons
+        from tests.python.conftest import cleanup_background_threads
+
+        for daemon in daemons_to_cleanup:
+            if daemon.lifecycle_worker:
+                daemon.lifecycle_worker.stop()
+            if daemon.connection_manager is not None:
+                with contextlib.suppress(Exception):  # noqa: BLE001
+                    daemon.connection_manager.stop()
+            cleanup_background_threads(daemon)
+
+
+def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
+    """Scenario: P2P load fails, daemon falls back to disk and succeeds.
+
+    We register a remote replica in the Global Store with a non-existent
+    remote-memory key so that the P2P transfer fails.  Daemon-B has the
+    model on its local disk, so it must fall back to disk-loading and
+    still return ALLOCATED.
+    """
+
+    daemons_to_cleanup = []
+    try:
+        # ------------------------------------------------------------------
+        # Step 1.  Spin up Daemon A (source) but do NOT export remote memory
+        # ------------------------------------------------------------------
+        daemon_a = _make_servicer(enable_global=True, gs_addr=global_store_service._address)
+        daemons_to_cleanup.append(daemon_a)
+        ctx = _MockContext()
+
+        model_name = "falcon-7b.ckpt"
+
+        # Register worker A
+        worker_req_a = global_store_pb2.RegisterWorkerRequest(
+            node_id="daemon_a_bad",
+            node_address="127.0.0.1",
+            grpc_port=daemon_a._grpc_port,
+            p2p_port=daemon_a._p2p_port,
+            mem_pool_total_size=16 * 1024 * 1024,
+            mem_pool_available_size=16 * 1024 * 1024,
+        )
+        worker_resp_a = global_store_service.RegisterWorker(worker_req_a, ctx)
+        assert worker_resp_a.status == global_store_pb2.Status.OK
+
+        # Register a replica with a non-existent remote key to force P2P failure
+        mem_info_bad = global_store_pb2.MemoryInfo(
+            node_id="daemon_a_bad",
+            node_address="127.0.0.1",
+            node_port=daemon_a._p2p_port,
+            remote_memory_keys=["missing_key"],
+            buffer_sizes=[4 * 1024 * 1024],
+            memory_size=4 * 1024 * 1024,
+            memory_type=global_store_pb2.MemoryType.GPU,
+            device_id=0,
+        )
+        reg_req = global_store_pb2.RegisterModelReplicaRequest(
+            model_name=model_name,
+            mem_info=mem_info_bad,
+            max_concurrency=1,
+            worker_id=worker_resp_a.worker_id,
+        )
+        rep_resp = global_store_service.RegisterModelReplica(reg_req, ctx)
+        assert rep_resp.status == global_store_pb2.Status.OK
+
+        # Force the Global Store to time out transport requests so the daemon
+        # immediately falls back to disk without attempting a P2P allocation.
+        from scstore.global_store.exceptions import TimeoutError as _GSTimeout
+        _orig_request_transport = global_store_service.service.transport_service.request_transport
+        def _always_timeout(*args, **kwargs):
+            raise _GSTimeout("forced timeout for test")
+        global_store_service.service.transport_service.request_transport = _always_timeout
+
+        try:
+            # ------------------------------------------------------------------
+            # Step 2.  Daemon B attempts remote load of the same model
+            #          P2P will fail fast (timeout); ensure disk fallback succeeds
+            # ------------------------------------------------------------------
+            daemon_b = _make_servicer(enable_global=True, gs_addr=global_store_service._address)
+            daemons_to_cleanup.append(daemon_b)
+            ctx_b = _MockContext()
+
+            # Prepare local disk so fallback path can succeed
+            create_dummy_model(daemon_b.config.server.storage_path, model_name)
+
+            load_req_b = store_daemon_pb2.LoadModelRequest(
+                model_path=model_name,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                device_uuid=str(uuid.uuid4()),
+                replica_uuid=str(uuid.uuid4()),
+                size_bytes=1 * 1024 * 1024,
+            )
+            resp_b = daemon_b.LoadModel(load_req_b, ctx_b)
+
+            # Allocation should succeed via disk fallback, returning ALLOCATED
+            assert (
+                resp_b.status
+                == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            )
+            assert resp_b.mem_handle.cuda_ipc_handle != b""
+
+            # Ensure no P2P transport record was created due to forced timeout
+            assert global_store_service.transport_repository.count_with_filters("in_progress") == 0
+            assert global_store_service.transport_repository.count_with_filters("completed") == 0
+
+            # Confirm the model to complete the lifecycle
+            confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
+                model_path=model_name,
+                replica_uuid=load_req_b.replica_uuid,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+            )
+            conf_resp_b = daemon_b.ConfirmModel(confirm_req_b, ctx_b)
+            assert conf_resp_b.code == 0
+        finally:
+            # Restore transport service behaviour
+            global_store_service.service.transport_service.request_transport = _orig_request_transport
+
+        # Confirm the model to complete the lifecycle
+        confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
+            model_path=model_name,
+            replica_uuid=load_req_b.replica_uuid,
+            target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        )
+        conf_resp_b = daemon_b.ConfirmModel(confirm_req_b, ctx_b)
+        assert conf_resp_b.code == 0
 
     finally:
         # Clean up daemons

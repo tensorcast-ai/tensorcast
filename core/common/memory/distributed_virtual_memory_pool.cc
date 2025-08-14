@@ -165,7 +165,8 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
       // them HOT after the unlock dance, allowing the system to reclaim them if
       // necessary. For other error types we still perform a full rollback.
       if (err == ENOMEM || err == EPERM) {
-        PLOG(ERROR) << "mlock failed for chunk " << i << " — proceeding without page lock";
+        // Use WARNING level instead of ERROR for expected failures in CI/container environments
+        PLOG(WARNING) << "mlock failed for chunk " << i << " — proceeding without page lock";
       } else {
         // Failed to lock pages, rollback this chunk and any previously locked ones.
         meta.state.store(expected, std::memory_order_release); // revert to previous state for this chunk
