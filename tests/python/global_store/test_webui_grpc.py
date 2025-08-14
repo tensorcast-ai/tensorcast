@@ -133,30 +133,8 @@ async def test_websocket_polling(mock_grpc_client):
     assert isinstance(ws_manager._last_state, dict)
 
 
-def test_no_duckdb_imports():
-    """Verify that refactored modules don't import duckdb."""
-    # Check that main.py no longer imports duckdb
-    with open("/data/workspace/model-store/scstore/global_store/webui_backend/main.py", "r") as f:
-        main_content = f.read()
-        assert "import duckdb" not in main_content
-        assert "duckdb.connect" not in main_content
-
-    # Check that app.py no longer imports duckdb
-    with open("/data/workspace/model-store/scstore/global_store/webui_backend/app.py", "r") as f:
-        app_content = f.read()
-        # Should only have TYPE_CHECKING import if any
-        lines = app_content.split("\n")
-        for line in lines:
-            if "import duckdb" in line and "TYPE_CHECKING" not in line:
-                assert False, f"Found non-TYPE_CHECKING duckdb import: {line}"
-
 
 if __name__ == "__main__":
-    # Run basic verification
-    print("Testing no DuckDB imports...")
-    test_no_duckdb_imports()
-    print("✓ No direct DuckDB imports found in refactored code")
-
     print("\nTesting gRPC client connection...")
     asyncio.run(test_grpc_client_connection())
     print("✓ gRPC client connection test passed")

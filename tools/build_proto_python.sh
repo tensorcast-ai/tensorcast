@@ -9,7 +9,7 @@ uv run python -m grpc_tools.protoc \
     --pyi_out=scstore/proto \
     --grpc_python_out=scstore/proto \
     --proto_path=scstore/proto \
-    scstore/proto/store_daemon.proto
+    proto/store_daemon.proto
 
 # Generate global_store protobuf files
 uv run python -m grpc_tools.protoc \
@@ -17,7 +17,7 @@ uv run python -m grpc_tools.protoc \
     --pyi_out=scstore/proto \
     --grpc_python_out=scstore/proto \
     --proto_path=scstore/proto \
-    scstore/proto/global_store.proto
+    proto/global_store.proto
 
 echo "Python protobuf files generated successfully!"
 # Fix import paths in generated *_pb2_grpc.py files
