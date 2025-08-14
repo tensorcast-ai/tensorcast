@@ -10,6 +10,7 @@ from scstore.global_store.webui_backend.grpc_client import (
     GlobalStoreClientConfig,
 )
 from scstore.proto import global_store_pb2
+from scstore.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
 @pytest.fixture
@@ -18,7 +19,7 @@ def mock_grpc_client():
     client = AsyncMock(spec=GlobalStoreClient)
 
     # Mock list_active_workers
-    worker1 = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
+    worker1 = WorkerInfoWrapper(global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
         worker_id="worker-1",
         node_id="node-1",
         node_address="192.168.1.1",
@@ -28,7 +29,7 @@ def mock_grpc_client():
         mem_pool_available_size=5368709120,  # 5GB
         accepting_new_requests=True,
         last_heartbeat_timestamp=1234567890,
-    )
+    ))
     client.list_active_workers.return_value = [worker1]
 
     # Mock list_model_replicas
@@ -106,6 +107,7 @@ async def test_api_endpoints_with_grpc(mock_grpc_client):
     workers_response = await list_workers(mock_grpc_client, False, 1, 50)
     assert len(workers_response.data) == 1
     assert workers_response.data[0]["worker_id"] == "worker-1"
+    assert workers_response.meta is not None
     assert workers_response.meta["total_count"] == 1
 
     # Test models endpoint

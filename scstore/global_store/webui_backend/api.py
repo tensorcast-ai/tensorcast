@@ -96,6 +96,7 @@ async def list_workers(
                 if replica.node_id == w.node_id:
                     replica_count += 1
 
+        last_dt = w.last_heartbeat_datetime
         worker_list.append(
             {
                 "worker_id": w.worker_id,
@@ -106,10 +107,10 @@ async def list_workers(
                 "mem_pool_total_size": w.mem_pool_total_size,
                 "mem_pool_available_size": w.mem_pool_available_size,
                 "accepting_new_requests": w.accepting_new_requests,
-                "last_heartbeat": _unix_timestamp_to_iso(w.last_heartbeat_timestamp),
+                "last_heartbeat": last_dt.isoformat() if last_dt else None,
                 "replica_count": replica_count,
                 "registered_at": None,  # Not available from proto
-                "updated_at": _unix_timestamp_to_iso(w.last_heartbeat_timestamp),
+                "updated_at": last_dt.isoformat() if last_dt else None,
             }
         )
 
@@ -146,6 +147,7 @@ async def get_worker(worker_id: str, client: GrpcClient) -> ApiResponse:
                     if replica.node_id == w.node_id:
                         replica_count += 1
 
+            last_dt = w.last_heartbeat_datetime
             worker_data = {
                 "worker_id": w.worker_id,
                 "node_id": w.node_id,
@@ -155,10 +157,10 @@ async def get_worker(worker_id: str, client: GrpcClient) -> ApiResponse:
                 "mem_pool_total_size": w.mem_pool_total_size,
                 "mem_pool_available_size": w.mem_pool_available_size,
                 "accepting_new_requests": w.accepting_new_requests,
-                "last_heartbeat": _unix_timestamp_to_iso(w.last_heartbeat_timestamp),
+                "last_heartbeat": last_dt.isoformat() if last_dt else None,
                 "replica_count": replica_count,
                 "registered_at": None,  # Not available from proto
-                "updated_at": _unix_timestamp_to_iso(w.last_heartbeat_timestamp),
+                "updated_at": last_dt.isoformat() if last_dt else None,
             }
             return ApiResponse(data=worker_data)
 

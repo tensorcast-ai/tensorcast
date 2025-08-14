@@ -5,11 +5,11 @@
 #include <thread>
 #include <vector>
 #include "core/common/cuda_api.h"
-#include "core/communicator/engine/engine.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
+#include "core/communicator/base/constants.h"
 #include "core/communicator/engine/gpu_tcp_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
@@ -168,6 +168,7 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
 
     // Launch threads
     std::vector<std::thread> threads;
+    threads.reserve(num_threads);
     for (std::size_t i = 0; i < num_threads; ++i) {
       threads.emplace_back(worker);
     }
@@ -253,7 +254,7 @@ TEST_CASE("GpuTcpStager Advanced Tests", "[communicator][tcp][gpu][stager][advan
     const int num_stages = 10;
     workers.reserve(num_stages);
     for (int i = 0; i < num_stages; ++i) {
-      workers.emplace_back([&stager, &tensor, i, &successful_stages, &failed_stages, chunk_size]() {
+      workers.emplace_back([&stager, &tensor, i, &successful_stages, &failed_stages]() {
         std::size_t offset = i * chunk_size;
         auto result = stager.stage(tensor, offset, chunk_size);
 

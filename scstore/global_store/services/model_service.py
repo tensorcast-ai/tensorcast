@@ -49,6 +49,19 @@ class ModelService:
         if replica.max_concurrency <= 0:
             raise ValidationError("max_concurrency must be positive")
 
+        # Additional validation for transport metadata consistency
+        if replica.remote_memory_keys:
+            if not replica.buffer_sizes:
+                raise ValidationError(
+                    "buffer_sizes must be provided when remote_memory_keys are set"
+                )
+            if len(replica.remote_memory_keys) != len(replica.buffer_sizes):
+                raise ValidationError(
+                    "buffer_sizes length must match remote_memory_keys length"
+                )
+            if sum(replica.buffer_sizes) != replica.memory_size:
+                raise ValidationError("sum(buffer_sizes) must equal memory_size")
+
         # Use atomic transaction to prevent race conditions
         with self.replica_repository.transaction() as cursor:
             # Use database-level UPSERT to handle concurrent registrations

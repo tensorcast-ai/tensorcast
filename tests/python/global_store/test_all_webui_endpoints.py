@@ -18,6 +18,7 @@ from scstore.global_store.webui_backend.api import (
 )
 from scstore.global_store.webui_backend.models import MemoryType
 from scstore.proto import global_store_pb2
+from scstore.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
 def create_mock_client():
@@ -25,7 +26,7 @@ def create_mock_client():
     client = AsyncMock()
 
     # Mock workers
-    worker1 = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
+    worker1 = WorkerInfoWrapper(global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
         worker_id="worker-1",
         node_id="node-1",
         node_address="192.168.1.1",
@@ -35,8 +36,8 @@ def create_mock_client():
         mem_pool_available_size=5368709120,  # 5GB
         accepting_new_requests=True,
         last_heartbeat_timestamp=1234567890,
-    )
-    worker2 = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
+    ))
+    worker2 = WorkerInfoWrapper(global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
         worker_id="worker-2",
         node_id="node-2",
         node_address="192.168.1.2",
@@ -46,7 +47,7 @@ def create_mock_client():
         mem_pool_available_size=8589934592,  # 8GB
         accepting_new_requests=True,
         last_heartbeat_timestamp=1234567891,
-    )
+    ))
     client.list_active_workers.return_value = [worker1, worker2]
 
     # Mock replicas
@@ -115,6 +116,7 @@ async def test_workers_endpoints():
     response = await list_workers(client, include_unavailable=False, page=1, page_size=50)
     assert len(response.data) == 2
     assert response.data[0]["worker_id"] == "worker-1"
+    assert response.meta is not None
     assert response.meta["total_count"] == 2
 
     # Test get specific worker
@@ -211,6 +213,7 @@ async def test_transports_endpoint():
     )
 
     assert response.data == []
+    assert response.meta is not None
     assert response.meta["total_count"] == 0
 
 

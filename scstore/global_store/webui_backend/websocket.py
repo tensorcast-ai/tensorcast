@@ -188,6 +188,7 @@ class WebSocketManager:
                                 worker.last_heartbeat_timestamp
                                 != last_worker.last_heartbeat_timestamp
                             ):
+                                last_dt = worker.last_heartbeat_datetime
                                 await self.send_update(
                                     "heartbeat",
                                     {
@@ -195,7 +196,9 @@ class WebSocketManager:
                                         "status": "active"
                                         if worker.accepting_new_requests
                                         else "unavailable",
-                                        "last_heartbeat": worker.last_heartbeat_timestamp.isoformat(),
+                                        "last_heartbeat": last_dt.isoformat()
+                                        if last_dt
+                                        else None,
                                         "mem_pool_available": worker.mem_pool_available_size,
                                     },
                                 )

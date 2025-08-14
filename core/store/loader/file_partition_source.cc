@@ -221,28 +221,56 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
   const auto& handle = file_handles_[partition_idx];
 
   if (using_direct_io_) {
-    // O_DIRECT requires aligned reads
-    uint64_t aligned_offset = (partition_offset / kDirectIOAlignment) * kDirectIOAlignment;
-    size_t offset_diff = partition_offset - aligned_offset;
-    size_t aligned_size = ((bytes + offset_diff + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
+    // Perform chunked aligned reads using the bounce buffer to avoid exceeding its capacity.
+    size_t total_copied = 0;
+    char* dst_bytes = static_cast<char*>(dst);
 
-    // Ensure aligned buffer is large enough
-    if (aligned_size > aligned_buffer_size_) {
-      return absl::InternalError("Aligned read size exceeds buffer");
-    }
-
-    // Align buffer pointer
+    // Compute aligned buffer pointer and its usable capacity once.
+    char* base = aligned_buffer_.get();
     char* aligned_ptr = reinterpret_cast<char*>(
-        (reinterpret_cast<uintptr_t>(aligned_buffer_.get()) + kDirectIOAlignment - 1) & ~(kDirectIOAlignment - 1));
+        (reinterpret_cast<uintptr_t>(base) + kDirectIOAlignment - 1) & ~(kDirectIOAlignment - 1));
+    size_t max_aligned_bytes = aligned_buffer_size_ - static_cast<size_t>(aligned_ptr - base);
 
-    ssize_t n = ::pread(handle.fd, aligned_ptr, aligned_size, aligned_offset);
-    if (n < 0) {
-      return absl::InternalError(absl::StrFormat("Failed to read partition: %s", strerror(errno)));
+    while (total_copied < bytes) {
+      uint64_t cur_off = partition_offset + total_copied;
+      size_t remaining = bytes - total_copied;
+
+      uint64_t aligned_offset = (cur_off / kDirectIOAlignment) * kDirectIOAlignment;
+      size_t offset_diff = static_cast<size_t>(cur_off - aligned_offset);
+
+      // Limit each iteration's payload to chunk_size
+      size_t payload = std::min(remaining, options_.chunk_size);
+
+      // Round up to alignment, then cap to bounce buffer capacity if needed
+      size_t aligned_size =
+          ((payload + offset_diff + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
+      if (aligned_size > max_aligned_bytes) {
+        if (max_aligned_bytes <= offset_diff) {
+          return absl::InternalError("Aligned buffer too small");
+        }
+        size_t max_payload = max_aligned_bytes - offset_diff;
+        payload = std::min(payload, max_payload);
+        aligned_size = ((payload + offset_diff + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
+      }
+
+      ssize_t n = ::pread(handle.fd, aligned_ptr, aligned_size, aligned_offset);
+      if (n < 0) {
+        return absl::InternalError(absl::StrFormat("Failed to read partition: %s", strerror(errno)));
+      }
+      if (static_cast<size_t>(n) <= offset_diff) {
+        // Nothing useful read
+        break;
+      }
+
+      size_t actual = std::min(static_cast<size_t>(n) - offset_diff, payload);
+      std::memcpy(dst_bytes + total_copied, aligned_ptr + offset_diff, actual);
+      total_copied += actual;
+
+      if (actual == 0) {
+        break;
+      }
     }
-
-    size_t actual_bytes = std::min(static_cast<size_t>(n) - offset_diff, bytes);
-    std::memcpy(dst, aligned_ptr + offset_diff, actual_bytes);
-    return actual_bytes;
+    return total_copied;
 
   } else {
     // Regular read

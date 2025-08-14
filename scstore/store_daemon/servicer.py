@@ -217,6 +217,25 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             on_pid_dead=self._on_pid_dead,
         )
 
+        # Initialize chunk_sync_worker - this is a required component
+        # If global store is not enabled, create a no-op worker
+        sync_interval = 10
+        if self.global_store_enabled and self.global_store_address:
+            # Will be properly initialized in _initialize_high_availability_connection
+            # Create a placeholder for now that will be replaced
+            self.chunk_sync_worker = ChunkSyncWorker(
+                servicer=self,
+                global_store_address=self.global_store_address,
+                sync_interval_seconds=sync_interval,
+            )
+        else:
+            # Create a no-op worker when global store is disabled
+            self.chunk_sync_worker = ChunkSyncWorker(
+                servicer=self,
+                global_store_address="",  # Empty address for no-op mode
+                sync_interval_seconds=sync_interval,
+            )
+
         self.lifecycle_worker: LifecycleWorker = LifecycleWorker(
             process_watcher=self.process_watcher,
             replica_manager=self.replica_manager,
@@ -271,12 +290,20 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             )
             logger.info(f"Connected to GlobalStore at {self.global_store_address}")
 
+            # Re-initialize chunk_sync_worker with proper connection
+            # Stop the placeholder worker first
+            if self.chunk_sync_worker:
+                self.chunk_sync_worker.stop()
+
             sync_interval = 10
             self.chunk_sync_worker = ChunkSyncWorker(
                 servicer=self,
                 global_store_address=self.global_store_address,
                 sync_interval_seconds=sync_interval,
             )
+
+            # Update lifecycle worker with the new chunk_sync_worker
+            self.lifecycle_worker.chunk_sync_worker = self.chunk_sync_worker
 
         except Exception as e:
             logger.exception(
@@ -902,6 +929,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         # Stop lifecycle worker first (which stops process watcher)
         self.lifecycle_worker.stop()
+
+        # Stop chunk sync worker
+        self.chunk_sync_worker.stop()
 
         # Evict local replicas during shutdown
         if self.replica_manager is not None:

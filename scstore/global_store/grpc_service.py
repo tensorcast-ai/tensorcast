@@ -852,6 +852,14 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
         worker_id: str,
     ) -> ModelReplica:
         """Convert MemoryInfo proto to ModelReplica."""
+        # Derive transport chunk sizes if client omitted them.
+        remote_keys = list(mem_info.remote_memory_keys)
+        buffer_sizes = list(mem_info.buffer_sizes)
+        if remote_keys and not buffer_sizes and len(remote_keys) == 1:
+            # Fallback: treat the replica as a single contiguous region.
+            # This keeps validation invariants while allowing simpler clients/tests.
+            buffer_sizes = [mem_info.memory_size]
+
         return ModelReplica(
             model_name=model_name,
             node_id=mem_info.node_id,
@@ -863,8 +871,8 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             ),
             device_id=mem_info.device_id,
             max_concurrency=max_concurrency,
-            remote_memory_keys=list(mem_info.remote_memory_keys),
-            buffer_sizes=list(mem_info.buffer_sizes),
+            remote_memory_keys=remote_keys,
+            buffer_sizes=buffer_sizes,
             worker_id=worker_id,
         )
 

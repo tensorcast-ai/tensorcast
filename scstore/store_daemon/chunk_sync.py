@@ -63,6 +63,11 @@ class ChunkSyncWorker:
             logger.warning("Chunk sync worker already running")
             return
 
+        # Skip starting if no global store address (no-op mode)
+        if not self.global_store_address:
+            logger.debug("Chunk sync worker in no-op mode (no global store address)")
+            return
+
         # Create gRPC channel and stub
         self._channel = grpc.insecure_channel(self.global_store_address)
         self._stub = global_store_pb2_grpc.GlobalModelStoreStub(self._channel)
@@ -184,7 +189,7 @@ class ChunkSyncWorker:
         # HOT = 0, LOCKED_TX = 1, COPIED_GPU = 2, COLD = 3, EVICTED = 4
         mapping = {
             0: global_store_pb2.ChunkState.CHUNK_HOT,
-            1: global_store_pb2.ChunkState.CHUNK_LOCKED,
+            1: global_store_pb2.ChunkState.CHUNK_LOCKED_TX,
             2: global_store_pb2.ChunkState.CHUNK_COPIED_GPU,
             3: global_store_pb2.ChunkState.CHUNK_COLD,
             4: global_store_pb2.ChunkState.CHUNK_EVICTED,
@@ -194,7 +199,7 @@ class ChunkSyncWorker:
         return (
             mapping[state]
             if state in mapping
-            else global_store_pb2.ChunkState.CHUNK_UNKNOWN
+            else global_store_pb2.ChunkState.CHUNK_HOT  # Default to HOT for unknown states
         )
 
     def _get_device_uuid(self, model_id: str) -> str:
