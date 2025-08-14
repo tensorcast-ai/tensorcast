@@ -23,11 +23,6 @@
 
 common --enable_platform_specific_config
 
-# Remote cache configuration (set BAZEL_REMOTE_CACHE environment variable to enable)
-# Example: export BAZEL_REMOTE_CACHE=grpc://cache-server:9092
-common --action_env=BAZEL_REMOTE_CACHE
-build:remote --remote_cache=${BAZEL_REMOTE_CACHE}
-
 build --cxxopt="-std=c++20"
 build --cxxopt="-Werror=thread-safety-analysis"
 build --cxxopt="-Werror=unused-result"
