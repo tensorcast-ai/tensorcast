@@ -42,7 +42,7 @@ jobs:
       - name: Run non-stress C++ tests
         timeout-minutes: 30
         run: |
-          tools/bazel test //core/... \
+          tools/bazel.sh test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
             --define use_fake_cuda=true \
             --test_output=errors \
@@ -51,7 +51,7 @@ jobs:
       - name: Run stress C++ tests
         timeout-minutes: 30
         run: |
-          tools/bazel test //core/... \
+          tools/bazel.sh test //core/... \
             --test_tag_filters="stress" \
             --define use_fake_cuda=true \
             --test_output=errors \
@@ -92,7 +92,7 @@ jobs:
 
       - name: Create symlink to external packages
         run: |
-          ln -s $(tools/bazel info output_base)/external external
+          ln -s $(tools/bazel.sh info output_base)/external external
           ls -l .venv/lib/python3.10/site-packages/cusparselt/lib/libcusparseLt.so.0
 
       - name: Build C++ extensions with fake CUDA
