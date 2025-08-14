@@ -39,6 +39,11 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-environment
 
+      - name: Create symlink to external packages
+        run: |
+          ln -s $(tools/bazel.sh info output_base)/external external
+          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
+
       - name: Run non-stress C++ tests
         timeout-minutes: 30
         run: |
@@ -93,7 +98,7 @@ jobs:
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
-          ls -l .venv/lib/python3.10/site-packages/cusparselt/lib/libcusparseLt.so.0
+          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
 
       - name: Build C++ extensions with fake CUDA
         run: |
