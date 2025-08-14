@@ -25,6 +25,7 @@ case "$subcommand" in
 esac
 
 args=()
+injected=()
 if [[ "$inject_flags" == true ]]; then
 	if [[ -n "${BAZEL_REMOTE_CACHE:-}" ]]; then
 		# Avoid duplicates if already provided
@@ -36,7 +37,7 @@ if [[ "$inject_flags" == true ]]; then
 			fi
 		done
 		if [[ "$has_remote_cache" == false ]]; then
-			args+=("--remote_cache=${BAZEL_REMOTE_CACHE}")
+			injected+=("--remote_cache=${BAZEL_REMOTE_CACHE}")
 		fi
 	fi
 
@@ -50,13 +51,29 @@ if [[ "$inject_flags" == true ]]; then
 			fi
 		done
 		if [[ "$has_google_credentials" == false ]]; then
-			args+=("--google_credentials=${GOOGLE_APPLICATION_CREDENTIALS}")
+			injected+=("--google_credentials=${GOOGLE_APPLICATION_CREDENTIALS}")
 		fi
 	fi
 fi
 
-# Forward all original args after our injected ones
-args+=("$@")
+# Reconstruct final args ensuring injected flags appear AFTER the subcommand
+if [[ ${#injected[@]} -gt 0 ]]; then
+	original=("$@")
+	inserted=false
+	for a in "${original[@]}"; do
+		args+=("$a")
+		if [[ "$inserted" == false && "$a" == "$subcommand" ]]; then
+			args+=("${injected[@]}")
+			inserted=true
+		fi
+	done
+	if [[ "$inserted" == false ]]; then
+		# Fallback: append at end if subcommand wasn't found for some reason
+		args+=("${injected[@]}")
+	fi
+else
+	args+=("$@")
+fi
 
 # Find real bazel or bazelisk
 if command -v bazel >/dev/null 2>&1; then
