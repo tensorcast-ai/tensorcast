@@ -45,7 +45,7 @@ jobs:
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
-          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
+          printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
 
       - name: Run non-stress C++ tests
         timeout-minutes: 30
@@ -106,7 +106,7 @@ jobs:
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
-          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
+          printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
 
       - name: Build C++ extensions with fake CUDA
         run: |
