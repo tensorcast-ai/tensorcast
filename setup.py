@@ -202,12 +202,12 @@ else:
     __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
 
 
-BAZEL_EXE = which("bazelisk")
+BAZEL_EXE = os.path.join(dir_path, "tools", "bazel.sh")
 
-if BAZEL_EXE is None:
-    BAZEL_EXE = which("bazel")
+if not os.path.exists(BAZEL_EXE):
+    BAZEL_EXE = which("bazelisk") or which("bazel")
     if BAZEL_EXE is None and BUILD_EXTENSION:
-        sys.exit("Could not find bazel in PATH")
+        sys.exit("Could not find bazel wrapper or bazel in PATH")
 
 
 def build_libscstore_cxx11_abi(

@@ -51,7 +51,7 @@ if [[ "$inject_flags" == true ]]; then
 		done
 		if [[ "$has_google_credentials" == false ]]; then
 			args+=("--google_credentials=${GOOGLE_APPLICATION_CREDENTIALS}")
-		fiecho
+		fi
 	fi
 fi
 
