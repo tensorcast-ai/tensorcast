@@ -39,13 +39,13 @@ jobs:
           git config --global --add safe.directory /__w/stepcast-store/stepcast-store
           git status
 
-      - name: Setup Build Environment
-        uses: ./.github/actions/setup-environment
-
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
           printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-environment
 
       - name: Run non-stress C++ tests
         timeout-minutes: 30
@@ -102,13 +102,13 @@ jobs:
           git config --global --add safe.directory /__w/stepcast-store/stepcast-store
           git status
 
-      - name: Setup Build Environment
-        uses: ./.github/actions/setup-environment
-
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
           printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
+
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-environment
 
       - name: Build C++ extensions with fake CUDA
         run: |
