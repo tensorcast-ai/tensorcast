@@ -30,8 +30,9 @@ from setuptools import find_packages, setup
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
 from setuptools.command.install import install
-from setuptools.command.build_ext import build_ext
 from wheel.bdist_wheel import bdist_wheel
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension  # noqa: E402
+
 
 # Import torch version validation utilities
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
@@ -118,7 +119,7 @@ load_dep_info()
 
 dir_path = str(get_root_dir())
 
-PRE_CXX11_ABI = False
+PRE_CXX11_ABI = True
 RELEASE = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
@@ -233,6 +234,9 @@ def build_libscstore_cxx11_abi(
         cmd.append("use_fake_cuda=true")
         print("Building with fake CUDA backend")
 
+    # get cuda path from CUDA_HOME or CUDA_PATH
+    cmd.append(f"--repo_env=CUDA_HOME={CUDA_DIR}")
+
     # if pre_cxx11_abi:
     #     cmd.append("--config=pre_cxx11_abi")
     #     print("using PRE CXX11 ABI build")
@@ -272,13 +276,14 @@ def copy_libscstore(debug: bool):
         os.remove(target)
 
 
+    print(f"Copying {dir_path + '/bazel-bin/core/libscstore.so'} to {target}")
     copyfile(
             dir_path + "/bazel-bin/core/libscstore.so",
             target
     )
 
 def copy_extensions():
-    files = glob.glob(dir_path + "/build/lib/scstore/*.so")
+    files = glob.glob(dir_path + "/build/lib.linux-*/scstore/*.so")
     for file in files:
         print(f"Copying {file} to {dir_path}/scstore/")
         copyfile(file, dir_path + "/scstore/" + os.path.basename(file))
@@ -300,17 +305,17 @@ class DevelopCommand(develop):
         gen_version_file()
         develop.run(self)
 
-class BuildExtensionCommand(build_ext):
+class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
     def initialize_options(self):
-        build_ext.initialize_options(self)
+        BuildExtension.initialize_options(self)
     def finalize_options(self):
-        build_ext.finalize_options(self)
+        BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
         copy_libscstore(debug=True)
-        build_ext.run(self)
+        BuildExtension.run(self)
         copy_extensions()
 
 
@@ -425,27 +430,20 @@ package_data = {}
 
 
 def cuda_dir():
-    return (
-        subprocess.check_output(
-            [BAZEL_EXE, "query", "@cuda//:cuda", "--output", "location"]
-        )
-        .decode("ascii")
-        .strip()
-        .split("/BUILD.bazel")[0]
-    )
+    return os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
 
 if BUILD_EXTENSION:
     CUDA_DIR = cuda_dir()
-    os.environ["CUDA_HOME"] = CUDA_DIR
+    if CUDA_DIR:
+        os.environ["CUDA_HOME"] = CUDA_DIR
 else:
     CUDA_DIR = None
 
 # Place this line here to make CUDA_HOME environment variable available
 
 
+
 if BUILD_EXTENSION:
-    from torch.utils.cpp_extension import BuildExtension  # noqa: E402
-    from torch.utils.cpp_extension import CUDAExtension  # noqa: E402
     EXTENSIONS = {
         "_C": ["scstore/csrc/checkpoint_py.cc"],
         "_checkpoint_store": ["scstore/csrc/checkpoint_store_py.cc"],
@@ -457,7 +455,7 @@ if BUILD_EXTENSION:
                 f"scstore.{name}",
                 sources,
                 library_dirs=[
-                    (dir_path + "/bazel-bin/core/"),
+                    (dir_path + "/scstore/lib"),
                 ],
                 libraries=["scstore"],
                 include_dirs=(
@@ -477,23 +475,24 @@ if BUILD_EXTENSION:
                         "-std=c++20",
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
+                        "-Wno-macro-redefined",
+                        "-Wno-pragmas",
                     ]
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
                     + (
                         ["-DUSE_FAKE_CUDA"]
                         if USE_FAKE_CUDA
                         else []
+                    )
+                    + (
+                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
+                        if PRE_CXX11_ABI
+                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
                     )
                 ),
                 extra_link_args=(
                     [
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
-                        "-Wno-macro-redefined",
                         "-Wl,--no-as-needed",
                         "-lscstore",
                         "-Wl,-rpath,$ORIGIN/lib",
@@ -530,7 +529,7 @@ cmd_class = {
 }
 
 if BuildExtension is not None:
-    cmd_class["build_ext"] = BuildExtension
+    cmd_class["build_ext"] = BuildExtensionCommand
 
 setup(
     name="scstore",

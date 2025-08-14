@@ -87,6 +87,14 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     return 0; // Offset beyond EOF
   }
 
+  // Validate key metadata to prevent out-of-range access.
+  if (options_.memory_keys.empty() || options_.buffer_sizes.empty()) {
+    return absl::InvalidArgumentError("RemoteKeySource has no memory keys/buffer sizes configured");
+  }
+  if (options_.memory_keys.size() != options_.buffer_sizes.size()) {
+    return absl::InvalidArgumentError("Memory keys and buffer sizes size mismatch");
+  }
+
   size_t bytes_to_read = std::min(bytes, static_cast<size_t>(options_.total_size - offset));
   size_t bytes_read = 0;
   char* dst_ptr = static_cast<char*>(dst);
@@ -94,16 +102,29 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
   // Determine starting key index and local offset within that key (stateless)
   size_t key_index = 0;
   size_t key_offset = 0;
+  bool found_segment = false;
   {
     uint64_t running_total = 0;
     for (size_t i = 0; i < options_.buffer_sizes.size(); ++i) {
-      if (offset < running_total + options_.buffer_sizes[i]) {
+      const uint64_t segment_end = running_total + options_.buffer_sizes[i];
+      if (offset < segment_end) {
         key_index = i;
         key_offset = static_cast<size_t>(offset - running_total);
+        found_segment = true;
         break;
       }
-      running_total += options_.buffer_sizes[i];
+      running_total = segment_end;
     }
+  }
+
+  if (!found_segment) {
+    return absl::InternalError("Failed to map offset to a valid key segment");
+  }
+  if (key_index >= options_.memory_keys.size() || key_index >= options_.buffer_sizes.size()) {
+    return absl::InternalError("Computed key_index is out of range");
+  }
+  if (key_offset >= options_.buffer_sizes[key_index]) {
+    return absl::InternalError("Computed key_offset exceeds key segment size");
   }
 
   while (bytes_read < bytes_to_read && key_index < options_.memory_keys.size()) {

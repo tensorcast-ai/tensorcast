@@ -2,6 +2,7 @@
 
 #include "core/testing/test_helpers.h"
 
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -22,7 +23,7 @@ std::vector<uint8_t> create_test_pattern(std::size_t size, uint8_t seed) {
 }
 
 bool verify_pattern(const void* data, std::size_t size, uint8_t seed) {
-  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  const auto* bytes = static_cast<const uint8_t*>(data);
   for (std::size_t i = 0; i < size; ++i) {
     if (bytes[i] != static_cast<uint8_t>((i + seed) % 256)) {
       LOG(ERROR) << "Mismatch at offset " << i << ": expected " << static_cast<int>((i + seed) % 256) << ", got "
@@ -50,7 +51,7 @@ int find_available_port(int base_port, int max_attempts) {
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     addr.sin_port = htons(port);
 
     if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {

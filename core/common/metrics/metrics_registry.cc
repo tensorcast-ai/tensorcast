@@ -20,7 +20,7 @@ std::string LabelsToString(stepcast::metrics::Labels labels) {
     return "";
   }
   // Sort by key for determinism.
-  std::sort(labels.begin(), labels.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::ranges::sort(labels, [](const auto& a, const auto& b) { return a.first < b.first; });
   std::ostringstream oss;
   for (size_t i = 0; i < labels.size(); ++i) {
     oss << labels[i].first << "=\"" << labels[i].second << "\"";

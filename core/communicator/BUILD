@@ -60,11 +60,17 @@ sc_cc_library(
     name = "ibv_wrap_lib",
     srcs = ["misc/ibv_wrap.cc"],
     hdrs = ["misc/ibv_wrap.h"],
+    defines = select({
+        ":use_fake_cuda": ["USE_FAKE_CUDA"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":common_lib",
-        ":ibv_mock_lib",
-    ],
+    ] + select({
+        ":use_fake_cuda": [":ibv_mock_lib"],
+        "//conditions:default": [],
+    }),
 )
 
 sc_header_only_library(
@@ -461,7 +467,10 @@ cc_test(
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
-    tags = ["requires_cuda"],
+    tags = [
+        "requires_cuda",
+        "stress",
+    ],
     deps = [
         ":engine_lib",
         "//core/testing:catch_main",

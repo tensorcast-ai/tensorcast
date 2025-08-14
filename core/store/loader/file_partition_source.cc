@@ -31,6 +31,7 @@ FilePartitionSource::~FilePartitionSource() {
 }
 
 absl::Status FilePartitionSource::OpenFiles() {
+  absl::MutexLock init_lock(&init_mutex_);
   if (initialized_) {
     return absl::OkStatus();
   }
@@ -94,7 +95,7 @@ absl::Status FilePartitionSource::OpenFiles() {
         (open_errno == EINVAL || open_errno == EOPNOTSUPP || open_errno == ENOTSUP || open_errno == EPERM)) {
       LOG(INFO) << "FilePartitionSource::OpenFiles falling back from O_DIRECT due to errno=" << open_errno;
       // Close any partially opened file descriptors before retrying
-      CloseFiles();
+      CloseFilesNoLock();
       using_direct_io_ = false;
       attempted_fallback = true;
       // Retry opening without O_DIRECT
@@ -102,13 +103,18 @@ absl::Status FilePartitionSource::OpenFiles() {
     }
 
     // If we reach here, opening failed and fallback (if any) either not applicable or already attempted
-    CloseFiles();
+    CloseFilesNoLock();
     return absl::InternalError(
         absl::StrFormat("Failed to open partition(s) (errno=%d): %s", open_errno, strerror(open_errno)));
   }
 }
 
 void FilePartitionSource::CloseFiles() {
+  absl::MutexLock init_lock(&init_mutex_);
+  CloseFilesNoLock();
+}
+
+void FilePartitionSource::CloseFilesNoLock() {
   for (auto& handle : file_handles_) {
     if (handle.fd >= 0) {
       ::close(handle.fd);

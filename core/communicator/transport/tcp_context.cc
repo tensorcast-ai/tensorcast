@@ -63,10 +63,20 @@ result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t
     return SYS_ERROR;
   }
 
+  // Enable address/port reuse to avoid EADDRINUSE due to TIME_WAIT and reduce bind conflicts
+  int one = 1;
+  if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0) {
+    PLOG(WARNING) << "failed to set SO_REUSEADDR";
+  }
+
+  if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) != 0) {
+    PLOG(WARNING) << "failed to set SO_REUSEPORT";
+  }
+
   CLEAR(local_addr_);
   local_addr_.sin_family = AF_INET;
   local_addr_.sin_addr.s_addr = inet_addr(ip.c_str());
-  local_addr_.sin_port = ntohs(port);
+  local_addr_.sin_port = htons(port);
 
   int ret = ::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), sizeof(local_addr_));
   if (ret < 0) {

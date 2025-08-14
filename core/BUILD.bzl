@@ -38,6 +38,7 @@ def sc_cc_library(
         hdrs = None,
         deps = None,
         visibility = None,
+        alwayslink = None,
         **kwargs):
     """Creates a cc_library with common defaults and standard dependencies.
 
@@ -51,6 +52,7 @@ def sc_cc_library(
         hdrs: Optional header files
         deps: Optional dependencies (standard deps are added automatically)
         visibility: Optional visibility, defaults to private
+        alwayslink: Optional alwayslink flag, defaults to True if srcs are provided
         **kwargs: Additional arguments passed to cc_library
     """
 
@@ -64,12 +66,17 @@ def sc_cc_library(
     # Merge provided deps with standard deps
     all_deps = standard_deps + (deps or [])
 
+    # Default alwayslink to True if sources are provided (to ensure symbols are included in shared libraries)
+    if alwayslink == None:
+        alwayslink = bool(srcs)
+
     cc_library(
         name = name,
         srcs = srcs or [],
         hdrs = hdrs or [],
         deps = all_deps,
         visibility = visibility or ["//visibility:private"],
+        alwayslink = alwayslink,
         **kwargs
     )
 

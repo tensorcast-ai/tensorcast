@@ -299,10 +299,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Start all reads simultaneously
     std::atomic<int> reads_started(0);
     std::atomic<int> reads_completed(0);
-    std::vector<std::future<void>> futures;
+    struct ExhaustionReadOutcome {
+      bool status_ok;
+      bool pattern_ok;
+    };
+    std::vector<std::future<ExhaustionReadOutcome>> futures;
 
     for (int i = 0; i < num_readers; ++i) {
-      futures.push_back(std::async(std::launch::async, [&, i]() {
+      futures.push_back(std::async(std::launch::async, [&, i]() -> ExhaustionReadOutcome {
         LOG(INFO) << "Reader " << i << " starting read";
         reads_started++;
 
@@ -317,15 +321,22 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                               source_port)
                           .get();
 
-        if (result.status.ok()) {
-          LOG(INFO) << "Reader " << i << " completed successfully";
-          REQUIRE(verify_pattern(target_buffers[i], tensor_size, 99));
+        ExhaustionReadOutcome outcome{result.status.ok(), false};
+        if (outcome.status_ok) {
+          bool ok = verify_pattern(target_buffers[i], tensor_size, 99);
+          outcome.pattern_ok = ok;
+          if (ok) {
+            LOG(INFO) << "Reader " << i << " completed successfully";
+          } else {
+            LOG(ERROR) << "Reader " << i << " data verification failed";
+          }
         } else {
           LOG(ERROR) << "Reader " << i << " failed: " << result.status;
         }
 
         reads_completed++;
         LOG(INFO) << "Reads completed: " << reads_completed.load() << "/" << num_readers;
+        return outcome;
       }));
     }
 
@@ -351,6 +362,13 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     LOG(INFO) << "All reads completed. Started: " << reads_started.load() << ", Completed: " << reads_completed.load();
+
+    // Verify outcomes in main thread
+    for (auto& future : futures) {
+      auto outcome = future.get();
+      REQUIRE(outcome.status_ok);
+      REQUIRE(outcome.pattern_ok);
+    }
 
     // Cleanup
     REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
@@ -399,7 +417,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         {100 * 1024 * 1024, 4 * 1024 * 1024, 100},
     };
 
-    std::vector<std::future<void>> futures;
+    std::vector<std::future<bool>> futures;
     std::vector<std::shared_ptr<CommunicateEngine>> engines;
     std::vector<void*> buffers;
 
@@ -415,7 +433,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       REQUIRE(buffer != nullptr);
       buffers.push_back(buffer);
 
-      futures.push_back(std::async(std::launch::async, [&, i]() {
+      futures.push_back(std::async(std::launch::async, [&, i]() -> bool {
         LOG(INFO) << "Starting partial read " << i << ": offset=" << read_specs[i].offset
                   << ", size=" << read_specs[i].size;
 
@@ -431,7 +449,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                               read_specs[i].offset)
                           .get();
 
-        REQUIRE(result.status.ok());
+        if (!result.status.ok()) {
+          LOG(ERROR) << "Partial read " << i << " failed: " << result.status;
+          return false;
+        }
 
         // Verify the pattern
         uint8_t* data = static_cast<uint8_t*>(buffers[i]);
@@ -445,15 +466,23 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
             break;
           }
         }
-        REQUIRE(pattern_correct);
+        if (!pattern_correct) {
+          return false;
+        }
 
         LOG(INFO) << "Partial read " << i << " completed successfully";
+        return true;
       }));
     }
 
     // Wait for all
     for (auto& future : futures) {
       REQUIRE(future.wait_for(std::chrono::seconds(30)) != std::future_status::timeout);
+    }
+
+    // Verify outcomes in main thread
+    for (auto& future : futures) {
+      REQUIRE(future.get());
     }
 
     // Cleanup
@@ -497,14 +526,24 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         // Find available port for this cycle
         int target_port = find_available_port(source_port + 10 + i * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find available target port for cycle " << i;
+          return;
+        }
 
         // Create new engine for each cycle
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for cycle " << i << ": " << init_status;
+          return;
+        }
 
         void* buffer = std::malloc(tensor_size);
-        REQUIRE(buffer != nullptr);
+        if (!buffer) {
+          LOG(ERROR) << "Failed to allocate buffer for cycle " << i;
+          return;
+        }
 
         // Perform transfer
         auto result = engine
@@ -519,9 +558,12 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                           .get();
 
         if (result.status.ok()) {
-          REQUIRE(verify_pattern(buffer, tensor_size, 111));
-          successful_cycles++;
-          LOG(INFO) << "Cycle " << i << " completed successfully";
+          if (verify_pattern(buffer, tensor_size, 111)) {
+            successful_cycles++;
+            LOG(INFO) << "Cycle " << i << " completed successfully";
+          } else {
+            LOG(ERROR) << "Cycle " << i << " data verification failed";
+          }
         } else {
           LOG(ERROR) << "Cycle " << i << " failed: " << result.status;
         }
@@ -595,26 +637,39 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Multiple readers for GPU-to-GPU transfers
-    std::vector<std::future<void>> futures;
+    std::vector<std::future<bool>> futures;
     const int transfers_per_gpu = 3;
 
     futures.reserve(transfers_per_gpu * 2);
     for (int i = 0; i < transfers_per_gpu * 2; ++i) {
-      futures.push_back(std::async(std::launch::async, [&, i]() {
+      futures.push_back(std::async(std::launch::async, [&, i]() -> bool {
         int src_gpu = i % 2;
         int dst_gpu = 1 - src_gpu;
 
         LOG(INFO) << "Transfer " << i << ": GPU " << src_gpu << " -> GPU " << dst_gpu;
 
         int target_port = find_available_port(source_port + 10 + i * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find target port for transfer " << i;
+          return false;
+        }
 
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for transfer " << i << ": " << init_status;
+          return false;
+        }
 
-        REQUIRE(stepcast::cuda::set_device(dst_gpu).ok());
+        if (!stepcast::cuda::set_device(dst_gpu).ok()) {
+          LOG(ERROR) << "Failed to set device to GPU " << dst_gpu << " for transfer " << i;
+          return false;
+        }
         void* dst_ptr;
-        REQUIRE(stepcast::cuda::malloc(&dst_ptr, tensor_size).ok());
+        if (!stepcast::cuda::malloc(&dst_ptr, tensor_size).ok()) {
+          LOG(ERROR) << "Failed to allocate dst buffer for transfer " << i;
+          return false;
+        }
 
         std::string tensor_name = "gpu_tensor_" + std::to_string(src_gpu);
         auto result = engine
@@ -627,23 +682,42 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                               "127.0.0.1",
                               source_port)
                           .get();
-
-        REQUIRE(result.status.ok());
+        if (!result.status.ok()) {
+          LOG(ERROR) << "Transfer " << i << " read failed: " << result.status;
+          (void)stepcast::cuda::free(dst_ptr);
+          return false;
+        }
 
         // Verify data
         std::vector<uint8_t> verify_data(tensor_size);
-        REQUIRE(stepcast::cuda::memcpy(verify_data.data(), dst_ptr, tensor_size, cudaMemcpyDeviceToHost).ok());
-        REQUIRE(verify_pattern(verify_data.data(), tensor_size, 100 + src_gpu));
+        if (!stepcast::cuda::memcpy(verify_data.data(), dst_ptr, tensor_size, cudaMemcpyDeviceToHost).ok()) {
+          LOG(ERROR) << "Transfer " << i << " memcpy D2H failed";
+          (void)stepcast::cuda::free(dst_ptr);
+          return false;
+        }
+        if (!verify_pattern(verify_data.data(), tensor_size, 100 + src_gpu)) {
+          LOG(ERROR) << "Transfer " << i << " data verification failed";
+          (void)stepcast::cuda::free(dst_ptr);
+          return false;
+        }
 
         LOG(INFO) << "Transfer " << i << " completed successfully";
-
-        REQUIRE(stepcast::cuda::free(dst_ptr).ok());
+        bool freed = stepcast::cuda::free(dst_ptr).ok();
+        if (!freed) {
+          LOG(ERROR) << "Failed to free dst buffer for transfer " << i;
+        }
+        return freed;
       }));
     }
 
     // Wait for all transfers
     for (auto& future : futures) {
       REQUIRE(future.wait_for(std::chrono::seconds(60)) != std::future_status::timeout);
+    }
+
+    // Verify outcomes in main thread
+    for (auto& future : futures) {
+      REQUIRE(future.get());
     }
 
     // Cleanup
@@ -698,10 +772,19 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     for (size_t i = 0; i < gpu_ptrs.size(); ++i) {
       futures.push_back(std::async(std::launch::async, [&, i]() {
         int target_port = find_available_port(source_port + 10 + i * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find target port for tensor " << i;
+          failed_reads++;
+          return;
+        }
 
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for tensor " << i << ": " << init_status;
+          failed_reads++;
+          return;
+        }
 
         void* cpu_buffer = std::malloc(tensor_size);
         if (!cpu_buffer) {
@@ -749,6 +832,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // At least some reads should succeed
     REQUIRE(successful_reads.load() > 0);
+    // All attempts accounted for (no silent drops)
+    REQUIRE(successful_reads.load() + failed_reads.load() == static_cast<int>(gpu_ptrs.size()));
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
@@ -937,18 +1022,29 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Read all tensors concurrently
-    std::vector<std::future<void>> futures;
+    std::vector<std::future<bool>> futures;
 
+    futures.reserve(test_sizes.size());
     for (size_t i = 0; i < test_sizes.size(); ++i) {
-      futures.push_back(std::async(std::launch::async, [&, i]() {
+      futures.push_back(std::async(std::launch::async, [&, i]() -> bool {
         int target_port = find_available_port(source_port + 10 + i * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find available target port for boundary tensor " << i;
+          return false;
+        }
 
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for boundary tensor " << i << ": " << init_status;
+          return false;
+        }
 
         void* cpu_buffer = std::malloc(test_sizes[i]);
-        REQUIRE(cpu_buffer != nullptr);
+        if (!cpu_buffer) {
+          LOG(ERROR) << "Failed to allocate CPU buffer for boundary tensor " << i;
+          return false;
+        }
 
         LOG(INFO) << "Reading tensor " << i << " (size " << test_sizes[i] << ")";
 
@@ -963,18 +1059,33 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                               source_port)
                           .get();
 
-        REQUIRE(result.status.ok());
-        REQUIRE(verify_pattern(cpu_buffer, test_sizes[i], 150 + i));
+        if (!result.status.ok()) {
+          LOG(ERROR) << "Boundary tensor " << i << " read failed: " << result.status;
+          std::free(cpu_buffer);
+          return false;
+        }
+        bool ok = verify_pattern(cpu_buffer, test_sizes[i], 150 + i);
+        if (!ok) {
+          LOG(ERROR) << "Boundary tensor " << i << " data verification failed";
+          std::free(cpu_buffer);
+          return false;
+        }
 
         LOG(INFO) << "Tensor " << i << " read completed successfully";
 
         std::free(cpu_buffer);
+        return true;
       }));
     }
 
     // Wait for all
     for (auto& future : futures) {
       REQUIRE(future.wait_for(std::chrono::seconds(30)) != std::future_status::timeout);
+    }
+
+    // Verify outcomes in main thread
+    for (auto& future : futures) {
+      REQUIRE(future.get());
     }
 
     // Cleanup
@@ -1023,10 +1134,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     for (int reader_id = 0; reader_id < 3; ++reader_id) {
       reader_futures.push_back(std::async(std::launch::async, [&, reader_id]() {
         int target_port = find_available_port(source_port + 10 + reader_id * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find target port for reader " << reader_id;
+          return;
+        }
 
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for reader " << reader_id << ": " << init_status;
+          return;
+        }
 
         while (!stop_flag.load()) {
           int tensor_id = rand() % num_tensors;
@@ -1109,6 +1227,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Should have some successful reads
     REQUIRE(successful_reads.load() > 0);
+    // Should also observe some failures due to dynamic unregistering
+    REQUIRE(failed_reads.load() > 0);
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
@@ -1144,19 +1264,33 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     const int num_iterations = 10;
     std::atomic<int> buffers_acquired(0);
     std::atomic<int> buffers_released(0);
+    std::atomic<int> read_status_fail_count(0);
+    std::atomic<int> pattern_fail_count(0);
+    std::atomic<int> normal_success_count(0);
+    std::atomic<int> simulated_exceptions_count(0);
 
     std::vector<std::future<void>> futures;
 
     for (int i = 0; i < num_iterations; ++i) {
       futures.push_back(std::async(std::launch::async, [&, i]() {
         int target_port = find_available_port(source_port + 10 + i * 10);
-        REQUIRE(target_port > 0);
+        if (target_port <= 0) {
+          LOG(ERROR) << "Failed to find available target port for iteration " << i;
+          return;
+        }
 
         auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-        REQUIRE(engine->init("127.0.0.1", target_port).ok());
+        auto init_status = engine->init("127.0.0.1", target_port);
+        if (!init_status.ok()) {
+          LOG(ERROR) << "Engine init failed for iteration " << i << ": " << init_status;
+          return;
+        }
 
         void* cpu_buffer = std::malloc(tensor_size);
-        REQUIRE(cpu_buffer != nullptr);
+        if (!cpu_buffer) {
+          LOG(ERROR) << "Failed to allocate CPU buffer for iteration " << i;
+          return;
+        }
 
         try {
           // Nested scope to test RAII
@@ -1176,16 +1310,24 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
                                   source_port)
                               .get();
 
-            if (i % 3 == 0) {
-              // Simulate error condition
-              LOG(INFO) << "Iteration " << i << " simulating error";
-              throw std::runtime_error("Simulated error");
+            if (!result.status.ok()) {
+              LOG(ERROR) << "Iteration " << i << " read failed: " << result.status;
+              read_status_fail_count++;
+            } else {
+              if (i % 3 == 0) {
+                // Simulate error condition
+                LOG(INFO) << "Iteration " << i << " simulating error";
+                throw std::runtime_error("Simulated error");
+              }
+              bool ok = verify_pattern(cpu_buffer, tensor_size, 180);
+              if (ok) {
+                LOG(INFO) << "Iteration " << i << " completed normally";
+                normal_success_count++;
+              } else {
+                LOG(ERROR) << "Iteration " << i << " data verification failed";
+                pattern_fail_count++;
+              }
             }
-
-            REQUIRE(result.status.ok());
-            REQUIRE(verify_pattern(cpu_buffer, tensor_size, 180));
-
-            LOG(INFO) << "Iteration " << i << " completed normally";
           }
           // ScopedStagedBuffer should be released here
           buffers_released++;
@@ -1194,6 +1336,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           LOG(INFO) << "Iteration " << i << " caught exception: " << e.what();
           // Buffer should still be released due to RAII
           buffers_released++;
+          simulated_exceptions_count++;
         }
 
         std::free(cpu_buffer);
@@ -1207,6 +1350,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     LOG(INFO) << "RAII test completed. Buffers acquired: " << buffers_acquired.load()
               << ", Buffers released: " << buffers_released.load();
+
+    // Strong assertions in main thread for RAII behavior
+    REQUIRE(read_status_fail_count.load() == 0);
+    REQUIRE(pattern_fail_count.load() == 0);
 
     // All acquired buffers should be released
     REQUIRE(buffers_acquired.load() == buffers_released.load());

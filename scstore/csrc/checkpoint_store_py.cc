@@ -7,11 +7,10 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include <vector>
+#include "scstore/csrc/logging.h"
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmacro-redefined"
 #include "core/common/logging_init.h"
 #include "core/common/metrics/metrics_export.h"
 #include "core/store/checkpoint_store.h"
@@ -22,7 +21,6 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
-#pragma GCC diagnostic pop
 
 namespace py = pybind11;
 
@@ -240,8 +238,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             LoadingHints hints;
             if (kwargs.contains("pinned_timeout_ms") && !kwargs["pinned_timeout_ms"].is_none()) {
               int t = kwargs["pinned_timeout_ms"].cast<int>();
-              if (t > 0)
+              if (t > 0) {
                 hints.pinned_timeout = std::chrono::milliseconds(t);
+              }
             }
 
             absl::StatusOr<ModelHandle> h_or;

@@ -373,8 +373,9 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
       std::vector<char> buffer(1024);
       for (int i = 0; i < 10; ++i) {
         auto result = source.read(buffer.data(), 1024);
-        if (!result.ok() && result.value() != 0) {
+        if (!result.ok() || result.value() == 0) {
           all_ok = false;
+          break;
         }
       }
     });
@@ -385,8 +386,9 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
         std::vector<char> buffer(1024);
         size_t offset = i * 10 * 1024;
         auto result = source.read_at(offset, buffer.data(), 1024);
-        if (!result.ok() && result.value() != 0) {
+        if (!result.ok() || result.value() == 0) {
           all_ok = false;
+          return;
         }
       });
     }
