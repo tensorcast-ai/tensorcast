@@ -254,5 +254,6 @@ exclude = [
 
 typeCheckingMode = "standard"
 reportMissingImports = "error"
+reportMissingModuleSource = "none"
 pythonVersion = "3.10"
 reportAttributeAccessIssue = "none"
