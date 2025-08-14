@@ -35,4 +35,8 @@ if ! $root_dir/tools/bazel.sh build //proto:global_store_grpc; then
 fi
 
 # copy proto files to scstore/proto
+if ! cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/scstore/csrc/proto; then
+    echo "Error: Failed to copy proto header files" >&2
+    exit 1
+fi
 cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/scstore/csrc/proto
