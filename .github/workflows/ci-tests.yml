@@ -12,6 +12,9 @@ jobs:
     name: C++ Tests
     runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
     env:
       USE_FAKE_CUDA: "1"
       CUDA_HOME: "/usr/local/cuda"
@@ -72,6 +75,9 @@ jobs:
     name: Python Tests
     runs-on: ubuntu-latest-m
     container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
     env:
       USE_FAKE_CUDA: "1"
       CUDA_HOME: "/usr/local/cuda"
@@ -100,17 +106,7 @@ jobs:
       - name: Create symlink to external packages
         run: |
           ln -s $(tools/bazel.sh info output_base)/external external
-          VALUE="${{ secrets.GCLOUD_SERVICE_ACCOUNT }}"
-          VALUE_STRIPPED=$(printf '%s' "$VALUE" | sed -e 's/^[[:space:]]*//')
-          case "$VALUE_STRIPPED" in
-            \{*)
-              printf '%s' "$VALUE" > credentials.json
-              ;;
-            *)
-              printf '%s' "$VALUE" | base64 -d > credentials.json
-              ;;
-          esac
-          tr -d '\r' < credentials.json > credentials.json.tmp && mv credentials.json.tmp credentials.json
+          echo "${{ secrets.GCLOUD_SERVICE_ACCOUNT }}" > credentials.json
 
       - name: Build C++ extensions with fake CUDA
         run: |
