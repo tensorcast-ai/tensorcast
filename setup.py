@@ -480,6 +480,7 @@ if BUILD_EXTENSION:
                         dir_path + "/external/abseil-cpp+",
                         dir_path + "/external/grpc+/include",
                         dir_path + "/bazel-bin/proto/global_store_grpc_cpp_pb",
+                        dir_path + "/bazel-bin/proto/global_store_grpc",
                         dir_path + "/external/protobuf+/src",
                         dir_path + "/external/gsl+",
                     ]

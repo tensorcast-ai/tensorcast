@@ -158,8 +158,11 @@ TEST_CASE("GpuTcpStager Basic Operations", "[communicator][tcp][gpu][stager]") {
           // Simulate some work
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-          // Release buffer
-          REQUIRE(stager.release_staged_buffer(staged_ptr).ok());
+          // Release buffer (avoid Catch2 macros inside threads)
+          auto release_status = stager.release_staged_buffer(staged_ptr);
+          if (!release_status.ok()) {
+            error_count++;
+          }
         } else {
           error_count++;
         }

@@ -42,11 +42,14 @@ TEST_CASE("save / load tensors that share same buffer", "[checkpoint][dedup]") {
   REQUIRE(offsets.size() == 2);
   REQUIRE(offsets["tensorA"] == offsets["tensorAlias"]);
 
-  // The on-disk file should contain exactly one record (aligned to 8 bytes)
+  // The on-disk file contains one record. It is 8-byte aligned, and may be padded to page size (e.g. 4096 bytes) when
+  // O_DIRECT is used.
   const fs::path data_file = tmp_dir / "tensor.data_0";
   REQUIRE(fs::exists(data_file));
-  const uint64_t expected_size = ((kTensorBytes + 7ULL) / 8ULL) * 8ULL;
-  REQUIRE(fs::file_size(data_file) == expected_size);
+  const uint64_t expected_min_size = ((kTensorBytes + 7ULL) / 8ULL) * 8ULL;
+  const uint64_t actual_size = fs::file_size(data_file);
+  REQUIRE(actual_size % 8ULL == 0ULL);
+  REQUIRE(actual_size >= expected_min_size);
 
   // ------------------------------------------------------------------
   // Restore tensors via checkpoint API (CPU path)
