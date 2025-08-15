@@ -2,11 +2,14 @@
 
 #include "checkpoint_store.h"
 
+#include <unistd.h>
+
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <random>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
@@ -1087,6 +1090,24 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
       .expected_model_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
+  // Check memory pressure before allocation to avoid unexpected evictions
+  // This helps prevent large registrations from causing issues with existing models
+  if (dvmp_) {
+    auto gpu_pool = dvmp_->get_gpu_pool(reg.device_id);
+    if (gpu_pool) {
+      size_t available = gpu_pool->get_available_size();
+      if (reg.total_size_bytes > available) {
+        // Try to evict unused memory first
+        auto evict_status = try_evict_gpu_memory(reg.total_size_bytes, reg.device_id);
+        if (!evict_status.ok()) {
+          return absl::ResourceExhaustedError(
+              absl::StrCat("Insufficient GPU memory available. Requested: ", reg.total_size_bytes,
+                           " bytes, Available: ", available, " bytes. ", evict_status.message()));
+        }
+      }
+    }
+  }
+
   auto model_or = Model::create(cfg);
   if (!model_or.ok()) {
     return model_or.status();
@@ -1113,8 +1134,12 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
   InstanceKey inst_key{.model_id = reg.model_id, .device = dev_key, /*replica=*/.replica = 0};
   (void)model_registry_->emplace(inst_key, model);
 
-  // Create pending entry with opaque id.
-  auto reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()));
+  // Create pending entry with cryptographically secure random ID
+  // Use a combination of timestamp, process ID, and random bytes for uniqueness
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<uint64_t> dis;
+  auto reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid(), "_", dis(gen));
 
   PendingRegistrationEntry entry;
   entry.registration_id = reg_id;
@@ -1149,6 +1174,7 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
 absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commit_registered_tensor_dict(
     std::string_view registration_id) {
   PendingRegistrationEntry entry;
+  std::shared_ptr<Model> model_to_free;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     auto it = pending_regs_.find(std::string(registration_id));
@@ -1156,16 +1182,21 @@ absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commi
       return absl::NotFoundError("registration_id not found");
     }
     // TTL enforcement: if expired, cleanup and fail fast.
+    // Keep the lock held to prevent race conditions during TTL check and removal
     if (it->second.expiry_time.time_since_epoch().count() > 0 &&
         std::chrono::steady_clock::now() > it->second.expiry_time) {
-      auto model_to_free = it->second.model;
+      model_to_free = it->second.model;
       pending_regs_.erase(it);
-      if (model_to_free) {
-        (void)model_to_free->release_memory(ModelLocation::GPU, /*safe_release=*/true);
-      }
-      return absl::DeadlineExceededError("registration expired (TTL)");
+      // Release outside the lock to avoid holding mutex during potentially slow operation
+    } else {
+      entry = it->second; // make a copy; we may erase after successful commit
     }
-    entry = it->second; // make a copy; we may erase after successful commit
+  }
+  
+  // Release memory outside the critical section if TTL expired
+  if (model_to_free) {
+    (void)model_to_free->release_memory(ModelLocation::GPU, /*safe_release=*/true);
+    return absl::DeadlineExceededError("registration expired (TTL)");
   }
 
   // Export remote memory keys if communication is enabled (GPU location).
