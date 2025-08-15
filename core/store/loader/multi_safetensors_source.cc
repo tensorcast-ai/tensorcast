@@ -135,12 +135,12 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
   uint64_t off = current_offset_;
   while (total < to_read) {
     // find segment
-    size_t idx = 0;
-    for (; idx < segments_.size(); ++idx) {
-      const auto& s = segments_[idx];
-      if (off < s.base_offset + s.data_size)
-        break;
-    }
+    // find segment using binary search for better performance with many files
+    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
+        [](uint64_t offset, const Segment& s) { return offset < s.base_offset + s.data_size; });
+    if (it == segments_.begin()) break;
+    --it;
+    const auto& s = *it;
     if (idx >= segments_.size())
       break;
     const auto& s = segments_[idx];
