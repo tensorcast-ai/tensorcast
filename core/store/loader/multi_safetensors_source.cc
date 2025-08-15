@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <endian.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -88,7 +89,7 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
     if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
       return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
     }
-    uint64_t header_len = header_len_le; // little-endian host assumption
+    uint64_t header_len = le64toh(header_len_le); // convert from little-endian to host order
     if (header_len > (1ULL << 30)) {
       return absl::InvalidArgumentError("Safetensors header too large");
     }
@@ -136,9 +137,11 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
   while (total < to_read) {
     // find segment
     // find segment using binary search for better performance with many files
-    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
-        [](uint64_t offset, const Segment& s) { return offset < s.base_offset + s.data_size; });
-    if (it == segments_.begin()) break;
+    auto it = std::upper_bound(segments_.begin(), segments_.end(), off, [](uint64_t offset, const Segment& s) {
+      return offset < s.base_offset + s.data_size;
+    });
+    if (it == segments_.begin())
+      break;
     --it;
     const auto& s = *it;
     if (idx >= segments_.size())

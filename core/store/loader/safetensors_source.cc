@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <endian.h>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -70,8 +71,8 @@ absl::Status SafetensorsSource::ParseHeaderLocked() {
   if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
     return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
   }
-  // Assume little-endian host
-  uint64_t header_len = header_len_le;
+  // Convert little-endian header length to host order
+  uint64_t header_len = le64toh(header_len_le);
   if (header_len > (1ULL << 30)) {
     return absl::InvalidArgumentError("Safetensors header too large");
   }

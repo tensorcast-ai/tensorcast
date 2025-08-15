@@ -22,6 +22,7 @@
 #include <cublas_v2.h>
 #include <nvml.h>
 #endif
+#include <endian.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -291,7 +292,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
       if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
         LOG(FATAL) << "Invalid safetensors header length: " << p.string();
       }
-      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      uint64_t data_start = sizeof(uint64_t) + le64toh(header_len_le);
       if (data_start > file_size) {
         LOG(FATAL) << "Invalid safetensors layout: data beyond EOF in " << p.string();
       }
@@ -390,7 +391,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
         ::close(fd);
         LOG(FATAL) << "Invalid safetensors header length while mapping: " << path.string();
       }
-      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      uint64_t data_start = sizeof(uint64_t) + le64toh(header_len_le);
       char* payload_ptr = static_cast<char*>(addr) + data_start;
       data_ptrs.push_back(static_cast<void*>(payload_ptr));
     }
