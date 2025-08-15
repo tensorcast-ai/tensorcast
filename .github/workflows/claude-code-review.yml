@@ -43,7 +43,7 @@ jobs:
           # model: "claude-opus-4-1-20250805"
 
           # Direct prompt for automated review (no @claude mention needed)
-          direct_prompt: |
+          custom_instructions: |
             Please review this pull request and provide feedback on:
             - Code quality and best practices
             - Potential bugs or issues
@@ -72,9 +72,4 @@ jobs:
 
           # Optional: Add specific tools for running tests or linting
           # allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck)"
-
-          # Optional: Skip review for certain conditions
-          if: |
-            !contains(github.event.pull_request.title, '[skip-review]') &&
-            !contains(github.event.pull_request.title, '[WIP]')
 
