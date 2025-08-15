@@ -202,6 +202,19 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   // For current proto, we include memory-replica metadata by overloading fields when available via
   // Global Store server. As a fallback, embed keys in the request's optional fields.
 
+  // Mark as in-memory replica and attach tensor index key/metadata
+  mem_info->set_is_memory_replica(true);
+  if (!tensor_index_key.empty()) {
+    mem_info->set_tensor_index_key(std::string(tensor_index_key));
+  }
+  // Best-effort creation metadata
+  {
+    const auto now = std::chrono::system_clock::now();
+    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    mem_info->set_creation_timestamp(static_cast<int64_t>(secs));
+  }
+  mem_info->set_source_process_id(std::to_string(getpid()));
+
   for (const auto& key : remote_memory_keys) {
     mem_info->add_remote_memory_keys(key);
   }
@@ -218,12 +231,15 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   // adjust after refactor if needed.
 
   // Optionally include canonical index data for UPSERT on first write.
-  // Current generated stubs may not expose these fields. Keep parameters to
-  // satisfy the interface and avoid unused warnings below.
-  (void)tensor_index_key;
-  (void)tensor_index_data;
-  (void)encoding;
-  (void)schema_version;
+  if (tensor_index_data.has_value() && !tensor_index_data->empty()) {
+    request.set_tensor_index_data(*tensor_index_data);
+    if (!encoding.empty()) {
+      request.set_encoding(std::string(encoding));
+    }
+    if (!schema_version.empty()) {
+      request.set_schema_version(std::string(schema_version));
+    }
+  }
 
   ::global_store::RegisterModelReplicaResponse response;
 

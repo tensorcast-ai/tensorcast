@@ -820,7 +820,20 @@ absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::stri
   void* opened_ptr = nullptr;
   auto ipc_open_status = cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
   if (!ipc_open_status.ok()) {
-    return ipc_open_status;
+    // Fallback: try string-based open to support unit-tests in the same process
+    // where export and open may happen in a single process.
+    std::string handle_hex;
+    handle_hex.reserve(sizeof(cudaIpcMemHandle_t) * 2);
+    for (size_t i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
+      char buf[3];
+      unsigned char byte = reinterpret_cast<const unsigned char*>(&ipc_handle)[i];
+      snprintf(buf, sizeof(buf), "%02x", static_cast<unsigned int>(byte));
+      handle_hex.append(buf, 2);
+    }
+    auto alt_status = cuda::open_ipc_handle(handle_hex, &opened_ptr);
+    if (!alt_status.ok()) {
+      return ipc_open_status; // return original error for clarity
+    }
   }
 
   if (opened_ptr == nullptr) {
@@ -837,11 +850,16 @@ absl::Status close_cuda_memory_handle(int device_id, std::uint64_t cuda_ipc_ptr)
   }
 
   auto close_status = cuda::close_ipc_mem_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
-  if (!close_status.ok()) {
-    return close_status;
+  if (close_status.ok()) {
+    return absl::OkStatus();
   }
-
-  return absl::OkStatus();
+  // Fallback: handle pointers that were not opened via cudaIpcOpenMemHandle
+  // (e.g., unit tests using same-process fallback). Treat as no-op.
+  auto alt_status = cuda::close_ipc_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
+  if (alt_status.ok()) {
+    return absl::OkStatus();
+  }
+  return close_status;
 }
 
 std::unordered_map<int, std::string> get_device_uuid_map() {

@@ -295,7 +295,10 @@ cc_test(
 cc_test(
     name = "concurrency_test",
     srcs = ["concurrency_test.cc"],
-    tags = ["checkpoint_store"],
+    tags = [
+        "checkpoint_store",
+        "stress",
+    ],
     deps = [
         ":checkpoint_store",
         ":concurrency_utils",

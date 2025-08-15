@@ -80,7 +80,7 @@ class CudaMemory {
    * May be invalid if memory wasn't allocated with IPC flag or came from pool without it.
    * @return cudaIpcMemHandle_t.
    */
-  cudaIpcMemHandle_t get_handle() const {
+  [[nodiscard]] cudaIpcMemHandle_t get_handle() const {
     return handle_;
   }
 
@@ -90,7 +90,7 @@ class CudaMemory {
    */
   void release_resources();
 
-  enum class AllocationType {
+  enum class AllocationType : std::uint8_t {
     UNINITIALIZED,
     DIRECT, // Allocated via cudaMalloc
     IPC_EXTERNAL // Borrowed via CUDA IPC handle

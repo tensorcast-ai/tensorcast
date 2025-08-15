@@ -65,6 +65,7 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
     _ensure_minimal_model_files(storage_root, reg["model_id"], reg["total_size_bytes"])  # satisfy Model::create
 
     out = cs.begin_register_tensor_dict(reg)
+
     assert out["registration_id"]
     assert out["device_id"] == 0
     assert out["size_bytes"] == 1 * 1024 * 1024

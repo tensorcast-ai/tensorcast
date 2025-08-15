@@ -1,5 +1,7 @@
 #! /bin/bash
 
+set -euo pipefail
+
 # Generate Python protobuf files using grpc_tools
 echo "Generating Python protobuf files using grpc_tools..."
 
@@ -40,3 +42,5 @@ if ! cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/sc
     exit 1
 fi
 cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/scstore/csrc/proto
+
+uv run ruff format scstore/proto/*

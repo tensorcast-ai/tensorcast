@@ -5,6 +5,7 @@
 # source: store_daemon.proto
 # Protobuf Python Version: 4.25.1
 """Generated protocol buffer code."""
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import symbol_database as _symbol_database
@@ -14,97 +15,97 @@ from google.protobuf.internal import builder as _builder
 _sym_db = _symbol_database.Default()
 
 
-
-
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12store_daemon.proto\x12\x0cstore_daemon\"\x18\n\x16GetServerConfigRequest\"D\n\x17GetServerConfigResponse\x12\x15\n\rmem_pool_size\x18\x01 \x01(\x03\x12\x12\n\nchunk_size\x18\x02 \x01(\x03\"*\n\x14RegisterModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\"?\n\x15RegisterModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x12\n\nmodel_size\x18\x02 \x01(\x03\"(\n\rMemCopyHandle\x12\x17\n\x0f\x63uda_ipc_handle\x18\x01 \x01(\x0c\"\xe7\x01\n\x10LoadModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65vice_uuid\x18\x03 \x01(\t\x12\x34\n\x12target_device_type\x18\x04 \x01(\x0e\x32\x18.store_daemon.DeviceType\x12$\n\x1cpinned_allocation_timeout_ms\x18\x05 \x01(\x05\x12\x0b\n\x03pid\x18\x06 \x01(\x05\x12\x17\n\x0fkeep_for_global\x18\x07 \x01(\x08\x12\x12\n\nsize_bytes\x18\x08 \x01(\x03\"\x9b\x01\n\x11LoadModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x34\n\nmem_handle\x18\x02 \x01(\x0b\x32\x1b.store_daemon.MemCopyHandleH\x00\x88\x01\x01\x12-\n\x06status\x18\x03 \x01(\x0e\x32\x1d.store_daemon.LoadModelStatusB\r\n\x0b_mem_handle\"u\n\x13\x43onfirmModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x34\n\x12target_device_type\x18\x03 \x01(\x0e\x32\x18.store_daemon.DeviceType\"8\n\x14\x43onfirmModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\"\xb0\x01\n\x12UnloadModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x34\n\x12target_device_type\x18\x03 \x01(\x0e\x32\x18.store_daemon.DeviceType\x12\x10\n\x03pid\x18\x04 \x01(\x05H\x00\x88\x01\x01\x12\x14\n\x07version\x18\x05 \x01(\tH\x01\x88\x01\x01\x42\x06\n\x04_pidB\n\n\x08_version\"7\n\x13UnloadModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05\"\x11\n\x0f\x43learMemRequest\"\x12\n\x10\x43learMemResponse\"\x18\n\x16GetWorkerStatusRequest\"\xc7\x01\n\x17GetWorkerStatusResponse\x12\x15\n\ris_registered\x18\x01 \x01(\x08\x12\x12\n\nis_healthy\x18\x02 \x01(\x08\x12\x18\n\x10is_shutting_down\x18\x03 \x01(\x08\x12\x1b\n\x13mem_pool_total_size\x18\x04 \x01(\x04\x12\x1f\n\x17mem_pool_available_size\x18\x05 \x01(\x04\x12\x16\n\x0euptime_seconds\x18\x06 \x01(\x03\x12\x11\n\tworker_id\x18\x07 \x01(\t\"Y\n\x13VerificationRequest\x12\x18\n\x10model_identifier\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x12\n\ntimeout_ms\x18\x03 \x01(\r\"Y\n\x14VerificationResponse\x12\x30\n\x06status\x18\x01 \x01(\x0e\x32 .store_daemon.VerificationStatus\x12\x0f\n\x07\x65rr_msg\x18\x02 \x01(\t\"\xde\x01\n\tModelInfo\x12\x18\n\x10model_identifier\x18\x01 \x01(\t\x12\x18\n\x10model_size_bytes\x18\x02 \x01(\x03\x12-\n\x08location\x18\x03 \x01(\x0e\x32\x1b.store_daemon.ModelLocation\x12\x18\n\x10loaded_timestamp\x18\x04 \x01(\x03\x12\x1d\n\x15last_access_timestamp\x18\x05 \x01(\x03\x12\x15\n\rreplica_uuids\x18\x06 \x03(\t\x12\x1e\n\x16is_registered_for_comm\x18\x07 \x01(\x08\"\xb9\x01\n\rGpuDeviceInfo\x12\x11\n\tdevice_id\x18\x01 \x01(\x05\x12\x13\n\x0b\x64\x65vice_uuid\x18\x02 \x01(\t\x12\x1a\n\x12total_memory_bytes\x18\x03 \x01(\x03\x12\x19\n\x11\x66ree_memory_bytes\x18\x04 \x01(\x03\x12\x19\n\x11used_memory_bytes\x18\x05 \x01(\x03\x12.\n\rloaded_models\x18\x06 \x03(\x0b\x32\x17.store_daemon.ModelInfo\"\x96\x01\n\x0eMemoryPoolInfo\x12\x18\n\x10total_size_bytes\x18\x01 \x01(\x03\x12\x17\n\x0f\x61vailable_bytes\x18\x02 \x01(\x03\x12\x17\n\x0f\x61llocated_bytes\x18\x03 \x01(\x03\x12\x1e\n\x16\x61llocated_chunks_count\x18\x04 \x01(\x05\x12\x18\n\x10\x63hunk_size_bytes\x18\x05 \x01(\x03\"}\n\x11\x43ommunicationInfo\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x17\n\x0ftotal_transfers\x18\x02 \x01(\x03\x12\x1f\n\x17total_bytes_transferred\x18\x03 \x01(\x03\x12\x1d\n\x15total_transfer_errors\x18\x04 \x01(\x03\"\x1a\n\x18GetDetailedStatusRequest\"\xce\x03\n\x19GetDetailedStatusResponse\x12\x15\n\ris_registered\x18\x01 \x01(\x08\x12\x12\n\nis_healthy\x18\x02 \x01(\x08\x12\x18\n\x10is_shutting_down\x18\x03 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\x12\x11\n\tworker_id\x18\x05 \x01(\t\x12\x36\n\x10memory_pool_info\x18\x06 \x01(\x0b\x32\x1c.store_daemon.MemoryPoolInfo\x12\x30\n\x0bgpu_devices\x18\x07 \x03(\x0b\x32\x1b.store_daemon.GpuDeviceInfo\x12+\n\ncpu_models\x18\x08 \x03(\x0b\x32\x17.store_daemon.ModelInfo\x12;\n\x12\x63ommunication_info\x18\t \x01(\x0b\x32\x1f.store_daemon.CommunicationInfo\x12\x1b\n\x13total_models_loaded\x18\n \x01(\x05\x12\x1e\n\x16total_model_size_bytes\x18\x0b \x01(\x03\x12\x14\n\x0cstorage_path\x18\x0c \x01(\t\x12\x1a\n\x12num_worker_threads\x18\r \x01(\x05\"\xb4\x01\n\x0fLoadedModelInfo\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x11\n\tref_count\x18\x04 \x01(\x05\x12\x0c\n\x04pids\x18\x05 \x03(\x05\x12\x12\n\nsize_bytes\x18\x06 \x01(\x03\x12\x17\n\x0fkeep_for_global\x18\x07 \x01(\x08\x12\x1d\n\x15last_access_timestamp\x18\x08 \x01(\x03\"~\n\x16GetLoadedModelsRequest\x12\x1c\n\x0fmodel_id_filter\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x1d\n\x10\x64\x65vice_id_filter\x18\x02 \x01(\x05H\x01\x88\x01\x01\x42\x12\n\x10_model_id_filterB\x13\n\x11_device_id_filter\"x\n\x17GetLoadedModelsResponse\x12-\n\x06models\x18\x01 \x03(\x0b\x32\x1d.store_daemon.LoadedModelInfo\x12\x14\n\x0ctotal_models\x18\x02 \x01(\x05\x12\x18\n\x10total_size_bytes\x18\x03 \x01(\x03\"<\n\x11LockChunksRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x15\n\rchunk_indices\x18\x02 \x03(\r\"(\n\x12LockChunksResponse\x12\x12\n\nlock_token\x18\x01 \x01(\t\")\n\x13UnlockChunksRequest\x12\x12\n\nlock_token\x18\x01 \x01(\t\"\x16\n\x14UnlockChunksResponse\"\xee\x01\n\x1e\x42\x65ginRegisterTensorDictRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x11\n\tdevice_id\x18\x02 \x01(\x05\x12\x12\n\ntotal_size\x18\x03 \x01(\x04\x12\x12\n\nenable_p2p\x18\x04 \x01(\x08\x12\x13\n\x06ttl_ms\x18\x05 \x01(\rH\x01\x88\x01\x01\x12\x1a\n\x10tensor_index_key\x18\x06 \x01(\tH\x00\x12:\n\x11tensor_index_data\x18\x07 \x01(\x0b\x32\x1d.store_daemon.TensorIndexDataH\x00\x42\x07\n\x05indexB\t\n\x07_ttl_ms\"I\n\x0fTensorIndexData\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x16\n\x0eschema_version\x18\x02 \x01(\t\x12\x10\n\x08\x65ncoding\x18\x03 \x01(\t\"v\n\x1f\x42\x65ginRegisterTensorDictResponse\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\x12\x19\n\x11\x64\x61\x65mon_ipc_handle\x18\x02 \x01(\x0c\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x0c\n\x04size\x18\x04 \x01(\x04\"<\n!CommitRegisteredTensorDictRequest\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\"p\n\"CommitRegisteredTensorDictResponse\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\x12\x10\n\x08model_id\x18\x02 \x01(\t\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x0c\n\x04size\x18\x04 \x01(\x04\";\n AbortRegisteredTensorDictRequest\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\"/\n!AbortRegisteredTensorDictResponse\x12\n\n\x02ok\x18\x01 \x01(\x08*L\n\nDeviceType\x12\x14\n\x10\x44\x45VICE_TYPE_DISK\x10\x00\x12\x13\n\x0f\x44\x45VICE_TYPE_CPU\x10\x01\x12\x13\n\x0f\x44\x45VICE_TYPE_GPU\x10\x02*P\n\x0fLoadModelStatus\x12\x1f\n\x1bLOAD_MODEL_STATUS_ALLOCATED\x10\x00\x12\x1c\n\x18LOAD_MODEL_STATUS_FAILED\x10\x01*\x9a\x01\n\x12VerificationStatus\x12\x1f\n\x1bVERIFICATION_STATUS_UNKNOWN\x10\x00\x12#\n\x1fVERIFICATION_STATUS_IN_PROGRESS\x10\x01\x12\x1e\n\x1aVERIFICATION_STATUS_PASSED\x10\x02\x12\x1e\n\x1aVERIFICATION_STATUS_FAILED\x10\x03*\x8c\x01\n\rModelLocation\x12\x17\n\x13MODEL_LOCATION_NONE\x10\x00\x12\x17\n\x13MODEL_LOCATION_DISK\x10\x01\x12\x16\n\x12MODEL_LOCATION_CPU\x10\x02\x12\x16\n\x12MODEL_LOCATION_GPU\x10\x03\x12\x19\n\x15MODEL_LOCATION_REMOTE\x10\x04\x32\x85\x0b\n\x0bStoreDaemon\x12N\n\tLoadModel\x12\x1e.store_daemon.LoadModelRequest\x1a\x1f.store_daemon.LoadModelResponse\"\x00\x12W\n\x0c\x43onfirmModel\x12!.store_daemon.ConfirmModelRequest\x1a\".store_daemon.ConfirmModelResponse\"\x00\x12T\n\x0bUnloadModel\x12 .store_daemon.UnloadModelRequest\x1a!.store_daemon.UnloadModelResponse\"\x00\x12K\n\x08\x43learMem\x12\x1d.store_daemon.ClearMemRequest\x1a\x1e.store_daemon.ClearMemResponse\"\x00\x12`\n\x0fGetServerConfig\x12$.store_daemon.GetServerConfigRequest\x1a%.store_daemon.GetServerConfigResponse\"\x00\x12`\n\x0fGetWorkerStatus\x12$.store_daemon.GetWorkerStatusRequest\x1a%.store_daemon.GetWorkerStatusResponse\"\x00\x12`\n\x15WaitModelVerification\x12!.store_daemon.VerificationRequest\x1a\".store_daemon.VerificationResponse\"\x00\x12\x66\n\x11GetDetailedStatus\x12&.store_daemon.GetDetailedStatusRequest\x1a\'.store_daemon.GetDetailedStatusResponse\"\x00\x12`\n\x0fGetLoadedModels\x12$.store_daemon.GetLoadedModelsRequest\x1a%.store_daemon.GetLoadedModelsResponse\"\x00\x12Z\n\x13LockTransportChunks\x12\x1f.store_daemon.LockChunksRequest\x1a .store_daemon.LockChunksResponse\"\x00\x12`\n\x15UnlockTransportChunks\x12!.store_daemon.UnlockChunksRequest\x1a\".store_daemon.UnlockChunksResponse\"\x00\x12x\n\x17\x42\x65ginRegisterTensorDict\x12,.store_daemon.BeginRegisterTensorDictRequest\x1a-.store_daemon.BeginRegisterTensorDictResponse\"\x00\x12\x81\x01\n\x1a\x43ommitRegisteredTensorDict\x12/.store_daemon.CommitRegisteredTensorDictRequest\x1a\x30.store_daemon.CommitRegisteredTensorDictResponse\"\x00\x12~\n\x19\x41\x62ortRegisteredTensorDict\x12..store_daemon.AbortRegisteredTensorDictRequest\x1a/.store_daemon.AbortRegisteredTensorDictResponse\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
+    b'\n\x12store_daemon.proto\x12\x0cstore_daemon"\x18\n\x16GetServerConfigRequest"D\n\x17GetServerConfigResponse\x12\x15\n\rmem_pool_size\x18\x01 \x01(\x03\x12\x12\n\nchunk_size\x18\x02 \x01(\x03"*\n\x14RegisterModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t"?\n\x15RegisterModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x12\n\nmodel_size\x18\x02 \x01(\x03"(\n\rMemCopyHandle\x12\x17\n\x0f\x63uda_ipc_handle\x18\x01 \x01(\x0c"\xe7\x01\n\x10LoadModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65vice_uuid\x18\x03 \x01(\t\x12\x34\n\x12target_device_type\x18\x04 \x01(\x0e\x32\x18.store_daemon.DeviceType\x12$\n\x1cpinned_allocation_timeout_ms\x18\x05 \x01(\x05\x12\x0b\n\x03pid\x18\x06 \x01(\x05\x12\x17\n\x0fkeep_for_global\x18\x07 \x01(\x08\x12\x12\n\nsize_bytes\x18\x08 \x01(\x03"\x9b\x01\n\x11LoadModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x34\n\nmem_handle\x18\x02 \x01(\x0b\x32\x1b.store_daemon.MemCopyHandleH\x00\x88\x01\x01\x12-\n\x06status\x18\x03 \x01(\x0e\x32\x1d.store_daemon.LoadModelStatusB\r\n\x0b_mem_handle"u\n\x13\x43onfirmModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x34\n\x12target_device_type\x18\x03 \x01(\x0e\x32\x18.store_daemon.DeviceType"8\n\x14\x43onfirmModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05"\xb0\x01\n\x12UnloadModelRequest\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x34\n\x12target_device_type\x18\x03 \x01(\x0e\x32\x18.store_daemon.DeviceType\x12\x10\n\x03pid\x18\x04 \x01(\x05H\x00\x88\x01\x01\x12\x14\n\x07version\x18\x05 \x01(\tH\x01\x88\x01\x01\x42\x06\n\x04_pidB\n\n\x08_version"7\n\x13UnloadModelResponse\x12\x12\n\nmodel_path\x18\x01 \x01(\t\x12\x0c\n\x04\x63ode\x18\x02 \x01(\x05"\x11\n\x0f\x43learMemRequest"\x12\n\x10\x43learMemResponse"\x18\n\x16GetWorkerStatusRequest"\xc7\x01\n\x17GetWorkerStatusResponse\x12\x15\n\ris_registered\x18\x01 \x01(\x08\x12\x12\n\nis_healthy\x18\x02 \x01(\x08\x12\x18\n\x10is_shutting_down\x18\x03 \x01(\x08\x12\x1b\n\x13mem_pool_total_size\x18\x04 \x01(\x04\x12\x1f\n\x17mem_pool_available_size\x18\x05 \x01(\x04\x12\x16\n\x0euptime_seconds\x18\x06 \x01(\x03\x12\x11\n\tworker_id\x18\x07 \x01(\t"Y\n\x13VerificationRequest\x12\x18\n\x10model_identifier\x18\x01 \x01(\t\x12\x14\n\x0creplica_uuid\x18\x02 \x01(\t\x12\x12\n\ntimeout_ms\x18\x03 \x01(\r"Y\n\x14VerificationResponse\x12\x30\n\x06status\x18\x01 \x01(\x0e\x32 .store_daemon.VerificationStatus\x12\x0f\n\x07\x65rr_msg\x18\x02 \x01(\t"\xde\x01\n\tModelInfo\x12\x18\n\x10model_identifier\x18\x01 \x01(\t\x12\x18\n\x10model_size_bytes\x18\x02 \x01(\x03\x12-\n\x08location\x18\x03 \x01(\x0e\x32\x1b.store_daemon.ModelLocation\x12\x18\n\x10loaded_timestamp\x18\x04 \x01(\x03\x12\x1d\n\x15last_access_timestamp\x18\x05 \x01(\x03\x12\x15\n\rreplica_uuids\x18\x06 \x03(\t\x12\x1e\n\x16is_registered_for_comm\x18\x07 \x01(\x08"\xb9\x01\n\rGpuDeviceInfo\x12\x11\n\tdevice_id\x18\x01 \x01(\x05\x12\x13\n\x0b\x64\x65vice_uuid\x18\x02 \x01(\t\x12\x1a\n\x12total_memory_bytes\x18\x03 \x01(\x03\x12\x19\n\x11\x66ree_memory_bytes\x18\x04 \x01(\x03\x12\x19\n\x11used_memory_bytes\x18\x05 \x01(\x03\x12.\n\rloaded_models\x18\x06 \x03(\x0b\x32\x17.store_daemon.ModelInfo"\x96\x01\n\x0eMemoryPoolInfo\x12\x18\n\x10total_size_bytes\x18\x01 \x01(\x03\x12\x17\n\x0f\x61vailable_bytes\x18\x02 \x01(\x03\x12\x17\n\x0f\x61llocated_bytes\x18\x03 \x01(\x03\x12\x1e\n\x16\x61llocated_chunks_count\x18\x04 \x01(\x05\x12\x18\n\x10\x63hunk_size_bytes\x18\x05 \x01(\x03"}\n\x11\x43ommunicationInfo\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x17\n\x0ftotal_transfers\x18\x02 \x01(\x03\x12\x1f\n\x17total_bytes_transferred\x18\x03 \x01(\x03\x12\x1d\n\x15total_transfer_errors\x18\x04 \x01(\x03"\x1a\n\x18GetDetailedStatusRequest"\xce\x03\n\x19GetDetailedStatusResponse\x12\x15\n\ris_registered\x18\x01 \x01(\x08\x12\x12\n\nis_healthy\x18\x02 \x01(\x08\x12\x18\n\x10is_shutting_down\x18\x03 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\x12\x11\n\tworker_id\x18\x05 \x01(\t\x12\x36\n\x10memory_pool_info\x18\x06 \x01(\x0b\x32\x1c.store_daemon.MemoryPoolInfo\x12\x30\n\x0bgpu_devices\x18\x07 \x03(\x0b\x32\x1b.store_daemon.GpuDeviceInfo\x12+\n\ncpu_models\x18\x08 \x03(\x0b\x32\x17.store_daemon.ModelInfo\x12;\n\x12\x63ommunication_info\x18\t \x01(\x0b\x32\x1f.store_daemon.CommunicationInfo\x12\x1b\n\x13total_models_loaded\x18\n \x01(\x05\x12\x1e\n\x16total_model_size_bytes\x18\x0b \x01(\x03\x12\x14\n\x0cstorage_path\x18\x0c \x01(\t\x12\x1a\n\x12num_worker_threads\x18\r \x01(\x05"\xb4\x01\n\x0fLoadedModelInfo\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x11\n\tref_count\x18\x04 \x01(\x05\x12\x0c\n\x04pids\x18\x05 \x03(\x05\x12\x12\n\nsize_bytes\x18\x06 \x01(\x03\x12\x17\n\x0fkeep_for_global\x18\x07 \x01(\x08\x12\x1d\n\x15last_access_timestamp\x18\x08 \x01(\x03"~\n\x16GetLoadedModelsRequest\x12\x1c\n\x0fmodel_id_filter\x18\x01 \x01(\tH\x00\x88\x01\x01\x12\x1d\n\x10\x64\x65vice_id_filter\x18\x02 \x01(\x05H\x01\x88\x01\x01\x42\x12\n\x10_model_id_filterB\x13\n\x11_device_id_filter"x\n\x17GetLoadedModelsResponse\x12-\n\x06models\x18\x01 \x03(\x0b\x32\x1d.store_daemon.LoadedModelInfo\x12\x14\n\x0ctotal_models\x18\x02 \x01(\x05\x12\x18\n\x10total_size_bytes\x18\x03 \x01(\x03"<\n\x11LockChunksRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x15\n\rchunk_indices\x18\x02 \x03(\r"(\n\x12LockChunksResponse\x12\x12\n\nlock_token\x18\x01 \x01(\t")\n\x13UnlockChunksRequest\x12\x12\n\nlock_token\x18\x01 \x01(\t"\x16\n\x14UnlockChunksResponse"\xee\x01\n\x1e\x42\x65ginRegisterTensorDictRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x11\n\tdevice_id\x18\x02 \x01(\x05\x12\x12\n\ntotal_size\x18\x03 \x01(\x04\x12\x12\n\nenable_p2p\x18\x04 \x01(\x08\x12\x13\n\x06ttl_ms\x18\x05 \x01(\rH\x01\x88\x01\x01\x12\x1a\n\x10tensor_index_key\x18\x06 \x01(\tH\x00\x12:\n\x11tensor_index_data\x18\x07 \x01(\x0b\x32\x1d.store_daemon.TensorIndexDataH\x00\x42\x07\n\x05indexB\t\n\x07_ttl_ms"I\n\x0fTensorIndexData\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x16\n\x0eschema_version\x18\x02 \x01(\t\x12\x10\n\x08\x65ncoding\x18\x03 \x01(\t"v\n\x1f\x42\x65ginRegisterTensorDictResponse\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\x12\x19\n\x11\x64\x61\x65mon_ipc_handle\x18\x02 \x01(\x0c\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x0c\n\x04size\x18\x04 \x01(\x04"<\n!CommitRegisteredTensorDictRequest\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t"p\n"CommitRegisteredTensorDictResponse\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t\x12\x10\n\x08model_id\x18\x02 \x01(\t\x12\x11\n\tdevice_id\x18\x03 \x01(\x05\x12\x0c\n\x04size\x18\x04 \x01(\x04";\n AbortRegisteredTensorDictRequest\x12\x17\n\x0fregistration_id\x18\x01 \x01(\t"/\n!AbortRegisteredTensorDictResponse\x12\n\n\x02ok\x18\x01 \x01(\x08*L\n\nDeviceType\x12\x14\n\x10\x44\x45VICE_TYPE_DISK\x10\x00\x12\x13\n\x0f\x44\x45VICE_TYPE_CPU\x10\x01\x12\x13\n\x0f\x44\x45VICE_TYPE_GPU\x10\x02*P\n\x0fLoadModelStatus\x12\x1f\n\x1bLOAD_MODEL_STATUS_ALLOCATED\x10\x00\x12\x1c\n\x18LOAD_MODEL_STATUS_FAILED\x10\x01*\x9a\x01\n\x12VerificationStatus\x12\x1f\n\x1bVERIFICATION_STATUS_UNKNOWN\x10\x00\x12#\n\x1fVERIFICATION_STATUS_IN_PROGRESS\x10\x01\x12\x1e\n\x1aVERIFICATION_STATUS_PASSED\x10\x02\x12\x1e\n\x1aVERIFICATION_STATUS_FAILED\x10\x03*\x8c\x01\n\rModelLocation\x12\x17\n\x13MODEL_LOCATION_NONE\x10\x00\x12\x17\n\x13MODEL_LOCATION_DISK\x10\x01\x12\x16\n\x12MODEL_LOCATION_CPU\x10\x02\x12\x16\n\x12MODEL_LOCATION_GPU\x10\x03\x12\x19\n\x15MODEL_LOCATION_REMOTE\x10\x04\x32\x85\x0b\n\x0bStoreDaemon\x12N\n\tLoadModel\x12\x1e.store_daemon.LoadModelRequest\x1a\x1f.store_daemon.LoadModelResponse"\x00\x12W\n\x0c\x43onfirmModel\x12!.store_daemon.ConfirmModelRequest\x1a".store_daemon.ConfirmModelResponse"\x00\x12T\n\x0bUnloadModel\x12 .store_daemon.UnloadModelRequest\x1a!.store_daemon.UnloadModelResponse"\x00\x12K\n\x08\x43learMem\x12\x1d.store_daemon.ClearMemRequest\x1a\x1e.store_daemon.ClearMemResponse"\x00\x12`\n\x0fGetServerConfig\x12$.store_daemon.GetServerConfigRequest\x1a%.store_daemon.GetServerConfigResponse"\x00\x12`\n\x0fGetWorkerStatus\x12$.store_daemon.GetWorkerStatusRequest\x1a%.store_daemon.GetWorkerStatusResponse"\x00\x12`\n\x15WaitModelVerification\x12!.store_daemon.VerificationRequest\x1a".store_daemon.VerificationResponse"\x00\x12\x66\n\x11GetDetailedStatus\x12&.store_daemon.GetDetailedStatusRequest\x1a\'.store_daemon.GetDetailedStatusResponse"\x00\x12`\n\x0fGetLoadedModels\x12$.store_daemon.GetLoadedModelsRequest\x1a%.store_daemon.GetLoadedModelsResponse"\x00\x12Z\n\x13LockTransportChunks\x12\x1f.store_daemon.LockChunksRequest\x1a .store_daemon.LockChunksResponse"\x00\x12`\n\x15UnlockTransportChunks\x12!.store_daemon.UnlockChunksRequest\x1a".store_daemon.UnlockChunksResponse"\x00\x12x\n\x17\x42\x65ginRegisterTensorDict\x12,.store_daemon.BeginRegisterTensorDictRequest\x1a-.store_daemon.BeginRegisterTensorDictResponse"\x00\x12\x81\x01\n\x1a\x43ommitRegisteredTensorDict\x12/.store_daemon.CommitRegisteredTensorDictRequest\x1a\x30.store_daemon.CommitRegisteredTensorDictResponse"\x00\x12~\n\x19\x41\x62ortRegisteredTensorDict\x12..store_daemon.AbortRegisteredTensorDictRequest\x1a/.store_daemon.AbortRegisteredTensorDictResponse"\x00\x62\x06proto3'
+)
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'store_daemon_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "store_daemon_pb2", _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
-  DESCRIPTOR._options = None
-  _globals['_DEVICETYPE']._serialized_start=4049
-  _globals['_DEVICETYPE']._serialized_end=4125
-  _globals['_LOADMODELSTATUS']._serialized_start=4127
-  _globals['_LOADMODELSTATUS']._serialized_end=4207
-  _globals['_VERIFICATIONSTATUS']._serialized_start=4210
-  _globals['_VERIFICATIONSTATUS']._serialized_end=4364
-  _globals['_MODELLOCATION']._serialized_start=4367
-  _globals['_MODELLOCATION']._serialized_end=4507
-  _globals['_GETSERVERCONFIGREQUEST']._serialized_start=36
-  _globals['_GETSERVERCONFIGREQUEST']._serialized_end=60
-  _globals['_GETSERVERCONFIGRESPONSE']._serialized_start=62
-  _globals['_GETSERVERCONFIGRESPONSE']._serialized_end=130
-  _globals['_REGISTERMODELREQUEST']._serialized_start=132
-  _globals['_REGISTERMODELREQUEST']._serialized_end=174
-  _globals['_REGISTERMODELRESPONSE']._serialized_start=176
-  _globals['_REGISTERMODELRESPONSE']._serialized_end=239
-  _globals['_MEMCOPYHANDLE']._serialized_start=241
-  _globals['_MEMCOPYHANDLE']._serialized_end=281
-  _globals['_LOADMODELREQUEST']._serialized_start=284
-  _globals['_LOADMODELREQUEST']._serialized_end=515
-  _globals['_LOADMODELRESPONSE']._serialized_start=518
-  _globals['_LOADMODELRESPONSE']._serialized_end=673
-  _globals['_CONFIRMMODELREQUEST']._serialized_start=675
-  _globals['_CONFIRMMODELREQUEST']._serialized_end=792
-  _globals['_CONFIRMMODELRESPONSE']._serialized_start=794
-  _globals['_CONFIRMMODELRESPONSE']._serialized_end=850
-  _globals['_UNLOADMODELREQUEST']._serialized_start=853
-  _globals['_UNLOADMODELREQUEST']._serialized_end=1029
-  _globals['_UNLOADMODELRESPONSE']._serialized_start=1031
-  _globals['_UNLOADMODELRESPONSE']._serialized_end=1086
-  _globals['_CLEARMEMREQUEST']._serialized_start=1088
-  _globals['_CLEARMEMREQUEST']._serialized_end=1105
-  _globals['_CLEARMEMRESPONSE']._serialized_start=1107
-  _globals['_CLEARMEMRESPONSE']._serialized_end=1125
-  _globals['_GETWORKERSTATUSREQUEST']._serialized_start=1127
-  _globals['_GETWORKERSTATUSREQUEST']._serialized_end=1151
-  _globals['_GETWORKERSTATUSRESPONSE']._serialized_start=1154
-  _globals['_GETWORKERSTATUSRESPONSE']._serialized_end=1353
-  _globals['_VERIFICATIONREQUEST']._serialized_start=1355
-  _globals['_VERIFICATIONREQUEST']._serialized_end=1444
-  _globals['_VERIFICATIONRESPONSE']._serialized_start=1446
-  _globals['_VERIFICATIONRESPONSE']._serialized_end=1535
-  _globals['_MODELINFO']._serialized_start=1538
-  _globals['_MODELINFO']._serialized_end=1760
-  _globals['_GPUDEVICEINFO']._serialized_start=1763
-  _globals['_GPUDEVICEINFO']._serialized_end=1948
-  _globals['_MEMORYPOOLINFO']._serialized_start=1951
-  _globals['_MEMORYPOOLINFO']._serialized_end=2101
-  _globals['_COMMUNICATIONINFO']._serialized_start=2103
-  _globals['_COMMUNICATIONINFO']._serialized_end=2228
-  _globals['_GETDETAILEDSTATUSREQUEST']._serialized_start=2230
-  _globals['_GETDETAILEDSTATUSREQUEST']._serialized_end=2256
-  _globals['_GETDETAILEDSTATUSRESPONSE']._serialized_start=2259
-  _globals['_GETDETAILEDSTATUSRESPONSE']._serialized_end=2721
-  _globals['_LOADEDMODELINFO']._serialized_start=2724
-  _globals['_LOADEDMODELINFO']._serialized_end=2904
-  _globals['_GETLOADEDMODELSREQUEST']._serialized_start=2906
-  _globals['_GETLOADEDMODELSREQUEST']._serialized_end=3032
-  _globals['_GETLOADEDMODELSRESPONSE']._serialized_start=3034
-  _globals['_GETLOADEDMODELSRESPONSE']._serialized_end=3154
-  _globals['_LOCKCHUNKSREQUEST']._serialized_start=3156
-  _globals['_LOCKCHUNKSREQUEST']._serialized_end=3216
-  _globals['_LOCKCHUNKSRESPONSE']._serialized_start=3218
-  _globals['_LOCKCHUNKSRESPONSE']._serialized_end=3258
-  _globals['_UNLOCKCHUNKSREQUEST']._serialized_start=3260
-  _globals['_UNLOCKCHUNKSREQUEST']._serialized_end=3301
-  _globals['_UNLOCKCHUNKSRESPONSE']._serialized_start=3303
-  _globals['_UNLOCKCHUNKSRESPONSE']._serialized_end=3325
-  _globals['_BEGINREGISTERTENSORDICTREQUEST']._serialized_start=3328
-  _globals['_BEGINREGISTERTENSORDICTREQUEST']._serialized_end=3566
-  _globals['_TENSORINDEXDATA']._serialized_start=3568
-  _globals['_TENSORINDEXDATA']._serialized_end=3641
-  _globals['_BEGINREGISTERTENSORDICTRESPONSE']._serialized_start=3643
-  _globals['_BEGINREGISTERTENSORDICTRESPONSE']._serialized_end=3761
-  _globals['_COMMITREGISTEREDTENSORDICTREQUEST']._serialized_start=3763
-  _globals['_COMMITREGISTEREDTENSORDICTREQUEST']._serialized_end=3823
-  _globals['_COMMITREGISTEREDTENSORDICTRESPONSE']._serialized_start=3825
-  _globals['_COMMITREGISTEREDTENSORDICTRESPONSE']._serialized_end=3937
-  _globals['_ABORTREGISTEREDTENSORDICTREQUEST']._serialized_start=3939
-  _globals['_ABORTREGISTEREDTENSORDICTREQUEST']._serialized_end=3998
-  _globals['_ABORTREGISTEREDTENSORDICTRESPONSE']._serialized_start=4000
-  _globals['_ABORTREGISTEREDTENSORDICTRESPONSE']._serialized_end=4047
-  _globals['_STOREDAEMON']._serialized_start=4510
-  _globals['_STOREDAEMON']._serialized_end=5923
+    DESCRIPTOR._options = None
+    _globals["_DEVICETYPE"]._serialized_start = 4049
+    _globals["_DEVICETYPE"]._serialized_end = 4125
+    _globals["_LOADMODELSTATUS"]._serialized_start = 4127
+    _globals["_LOADMODELSTATUS"]._serialized_end = 4207
+    _globals["_VERIFICATIONSTATUS"]._serialized_start = 4210
+    _globals["_VERIFICATIONSTATUS"]._serialized_end = 4364
+    _globals["_MODELLOCATION"]._serialized_start = 4367
+    _globals["_MODELLOCATION"]._serialized_end = 4507
+    _globals["_GETSERVERCONFIGREQUEST"]._serialized_start = 36
+    _globals["_GETSERVERCONFIGREQUEST"]._serialized_end = 60
+    _globals["_GETSERVERCONFIGRESPONSE"]._serialized_start = 62
+    _globals["_GETSERVERCONFIGRESPONSE"]._serialized_end = 130
+    _globals["_REGISTERMODELREQUEST"]._serialized_start = 132
+    _globals["_REGISTERMODELREQUEST"]._serialized_end = 174
+    _globals["_REGISTERMODELRESPONSE"]._serialized_start = 176
+    _globals["_REGISTERMODELRESPONSE"]._serialized_end = 239
+    _globals["_MEMCOPYHANDLE"]._serialized_start = 241
+    _globals["_MEMCOPYHANDLE"]._serialized_end = 281
+    _globals["_LOADMODELREQUEST"]._serialized_start = 284
+    _globals["_LOADMODELREQUEST"]._serialized_end = 515
+    _globals["_LOADMODELRESPONSE"]._serialized_start = 518
+    _globals["_LOADMODELRESPONSE"]._serialized_end = 673
+    _globals["_CONFIRMMODELREQUEST"]._serialized_start = 675
+    _globals["_CONFIRMMODELREQUEST"]._serialized_end = 792
+    _globals["_CONFIRMMODELRESPONSE"]._serialized_start = 794
+    _globals["_CONFIRMMODELRESPONSE"]._serialized_end = 850
+    _globals["_UNLOADMODELREQUEST"]._serialized_start = 853
+    _globals["_UNLOADMODELREQUEST"]._serialized_end = 1029
+    _globals["_UNLOADMODELRESPONSE"]._serialized_start = 1031
+    _globals["_UNLOADMODELRESPONSE"]._serialized_end = 1086
+    _globals["_CLEARMEMREQUEST"]._serialized_start = 1088
+    _globals["_CLEARMEMREQUEST"]._serialized_end = 1105
+    _globals["_CLEARMEMRESPONSE"]._serialized_start = 1107
+    _globals["_CLEARMEMRESPONSE"]._serialized_end = 1125
+    _globals["_GETWORKERSTATUSREQUEST"]._serialized_start = 1127
+    _globals["_GETWORKERSTATUSREQUEST"]._serialized_end = 1151
+    _globals["_GETWORKERSTATUSRESPONSE"]._serialized_start = 1154
+    _globals["_GETWORKERSTATUSRESPONSE"]._serialized_end = 1353
+    _globals["_VERIFICATIONREQUEST"]._serialized_start = 1355
+    _globals["_VERIFICATIONREQUEST"]._serialized_end = 1444
+    _globals["_VERIFICATIONRESPONSE"]._serialized_start = 1446
+    _globals["_VERIFICATIONRESPONSE"]._serialized_end = 1535
+    _globals["_MODELINFO"]._serialized_start = 1538
+    _globals["_MODELINFO"]._serialized_end = 1760
+    _globals["_GPUDEVICEINFO"]._serialized_start = 1763
+    _globals["_GPUDEVICEINFO"]._serialized_end = 1948
+    _globals["_MEMORYPOOLINFO"]._serialized_start = 1951
+    _globals["_MEMORYPOOLINFO"]._serialized_end = 2101
+    _globals["_COMMUNICATIONINFO"]._serialized_start = 2103
+    _globals["_COMMUNICATIONINFO"]._serialized_end = 2228
+    _globals["_GETDETAILEDSTATUSREQUEST"]._serialized_start = 2230
+    _globals["_GETDETAILEDSTATUSREQUEST"]._serialized_end = 2256
+    _globals["_GETDETAILEDSTATUSRESPONSE"]._serialized_start = 2259
+    _globals["_GETDETAILEDSTATUSRESPONSE"]._serialized_end = 2721
+    _globals["_LOADEDMODELINFO"]._serialized_start = 2724
+    _globals["_LOADEDMODELINFO"]._serialized_end = 2904
+    _globals["_GETLOADEDMODELSREQUEST"]._serialized_start = 2906
+    _globals["_GETLOADEDMODELSREQUEST"]._serialized_end = 3032
+    _globals["_GETLOADEDMODELSRESPONSE"]._serialized_start = 3034
+    _globals["_GETLOADEDMODELSRESPONSE"]._serialized_end = 3154
+    _globals["_LOCKCHUNKSREQUEST"]._serialized_start = 3156
+    _globals["_LOCKCHUNKSREQUEST"]._serialized_end = 3216
+    _globals["_LOCKCHUNKSRESPONSE"]._serialized_start = 3218
+    _globals["_LOCKCHUNKSRESPONSE"]._serialized_end = 3258
+    _globals["_UNLOCKCHUNKSREQUEST"]._serialized_start = 3260
+    _globals["_UNLOCKCHUNKSREQUEST"]._serialized_end = 3301
+    _globals["_UNLOCKCHUNKSRESPONSE"]._serialized_start = 3303
+    _globals["_UNLOCKCHUNKSRESPONSE"]._serialized_end = 3325
+    _globals["_BEGINREGISTERTENSORDICTREQUEST"]._serialized_start = 3328
+    _globals["_BEGINREGISTERTENSORDICTREQUEST"]._serialized_end = 3566
+    _globals["_TENSORINDEXDATA"]._serialized_start = 3568
+    _globals["_TENSORINDEXDATA"]._serialized_end = 3641
+    _globals["_BEGINREGISTERTENSORDICTRESPONSE"]._serialized_start = 3643
+    _globals["_BEGINREGISTERTENSORDICTRESPONSE"]._serialized_end = 3761
+    _globals["_COMMITREGISTEREDTENSORDICTREQUEST"]._serialized_start = 3763
+    _globals["_COMMITREGISTEREDTENSORDICTREQUEST"]._serialized_end = 3823
+    _globals["_COMMITREGISTEREDTENSORDICTRESPONSE"]._serialized_start = 3825
+    _globals["_COMMITREGISTEREDTENSORDICTRESPONSE"]._serialized_end = 3937
+    _globals["_ABORTREGISTEREDTENSORDICTREQUEST"]._serialized_start = 3939
+    _globals["_ABORTREGISTEREDTENSORDICTREQUEST"]._serialized_end = 3998
+    _globals["_ABORTREGISTEREDTENSORDICTRESPONSE"]._serialized_start = 4000
+    _globals["_ABORTREGISTEREDTENSORDICTRESPONSE"]._serialized_end = 4047
+    _globals["_STOREDAEMON"]._serialized_start = 4510
+    _globals["_STOREDAEMON"]._serialized_end = 5923
 # @@protoc_insertion_point(module_scope)

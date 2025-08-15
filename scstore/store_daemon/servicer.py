@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
 import grpc
 
+from scstore import _checkpoint_store as _cs
 from scstore.logger import init_logger
 from scstore.proto import (
     global_store_pb2_grpc,
@@ -847,12 +848,12 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         context: grpc.ServicerContext,
     ) -> store_daemon_pb2.BeginRegisterTensorDictResponse:
         try:
-            reg = {
+            reg: _cs.CheckpointStore.TensorDictRegistration = {
                 "model_id": request.model_id,
                 "tensor_index_key": request.tensor_index_key
                 if request.WhichOneof("index") == "tensor_index_key"
                 else "",
-                "tensor_index_data": request.tensor_index_data.data
+                "tensor_index_data": request.tensor_index_data.data.decode("utf-8")
                 if request.WhichOneof("index") == "tensor_index_data"
                 else None,
                 "schema_version": request.tensor_index_data.schema_version
@@ -930,7 +931,6 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             indices = list(request.chunk_indices)
 
             # Call checkpoint store to lock chunks
-            from scstore import _checkpoint_store as _cs
 
             dev = _cs.DeviceKey()
             dev.type = _cs.DeviceType.NONE

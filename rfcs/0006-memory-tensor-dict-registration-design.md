@@ -521,21 +521,26 @@ m.def(
       - Abort 释放（Abort 后 Commit 返回 NotFound）
       - TTL 过期（Commit 返回 DeadlineExceeded 并回收显存）
       - 非法参数校验（size=0 / 设备号<0 / 缺失 key）
-    - 说明：为满足 `Model::create(DiskSource)` 的初始化检查，测试在 `storage_path/model_id/` 下创建最小化模型目录与占位文件；实现侧 `begin_register_tensor_dict` 已改为使用 `storage_path_/model_id` 作为 `DiskSource` 路径，仅做显存分配不触发磁盘 I/O。
+      - 新增：重复 Commit 返回 NotFound；提交未知 `registration_id` 返回 NotFound
+    - 说明：为满足 `Model::create(DiskSource)` 的初始化检查，测试在 `storage_path/model_id/` 下创建最小化模型目录与占位文件；实现侧 `begin_register_tensor_dict` 使用 `storage_path_/model_id` 作为 `DiskSource` 路径，仅做显存分配不触发磁盘 I/O。
     - 结果：在真实 CUDA GPU 上全部通过，同时 `//core/store:checkpoint_store_test` 与 `//core/store:checkpoint_store_p2p_loader_test` 回归通过。
 
-- Python 绑定（进行中）：
-  - 低层 pybind 路径（`scstore._checkpoint_store`）已包含接口定义（见 `checkpoint_store_py.cc` 的 `begin_registered_tensor_dict/commit/abort` 绑定）。
-  - 新增用例：`tests/python/test_checkpoint_registration_pybind.py`（验证 `begin→map CUDA IPC→commit`）。
-  - 当前状态：在本地开发环境构建的 `libscstore.so` 尚未导出新的符号，导致 Python 扩展链接报 `undefined symbol: CheckpointStore::begin_register_tensor_dict`。需先完整重建 `//core:libscstore.so` 并由 `setup.py develop` 同步到 `scstore/lib/libscstore.so` 后再运行该用例。
+- Python 绑定（部分通过）：
+  - 低层 pybind 路径（`scstore._checkpoint_store`）已包含接口定义（`begin_register_tensor_dict/commit/abort`）。
+  - 用例：`tests/python/test_checkpoint_registration_pybind.py`（验证 `begin→map CUDA IPC→commit`）。
+  - 构建：通过 `BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py build_ext` 完整重建 C++ 核心与 Python 扩展，产物已同步至 `scstore/lib/libscstore.so` 且加载正常。
+  - 现状：`begin` 与 `commit` 路径可用，但在“映射守护进程导出的 CUDA IPC 句柄（_C.get_cuda_memory_ptr）”处，测试环境报 `cudaErrorDeviceUninitialized`。已在 C++ 与 pybind 层引入“线程首个 CUDA 调用触发上下文创建”的防御（`cudaFree(0)`/`set_device`），仍有复现；怀疑与测试用例上下文初始化时序相关，后续将：
+    - 在 `_C.get_cuda_memory_ptr` 前显式初始化上下文（候选：`torch.cuda.init()`/首个 `torch.cuda.current_device()`），或
+    - 在守护分配侧改为“先行触发流创建/设备同步”，确保 IPC 句柄对外前上下文就绪。
 
 - StoreDaemon gRPC（进行中）：
-  - 新增用例：`tests/python/store_daemon/test_memory_registration.py`（覆盖 `BeginRegisterTensorDict/Commit/Abort` 三个 RPC 及 TTL 路径）。
-  - 当前状态：`scstore/proto/store_daemon_pb2.py` 尚未包含新消息与 RPC，导入时报 `AttributeError: BeginRegisterTensorDictRequest`。需按 `proto/store_daemon.proto` 重新生成 Python stubs（参考 `tools/build_proto_python.sh`），并在服务端实现中维持现有向下兼容逻辑。
+  - Python stubs 已同步：更新 `tools/build_proto_python.sh`（修正 `--proto_path`、优先使用项目 venv 的 Python）并重生 `scstore/proto/store_daemon_pb2*.py[i]`。
+  - 服务端实现已包含 `BeginRegisterTensorDict/Commit/Abort`；
+  - 用例：`tests/python/store_daemon/test_memory_registration.py` 覆盖 Begin/Commit/Abort/TTL；待在上述 IPC 上下文问题修复后跑通全链路。
 
 - 端到端（待办）：
   - A 节点内存注册（GPU RAM）→ GS 注册（仅 key）→ B 节点通过 GS 选取内存副本并 P2P 拉取 → 验证落地；
-  - 依赖 Python 绑定与 StoreDaemon proto 同步完成。
+  - 依赖 Python 绑定 IPC 上下文初始化修复与 StoreDaemon 测试绿灯。
 
 ## 9. Mermaid Diagrams
 
@@ -580,11 +585,12 @@ sequenceDiagram
 
 | Phase | Task | Status | Notes |
 |----|---|-----|----|
-| A | Python Begin/Commit 封装与写入 | ⏳ In progress | C++ pybind 已绑定；待修复 `libscstore.so` 导出符号后补充用例通过 |
-| A | StoreDaemon Begin/Commit/Abort | ⏳ In progress | 端点代码存在；Python proto 未同步，阻塞用例运行（需重生 `store_daemon_pb2*`） |
+| A | Python Begin/Commit 封装与写入 | ⚠️ Partially passing | `begin/commit` 正常；`_C.get_cuda_memory_ptr` 在 CI/测试环境偶发 `cudaErrorDeviceUninitialized`，已在 C++/pybind 层添加上下文初始化防御，仍需继续修复 |
+| A | StoreDaemon Begin/Commit/Abort | ⏳ In progress | Python stubs 已重生；服务端方法已实现；单测待随着 IPC 上下文问题修复后统一跑通 |
 | A | GS MemoryInfo 扩展 | ✅ Implemented (proto) | `proto/global_store.proto` 包含 `tensor_index_key` 与 `GetModelIndex`；C++ 客户端已适配 |
 | A | C++ CheckpointStore 注册 API | ✅ Implemented & Tested | 新增 `begin/commit/abort_registered_tensor_dict`；单测在实机 CUDA 环境通过 |
-| A | Python bindings (pybind11) | ⏳ In progress | 绑定已添加；打包产物需更新以暴露新符号，测试暂阻塞 |
+| A | Python bindings (pybind11) | ⚠️ Builds OK, tests WIP | 通过 `BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py build_ext` 构建成功；映射 IPC 的单测仍在修复中 |
+| A | Proto & tooling | ✅ Updated | `tools/build_proto_python.sh` 修正 `--proto_path` 并默认使用项目 venv Python；重生 `store_daemon_pb2*` 成功 |
 | B | 指标与错误处理 | ⏳ Pending | 注册时延/吞吐/失败计数 |
 | B | 校验与回收 | ⏳ Pending | GPU 校验/失败清理 |
 

@@ -242,3 +242,65 @@ TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[checkp
   std::error_code ec;
   fs::remove_all(temp_root, ec);
 }
+
+TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[checkpoint_store][memory-registration]") {
+  if (!stepcast::tests::is_cuda_available()) {
+    WARN("CUDA not available – skipping memory registration tests.");
+    return;
+  }
+
+  const std::string model_id = "mem_reg_double_commit";
+  const uint64_t size_bytes = 1ULL * 1024 * 1024; // 1 MiB
+
+  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_double_commit_test";
+  fs::create_directories(temp_root);
+
+  // Create a minimal on-disk model directory so Model::create(DiskSource) initializes
+  fs::path model_dir = temp_root / model_id;
+  fs::create_directories(model_dir);
+  REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
+
+  CheckpointStore store = make_store(temp_root);
+
+  CheckpointStore::TensorDictRegistration reg;
+  reg.model_id = model_id;
+  reg.tensor_index_key = "0011";
+  reg.device_id = 0;
+  reg.total_size_bytes = size_bytes;
+
+  auto begin_or = store.begin_register_tensor_dict(reg);
+  REQUIRE(begin_or.ok());
+  const auto& begin = begin_or.value();
+
+  auto commit1 = store.commit_registered_tensor_dict(begin.registration_id);
+  REQUIRE(commit1.ok());
+
+  auto commit2 = store.commit_registered_tensor_dict(begin.registration_id);
+  REQUIRE_FALSE(commit2.ok());
+  REQUIRE(commit2.status().code() == absl::StatusCode::kNotFound);
+
+  REQUIRE(store.clear_mem() == 0);
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE(
+    "Memory TensorDict registration: commit unknown id returns NotFound",
+    "[checkpoint_store][memory-registration]") {
+  if (!stepcast::tests::is_cuda_available()) {
+    WARN("CUDA not available – skipping memory registration tests.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_unknown_commit_test";
+  fs::create_directories(temp_root);
+  CheckpointStore store = make_store(temp_root);
+
+  auto commit_or = store.commit_registered_tensor_dict("non-existent-id");
+  REQUIRE_FALSE(commit_or.ok());
+  REQUIRE(commit_or.status().code() == absl::StatusCode::kNotFound);
+
+  REQUIRE(store.clear_mem() == 0);
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
