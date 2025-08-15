@@ -400,7 +400,12 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
 
     // Update partition_sizes to reflect actual bytes mapped
     data_lengths[i] = (!is_safetensors) ? bytes_to_map : len_or_payload; // reflect payload length for safetensors
-    bytes_processed += bytes_to_map;
+    // For safetensors, only count the payload towards bytes_processed to match actual_model_size
+    if (!is_safetensors) {
+      bytes_processed += bytes_to_map;
+    } else {
+      bytes_processed += len_or_payload;
+    }
   }
 
   // Adjust partition_sizes to only include partitions we actually read
