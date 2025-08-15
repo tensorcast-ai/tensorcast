@@ -96,6 +96,14 @@ struct CompleteModelReplicaTransportResponseDefaultTypeInternal;
 extern CompleteModelReplicaTransportResponseDefaultTypeInternal
     _CompleteModelReplicaTransportResponse_default_instance_;
 extern const ::google::protobuf::internal::ClassDataFull CompleteModelReplicaTransportResponse_class_data_;
+class GetModelIndexRequest;
+struct GetModelIndexRequestDefaultTypeInternal;
+extern GetModelIndexRequestDefaultTypeInternal _GetModelIndexRequest_default_instance_;
+extern const ::google::protobuf::internal::ClassDataFull GetModelIndexRequest_class_data_;
+class GetModelIndexResponse;
+struct GetModelIndexResponseDefaultTypeInternal;
+extern GetModelIndexResponseDefaultTypeInternal _GetModelIndexResponse_default_instance_;
+extern const ::google::protobuf::internal::ClassDataFull GetModelIndexResponse_class_data_;
 class GetModelInfoRequest;
 struct GetModelInfoRequestDefaultTypeInternal;
 extern GetModelInfoRequestDefaultTypeInternal _GetModelInfoRequest_default_instance_;
@@ -1061,7 +1069,7 @@ class UpdateModelReplicaResponse final : public ::google::protobuf::Message
   static const UpdateModelReplicaResponse& default_instance() {
     return *reinterpret_cast<const UpdateModelReplicaResponse*>(&_UpdateModelReplicaResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 25;
+  static constexpr int kIndexInFileMessages = 27;
   friend void swap(UpdateModelReplicaResponse& a, UpdateModelReplicaResponse& b) {
     a.Swap(&b);
   }
@@ -1302,7 +1310,7 @@ class UpdateModelReplicaRequest final : public ::google::protobuf::Message
   static const UpdateModelReplicaRequest& default_instance() {
     return *reinterpret_cast<const UpdateModelReplicaRequest*>(&_UpdateModelReplicaRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 24;
+  static constexpr int kIndexInFileMessages = 26;
   friend void swap(UpdateModelReplicaRequest& a, UpdateModelReplicaRequest& b) {
     a.Swap(&b);
   }
@@ -1953,7 +1961,7 @@ class UnregisterModelReplicaResponse final : public ::google::protobuf::Message
   static const UnregisterModelReplicaResponse& default_instance() {
     return *reinterpret_cast<const UnregisterModelReplicaResponse*>(&_UnregisterModelReplicaResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 27;
+  static constexpr int kIndexInFileMessages = 29;
   friend void swap(UnregisterModelReplicaResponse& a, UnregisterModelReplicaResponse& b) {
     a.Swap(&b);
   }
@@ -2162,7 +2170,7 @@ class UnregisterModelReplicaRequest final : public ::google::protobuf::Message
   static const UnregisterModelReplicaRequest& default_instance() {
     return *reinterpret_cast<const UnregisterModelReplicaRequest*>(&_UnregisterModelReplicaRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 26;
+  static constexpr int kIndexInFileMessages = 28;
   friend void swap(UnregisterModelReplicaRequest& a, UnregisterModelReplicaRequest& b) {
     a.Swap(&b);
   }
@@ -3177,7 +3185,7 @@ class RegisterModelReplicaResponse final : public ::google::protobuf::Message
   static const RegisterModelReplicaResponse& default_instance() {
     return *reinterpret_cast<const RegisterModelReplicaResponse*>(&_RegisterModelReplicaResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 23;
+  static constexpr int kIndexInFileMessages = 25;
   friend void swap(RegisterModelReplicaResponse& a, RegisterModelReplicaResponse& b) {
     a.Swap(&b);
   }
@@ -3420,7 +3428,7 @@ class QueryChunkLocationsRequest final : public ::google::protobuf::Message
   static const QueryChunkLocationsRequest& default_instance() {
     return *reinterpret_cast<const QueryChunkLocationsRequest*>(&_QueryChunkLocationsRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 38;
+  static constexpr int kIndexInFileMessages = 40;
   friend void swap(QueryChunkLocationsRequest& a, QueryChunkLocationsRequest& b) {
     a.Swap(&b);
   }
@@ -3653,7 +3661,7 @@ class MemoryInfo final : public ::google::protobuf::Message
   static const MemoryInfo& default_instance() {
     return *reinterpret_cast<const MemoryInfo*>(&_MemoryInfo_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 28;
+  static constexpr int kIndexInFileMessages = 30;
   friend void swap(MemoryInfo& a, MemoryInfo& b) {
     a.Swap(&b);
   }
@@ -3757,10 +3765,14 @@ class MemoryInfo final : public ::google::protobuf::Message
     kBufferSizesFieldNumber = 9,
     kNodeIdFieldNumber = 1,
     kNodeAddressFieldNumber = 2,
+    kTensorIndexKeyFieldNumber = 11,
+    kSourceProcessIdFieldNumber = 13,
     kNodePortFieldNumber = 3,
     kMemoryTypeFieldNumber = 6,
     kMemorySizeFieldNumber = 5,
     kDeviceIdFieldNumber = 7,
+    kIsMemoryReplicaFieldNumber = 10,
+    kCreationTimestampFieldNumber = 12,
   };
   // repeated string remote_memory_keys = 8 [json_name = "remoteMemoryKeys"];
   int remote_memory_keys_size() const;
@@ -3834,6 +3846,36 @@ class MemoryInfo final : public ::google::protobuf::Message
   ::std::string* PROTOBUF_NONNULL _internal_mutable_node_address();
 
  public:
+  // string tensor_index_key = 11 [json_name = "tensorIndexKey"];
+  void clear_tensor_index_key();
+  const ::std::string& tensor_index_key() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_tensor_index_key(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_tensor_index_key();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_tensor_index_key();
+  void set_allocated_tensor_index_key(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_tensor_index_key() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_tensor_index_key(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_tensor_index_key();
+
+ public:
+  // string source_process_id = 13 [json_name = "sourceProcessId"];
+  void clear_source_process_id();
+  const ::std::string& source_process_id() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_source_process_id(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_source_process_id();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_source_process_id();
+  void set_allocated_source_process_id(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_source_process_id() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_source_process_id(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_source_process_id();
+
+ public:
   // uint32 node_port = 3 [json_name = "nodePort"];
   void clear_node_port();
   ::uint32_t node_port() const;
@@ -3874,11 +3916,31 @@ class MemoryInfo final : public ::google::protobuf::Message
   void _internal_set_device_id(::uint32_t value);
 
  public:
+  // bool is_memory_replica = 10 [json_name = "isMemoryReplica"];
+  void clear_is_memory_replica();
+  bool is_memory_replica() const;
+  void set_is_memory_replica(bool value);
+
+ private:
+  bool _internal_is_memory_replica() const;
+  void _internal_set_is_memory_replica(bool value);
+
+ public:
+  // int64 creation_timestamp = 12 [json_name = "creationTimestamp"];
+  void clear_creation_timestamp();
+  ::int64_t creation_timestamp() const;
+  void set_creation_timestamp(::int64_t value);
+
+ private:
+  ::int64_t _internal_creation_timestamp() const;
+  void _internal_set_creation_timestamp(::int64_t value);
+
+ public:
   // @@protoc_insertion_point(class_scope:global_store.MemoryInfo)
  private:
   class _Internal;
   friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<4, 8, 0, 77, 2> _table_;
+  static const ::google::protobuf::internal::TcParseTable<4, 12, 0, 110, 2> _table_;
 
   friend class ::google::protobuf::MessageLite;
   friend class ::google::protobuf::Arena;
@@ -3903,10 +3965,14 @@ class MemoryInfo final : public ::google::protobuf::Message
     ::google::protobuf::internal::CachedSize _buffer_sizes_cached_byte_size_;
     ::google::protobuf::internal::ArenaStringPtr node_id_;
     ::google::protobuf::internal::ArenaStringPtr node_address_;
+    ::google::protobuf::internal::ArenaStringPtr tensor_index_key_;
+    ::google::protobuf::internal::ArenaStringPtr source_process_id_;
     ::uint32_t node_port_;
     int memory_type_;
     ::uint64_t memory_size_;
     ::uint32_t device_id_;
+    bool is_memory_replica_;
+    ::int64_t creation_timestamp_;
     PROTOBUF_TSAN_DECLARE_MEMBER
   };
   union {
@@ -3972,7 +4038,7 @@ class ListModelReplicasRequest final : public ::google::protobuf::Message
   static const ListModelReplicasRequest& default_instance() {
     return *reinterpret_cast<const ListModelReplicasRequest*>(&_ListModelReplicasRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 19;
+  static constexpr int kIndexInFileMessages = 21;
   friend void swap(ListModelReplicasRequest& a, ListModelReplicasRequest& b) {
     a.Swap(&b);
   }
@@ -4808,7 +4874,7 @@ class HealthCheckResponse final : public ::google::protobuf::Message
   static const HealthCheckResponse& default_instance() {
     return *reinterpret_cast<const HealthCheckResponse*>(&_HealthCheckResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 37;
+  static constexpr int kIndexInFileMessages = 39;
   friend void swap(HealthCheckResponse& a, HealthCheckResponse& b) {
     a.Swap(&b);
   }
@@ -5009,7 +5075,7 @@ class HealthCheckRequest final : public ::google::protobuf::internal::ZeroFields
   static const HealthCheckRequest& default_instance() {
     return *reinterpret_cast<const HealthCheckRequest*>(&_HealthCheckRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 36;
+  static constexpr int kIndexInFileMessages = 38;
   friend void swap(HealthCheckRequest& a, HealthCheckRequest& b) {
     a.Swap(&b);
   }
@@ -5313,6 +5379,485 @@ class GetModelInfoRequest final : public ::google::protobuf::Message
 extern const ::google::protobuf::internal::ClassDataFull GetModelInfoRequest_class_data_;
 // -------------------------------------------------------------------
 
+class GetModelIndexResponse final : public ::google::protobuf::Message
+/* @@protoc_insertion_point(class_definition:global_store.GetModelIndexResponse) */ {
+ public:
+  inline GetModelIndexResponse() : GetModelIndexResponse(nullptr) {}
+  ~GetModelIndexResponse() PROTOBUF_FINAL;
+
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+  void operator delete(GetModelIndexResponse* PROTOBUF_NONNULL msg, std::destroying_delete_t) {
+    SharedDtor(*msg);
+    ::google::protobuf::internal::SizedDelete(msg, sizeof(GetModelIndexResponse));
+  }
+#endif
+
+  template <typename = void>
+  explicit PROTOBUF_CONSTEXPR GetModelIndexResponse(::google::protobuf::internal::ConstantInitialized);
+
+  inline GetModelIndexResponse(const GetModelIndexResponse& from) : GetModelIndexResponse(nullptr, from) {}
+  inline GetModelIndexResponse(GetModelIndexResponse&& from) noexcept
+      : GetModelIndexResponse(nullptr, ::std::move(from)) {}
+  inline GetModelIndexResponse& operator=(const GetModelIndexResponse& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline GetModelIndexResponse& operator=(GetModelIndexResponse&& from) noexcept {
+    if (this == &from)
+      return *this;
+    if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(
+        ::google::protobuf::UnknownFieldSet::default_instance);
+  }
+  inline ::google::protobuf::UnknownFieldSet* PROTOBUF_NONNULL mutable_unknown_fields() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+  }
+
+  static const ::google::protobuf::Descriptor* PROTOBUF_NONNULL descriptor() {
+    return GetDescriptor();
+  }
+  static const ::google::protobuf::Descriptor* PROTOBUF_NONNULL GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::google::protobuf::Reflection* PROTOBUF_NONNULL GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const GetModelIndexResponse& default_instance() {
+    return *reinterpret_cast<const GetModelIndexResponse*>(&_GetModelIndexResponse_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages = 20;
+  friend void swap(GetModelIndexResponse& a, GetModelIndexResponse& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(GetModelIndexResponse* PROTOBUF_NONNULL other) {
+    if (other == this)
+      return;
+    if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
+      InternalSwap(other);
+    } else {
+      ::google::protobuf::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(GetModelIndexResponse* PROTOBUF_NONNULL other) {
+    if (other == this)
+      return;
+    ABSL_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  GetModelIndexResponse* PROTOBUF_NONNULL New(::google::protobuf::Arena* PROTOBUF_NULLABLE arena = nullptr) const {
+    return ::google::protobuf::Message::DefaultConstruct<GetModelIndexResponse>(arena);
+  }
+  using ::google::protobuf::Message::CopyFrom;
+  void CopyFrom(const GetModelIndexResponse& from);
+  using ::google::protobuf::Message::MergeFrom;
+  void MergeFrom(const GetModelIndexResponse& from) {
+    GetModelIndexResponse::MergeImpl(*this, from);
+  }
+
+ private:
+  static void MergeImpl(::google::protobuf::MessageLite& to_msg, const ::google::protobuf::MessageLite& from_msg);
+
+ public:
+  bool IsInitialized() const {
+    return true;
+  }
+  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+ private:
+  static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
+  static ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      const ::google::protobuf::MessageLite& msg,
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream);
+
+ public:
+  ::size_t ByteSizeLong() const {
+    return ByteSizeLong(*this);
+  }
+  ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream) const {
+    return _InternalSerialize(*this, target, stream);
+  }
+#else // PROTOBUF_CUSTOM_VTABLE
+  ::size_t ByteSizeLong() const final;
+  ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream) const final;
+#endif // PROTOBUF_CUSTOM_VTABLE
+  int GetCachedSize() const {
+    return _impl_._cached_size_.Get();
+  }
+
+ private:
+  void SharedCtor(::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  static void SharedDtor(MessageLite& self);
+  void InternalSwap(GetModelIndexResponse* PROTOBUF_NONNULL other);
+
+ private:
+  template <typename T>
+  friend ::absl::string_view(::google::protobuf::internal::GetAnyMessageName)();
+  static ::absl::string_view FullMessageName() {
+    return "global_store.GetModelIndexResponse";
+  }
+
+ protected:
+  explicit GetModelIndexResponse(::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  GetModelIndexResponse(::google::protobuf::Arena* PROTOBUF_NULLABLE arena, const GetModelIndexResponse& from);
+  GetModelIndexResponse(::google::protobuf::Arena* PROTOBUF_NULLABLE arena, GetModelIndexResponse&& from) noexcept
+      : GetModelIndexResponse(arena) {
+    *this = ::std::move(from);
+  }
+  const ::google::protobuf::internal::ClassData* PROTOBUF_NONNULL GetClassData() const PROTOBUF_FINAL;
+  static void* PROTOBUF_NONNULL PlacementNew_(
+      const void* PROTOBUF_NONNULL,
+      void* PROTOBUF_NONNULL mem,
+      ::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  static constexpr auto InternalNewImpl_();
+
+ public:
+  static constexpr auto InternalGenerateClassData_();
+
+  ::google::protobuf::Metadata GetMetadata() const;
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+  enum : int {
+    kTensorIndexDataFieldNumber = 2,
+    kEncodingFieldNumber = 3,
+    kSchemaVersionFieldNumber = 4,
+    kStatusFieldNumber = 1,
+  };
+  // bytes tensor_index_data = 2 [json_name = "tensorIndexData"];
+  void clear_tensor_index_data();
+  const ::std::string& tensor_index_data() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_tensor_index_data(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_tensor_index_data();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_tensor_index_data();
+  void set_allocated_tensor_index_data(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_tensor_index_data() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_tensor_index_data(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_tensor_index_data();
+
+ public:
+  // string encoding = 3 [json_name = "encoding"];
+  void clear_encoding();
+  const ::std::string& encoding() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_encoding(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_encoding();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_encoding();
+  void set_allocated_encoding(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_encoding() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_encoding(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_encoding();
+
+ public:
+  // string schema_version = 4 [json_name = "schemaVersion"];
+  void clear_schema_version();
+  const ::std::string& schema_version() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_schema_version(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_schema_version();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_schema_version();
+  void set_allocated_schema_version(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_schema_version() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_schema_version(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_schema_version();
+
+ public:
+  // .global_store.Status status = 1 [json_name = "status"];
+  void clear_status();
+  ::global_store::Status status() const;
+  void set_status(::global_store::Status value);
+
+ private:
+  ::global_store::Status _internal_status() const;
+  void _internal_set_status(::global_store::Status value);
+
+ public:
+  // @@protoc_insertion_point(class_scope:global_store.GetModelIndexResponse)
+ private:
+  class _Internal;
+  friend class ::google::protobuf::internal::TcParser;
+  static const ::google::protobuf::internal::TcParseTable<2, 4, 0, 65, 2> _table_;
+
+  friend class ::google::protobuf::MessageLite;
+  friend class ::google::protobuf::Arena;
+  template <typename T>
+  friend class ::google::protobuf::Arena::InternalHelper;
+  using InternalArenaConstructable_ = void;
+  using DestructorSkippable_ = void;
+  struct Impl_ {
+    inline explicit constexpr Impl_(::google::protobuf::internal::ConstantInitialized) noexcept;
+    inline explicit Impl_(
+        ::google::protobuf::internal::InternalVisibility visibility,
+        ::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+    inline explicit Impl_(
+        ::google::protobuf::internal::InternalVisibility visibility,
+        ::google::protobuf::Arena* PROTOBUF_NULLABLE arena,
+        const Impl_& from,
+        const GetModelIndexResponse& from_msg);
+    ::google::protobuf::internal::HasBits<1> _has_bits_;
+    ::google::protobuf::internal::CachedSize _cached_size_;
+    ::google::protobuf::internal::ArenaStringPtr tensor_index_data_;
+    ::google::protobuf::internal::ArenaStringPtr encoding_;
+    ::google::protobuf::internal::ArenaStringPtr schema_version_;
+    int status_;
+    PROTOBUF_TSAN_DECLARE_MEMBER
+  };
+  union {
+    Impl_ _impl_;
+  };
+  friend struct ::TableStruct_proto_2fglobal_5fstore_2eproto;
+};
+
+extern const ::google::protobuf::internal::ClassDataFull GetModelIndexResponse_class_data_;
+// -------------------------------------------------------------------
+
+class GetModelIndexRequest final : public ::google::protobuf::Message
+/* @@protoc_insertion_point(class_definition:global_store.GetModelIndexRequest) */ {
+ public:
+  inline GetModelIndexRequest() : GetModelIndexRequest(nullptr) {}
+  ~GetModelIndexRequest() PROTOBUF_FINAL;
+
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+  void operator delete(GetModelIndexRequest* PROTOBUF_NONNULL msg, std::destroying_delete_t) {
+    SharedDtor(*msg);
+    ::google::protobuf::internal::SizedDelete(msg, sizeof(GetModelIndexRequest));
+  }
+#endif
+
+  template <typename = void>
+  explicit PROTOBUF_CONSTEXPR GetModelIndexRequest(::google::protobuf::internal::ConstantInitialized);
+
+  inline GetModelIndexRequest(const GetModelIndexRequest& from) : GetModelIndexRequest(nullptr, from) {}
+  inline GetModelIndexRequest(GetModelIndexRequest&& from) noexcept
+      : GetModelIndexRequest(nullptr, ::std::move(from)) {}
+  inline GetModelIndexRequest& operator=(const GetModelIndexRequest& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline GetModelIndexRequest& operator=(GetModelIndexRequest&& from) noexcept {
+    if (this == &from)
+      return *this;
+    if (::google::protobuf::internal::CanMoveWithInternalSwap(GetArena(), from.GetArena())) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  inline const ::google::protobuf::UnknownFieldSet& unknown_fields() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.unknown_fields<::google::protobuf::UnknownFieldSet>(
+        ::google::protobuf::UnknownFieldSet::default_instance);
+  }
+  inline ::google::protobuf::UnknownFieldSet* PROTOBUF_NONNULL mutable_unknown_fields() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return _internal_metadata_.mutable_unknown_fields<::google::protobuf::UnknownFieldSet>();
+  }
+
+  static const ::google::protobuf::Descriptor* PROTOBUF_NONNULL descriptor() {
+    return GetDescriptor();
+  }
+  static const ::google::protobuf::Descriptor* PROTOBUF_NONNULL GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::google::protobuf::Reflection* PROTOBUF_NONNULL GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const GetModelIndexRequest& default_instance() {
+    return *reinterpret_cast<const GetModelIndexRequest*>(&_GetModelIndexRequest_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages = 19;
+  friend void swap(GetModelIndexRequest& a, GetModelIndexRequest& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(GetModelIndexRequest* PROTOBUF_NONNULL other) {
+    if (other == this)
+      return;
+    if (::google::protobuf::internal::CanUseInternalSwap(GetArena(), other->GetArena())) {
+      InternalSwap(other);
+    } else {
+      ::google::protobuf::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(GetModelIndexRequest* PROTOBUF_NONNULL other) {
+    if (other == this)
+      return;
+    ABSL_DCHECK(GetArena() == other->GetArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  GetModelIndexRequest* PROTOBUF_NONNULL New(::google::protobuf::Arena* PROTOBUF_NULLABLE arena = nullptr) const {
+    return ::google::protobuf::Message::DefaultConstruct<GetModelIndexRequest>(arena);
+  }
+  using ::google::protobuf::Message::CopyFrom;
+  void CopyFrom(const GetModelIndexRequest& from);
+  using ::google::protobuf::Message::MergeFrom;
+  void MergeFrom(const GetModelIndexRequest& from) {
+    GetModelIndexRequest::MergeImpl(*this, from);
+  }
+
+ private:
+  static void MergeImpl(::google::protobuf::MessageLite& to_msg, const ::google::protobuf::MessageLite& from_msg);
+
+ public:
+  bool IsInitialized() const {
+    return true;
+  }
+  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;
+#if defined(PROTOBUF_CUSTOM_VTABLE)
+ private:
+  static ::size_t ByteSizeLong(const ::google::protobuf::MessageLite& msg);
+  static ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      const ::google::protobuf::MessageLite& msg,
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream);
+
+ public:
+  ::size_t ByteSizeLong() const {
+    return ByteSizeLong(*this);
+  }
+  ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream) const {
+    return _InternalSerialize(*this, target, stream);
+  }
+#else // PROTOBUF_CUSTOM_VTABLE
+  ::size_t ByteSizeLong() const final;
+  ::uint8_t* PROTOBUF_NONNULL _InternalSerialize(
+      ::uint8_t* PROTOBUF_NONNULL target,
+      ::google::protobuf::io::EpsCopyOutputStream* PROTOBUF_NONNULL stream) const final;
+#endif // PROTOBUF_CUSTOM_VTABLE
+  int GetCachedSize() const {
+    return _impl_._cached_size_.Get();
+  }
+
+ private:
+  void SharedCtor(::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  static void SharedDtor(MessageLite& self);
+  void InternalSwap(GetModelIndexRequest* PROTOBUF_NONNULL other);
+
+ private:
+  template <typename T>
+  friend ::absl::string_view(::google::protobuf::internal::GetAnyMessageName)();
+  static ::absl::string_view FullMessageName() {
+    return "global_store.GetModelIndexRequest";
+  }
+
+ protected:
+  explicit GetModelIndexRequest(::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  GetModelIndexRequest(::google::protobuf::Arena* PROTOBUF_NULLABLE arena, const GetModelIndexRequest& from);
+  GetModelIndexRequest(::google::protobuf::Arena* PROTOBUF_NULLABLE arena, GetModelIndexRequest&& from) noexcept
+      : GetModelIndexRequest(arena) {
+    *this = ::std::move(from);
+  }
+  const ::google::protobuf::internal::ClassData* PROTOBUF_NONNULL GetClassData() const PROTOBUF_FINAL;
+  static void* PROTOBUF_NONNULL PlacementNew_(
+      const void* PROTOBUF_NONNULL,
+      void* PROTOBUF_NONNULL mem,
+      ::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+  static constexpr auto InternalNewImpl_();
+
+ public:
+  static constexpr auto InternalGenerateClassData_();
+
+  ::google::protobuf::Metadata GetMetadata() const;
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+  enum : int {
+    kModelNameFieldNumber = 1,
+    kTensorIndexKeyFieldNumber = 2,
+  };
+  // string model_name = 1 [json_name = "modelName"];
+  void clear_model_name();
+  const ::std::string& model_name() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_model_name(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_model_name();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_model_name();
+  void set_allocated_model_name(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_model_name() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_model_name(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_model_name();
+
+ public:
+  // string tensor_index_key = 2 [json_name = "tensorIndexKey"];
+  void clear_tensor_index_key();
+  const ::std::string& tensor_index_key() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_tensor_index_key(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_tensor_index_key();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_tensor_index_key();
+  void set_allocated_tensor_index_key(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_tensor_index_key() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_tensor_index_key(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_tensor_index_key();
+
+ public:
+  // @@protoc_insertion_point(class_scope:global_store.GetModelIndexRequest)
+ private:
+  class _Internal;
+  friend class ::google::protobuf::internal::TcParser;
+  static const ::google::protobuf::internal::TcParseTable<1, 2, 0, 68, 2> _table_;
+
+  friend class ::google::protobuf::MessageLite;
+  friend class ::google::protobuf::Arena;
+  template <typename T>
+  friend class ::google::protobuf::Arena::InternalHelper;
+  using InternalArenaConstructable_ = void;
+  using DestructorSkippable_ = void;
+  struct Impl_ {
+    inline explicit constexpr Impl_(::google::protobuf::internal::ConstantInitialized) noexcept;
+    inline explicit Impl_(
+        ::google::protobuf::internal::InternalVisibility visibility,
+        ::google::protobuf::Arena* PROTOBUF_NULLABLE arena);
+    inline explicit Impl_(
+        ::google::protobuf::internal::InternalVisibility visibility,
+        ::google::protobuf::Arena* PROTOBUF_NULLABLE arena,
+        const Impl_& from,
+        const GetModelIndexRequest& from_msg);
+    ::google::protobuf::internal::HasBits<1> _has_bits_;
+    ::google::protobuf::internal::CachedSize _cached_size_;
+    ::google::protobuf::internal::ArenaStringPtr model_name_;
+    ::google::protobuf::internal::ArenaStringPtr tensor_index_key_;
+    PROTOBUF_TSAN_DECLARE_MEMBER
+  };
+  union {
+    Impl_ _impl_;
+  };
+  friend struct ::TableStruct_proto_2fglobal_5fstore_2eproto;
+};
+
+extern const ::google::protobuf::internal::ClassDataFull GetModelIndexRequest_class_data_;
+// -------------------------------------------------------------------
+
 class CompleteModelReplicaTransportResponse final : public ::google::protobuf::Message
 /* @@protoc_insertion_point(class_definition:global_store.CompleteModelReplicaTransportResponse) */ {
  public:
@@ -5369,7 +5914,7 @@ class CompleteModelReplicaTransportResponse final : public ::google::protobuf::M
     return *reinterpret_cast<const CompleteModelReplicaTransportResponse*>(
         &_CompleteModelReplicaTransportResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 33;
+  static constexpr int kIndexInFileMessages = 35;
   friend void swap(CompleteModelReplicaTransportResponse& a, CompleteModelReplicaTransportResponse& b) {
     a.Swap(&b);
   }
@@ -5579,7 +6124,7 @@ class CompleteModelReplicaTransportRequest final : public ::google::protobuf::Me
     return *reinterpret_cast<const CompleteModelReplicaTransportRequest*>(
         &_CompleteModelReplicaTransportRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 32;
+  static constexpr int kIndexInFileMessages = 34;
   friend void swap(CompleteModelReplicaTransportRequest& a, CompleteModelReplicaTransportRequest& b) {
     a.Swap(&b);
   }
@@ -5791,7 +6336,7 @@ class ChunkStateUpdate final : public ::google::protobuf::Message
   static const ChunkStateUpdate& default_instance() {
     return *reinterpret_cast<const ChunkStateUpdate*>(&_ChunkStateUpdate_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 41;
+  static constexpr int kIndexInFileMessages = 43;
   friend void swap(ChunkStateUpdate& a, ChunkStateUpdate& b) {
     a.Swap(&b);
   }
@@ -6051,7 +6596,7 @@ class ChunkLocation final : public ::google::protobuf::Message
   static const ChunkLocation& default_instance() {
     return *reinterpret_cast<const ChunkLocation*>(&_ChunkLocation_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 39;
+  static constexpr int kIndexInFileMessages = 41;
   friend void swap(ChunkLocation& a, ChunkLocation& b) {
     a.Swap(&b);
   }
@@ -6354,7 +6899,7 @@ class BatchUpdateChunkStatesResponse final : public ::google::protobuf::Message
   static const BatchUpdateChunkStatesResponse& default_instance() {
     return *reinterpret_cast<const BatchUpdateChunkStatesResponse*>(&_BatchUpdateChunkStatesResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 43;
+  static constexpr int kIndexInFileMessages = 45;
   friend void swap(BatchUpdateChunkStatesResponse& a, BatchUpdateChunkStatesResponse& b) {
     a.Swap(&b);
   }
@@ -6576,7 +7121,7 @@ class RequestModelReplicaTransportResponse final : public ::google::protobuf::Me
     return *reinterpret_cast<const RequestModelReplicaTransportResponse*>(
         &_RequestModelReplicaTransportResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 31;
+  static constexpr int kIndexInFileMessages = 33;
   friend void swap(RequestModelReplicaTransportResponse& a, RequestModelReplicaTransportResponse& b) {
     a.Swap(&b);
   }
@@ -6820,7 +7365,7 @@ class RequestModelReplicaTransportRequest final : public ::google::protobuf::Mes
     return *reinterpret_cast<const RequestModelReplicaTransportRequest*>(
         &_RequestModelReplicaTransportRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 30;
+  static constexpr int kIndexInFileMessages = 32;
   friend void swap(RequestModelReplicaTransportRequest& a, RequestModelReplicaTransportRequest& b) {
     a.Swap(&b);
   }
@@ -7109,7 +7654,7 @@ class RegisterModelReplicaRequest final : public ::google::protobuf::Message
   static const RegisterModelReplicaRequest& default_instance() {
     return *reinterpret_cast<const RegisterModelReplicaRequest*>(&_RegisterModelReplicaRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 22;
+  static constexpr int kIndexInFileMessages = 24;
   friend void swap(RegisterModelReplicaRequest& a, RegisterModelReplicaRequest& b) {
     a.Swap(&b);
   }
@@ -7217,6 +7762,9 @@ class RegisterModelReplicaRequest final : public ::google::protobuf::Message
   enum : int {
     kModelNameFieldNumber = 1,
     kWorkerIdFieldNumber = 4,
+    kTensorIndexDataFieldNumber = 5,
+    kEncodingFieldNumber = 6,
+    kSchemaVersionFieldNumber = 7,
     kMemInfoFieldNumber = 2,
     kMaxConcurrencyFieldNumber = 3,
   };
@@ -7250,6 +7798,54 @@ class RegisterModelReplicaRequest final : public ::google::protobuf::Message
   ::std::string* PROTOBUF_NONNULL _internal_mutable_worker_id();
 
  public:
+  // optional bytes tensor_index_data = 5 [json_name = "tensorIndexData"];
+  bool has_tensor_index_data() const;
+  void clear_tensor_index_data();
+  const ::std::string& tensor_index_data() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_tensor_index_data(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_tensor_index_data();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_tensor_index_data();
+  void set_allocated_tensor_index_data(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_tensor_index_data() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_tensor_index_data(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_tensor_index_data();
+
+ public:
+  // optional string encoding = 6 [json_name = "encoding"];
+  bool has_encoding() const;
+  void clear_encoding();
+  const ::std::string& encoding() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_encoding(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_encoding();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_encoding();
+  void set_allocated_encoding(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_encoding() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_encoding(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_encoding();
+
+ public:
+  // optional string schema_version = 7 [json_name = "schemaVersion"];
+  bool has_schema_version() const;
+  void clear_schema_version();
+  const ::std::string& schema_version() const;
+  template <typename Arg_ = const ::std::string&, typename... Args_>
+  void set_schema_version(Arg_&& arg, Args_... args);
+  ::std::string* PROTOBUF_NONNULL mutable_schema_version();
+  [[nodiscard]] ::std::string* PROTOBUF_NULLABLE release_schema_version();
+  void set_allocated_schema_version(::std::string* PROTOBUF_NULLABLE value);
+
+ private:
+  const ::std::string& _internal_schema_version() const;
+  PROTOBUF_ALWAYS_INLINE void _internal_set_schema_version(const ::std::string& value);
+  ::std::string* PROTOBUF_NONNULL _internal_mutable_schema_version();
+
+ public:
   // .global_store.MemoryInfo mem_info = 2 [json_name = "memInfo"];
   bool has_mem_info() const;
   void clear_mem_info();
@@ -7279,7 +7875,7 @@ class RegisterModelReplicaRequest final : public ::google::protobuf::Message
  private:
   class _Internal;
   friend class ::google::protobuf::internal::TcParser;
-  static const ::google::protobuf::internal::TcParseTable<2, 4, 1, 68, 2> _table_;
+  static const ::google::protobuf::internal::TcParseTable<3, 7, 1, 90, 2> _table_;
 
   friend class ::google::protobuf::MessageLite;
   friend class ::google::protobuf::Arena;
@@ -7301,6 +7897,9 @@ class RegisterModelReplicaRequest final : public ::google::protobuf::Message
     ::google::protobuf::internal::CachedSize _cached_size_;
     ::google::protobuf::internal::ArenaStringPtr model_name_;
     ::google::protobuf::internal::ArenaStringPtr worker_id_;
+    ::google::protobuf::internal::ArenaStringPtr tensor_index_data_;
+    ::google::protobuf::internal::ArenaStringPtr encoding_;
+    ::google::protobuf::internal::ArenaStringPtr schema_version_;
     ::global_store::MemoryInfo* PROTOBUF_NULLABLE mem_info_;
     ::uint32_t max_concurrency_;
     PROTOBUF_TSAN_DECLARE_MEMBER
@@ -7369,7 +7968,7 @@ class QueryChunkLocationsResponse final : public ::google::protobuf::Message
   static const QueryChunkLocationsResponse& default_instance() {
     return *reinterpret_cast<const QueryChunkLocationsResponse*>(&_QueryChunkLocationsResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 40;
+  static constexpr int kIndexInFileMessages = 42;
   friend void swap(QueryChunkLocationsResponse& a, QueryChunkLocationsResponse& b) {
     a.Swap(&b);
   }
@@ -8114,7 +8713,7 @@ class MemoryInfoList final : public ::google::protobuf::Message
   static const MemoryInfoList& default_instance() {
     return *reinterpret_cast<const MemoryInfoList*>(&_MemoryInfoList_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 29;
+  static constexpr int kIndexInFileMessages = 31;
   friend void swap(MemoryInfoList& a, MemoryInfoList& b) {
     a.Swap(&b);
   }
@@ -8542,7 +9141,7 @@ class GetModelReplicaResponse final : public ::google::protobuf::Message
   static const GetModelReplicaResponse& default_instance() {
     return *reinterpret_cast<const GetModelReplicaResponse*>(&_GetModelReplicaResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 35;
+  static constexpr int kIndexInFileMessages = 37;
   friend void swap(GetModelReplicaResponse& a, GetModelReplicaResponse& b) {
     a.Swap(&b);
   }
@@ -8779,7 +9378,7 @@ class GetModelReplicaRequest final : public ::google::protobuf::Message
   static const GetModelReplicaRequest& default_instance() {
     return *reinterpret_cast<const GetModelReplicaRequest*>(&_GetModelReplicaRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 34;
+  static constexpr int kIndexInFileMessages = 36;
   friend void swap(GetModelReplicaRequest& a, GetModelReplicaRequest& b) {
     a.Swap(&b);
   }
@@ -9023,7 +9622,7 @@ class BatchUpdateChunkStatesRequest final : public ::google::protobuf::Message
   static const BatchUpdateChunkStatesRequest& default_instance() {
     return *reinterpret_cast<const BatchUpdateChunkStatesRequest*>(&_BatchUpdateChunkStatesRequest_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 42;
+  static constexpr int kIndexInFileMessages = 44;
   friend void swap(BatchUpdateChunkStatesRequest& a, BatchUpdateChunkStatesRequest& b) {
     a.Swap(&b);
   }
@@ -10822,7 +11421,7 @@ class ListModelReplicasResponse final : public ::google::protobuf::Message
   static const ListModelReplicasResponse& default_instance() {
     return *reinterpret_cast<const ListModelReplicasResponse*>(&_ListModelReplicasResponse_default_instance_);
   }
-  static constexpr int kIndexInFileMessages = 21;
+  static constexpr int kIndexInFileMessages = 23;
   friend void swap(ListModelReplicasResponse& a, ListModelReplicasResponse& b) {
     a.Swap(&b);
   }
@@ -14210,6 +14809,354 @@ inline void GetModelInfoResponse::set_allocated_model_info(::global_store::Model
 
 // -------------------------------------------------------------------
 
+// GetModelIndexRequest
+
+// string model_name = 1 [json_name = "modelName"];
+inline void GetModelIndexRequest::clear_model_name() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.model_name_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000001u;
+}
+inline const ::std::string& GetModelIndexRequest::model_name() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexRequest.model_name)
+  return _internal_model_name();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void GetModelIndexRequest::set_model_name(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  _impl_.model_name_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexRequest.model_name)
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexRequest::mutable_model_name() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_model_name();
+  // @@protoc_insertion_point(field_mutable:global_store.GetModelIndexRequest.model_name)
+  return _s;
+}
+inline const ::std::string& GetModelIndexRequest::_internal_model_name() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.model_name_.Get();
+}
+inline void GetModelIndexRequest::_internal_set_model_name(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  _impl_.model_name_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexRequest::_internal_mutable_model_name() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  return _impl_.model_name_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE GetModelIndexRequest::release_model_name() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.GetModelIndexRequest.model_name)
+  if ((_impl_._has_bits_[0] & 0x00000001u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000001u;
+  auto* released = _impl_.model_name_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.model_name_.Set("", GetArena());
+  }
+  return released;
+}
+inline void GetModelIndexRequest::set_allocated_model_name(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000001u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000001u;
+  }
+  _impl_.model_name_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.model_name_.IsDefault()) {
+    _impl_.model_name_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.GetModelIndexRequest.model_name)
+}
+
+// string tensor_index_key = 2 [json_name = "tensorIndexKey"];
+inline void GetModelIndexRequest::clear_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.tensor_index_key_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000002u;
+}
+inline const ::std::string& GetModelIndexRequest::tensor_index_key() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexRequest.tensor_index_key)
+  return _internal_tensor_index_key();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void GetModelIndexRequest::set_tensor_index_key(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  _impl_.tensor_index_key_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexRequest.tensor_index_key)
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexRequest::mutable_tensor_index_key() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_tensor_index_key();
+  // @@protoc_insertion_point(field_mutable:global_store.GetModelIndexRequest.tensor_index_key)
+  return _s;
+}
+inline const ::std::string& GetModelIndexRequest::_internal_tensor_index_key() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.tensor_index_key_.Get();
+}
+inline void GetModelIndexRequest::_internal_set_tensor_index_key(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  _impl_.tensor_index_key_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexRequest::_internal_mutable_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  return _impl_.tensor_index_key_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE GetModelIndexRequest::release_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.GetModelIndexRequest.tensor_index_key)
+  if ((_impl_._has_bits_[0] & 0x00000002u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000002u;
+  auto* released = _impl_.tensor_index_key_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.tensor_index_key_.Set("", GetArena());
+  }
+  return released;
+}
+inline void GetModelIndexRequest::set_allocated_tensor_index_key(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000002u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000002u;
+  }
+  _impl_.tensor_index_key_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.tensor_index_key_.IsDefault()) {
+    _impl_.tensor_index_key_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.GetModelIndexRequest.tensor_index_key)
+}
+
+// -------------------------------------------------------------------
+
+// GetModelIndexResponse
+
+// .global_store.Status status = 1 [json_name = "status"];
+inline void GetModelIndexResponse::clear_status() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.status_ = 0;
+  _impl_._has_bits_[0] &= ~0x00000008u;
+}
+inline ::global_store::Status GetModelIndexResponse::status() const {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexResponse.status)
+  return _internal_status();
+}
+inline void GetModelIndexResponse::set_status(::global_store::Status value) {
+  _internal_set_status(value);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexResponse.status)
+}
+inline ::global_store::Status GetModelIndexResponse::_internal_status() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return static_cast<::global_store::Status>(_impl_.status_);
+}
+inline void GetModelIndexResponse::_internal_set_status(::global_store::Status value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.status_ = value;
+}
+
+// bytes tensor_index_data = 2 [json_name = "tensorIndexData"];
+inline void GetModelIndexResponse::clear_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.tensor_index_data_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000001u;
+}
+inline const ::std::string& GetModelIndexResponse::tensor_index_data() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexResponse.tensor_index_data)
+  return _internal_tensor_index_data();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void GetModelIndexResponse::set_tensor_index_data(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  _impl_.tensor_index_data_.SetBytes(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexResponse.tensor_index_data)
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::mutable_tensor_index_data()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_tensor_index_data();
+  // @@protoc_insertion_point(field_mutable:global_store.GetModelIndexResponse.tensor_index_data)
+  return _s;
+}
+inline const ::std::string& GetModelIndexResponse::_internal_tensor_index_data() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.tensor_index_data_.Get();
+}
+inline void GetModelIndexResponse::_internal_set_tensor_index_data(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  _impl_.tensor_index_data_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::_internal_mutable_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000001u;
+  return _impl_.tensor_index_data_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE GetModelIndexResponse::release_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.GetModelIndexResponse.tensor_index_data)
+  if ((_impl_._has_bits_[0] & 0x00000001u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000001u;
+  auto* released = _impl_.tensor_index_data_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.tensor_index_data_.Set("", GetArena());
+  }
+  return released;
+}
+inline void GetModelIndexResponse::set_allocated_tensor_index_data(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000001u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000001u;
+  }
+  _impl_.tensor_index_data_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.tensor_index_data_.IsDefault()) {
+    _impl_.tensor_index_data_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.GetModelIndexResponse.tensor_index_data)
+}
+
+// string encoding = 3 [json_name = "encoding"];
+inline void GetModelIndexResponse::clear_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.encoding_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000002u;
+}
+inline const ::std::string& GetModelIndexResponse::encoding() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexResponse.encoding)
+  return _internal_encoding();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void GetModelIndexResponse::set_encoding(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  _impl_.encoding_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexResponse.encoding)
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::mutable_encoding() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_encoding();
+  // @@protoc_insertion_point(field_mutable:global_store.GetModelIndexResponse.encoding)
+  return _s;
+}
+inline const ::std::string& GetModelIndexResponse::_internal_encoding() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.encoding_.Get();
+}
+inline void GetModelIndexResponse::_internal_set_encoding(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  _impl_.encoding_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::_internal_mutable_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000002u;
+  return _impl_.encoding_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE GetModelIndexResponse::release_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.GetModelIndexResponse.encoding)
+  if ((_impl_._has_bits_[0] & 0x00000002u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000002u;
+  auto* released = _impl_.encoding_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.encoding_.Set("", GetArena());
+  }
+  return released;
+}
+inline void GetModelIndexResponse::set_allocated_encoding(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000002u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000002u;
+  }
+  _impl_.encoding_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.encoding_.IsDefault()) {
+    _impl_.encoding_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.GetModelIndexResponse.encoding)
+}
+
+// string schema_version = 4 [json_name = "schemaVersion"];
+inline void GetModelIndexResponse::clear_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.schema_version_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000004u;
+}
+inline const ::std::string& GetModelIndexResponse::schema_version() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.GetModelIndexResponse.schema_version)
+  return _internal_schema_version();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void GetModelIndexResponse::set_schema_version(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.schema_version_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.GetModelIndexResponse.schema_version)
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::mutable_schema_version() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_schema_version();
+  // @@protoc_insertion_point(field_mutable:global_store.GetModelIndexResponse.schema_version)
+  return _s;
+}
+inline const ::std::string& GetModelIndexResponse::_internal_schema_version() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.schema_version_.Get();
+}
+inline void GetModelIndexResponse::_internal_set_schema_version(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.schema_version_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL GetModelIndexResponse::_internal_mutable_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  return _impl_.schema_version_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE GetModelIndexResponse::release_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.GetModelIndexResponse.schema_version)
+  if ((_impl_._has_bits_[0] & 0x00000004u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000004u;
+  auto* released = _impl_.schema_version_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.schema_version_.Set("", GetArena());
+  }
+  return released;
+}
+inline void GetModelIndexResponse::set_allocated_schema_version(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000004u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000004u;
+  }
+  _impl_.schema_version_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.schema_version_.IsDefault()) {
+    _impl_.schema_version_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.GetModelIndexResponse.schema_version)
+}
+
+// -------------------------------------------------------------------
+
 // ListModelReplicasRequest
 
 // optional string model_name = 1 [json_name = "modelName"];
@@ -14643,7 +15590,7 @@ inline void RegisterModelReplicaRequest::set_allocated_model_name(::std::string*
 
 // .global_store.MemoryInfo mem_info = 2 [json_name = "memInfo"];
 inline bool RegisterModelReplicaRequest::has_mem_info() const {
-  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
+  bool value = (_impl_._has_bits_[0] & 0x00000020u) != 0;
   PROTOBUF_ASSUME(!value || _impl_.mem_info_ != nullptr);
   return value;
 }
@@ -14651,7 +15598,7 @@ inline void RegisterModelReplicaRequest::clear_mem_info() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   if (_impl_.mem_info_ != nullptr)
     _impl_.mem_info_->Clear();
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000020u;
 }
 inline const ::global_store::MemoryInfo& RegisterModelReplicaRequest::_internal_mem_info() const {
   ::google::protobuf::internal::TSanRead(&_impl_);
@@ -14672,16 +15619,16 @@ inline void RegisterModelReplicaRequest::unsafe_arena_set_allocated_mem_info(
   }
   _impl_.mem_info_ = reinterpret_cast<::global_store::MemoryInfo*>(value);
   if (value != nullptr) {
-    _impl_._has_bits_[0] |= 0x00000004u;
+    _impl_._has_bits_[0] |= 0x00000020u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000004u;
+    _impl_._has_bits_[0] &= ~0x00000020u;
   }
   // @@protoc_insertion_point(field_unsafe_arena_set_allocated:global_store.RegisterModelReplicaRequest.mem_info)
 }
 inline ::global_store::MemoryInfo* PROTOBUF_NULLABLE RegisterModelReplicaRequest::release_mem_info() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
 
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000020u;
   ::global_store::MemoryInfo* released = _impl_.mem_info_;
   _impl_.mem_info_ = nullptr;
   if (::google::protobuf::internal::DebugHardenForceCopyInRelease()) {
@@ -14701,7 +15648,7 @@ inline ::global_store::MemoryInfo* PROTOBUF_NULLABLE RegisterModelReplicaRequest
   ::google::protobuf::internal::TSanWrite(&_impl_);
   // @@protoc_insertion_point(field_release:global_store.RegisterModelReplicaRequest.mem_info)
 
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000020u;
   ::global_store::MemoryInfo* temp = _impl_.mem_info_;
   _impl_.mem_info_ = nullptr;
   return temp;
@@ -14716,7 +15663,7 @@ inline ::global_store::MemoryInfo* PROTOBUF_NONNULL RegisterModelReplicaRequest:
 }
 inline ::global_store::MemoryInfo* PROTOBUF_NONNULL RegisterModelReplicaRequest::mutable_mem_info()
     ABSL_ATTRIBUTE_LIFETIME_BOUND {
-  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_._has_bits_[0] |= 0x00000020u;
   ::global_store::MemoryInfo* _msg = _internal_mutable_mem_info();
   // @@protoc_insertion_point(field_mutable:global_store.RegisterModelReplicaRequest.mem_info)
   return _msg;
@@ -14733,9 +15680,9 @@ inline void RegisterModelReplicaRequest::set_allocated_mem_info(::global_store::
     if (message_arena != submessage_arena) {
       value = ::google::protobuf::internal::GetOwnedMessage(message_arena, value, submessage_arena);
     }
-    _impl_._has_bits_[0] |= 0x00000004u;
+    _impl_._has_bits_[0] |= 0x00000020u;
   } else {
-    _impl_._has_bits_[0] &= ~0x00000004u;
+    _impl_._has_bits_[0] &= ~0x00000020u;
   }
 
   _impl_.mem_info_ = reinterpret_cast<::global_store::MemoryInfo*>(value);
@@ -14746,7 +15693,7 @@ inline void RegisterModelReplicaRequest::set_allocated_mem_info(::global_store::
 inline void RegisterModelReplicaRequest::clear_max_concurrency() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   _impl_.max_concurrency_ = 0u;
-  _impl_._has_bits_[0] &= ~0x00000008u;
+  _impl_._has_bits_[0] &= ~0x00000040u;
 }
 inline ::uint32_t RegisterModelReplicaRequest::max_concurrency() const {
   // @@protoc_insertion_point(field_get:global_store.RegisterModelReplicaRequest.max_concurrency)
@@ -14754,7 +15701,7 @@ inline ::uint32_t RegisterModelReplicaRequest::max_concurrency() const {
 }
 inline void RegisterModelReplicaRequest::set_max_concurrency(::uint32_t value) {
   _internal_set_max_concurrency(value);
-  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_._has_bits_[0] |= 0x00000040u;
   // @@protoc_insertion_point(field_set:global_store.RegisterModelReplicaRequest.max_concurrency)
 }
 inline ::uint32_t RegisterModelReplicaRequest::_internal_max_concurrency() const {
@@ -14827,6 +15774,209 @@ inline void RegisterModelReplicaRequest::set_allocated_worker_id(::std::string* 
     _impl_.worker_id_.Set("", GetArena());
   }
   // @@protoc_insertion_point(field_set_allocated:global_store.RegisterModelReplicaRequest.worker_id)
+}
+
+// optional bytes tensor_index_data = 5 [json_name = "tensorIndexData"];
+inline bool RegisterModelReplicaRequest::has_tensor_index_data() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000004u) != 0;
+  return value;
+}
+inline void RegisterModelReplicaRequest::clear_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.tensor_index_data_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000004u;
+}
+inline const ::std::string& RegisterModelReplicaRequest::tensor_index_data() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.RegisterModelReplicaRequest.tensor_index_data)
+  return _internal_tensor_index_data();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void RegisterModelReplicaRequest::set_tensor_index_data(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.tensor_index_data_.SetBytes(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.RegisterModelReplicaRequest.tensor_index_data)
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::mutable_tensor_index_data()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_tensor_index_data();
+  // @@protoc_insertion_point(field_mutable:global_store.RegisterModelReplicaRequest.tensor_index_data)
+  return _s;
+}
+inline const ::std::string& RegisterModelReplicaRequest::_internal_tensor_index_data() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.tensor_index_data_.Get();
+}
+inline void RegisterModelReplicaRequest::_internal_set_tensor_index_data(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.tensor_index_data_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::_internal_mutable_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  return _impl_.tensor_index_data_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE RegisterModelReplicaRequest::release_tensor_index_data() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.RegisterModelReplicaRequest.tensor_index_data)
+  if ((_impl_._has_bits_[0] & 0x00000004u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000004u;
+  auto* released = _impl_.tensor_index_data_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.tensor_index_data_.Set("", GetArena());
+  }
+  return released;
+}
+inline void RegisterModelReplicaRequest::set_allocated_tensor_index_data(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000004u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000004u;
+  }
+  _impl_.tensor_index_data_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.tensor_index_data_.IsDefault()) {
+    _impl_.tensor_index_data_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.RegisterModelReplicaRequest.tensor_index_data)
+}
+
+// optional string encoding = 6 [json_name = "encoding"];
+inline bool RegisterModelReplicaRequest::has_encoding() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000008u) != 0;
+  return value;
+}
+inline void RegisterModelReplicaRequest::clear_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.encoding_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000008u;
+}
+inline const ::std::string& RegisterModelReplicaRequest::encoding() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.RegisterModelReplicaRequest.encoding)
+  return _internal_encoding();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void RegisterModelReplicaRequest::set_encoding(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_.encoding_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.RegisterModelReplicaRequest.encoding)
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::mutable_encoding() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_encoding();
+  // @@protoc_insertion_point(field_mutable:global_store.RegisterModelReplicaRequest.encoding)
+  return _s;
+}
+inline const ::std::string& RegisterModelReplicaRequest::_internal_encoding() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.encoding_.Get();
+}
+inline void RegisterModelReplicaRequest::_internal_set_encoding(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_.encoding_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::_internal_mutable_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  return _impl_.encoding_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE RegisterModelReplicaRequest::release_encoding() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.RegisterModelReplicaRequest.encoding)
+  if ((_impl_._has_bits_[0] & 0x00000008u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000008u;
+  auto* released = _impl_.encoding_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.encoding_.Set("", GetArena());
+  }
+  return released;
+}
+inline void RegisterModelReplicaRequest::set_allocated_encoding(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000008u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000008u;
+  }
+  _impl_.encoding_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.encoding_.IsDefault()) {
+    _impl_.encoding_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.RegisterModelReplicaRequest.encoding)
+}
+
+// optional string schema_version = 7 [json_name = "schemaVersion"];
+inline bool RegisterModelReplicaRequest::has_schema_version() const {
+  bool value = (_impl_._has_bits_[0] & 0x00000010u) != 0;
+  return value;
+}
+inline void RegisterModelReplicaRequest::clear_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.schema_version_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000010u;
+}
+inline const ::std::string& RegisterModelReplicaRequest::schema_version() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.RegisterModelReplicaRequest.schema_version)
+  return _internal_schema_version();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void RegisterModelReplicaRequest::set_schema_version(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000010u;
+  _impl_.schema_version_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.RegisterModelReplicaRequest.schema_version)
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::mutable_schema_version()
+    ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_schema_version();
+  // @@protoc_insertion_point(field_mutable:global_store.RegisterModelReplicaRequest.schema_version)
+  return _s;
+}
+inline const ::std::string& RegisterModelReplicaRequest::_internal_schema_version() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.schema_version_.Get();
+}
+inline void RegisterModelReplicaRequest::_internal_set_schema_version(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000010u;
+  _impl_.schema_version_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL RegisterModelReplicaRequest::_internal_mutable_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000010u;
+  return _impl_.schema_version_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE RegisterModelReplicaRequest::release_schema_version() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.RegisterModelReplicaRequest.schema_version)
+  if ((_impl_._has_bits_[0] & 0x00000010u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000010u;
+  auto* released = _impl_.schema_version_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.schema_version_.Set("", GetArena());
+  }
+  return released;
+}
+inline void RegisterModelReplicaRequest::set_allocated_schema_version(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000010u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000010u;
+  }
+  _impl_.schema_version_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.schema_version_.IsDefault()) {
+    _impl_.schema_version_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.RegisterModelReplicaRequest.schema_version)
 }
 
 // -------------------------------------------------------------------
@@ -15563,7 +16713,7 @@ inline void MemoryInfo::set_allocated_node_address(::std::string* PROTOBUF_NULLA
 inline void MemoryInfo::clear_node_port() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   _impl_.node_port_ = 0u;
-  _impl_._has_bits_[0] &= ~0x00000004u;
+  _impl_._has_bits_[0] &= ~0x00000010u;
 }
 inline ::uint32_t MemoryInfo::node_port() const {
   // @@protoc_insertion_point(field_get:global_store.MemoryInfo.node_port)
@@ -15571,7 +16721,7 @@ inline ::uint32_t MemoryInfo::node_port() const {
 }
 inline void MemoryInfo::set_node_port(::uint32_t value) {
   _internal_set_node_port(value);
-  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_._has_bits_[0] |= 0x00000010u;
   // @@protoc_insertion_point(field_set:global_store.MemoryInfo.node_port)
 }
 inline ::uint32_t MemoryInfo::_internal_node_port() const {
@@ -15587,7 +16737,7 @@ inline void MemoryInfo::_internal_set_node_port(::uint32_t value) {
 inline void MemoryInfo::clear_memory_size() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   _impl_.memory_size_ = ::uint64_t{0u};
-  _impl_._has_bits_[0] &= ~0x00000010u;
+  _impl_._has_bits_[0] &= ~0x00000040u;
 }
 inline ::uint64_t MemoryInfo::memory_size() const {
   // @@protoc_insertion_point(field_get:global_store.MemoryInfo.memory_size)
@@ -15595,7 +16745,7 @@ inline ::uint64_t MemoryInfo::memory_size() const {
 }
 inline void MemoryInfo::set_memory_size(::uint64_t value) {
   _internal_set_memory_size(value);
-  _impl_._has_bits_[0] |= 0x00000010u;
+  _impl_._has_bits_[0] |= 0x00000040u;
   // @@protoc_insertion_point(field_set:global_store.MemoryInfo.memory_size)
 }
 inline ::uint64_t MemoryInfo::_internal_memory_size() const {
@@ -15611,7 +16761,7 @@ inline void MemoryInfo::_internal_set_memory_size(::uint64_t value) {
 inline void MemoryInfo::clear_memory_type() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   _impl_.memory_type_ = 0;
-  _impl_._has_bits_[0] &= ~0x00000008u;
+  _impl_._has_bits_[0] &= ~0x00000020u;
 }
 inline ::global_store::MemoryType MemoryInfo::memory_type() const {
   // @@protoc_insertion_point(field_get:global_store.MemoryInfo.memory_type)
@@ -15619,7 +16769,7 @@ inline ::global_store::MemoryType MemoryInfo::memory_type() const {
 }
 inline void MemoryInfo::set_memory_type(::global_store::MemoryType value) {
   _internal_set_memory_type(value);
-  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_._has_bits_[0] |= 0x00000020u;
   // @@protoc_insertion_point(field_set:global_store.MemoryInfo.memory_type)
 }
 inline ::global_store::MemoryType MemoryInfo::_internal_memory_type() const {
@@ -15635,7 +16785,7 @@ inline void MemoryInfo::_internal_set_memory_type(::global_store::MemoryType val
 inline void MemoryInfo::clear_device_id() {
   ::google::protobuf::internal::TSanWrite(&_impl_);
   _impl_.device_id_ = 0u;
-  _impl_._has_bits_[0] &= ~0x00000020u;
+  _impl_._has_bits_[0] &= ~0x00000080u;
 }
 inline ::uint32_t MemoryInfo::device_id() const {
   // @@protoc_insertion_point(field_get:global_store.MemoryInfo.device_id)
@@ -15643,7 +16793,7 @@ inline ::uint32_t MemoryInfo::device_id() const {
 }
 inline void MemoryInfo::set_device_id(::uint32_t value) {
   _internal_set_device_id(value);
-  _impl_._has_bits_[0] |= 0x00000020u;
+  _impl_._has_bits_[0] |= 0x00000080u;
   // @@protoc_insertion_point(field_set:global_store.MemoryInfo.device_id)
 }
 inline ::uint32_t MemoryInfo::_internal_device_id() const {
@@ -15756,6 +16906,180 @@ inline const ::google::protobuf::RepeatedField<::uint64_t>& MemoryInfo::_interna
 inline ::google::protobuf::RepeatedField<::uint64_t>* PROTOBUF_NONNULL MemoryInfo::_internal_mutable_buffer_sizes() {
   ::google::protobuf::internal::TSanRead(&_impl_);
   return &_impl_.buffer_sizes_;
+}
+
+// bool is_memory_replica = 10 [json_name = "isMemoryReplica"];
+inline void MemoryInfo::clear_is_memory_replica() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.is_memory_replica_ = false;
+  _impl_._has_bits_[0] &= ~0x00000100u;
+}
+inline bool MemoryInfo::is_memory_replica() const {
+  // @@protoc_insertion_point(field_get:global_store.MemoryInfo.is_memory_replica)
+  return _internal_is_memory_replica();
+}
+inline void MemoryInfo::set_is_memory_replica(bool value) {
+  _internal_set_is_memory_replica(value);
+  _impl_._has_bits_[0] |= 0x00000100u;
+  // @@protoc_insertion_point(field_set:global_store.MemoryInfo.is_memory_replica)
+}
+inline bool MemoryInfo::_internal_is_memory_replica() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.is_memory_replica_;
+}
+inline void MemoryInfo::_internal_set_is_memory_replica(bool value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.is_memory_replica_ = value;
+}
+
+// string tensor_index_key = 11 [json_name = "tensorIndexKey"];
+inline void MemoryInfo::clear_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.tensor_index_key_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000004u;
+}
+inline const ::std::string& MemoryInfo::tensor_index_key() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.MemoryInfo.tensor_index_key)
+  return _internal_tensor_index_key();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void MemoryInfo::set_tensor_index_key(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.tensor_index_key_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.MemoryInfo.tensor_index_key)
+}
+inline ::std::string* PROTOBUF_NONNULL MemoryInfo::mutable_tensor_index_key() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_tensor_index_key();
+  // @@protoc_insertion_point(field_mutable:global_store.MemoryInfo.tensor_index_key)
+  return _s;
+}
+inline const ::std::string& MemoryInfo::_internal_tensor_index_key() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.tensor_index_key_.Get();
+}
+inline void MemoryInfo::_internal_set_tensor_index_key(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  _impl_.tensor_index_key_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL MemoryInfo::_internal_mutable_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000004u;
+  return _impl_.tensor_index_key_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE MemoryInfo::release_tensor_index_key() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.MemoryInfo.tensor_index_key)
+  if ((_impl_._has_bits_[0] & 0x00000004u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000004u;
+  auto* released = _impl_.tensor_index_key_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.tensor_index_key_.Set("", GetArena());
+  }
+  return released;
+}
+inline void MemoryInfo::set_allocated_tensor_index_key(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000004u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000004u;
+  }
+  _impl_.tensor_index_key_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.tensor_index_key_.IsDefault()) {
+    _impl_.tensor_index_key_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.MemoryInfo.tensor_index_key)
+}
+
+// int64 creation_timestamp = 12 [json_name = "creationTimestamp"];
+inline void MemoryInfo::clear_creation_timestamp() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.creation_timestamp_ = ::int64_t{0};
+  _impl_._has_bits_[0] &= ~0x00000200u;
+}
+inline ::int64_t MemoryInfo::creation_timestamp() const {
+  // @@protoc_insertion_point(field_get:global_store.MemoryInfo.creation_timestamp)
+  return _internal_creation_timestamp();
+}
+inline void MemoryInfo::set_creation_timestamp(::int64_t value) {
+  _internal_set_creation_timestamp(value);
+  _impl_._has_bits_[0] |= 0x00000200u;
+  // @@protoc_insertion_point(field_set:global_store.MemoryInfo.creation_timestamp)
+}
+inline ::int64_t MemoryInfo::_internal_creation_timestamp() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.creation_timestamp_;
+}
+inline void MemoryInfo::_internal_set_creation_timestamp(::int64_t value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.creation_timestamp_ = value;
+}
+
+// string source_process_id = 13 [json_name = "sourceProcessId"];
+inline void MemoryInfo::clear_source_process_id() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_.source_process_id_.ClearToEmpty();
+  _impl_._has_bits_[0] &= ~0x00000008u;
+}
+inline const ::std::string& MemoryInfo::source_process_id() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  // @@protoc_insertion_point(field_get:global_store.MemoryInfo.source_process_id)
+  return _internal_source_process_id();
+}
+template <typename Arg_, typename... Args_>
+PROTOBUF_ALWAYS_INLINE void MemoryInfo::set_source_process_id(Arg_&& arg, Args_... args) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_.source_process_id_.Set(static_cast<Arg_&&>(arg), args..., GetArena());
+  // @@protoc_insertion_point(field_set:global_store.MemoryInfo.source_process_id)
+}
+inline ::std::string* PROTOBUF_NONNULL MemoryInfo::mutable_source_process_id() ABSL_ATTRIBUTE_LIFETIME_BOUND {
+  ::std::string* _s = _internal_mutable_source_process_id();
+  // @@protoc_insertion_point(field_mutable:global_store.MemoryInfo.source_process_id)
+  return _s;
+}
+inline const ::std::string& MemoryInfo::_internal_source_process_id() const {
+  ::google::protobuf::internal::TSanRead(&_impl_);
+  return _impl_.source_process_id_.Get();
+}
+inline void MemoryInfo::_internal_set_source_process_id(const ::std::string& value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  _impl_.source_process_id_.Set(value, GetArena());
+}
+inline ::std::string* PROTOBUF_NONNULL MemoryInfo::_internal_mutable_source_process_id() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  _impl_._has_bits_[0] |= 0x00000008u;
+  return _impl_.source_process_id_.Mutable(GetArena());
+}
+inline ::std::string* PROTOBUF_NULLABLE MemoryInfo::release_source_process_id() {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  // @@protoc_insertion_point(field_release:global_store.MemoryInfo.source_process_id)
+  if ((_impl_._has_bits_[0] & 0x00000008u) == 0) {
+    return nullptr;
+  }
+  _impl_._has_bits_[0] &= ~0x00000008u;
+  auto* released = _impl_.source_process_id_.Release();
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString()) {
+    _impl_.source_process_id_.Set("", GetArena());
+  }
+  return released;
+}
+inline void MemoryInfo::set_allocated_source_process_id(::std::string* PROTOBUF_NULLABLE value) {
+  ::google::protobuf::internal::TSanWrite(&_impl_);
+  if (value != nullptr) {
+    _impl_._has_bits_[0] |= 0x00000008u;
+  } else {
+    _impl_._has_bits_[0] &= ~0x00000008u;
+  }
+  _impl_.source_process_id_.SetAllocated(value, GetArena());
+  if (::google::protobuf::internal::DebugHardenForceCopyDefaultString() && _impl_.source_process_id_.IsDefault()) {
+    _impl_.source_process_id_.Set("", GetArena());
+  }
+  // @@protoc_insertion_point(field_set_allocated:global_store.MemoryInfo.source_process_id)
 }
 
 // -------------------------------------------------------------------

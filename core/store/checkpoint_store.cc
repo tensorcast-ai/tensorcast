@@ -21,6 +21,7 @@
 #include "core/store/loading/prepare_orchestrator.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_config.h"
+// #include "core/store/loading/replica_registration_helper.h"
 
 namespace stepcast::store {
 // Forward declaration for GPU eviction helper defined later in this file.
@@ -237,8 +238,11 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   ModelConfig config{
       .source = resolved_source,
       .model_identifier = model_identifier,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
       .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_};
+      .dvmp = dvmp_,
+      .expected_model_size = std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   if (target_location == ModelLocation::GPU) {
@@ -365,7 +369,13 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
   ModelConfig config{
-      .source = p2p_source, .model_identifier = model_identifier, .pinned_memory_pool = memory_pool_, .dvmp = dvmp_};
+      .source = p2p_source,
+      .model_identifier = model_identifier,
+      .device_type = (target_location == ModelLocation::GPU ? DeviceType::GPU : DeviceType::CPU),
+      .local_device_id = target.location.device_id,
+      .pinned_memory_pool = memory_pool_,
+      .dvmp = dvmp_,
+      .expected_model_size = std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
@@ -440,10 +450,10 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
 }
 
 absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
-    const std::string& model_identifier,
-    const InlineBufferSource& source,
-    const ModelTarget& target,
-    const LoadingHints& hints) {
+    const std::string& /*model_identifier*/,
+    const InlineBufferSource& /*source*/,
+    const ModelTarget& /*target*/,
+    const LoadingHints& /*hints*/) {
   // InlineBufferSource is a newly added type, temporarily returning unimplemented error
   // Future: implement direct model loading from memory buffer
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
@@ -455,11 +465,12 @@ std::shared_ptr<Model> CheckpointStore::get_or_create_model(
   // Build InstanceKey for the requested device (CPU when local_device_id < 0)
   DeviceKey dev_key;
   if (config.device_type == DeviceType::GPU) {
-    dev_key = DeviceKey{DeviceType::GPU, (config.local_device_id >= 0 ? config.local_device_id : 0), ""};
+    dev_key = DeviceKey{
+        .type = DeviceType::GPU, .ordinal = (config.local_device_id >= 0 ? config.local_device_id : 0), .uuid = ""};
   } else {
-    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+    dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  InstanceKey inst_key{model_identifier, dev_key, /*replica=*/0};
+  InstanceKey inst_key{.model_id = model_identifier, .device = dev_key, /*replica=*/.replica = 0};
 
   // Fast-path: already present in registry
   if (auto existing_or = model_registry_->find(inst_key); existing_or.ok()) {
@@ -503,7 +514,7 @@ absl::Status CheckpointStore::try_evict_memory_for_model(size_t required_size) {
       continue;
     }
 
-    auto model = model_result.value();
+    const auto& model = model_result.value();
 
     // Only attempt to free CPU memory for now – GPU eviction will be handled
     // in a future iteration.
@@ -590,9 +601,9 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
   // ────────────────────────────────────────────────────────────────────
   // Fast-path: instance already present on the requested device.
   // ────────────────────────────────────────────────────────────────────
-  const InstanceKey dst_key{std::string(model_id), target_device, /*replica=*/0};
+  const InstanceKey dst_key{.model_id = std::string(model_id), .device = target_device, /*replica=*/.replica = 0};
   if (auto existing_or = model_registry_->find(dst_key); existing_or.ok()) {
-    auto model = existing_or.value();
+    const auto& model = existing_or.value();
 
     ModelLocation dst_loc = (target_device.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
     std::optional<int> opt_dev;
@@ -652,7 +663,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
         if (!src_or.ok()) {
           continue;
         }
-        auto src_model = src_or.value();
+        const auto& src_model = src_or.value();
         if (src_model->get_memory_state(ModelLocation::GPU) != MemoryState::LOADED) {
           continue;
         }
@@ -670,7 +681,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_memory_pool = memory_pool_,
-            .dvmp = dvmp_};
+            .dvmp = dvmp_,
+            .expected_model_size = std::nullopt};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
         auto dst_or = Model::create(cfg);
@@ -840,7 +852,7 @@ absl::Status try_evict_gpu_memory_impl(
     if (!model_res.ok()) {
       continue;
     }
-    auto model = model_res.value();
+    const auto& model = model_res.value();
 
     if (model->get_memory_state(ModelLocation::GPU) != MemoryState::LOADED) {
       continue; // Nothing to free.
@@ -879,7 +891,7 @@ int CheckpointStore::wait_instance_ready(const InstanceKey& key) {
   if (!model_res.ok()) {
     return 1; // Not found
   }
-  auto model = model_res.value();
+  const auto& model = model_res.value();
   ModelLocation loc = (key.device.type == DeviceType::CPU) ? ModelLocation::PAGEABLE_CPU : ModelLocation::GPU;
   absl::Status st = model->wait_until_loaded(loc, absl::InfiniteDuration());
   return st.ok() ? 0 : 1;
@@ -891,7 +903,7 @@ int CheckpointStore::unload_instance(const InstanceKey& key) {
     return 1; // Instance not found.
   }
 
-  auto model = model_res.value();
+  const auto& model = model_res.value();
   ModelLocation loc = (key.device.type == DeviceType::CPU) ? ModelLocation::PAGEABLE_CPU : ModelLocation::GPU;
 
   // Inspect current state *before* attempting the release so we can tell if
@@ -1037,6 +1049,189 @@ absl::Status CheckpointStore::unlock_chunks(
 
   // Forward the call to DVMP.
   return dvmp->unlock_chunks(instance_key.model_id, chunk_indices, copied_gpu);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC-0006 – Memory TensorDict Registration (coalesced)
+// ═══════════════════════════════════════════════════════════════════════════
+
+absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_register_tensor_dict(
+    const TensorDictRegistration& reg) {
+  if (reg.total_size_bytes == 0) {
+    return absl::InvalidArgumentError("total_size_bytes must be > 0");
+  }
+  if (reg.device_id < 0) {
+    return absl::InvalidArgumentError("device_id must be >= 0");
+  }
+  if (reg.tensor_index_key.empty()) {
+    return absl::InvalidArgumentError("tensor_index_key must be provided");
+  }
+
+  // Prepare minimal Model instance bound to target GPU to own the allocation.
+  // Use a real on-disk path (if available) to satisfy Model::create() loader initialization,
+  // though we will only allocate memory and not load data in this flow.
+  DiskSource dummy_source;
+  if (!storage_path_.empty()) {
+    dummy_source.path = storage_path_ / std::string(reg.model_id);
+  } else {
+    // Fallback: treat model_id as a fully qualified path if storage root is empty
+    dummy_source.path = std::filesystem::path(std::string(reg.model_id));
+  }
+  ModelConfig cfg{
+      .source = dummy_source,
+      .model_identifier = reg.model_id,
+      .device_type = DeviceType::GPU,
+      .local_device_id = reg.device_id,
+      .pinned_memory_pool = memory_pool_,
+      .dvmp = dvmp_,
+      .expected_model_size = reg.total_size_bytes};
+  cfg.pinned_memory_timeout = pinned_memory_timeout_;
+
+  auto model_or = Model::create(cfg);
+  if (!model_or.ok()) {
+    return model_or.status();
+  }
+  auto model = std::shared_ptr<Model>(std::move(model_or.value()));
+
+  // Allocate GPU memory only. No loading/copying here.
+  absl::Status st = model->get_memory_manager().allocate_memory(ModelLocation::GPU);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Obtain CUDA IPC handle to return to caller.
+  auto ipc_or = model->get_memory_manager().get_cuda_ipc_handle();
+  if (!ipc_or.ok()) {
+    return ipc_or.status();
+  }
+
+  const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+  void* base_ptr = (!gpu_ptrs.empty() ? gpu_ptrs[0] : nullptr);
+
+  // Emplace into registry to ensure lifecycle is tracked (InstanceKey via config).
+  DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = reg.device_id, .uuid = ""};
+  InstanceKey inst_key{.model_id = reg.model_id, .device = dev_key, /*replica=*/.replica = 0};
+  (void)model_registry_->emplace(inst_key, model);
+
+  // Create pending entry with opaque id.
+  auto reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()));
+
+  PendingRegistrationEntry entry;
+  entry.registration_id = reg_id;
+  entry.model_id = reg.model_id;
+  entry.device_id = reg.device_id;
+  entry.size_bytes = reg.total_size_bytes;
+  entry.tensor_index_key = reg.tensor_index_key;
+  entry.tensor_index_data = reg.tensor_index_data;
+  entry.schema_version = reg.schema_version;
+  entry.encoding = reg.encoding;
+  entry.enable_p2p = reg.enable_p2p;
+  if (reg.ttl_ms > 0) {
+    entry.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reg.ttl_ms);
+  }
+  entry.model = model;
+  entry.gpu_ptr = base_ptr;
+  entry.ipc_handle = *ipc_or;
+
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_regs_.emplace(reg_id, std::move(entry));
+  }
+
+  RegistrationBeginResult out;
+  out.registration_id = reg_id;
+  out.device_id = reg.device_id;
+  out.size_bytes = reg.total_size_bytes;
+  std::memcpy(out.cuda_ipc_handle_bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+  return out;
+}
+
+absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commit_registered_tensor_dict(
+    std::string_view registration_id) {
+  PendingRegistrationEntry entry;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_regs_.find(std::string(registration_id));
+    if (it == pending_regs_.end()) {
+      return absl::NotFoundError("registration_id not found");
+    }
+    // TTL enforcement: if expired, cleanup and fail fast.
+    if (it->second.expiry_time.time_since_epoch().count() > 0 &&
+        std::chrono::steady_clock::now() > it->second.expiry_time) {
+      auto model_to_free = it->second.model;
+      pending_regs_.erase(it);
+      if (model_to_free) {
+        (void)model_to_free->release_memory(ModelLocation::GPU, /*safe_release=*/true);
+      }
+      return absl::DeadlineExceededError("registration expired (TTL)");
+    }
+    entry = it->second; // make a copy; we may erase after successful commit
+  }
+
+  // Export remote memory keys if communication is enabled (GPU location).
+  std::vector<std::string> remote_keys;
+  std::vector<uint64_t> buffer_sizes;
+  if (entry.enable_p2p && comm_manager_ && comm_manager_->is_enabled()) {
+    auto reg_info_or = entry.model->enable_remote_memory_access(ModelLocation::GPU, comm_manager_->get_engine());
+    if (!reg_info_or.ok()) {
+      return reg_info_or.status();
+    }
+    remote_keys = reg_info_or->remote_memory_keys;
+    buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
+    for (const auto& sz : reg_info_or->buffer_sizes) {
+      buffer_sizes.push_back(static_cast<uint64_t>(sz));
+    }
+  }
+
+  // Register with Global Store (memory replica). Provide tensor_index_key and optional UPSERT data.
+  if (global_store_client_ && global_store_client_->is_connected()) {
+    DeviceKey device{.type = DeviceType::GPU, .ordinal = entry.device_id, .uuid = ""};
+    auto reg_or = global_store_client_->register_memory_replica(
+        entry.model_id,
+        /*worker_id=*/"local",
+        device,
+        entry.size_bytes,
+        entry.tensor_index_key,
+        remote_keys,
+        buffer_sizes,
+        entry.tensor_index_data,
+        entry.encoding,
+        entry.schema_version,
+        /*max_concurrency=*/1);
+    if (!reg_or.ok()) {
+      return reg_or.status();
+    }
+  }
+
+  // Finalize: remove from pending list on success.
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_regs_.erase(std::string(registration_id));
+  }
+  RegistrationCommitResult result;
+  result.registration_id = std::string(registration_id);
+  result.model_id = entry.model_id;
+  result.device_id = entry.device_id;
+  result.size_bytes = entry.size_bytes;
+  return result;
+}
+
+absl::Status CheckpointStore::abort_registered_tensor_dict(std::string_view registration_id) {
+  std::shared_ptr<Model> model;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_regs_.find(std::string(registration_id));
+    if (it == pending_regs_.end()) {
+      return absl::NotFoundError("registration_id not found");
+    }
+    model = it->second.model;
+    pending_regs_.erase(it);
+  }
+  if (model) {
+    // Release GPU memory; ignore failures to guarantee best-effort cleanup.
+    (void)model->release_memory(ModelLocation::GPU, /*safe_release=*/true);
+  }
+  return absl::OkStatus();
 }
 
 } // namespace stepcast::store

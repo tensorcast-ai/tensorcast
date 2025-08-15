@@ -163,7 +163,7 @@ def register_tensor_dict(state_dict: dict[str, torch.Tensor], model_id: str, *,
 
 - 服务端步骤：
   1) Begin：若携带 `tensor_index_data`，解析并校验字段与 8 字节对齐；计算规范化索引的 `sha256(index_bytes)` 并与（若提供）`tensor_index_key` 校验一致；以 `_C.allocate_cuda_memory(device_id, total_size)` 分配目标连续显存；以 `_C.get_cuda_memory_handle(device_id, target_ptr)` 导出 `daemon_ipc_handle` 返回；记录挂起的注册条目（pending），并设置 TTL（超时自动回收）。
-  2) 用户侧把数据写入该显存后调用 Commit：服务端验证该 `registration_id` 仍有效，关闭任何可写映射逻辑上的引用，生成/导出 remote memory keys，构造 `RemoteReplicaInfo`，在 Global Store 调用 `RegisterModelReplica`（location=GPU, size=total_size, is_memory_replica=true, tensor_index_key=...，schema/encoding）。GS 端若不存在该 key，再附带 `tensor_index_data` 完成一次性 UPSERT 至 `model_indices`。
+  2) 用户侧把数据写入该显存后调用 Commit：服务端验证该 `registration_id` 仍有效（TTL 校验），关闭任何可写映射逻辑上的引用，按需（`enable_p2p`）生成/导出 remote memory keys，并在 Global Store 以“内存副本”注册：`RegisterModelReplica`（location=GPU, size=total_size, is_memory_replica=true, tensor_index_key=..., remote_memory_keys, buffer_sizes）。GS 端若缺失索引则完成 UPSERT；返回提交摘要（`registration_id/model_id/device_id/size_bytes`）。
   3) 失败与回收：Commit 失败或 TTL 过期触发显存释放与条目清理；Abort 立即清理并返回（幂等）。
 
 说明：数据写入由用户进程直接面向“目标显存（守护进程分配）”，提交后即完成所有权的转移，无需二次拷贝。
@@ -411,8 +411,7 @@ def plan_coalesced_layout(tensors):
 
 2) StoreDaemon：
 - Begin：分配目标连续显存，导出 `daemon_ipc_handle` 并记录 pending 条目（含 TTL）；如带 `tensor_index_data`，校验并缓存其 `tensor_index_key`（若同时提供）；
-- Commit：校验条目有效，封存该注册（逻辑只读），导出 remote memory keys，调用 GS `RegisterModelReplica(location=GPU, size=total_size, is_memory_replica=true, tensor_index_key=..., schema/encoding)`；GS 若缺失索引则完成 UPSERT；
-- 返回确认信息；若 Commit 前发生超时或 Abort，释放显存并删除条目（幂等）。
+- Commit：校验条目有效（含 TTL），封存该注册（逻辑只读），按 `enable_p2p` 决定是否导出 remote memory keys，调用 GS `RegisterModelReplica(location=GPU, size=total_size, is_memory_replica=true, tensor_index_key=..., remote_memory_keys, buffer_sizes)`；GS 若缺失索引则完成 UPSERT；返回提交摘要（`registration_id/model_id/device_id/size_bytes`）。
 
 错误处理：任一步失败需关闭任何已开启的映射并释放已分配显存；Begin→Commit 超时按 TTL 回收；对外返回明确错误码与信息。
 
@@ -513,6 +512,31 @@ m.def(
   - `GetModelInfo` 返回 key，按需 `GetModelIndex` 一次；本地 LRU 缓存命中后不重复拉取；
   - 校验 `ModelVerifier` 通过，端到端耗时与吞吐监控。
 
+— 已实现与当前结果（2025-08-15）—
+
+- C++ 单测（通过，实机 CUDA 环境）：
+  - `core/store/registration_memory_replica_test.cc`
+    - 覆盖：
+      - Begin/Commit 生命周期（返回 `registration_id/daemon_ipc_handle`，提交注册成功）
+      - Abort 释放（Abort 后 Commit 返回 NotFound）
+      - TTL 过期（Commit 返回 DeadlineExceeded 并回收显存）
+      - 非法参数校验（size=0 / 设备号<0 / 缺失 key）
+    - 说明：为满足 `Model::create(DiskSource)` 的初始化检查，测试在 `storage_path/model_id/` 下创建最小化模型目录与占位文件；实现侧 `begin_register_tensor_dict` 已改为使用 `storage_path_/model_id` 作为 `DiskSource` 路径，仅做显存分配不触发磁盘 I/O。
+    - 结果：在真实 CUDA GPU 上全部通过，同时 `//core/store:checkpoint_store_test` 与 `//core/store:checkpoint_store_p2p_loader_test` 回归通过。
+
+- Python 绑定（进行中）：
+  - 低层 pybind 路径（`scstore._checkpoint_store`）已包含接口定义（见 `checkpoint_store_py.cc` 的 `begin_registered_tensor_dict/commit/abort` 绑定）。
+  - 新增用例：`tests/python/test_checkpoint_registration_pybind.py`（验证 `begin→map CUDA IPC→commit`）。
+  - 当前状态：在本地开发环境构建的 `libscstore.so` 尚未导出新的符号，导致 Python 扩展链接报 `undefined symbol: CheckpointStore::begin_register_tensor_dict`。需先完整重建 `//core:libscstore.so` 并由 `setup.py develop` 同步到 `scstore/lib/libscstore.so` 后再运行该用例。
+
+- StoreDaemon gRPC（进行中）：
+  - 新增用例：`tests/python/store_daemon/test_memory_registration.py`（覆盖 `BeginRegisterTensorDict/Commit/Abort` 三个 RPC 及 TTL 路径）。
+  - 当前状态：`scstore/proto/store_daemon_pb2.py` 尚未包含新消息与 RPC，导入时报 `AttributeError: BeginRegisterTensorDictRequest`。需按 `proto/store_daemon.proto` 重新生成 Python stubs（参考 `tools/build_proto_python.sh`），并在服务端实现中维持现有向下兼容逻辑。
+
+- 端到端（待办）：
+  - A 节点内存注册（GPU RAM）→ GS 注册（仅 key）→ B 节点通过 GS 选取内存副本并 P2P 拉取 → 验证落地；
+  - 依赖 Python 绑定与 StoreDaemon proto 同步完成。
+
 ## 9. Mermaid Diagrams
 
 ```mermaid
@@ -556,13 +580,13 @@ sequenceDiagram
 
 | Phase | Task | Status | Notes |
 |----|---|-----|----|
-| A | Python Begin/Commit 封装与写入 | ⏳ Pending | `scstore/torch_util.py` |
-| A | StoreDaemon Begin/Commit/Abort | ⏳ Pending | gRPC + TTL/回收 + 注册 |
-| A | GS MemoryInfo 扩展 | ⏳ Pending | `proto/global_store.proto` |
-| A | Docs 更新 | ⏳ Pending | web-docs 与开发指南 |
+| A | Python Begin/Commit 封装与写入 | ⏳ In progress | C++ pybind 已绑定；待修复 `libscstore.so` 导出符号后补充用例通过 |
+| A | StoreDaemon Begin/Commit/Abort | ⏳ In progress | 端点代码存在；Python proto 未同步，阻塞用例运行（需重生 `store_daemon_pb2*`） |
+| A | GS MemoryInfo 扩展 | ✅ Implemented (proto) | `proto/global_store.proto` 包含 `tensor_index_key` 与 `GetModelIndex`；C++ 客户端已适配 |
+| A | C++ CheckpointStore 注册 API | ✅ Implemented & Tested | 新增 `begin/commit/abort_registered_tensor_dict`；单测在实机 CUDA 环境通过 |
+| A | Python bindings (pybind11) | ⏳ In progress | 绑定已添加；打包产物需更新以暴露新符号，测试暂阻塞 |
 | B | 指标与错误处理 | ⏳ Pending | 注册时延/吞吐/失败计数 |
 | B | 校验与回收 | ⏳ Pending | GPU 校验/失败清理 |
-| C | 峰值优化 | ⏳ Pending | 分段释放/VMM（可选） |
 
 ## 11. Code References
 

@@ -72,24 +72,6 @@ class RegisterModelResponse(_message.Message):
     model_size: int
     def __init__(self, model_path: _Optional[str] = ..., model_size: _Optional[int] = ...) -> None: ...
 
-class MemCopyChunk(_message.Message):
-    __slots__ = ("src_offset", "size", "dst_offset", "handle_idx")
-    SRC_OFFSET_FIELD_NUMBER: _ClassVar[int]
-    SIZE_FIELD_NUMBER: _ClassVar[int]
-    DST_OFFSET_FIELD_NUMBER: _ClassVar[int]
-    HANDLE_IDX_FIELD_NUMBER: _ClassVar[int]
-    src_offset: int
-    size: int
-    dst_offset: int
-    handle_idx: int
-    def __init__(self, src_offset: _Optional[int] = ..., size: _Optional[int] = ..., dst_offset: _Optional[int] = ..., handle_idx: _Optional[int] = ...) -> None: ...
-
-class MemCopyChunkList(_message.Message):
-    __slots__ = ("chunks",)
-    CHUNKS_FIELD_NUMBER: _ClassVar[int]
-    chunks: _containers.RepeatedCompositeFieldContainer[MemCopyChunk]
-    def __init__(self, chunks: _Optional[_Iterable[_Union[MemCopyChunk, _Mapping]]] = ...) -> None: ...
-
 class MemCopyHandle(_message.Message):
     __slots__ = ("cuda_ipc_handle",)
     CUDA_IPC_HANDLE_FIELD_NUMBER: _ClassVar[int]
@@ -369,3 +351,73 @@ class UnlockChunksRequest(_message.Message):
 class UnlockChunksResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class BeginRegisterTensorDictRequest(_message.Message):
+    __slots__ = ("model_id", "device_id", "total_size", "enable_p2p", "ttl_ms", "tensor_index_key", "tensor_index_data")
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_SIZE_FIELD_NUMBER: _ClassVar[int]
+    ENABLE_P2P_FIELD_NUMBER: _ClassVar[int]
+    TTL_MS_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_KEY_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_DATA_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    device_id: int
+    total_size: int
+    enable_p2p: bool
+    ttl_ms: int
+    tensor_index_key: str
+    tensor_index_data: TensorIndexData
+    def __init__(self, model_id: _Optional[str] = ..., device_id: _Optional[int] = ..., total_size: _Optional[int] = ..., enable_p2p: bool = ..., ttl_ms: _Optional[int] = ..., tensor_index_key: _Optional[str] = ..., tensor_index_data: _Optional[_Union[TensorIndexData, _Mapping]] = ...) -> None: ...
+
+class TensorIndexData(_message.Message):
+    __slots__ = ("data", "schema_version", "encoding")
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    data: bytes
+    schema_version: str
+    encoding: str
+    def __init__(self, data: _Optional[bytes] = ..., schema_version: _Optional[str] = ..., encoding: _Optional[str] = ...) -> None: ...
+
+class BeginRegisterTensorDictResponse(_message.Message):
+    __slots__ = ("registration_id", "daemon_ipc_handle", "device_id", "size")
+    REGISTRATION_ID_FIELD_NUMBER: _ClassVar[int]
+    DAEMON_IPC_HANDLE_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    registration_id: str
+    daemon_ipc_handle: bytes
+    device_id: int
+    size: int
+    def __init__(self, registration_id: _Optional[str] = ..., daemon_ipc_handle: _Optional[bytes] = ..., device_id: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
+
+class CommitRegisteredTensorDictRequest(_message.Message):
+    __slots__ = ("registration_id",)
+    REGISTRATION_ID_FIELD_NUMBER: _ClassVar[int]
+    registration_id: str
+    def __init__(self, registration_id: _Optional[str] = ...) -> None: ...
+
+class CommitRegisteredTensorDictResponse(_message.Message):
+    __slots__ = ("registration_id", "model_id", "device_id", "size")
+    REGISTRATION_ID_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    registration_id: str
+    model_id: str
+    device_id: int
+    size: int
+    def __init__(self, registration_id: _Optional[str] = ..., model_id: _Optional[str] = ..., device_id: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
+
+class AbortRegisteredTensorDictRequest(_message.Message):
+    __slots__ = ("registration_id",)
+    REGISTRATION_ID_FIELD_NUMBER: _ClassVar[int]
+    registration_id: str
+    def __init__(self, registration_id: _Optional[str] = ...) -> None: ...
+
+class AbortRegisteredTensorDictResponse(_message.Message):
+    __slots__ = ("ok",)
+    OK_FIELD_NUMBER: _ClassVar[int]
+    ok: bool
+    def __init__(self, ok: bool = ...) -> None: ...

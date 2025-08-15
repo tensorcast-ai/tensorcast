@@ -276,6 +276,23 @@ cc_test(
 )
 
 cc_test(
+    name = "registration_memory_replica_test",
+    srcs = ["registration_memory_replica_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":checkpoint_store",
+        "//core/common",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "concurrency_test",
     srcs = ["concurrency_test.cc"],
     tags = ["checkpoint_store"],

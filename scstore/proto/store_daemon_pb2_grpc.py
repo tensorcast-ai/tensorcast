@@ -4,7 +4,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import scstore.proto.store_daemon_pb2 as store__daemon__pb2
+import store_daemon_pb2 as store__daemon__pb2
 
 
 class StoreDaemonStub(object):
@@ -70,6 +70,21 @@ class StoreDaemonStub(object):
                 '/store_daemon.StoreDaemon/UnlockTransportChunks',
                 request_serializer=store__daemon__pb2.UnlockChunksRequest.SerializeToString,
                 response_deserializer=store__daemon__pb2.UnlockChunksResponse.FromString,
+                )
+        self.BeginRegisterTensorDict = channel.unary_unary(
+                '/store_daemon.StoreDaemon/BeginRegisterTensorDict',
+                request_serializer=store__daemon__pb2.BeginRegisterTensorDictRequest.SerializeToString,
+                response_deserializer=store__daemon__pb2.BeginRegisterTensorDictResponse.FromString,
+                )
+        self.CommitRegisteredTensorDict = channel.unary_unary(
+                '/store_daemon.StoreDaemon/CommitRegisteredTensorDict',
+                request_serializer=store__daemon__pb2.CommitRegisteredTensorDictRequest.SerializeToString,
+                response_deserializer=store__daemon__pb2.CommitRegisteredTensorDictResponse.FromString,
+                )
+        self.AbortRegisteredTensorDict = channel.unary_unary(
+                '/store_daemon.StoreDaemon/AbortRegisteredTensorDict',
+                request_serializer=store__daemon__pb2.AbortRegisteredTensorDictRequest.SerializeToString,
+                response_deserializer=store__daemon__pb2.AbortRegisteredTensorDictResponse.FromString,
                 )
 
 
@@ -157,6 +172,26 @@ class StoreDaemonServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def BeginRegisterTensorDict(self, request, context):
+        """========== Memory TensorDict Registration ==========
+        Register in-memory tensor dict as memory replica without disk I/O
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CommitRegisteredTensorDict(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AbortRegisteredTensorDict(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StoreDaemonServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -214,6 +249,21 @@ def add_StoreDaemonServicer_to_server(servicer, server):
                     servicer.UnlockTransportChunks,
                     request_deserializer=store__daemon__pb2.UnlockChunksRequest.FromString,
                     response_serializer=store__daemon__pb2.UnlockChunksResponse.SerializeToString,
+            ),
+            'BeginRegisterTensorDict': grpc.unary_unary_rpc_method_handler(
+                    servicer.BeginRegisterTensorDict,
+                    request_deserializer=store__daemon__pb2.BeginRegisterTensorDictRequest.FromString,
+                    response_serializer=store__daemon__pb2.BeginRegisterTensorDictResponse.SerializeToString,
+            ),
+            'CommitRegisteredTensorDict': grpc.unary_unary_rpc_method_handler(
+                    servicer.CommitRegisteredTensorDict,
+                    request_deserializer=store__daemon__pb2.CommitRegisteredTensorDictRequest.FromString,
+                    response_serializer=store__daemon__pb2.CommitRegisteredTensorDictResponse.SerializeToString,
+            ),
+            'AbortRegisteredTensorDict': grpc.unary_unary_rpc_method_handler(
+                    servicer.AbortRegisteredTensorDict,
+                    request_deserializer=store__daemon__pb2.AbortRegisteredTensorDictRequest.FromString,
+                    response_serializer=store__daemon__pb2.AbortRegisteredTensorDictResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -409,5 +459,56 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(request, target, '/store_daemon.StoreDaemon/UnlockTransportChunks',
             store__daemon__pb2.UnlockChunksRequest.SerializeToString,
             store__daemon__pb2.UnlockChunksResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def BeginRegisterTensorDict(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/store_daemon.StoreDaemon/BeginRegisterTensorDict',
+            store__daemon__pb2.BeginRegisterTensorDictRequest.SerializeToString,
+            store__daemon__pb2.BeginRegisterTensorDictResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def CommitRegisteredTensorDict(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/store_daemon.StoreDaemon/CommitRegisteredTensorDict',
+            store__daemon__pb2.CommitRegisteredTensorDictRequest.SerializeToString,
+            store__daemon__pb2.CommitRegisteredTensorDictResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def AbortRegisteredTensorDict(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/store_daemon.StoreDaemon/AbortRegisteredTensorDict',
+            store__daemon__pb2.AbortRegisteredTensorDictRequest.SerializeToString,
+            store__daemon__pb2.AbortRegisteredTensorDictResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

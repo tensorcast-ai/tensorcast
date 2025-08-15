@@ -183,6 +183,26 @@ class GlobalModelStore final {
       return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>>(
           PrepareAsyncGetModelInfoRaw(context, request, cq));
     }
+    virtual ::grpc::Status GetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::global_store::GetModelIndexResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>
+    AsyncGetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>(
+          AsyncGetModelIndexRaw(context, request, cq));
+    }
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>
+    PrepareAsyncGetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>(
+          PrepareAsyncGetModelIndexRaw(context, request, cq));
+    }
     virtual ::grpc::Status RegisterWorker(
         ::grpc::ClientContext* context,
         const ::global_store::RegisterWorkerRequest& request,
@@ -439,6 +459,16 @@ class GlobalModelStore final {
           const ::global_store::GetModelInfoRequest* request,
           ::global_store::GetModelInfoResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
+      virtual void GetModelIndex(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest* request,
+          ::global_store::GetModelIndexResponse* response,
+          std::function<void(::grpc::Status)>) = 0;
+      virtual void GetModelIndex(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest* request,
+          ::global_store::GetModelIndexResponse* response,
+          ::grpc::ClientUnaryReactor* reactor) = 0;
       virtual void RegisterWorker(
           ::grpc::ClientContext* context,
           const ::global_store::RegisterWorkerRequest* request,
@@ -607,6 +637,15 @@ class GlobalModelStore final {
     PrepareAsyncGetModelInfoRaw(
         ::grpc::ClientContext* context,
         const ::global_store::GetModelInfoRequest& request,
+        ::grpc::CompletionQueue* cq) = 0;
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) = 0;
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*
+    PrepareAsyncGetModelIndexRaw(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
     virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterWorkerResponse>* AsyncRegisterWorkerRaw(
         ::grpc::ClientContext* context,
@@ -836,6 +875,24 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* cq) {
       return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>>(
           PrepareAsyncGetModelInfoRaw(context, request, cq));
+    }
+    ::grpc::Status GetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::global_store::GetModelIndexResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>> AsyncGetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>>(
+          AsyncGetModelIndexRaw(context, request, cq));
+    }
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>> PrepareAsyncGetModelIndex(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>>(
+          PrepareAsyncGetModelIndexRaw(context, request, cq));
     }
     ::grpc::Status RegisterWorker(
         ::grpc::ClientContext* context,
@@ -1083,6 +1140,16 @@ class GlobalModelStore final {
           const ::global_store::GetModelInfoRequest* request,
           ::global_store::GetModelInfoResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
+      void GetModelIndex(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest* request,
+          ::global_store::GetModelIndexResponse* response,
+          std::function<void(::grpc::Status)>) override;
+      void GetModelIndex(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest* request,
+          ::global_store::GetModelIndexResponse* response,
+          ::grpc::ClientUnaryReactor* reactor) override;
       void RegisterWorker(
           ::grpc::ClientContext* context,
           const ::global_store::RegisterWorkerRequest* request,
@@ -1250,6 +1317,14 @@ class GlobalModelStore final {
         ::grpc::ClientContext* context,
         const ::global_store::GetModelInfoRequest& request,
         ::grpc::CompletionQueue* cq) override;
+    ::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) override;
+    ::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>* PrepareAsyncGetModelIndexRaw(
+        ::grpc::ClientContext* context,
+        const ::global_store::GetModelIndexRequest& request,
+        ::grpc::CompletionQueue* cq) override;
     ::grpc::ClientAsyncResponseReader<::global_store::RegisterWorkerResponse>* AsyncRegisterWorkerRaw(
         ::grpc::ClientContext* context,
         const ::global_store::RegisterWorkerRequest& request,
@@ -1331,6 +1406,7 @@ class GlobalModelStore final {
     const ::grpc::internal::RpcMethod rpcmethod_CompleteModelReplicaTransport_;
     const ::grpc::internal::RpcMethod rpcmethod_ListModelReplicas_;
     const ::grpc::internal::RpcMethod rpcmethod_GetModelInfo_;
+    const ::grpc::internal::RpcMethod rpcmethod_GetModelIndex_;
     const ::grpc::internal::RpcMethod rpcmethod_RegisterWorker_;
     const ::grpc::internal::RpcMethod rpcmethod_WorkerHeartbeat_;
     const ::grpc::internal::RpcMethod rpcmethod_UnregisterWorker_;
@@ -1377,6 +1453,10 @@ class GlobalModelStore final {
         ::grpc::ServerContext* context,
         const ::global_store::GetModelInfoRequest* request,
         ::global_store::GetModelInfoResponse* response);
+    virtual ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* context,
+        const ::global_store::GetModelIndexRequest* request,
+        ::global_store::GetModelIndexResponse* response);
     virtual ::grpc::Status RegisterWorker(
         ::grpc::ServerContext* context,
         const ::global_store::RegisterWorkerRequest* request,
@@ -1625,13 +1705,43 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
+  class WithAsyncMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithAsyncMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodAsync(7);
+    }
+    ~WithAsyncMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable synchronous version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    void RequestGetModelIndex(
+        ::grpc::ServerContext* context,
+        ::global_store::GetModelIndexRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::GetModelIndexResponse>* response,
+        ::grpc::CompletionQueue* new_call_cq,
+        ::grpc::ServerCompletionQueue* notification_cq,
+        void* tag) {
+      ::grpc::Service::RequestAsyncUnary(7, context, request, response, new_call_cq, notification_cq, tag);
+    }
+  };
+  template <class BaseClass>
   class WithAsyncMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
     WithAsyncMethod_RegisterWorker() {
-      ::grpc::Service::MarkMethodAsync(7);
+      ::grpc::Service::MarkMethodAsync(8);
     }
     ~WithAsyncMethod_RegisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1651,7 +1761,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(7, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(8, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1661,7 +1771,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_WorkerHeartbeat() {
-      ::grpc::Service::MarkMethodAsync(8);
+      ::grpc::Service::MarkMethodAsync(9);
     }
     ~WithAsyncMethod_WorkerHeartbeat() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1681,7 +1791,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(8, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(9, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1691,7 +1801,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_UnregisterWorker() {
-      ::grpc::Service::MarkMethodAsync(9);
+      ::grpc::Service::MarkMethodAsync(10);
     }
     ~WithAsyncMethod_UnregisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1711,7 +1821,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(9, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(10, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1721,7 +1831,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_ListActiveWorkers() {
-      ::grpc::Service::MarkMethodAsync(10);
+      ::grpc::Service::MarkMethodAsync(11);
     }
     ~WithAsyncMethod_ListActiveWorkers() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1741,7 +1851,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(10, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(11, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1751,7 +1861,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_SynchronizeWorkerState() {
-      ::grpc::Service::MarkMethodAsync(11);
+      ::grpc::Service::MarkMethodAsync(12);
     }
     ~WithAsyncMethod_SynchronizeWorkerState() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1771,7 +1881,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(11, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(12, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1781,7 +1891,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_RequestFullStateSync() {
-      ::grpc::Service::MarkMethodAsync(12);
+      ::grpc::Service::MarkMethodAsync(13);
     }
     ~WithAsyncMethod_RequestFullStateSync() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1801,7 +1911,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(12, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(13, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1811,7 +1921,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_HealthCheck() {
-      ::grpc::Service::MarkMethodAsync(13);
+      ::grpc::Service::MarkMethodAsync(14);
     }
     ~WithAsyncMethod_HealthCheck() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1831,7 +1941,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(13, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(14, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1841,7 +1951,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_QueryChunkLocations() {
-      ::grpc::Service::MarkMethodAsync(14);
+      ::grpc::Service::MarkMethodAsync(15);
     }
     ~WithAsyncMethod_QueryChunkLocations() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1861,7 +1971,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(14, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(15, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -1871,7 +1981,7 @@ class GlobalModelStore final {
 
    public:
     WithAsyncMethod_BatchUpdateChunkStates() {
-      ::grpc::Service::MarkMethodAsync(15);
+      ::grpc::Service::MarkMethodAsync(16);
     }
     ~WithAsyncMethod_BatchUpdateChunkStates() override {
       BaseClassMustBeDerivedFromService(this);
@@ -1891,17 +2001,17 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(15, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(16, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
-  typedef WithAsyncMethod_RegisterModelReplica<
-      WithAsyncMethod_UpdateModelReplica<WithAsyncMethod_UnregisterModelReplica<
-          WithAsyncMethod_RequestModelReplicaTransport<WithAsyncMethod_CompleteModelReplicaTransport<
-              WithAsyncMethod_ListModelReplicas<WithAsyncMethod_GetModelInfo<WithAsyncMethod_RegisterWorker<
+  typedef WithAsyncMethod_RegisterModelReplica<WithAsyncMethod_UpdateModelReplica<
+      WithAsyncMethod_UnregisterModelReplica<WithAsyncMethod_RequestModelReplicaTransport<
+          WithAsyncMethod_CompleteModelReplicaTransport<WithAsyncMethod_ListModelReplicas<
+              WithAsyncMethod_GetModelInfo<WithAsyncMethod_GetModelIndex<WithAsyncMethod_RegisterWorker<
                   WithAsyncMethod_WorkerHeartbeat<WithAsyncMethod_UnregisterWorker<WithAsyncMethod_ListActiveWorkers<
                       WithAsyncMethod_SynchronizeWorkerState<WithAsyncMethod_RequestFullStateSync<
                           WithAsyncMethod_HealthCheck<WithAsyncMethod_QueryChunkLocations<
-                              WithAsyncMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>
+                              WithAsyncMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       AsyncService;
   template <class BaseClass>
   class WithCallbackMethod_RegisterModelReplica : public BaseClass {
@@ -2227,6 +2337,51 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
+  class WithCallbackMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithCallbackMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodCallback(
+          7,
+          new ::grpc::internal::
+              CallbackUnaryHandler<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>(
+                  [this](
+                      ::grpc::CallbackServerContext* context,
+                      const ::global_store::GetModelIndexRequest* request,
+                      ::global_store::GetModelIndexResponse* response) {
+                    return this->GetModelIndex(context, request, response);
+                  }));
+    }
+    void SetMessageAllocatorFor_GetModelIndex(
+        ::grpc::MessageAllocator<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>*
+            allocator) {
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(7);
+      static_cast<::grpc::internal::CallbackUnaryHandler<
+          ::global_store::GetModelIndexRequest,
+          ::global_store::GetModelIndexResponse>*>(handler)
+          ->SetMessageAllocator(allocator);
+    }
+    ~WithCallbackMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable synchronous version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    virtual ::grpc::ServerUnaryReactor* GetModelIndex(
+        ::grpc::CallbackServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) {
+      return nullptr;
+    }
+  };
+  template <class BaseClass>
   class WithCallbackMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
@@ -2234,7 +2389,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_RegisterWorker() {
       ::grpc::Service::MarkMethodCallback(
-          7,
+          8,
           new ::grpc::internal::
               CallbackUnaryHandler<::global_store::RegisterWorkerRequest, ::global_store::RegisterWorkerResponse>(
                   [this](
@@ -2247,7 +2402,7 @@ class GlobalModelStore final {
     void SetMessageAllocatorFor_RegisterWorker(
         ::grpc::MessageAllocator<::global_store::RegisterWorkerRequest, ::global_store::RegisterWorkerResponse>*
             allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(7);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(8);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::RegisterWorkerRequest,
           ::global_store::RegisterWorkerResponse>*>(handler)
@@ -2279,7 +2434,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_WorkerHeartbeat() {
       ::grpc::Service::MarkMethodCallback(
-          8,
+          9,
           new ::grpc::internal::
               CallbackUnaryHandler<::global_store::WorkerHeartbeatRequest, ::global_store::WorkerHeartbeatResponse>(
                   [this](
@@ -2292,7 +2447,7 @@ class GlobalModelStore final {
     void SetMessageAllocatorFor_WorkerHeartbeat(
         ::grpc::MessageAllocator<::global_store::WorkerHeartbeatRequest, ::global_store::WorkerHeartbeatResponse>*
             allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(8);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(9);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::WorkerHeartbeatRequest,
           ::global_store::WorkerHeartbeatResponse>*>(handler)
@@ -2324,7 +2479,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_UnregisterWorker() {
       ::grpc::Service::MarkMethodCallback(
-          9,
+          10,
           new ::grpc::internal::
               CallbackUnaryHandler<::global_store::UnregisterWorkerRequest, ::global_store::UnregisterWorkerResponse>(
                   [this](
@@ -2337,7 +2492,7 @@ class GlobalModelStore final {
     void SetMessageAllocatorFor_UnregisterWorker(
         ::grpc::MessageAllocator<::global_store::UnregisterWorkerRequest, ::global_store::UnregisterWorkerResponse>*
             allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(9);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(10);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::UnregisterWorkerRequest,
           ::global_store::UnregisterWorkerResponse>*>(handler)
@@ -2369,7 +2524,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_ListActiveWorkers() {
       ::grpc::Service::MarkMethodCallback(
-          10,
+          11,
           new ::grpc::internal::
               CallbackUnaryHandler<::global_store::ListActiveWorkersRequest, ::global_store::ListActiveWorkersResponse>(
                   [this](
@@ -2382,7 +2537,7 @@ class GlobalModelStore final {
     void SetMessageAllocatorFor_ListActiveWorkers(
         ::grpc::MessageAllocator<::global_store::ListActiveWorkersRequest, ::global_store::ListActiveWorkersResponse>*
             allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(10);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(11);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::ListActiveWorkersRequest,
           ::global_store::ListActiveWorkersResponse>*>(handler)
@@ -2414,7 +2569,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_SynchronizeWorkerState() {
       ::grpc::Service::MarkMethodCallback(
-          11,
+          12,
           new ::grpc::internal::CallbackUnaryHandler<
               ::global_store::SynchronizeWorkerStateRequest,
               ::global_store::SynchronizeWorkerStateResponse>(
@@ -2429,7 +2584,7 @@ class GlobalModelStore final {
         ::grpc::MessageAllocator<
             ::global_store::SynchronizeWorkerStateRequest,
             ::global_store::SynchronizeWorkerStateResponse>* allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(11);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(12);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::SynchronizeWorkerStateRequest,
           ::global_store::SynchronizeWorkerStateResponse>*>(handler)
@@ -2461,7 +2616,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_RequestFullStateSync() {
       ::grpc::Service::MarkMethodCallback(
-          12,
+          13,
           new ::grpc::internal::CallbackUnaryHandler<
               ::global_store::RequestFullStateSyncRequest,
               ::global_store::RequestFullStateSyncResponse>(
@@ -2476,7 +2631,7 @@ class GlobalModelStore final {
         ::grpc::MessageAllocator<
             ::global_store::RequestFullStateSyncRequest,
             ::global_store::RequestFullStateSyncResponse>* allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(12);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(13);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::RequestFullStateSyncRequest,
           ::global_store::RequestFullStateSyncResponse>*>(handler)
@@ -2508,7 +2663,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_HealthCheck() {
       ::grpc::Service::MarkMethodCallback(
-          13,
+          14,
           new ::grpc::internal::
               CallbackUnaryHandler<::global_store::HealthCheckRequest, ::global_store::HealthCheckResponse>(
                   [this](
@@ -2520,7 +2675,7 @@ class GlobalModelStore final {
     }
     void SetMessageAllocatorFor_HealthCheck(
         ::grpc::MessageAllocator<::global_store::HealthCheckRequest, ::global_store::HealthCheckResponse>* allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(13);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(14);
       static_cast<::grpc::internal::
                       CallbackUnaryHandler<::global_store::HealthCheckRequest, ::global_store::HealthCheckResponse>*>(
           handler)
@@ -2552,7 +2707,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_QueryChunkLocations() {
       ::grpc::Service::MarkMethodCallback(
-          14,
+          15,
           new ::grpc::internal::CallbackUnaryHandler<
               ::global_store::QueryChunkLocationsRequest,
               ::global_store::QueryChunkLocationsResponse>(
@@ -2567,7 +2722,7 @@ class GlobalModelStore final {
         ::grpc::MessageAllocator<
             ::global_store::QueryChunkLocationsRequest,
             ::global_store::QueryChunkLocationsResponse>* allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(14);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(15);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::QueryChunkLocationsRequest,
           ::global_store::QueryChunkLocationsResponse>*>(handler)
@@ -2599,7 +2754,7 @@ class GlobalModelStore final {
    public:
     WithCallbackMethod_BatchUpdateChunkStates() {
       ::grpc::Service::MarkMethodCallback(
-          15,
+          16,
           new ::grpc::internal::CallbackUnaryHandler<
               ::global_store::BatchUpdateChunkStatesRequest,
               ::global_store::BatchUpdateChunkStatesResponse>(
@@ -2614,7 +2769,7 @@ class GlobalModelStore final {
         ::grpc::MessageAllocator<
             ::global_store::BatchUpdateChunkStatesRequest,
             ::global_store::BatchUpdateChunkStatesResponse>* allocator) {
-      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(15);
+      ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(16);
       static_cast<::grpc::internal::CallbackUnaryHandler<
           ::global_store::BatchUpdateChunkStatesRequest,
           ::global_store::BatchUpdateChunkStatesResponse>*>(handler)
@@ -2638,14 +2793,15 @@ class GlobalModelStore final {
       return nullptr;
     }
   };
-  typedef WithCallbackMethod_RegisterModelReplica<WithCallbackMethod_UpdateModelReplica<
-      WithCallbackMethod_UnregisterModelReplica<WithCallbackMethod_RequestModelReplicaTransport<
-          WithCallbackMethod_CompleteModelReplicaTransport<WithCallbackMethod_ListModelReplicas<
-              WithCallbackMethod_GetModelInfo<WithCallbackMethod_RegisterWorker<WithCallbackMethod_WorkerHeartbeat<
-                  WithCallbackMethod_UnregisterWorker<WithCallbackMethod_ListActiveWorkers<
-                      WithCallbackMethod_SynchronizeWorkerState<WithCallbackMethod_RequestFullStateSync<
-                          WithCallbackMethod_HealthCheck<WithCallbackMethod_QueryChunkLocations<
-                              WithCallbackMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>
+  typedef WithCallbackMethod_RegisterModelReplica<
+      WithCallbackMethod_UpdateModelReplica<WithCallbackMethod_UnregisterModelReplica<
+          WithCallbackMethod_RequestModelReplicaTransport<WithCallbackMethod_CompleteModelReplicaTransport<
+              WithCallbackMethod_ListModelReplicas<WithCallbackMethod_GetModelInfo<
+                  WithCallbackMethod_GetModelIndex<WithCallbackMethod_RegisterWorker<WithCallbackMethod_WorkerHeartbeat<
+                      WithCallbackMethod_UnregisterWorker<WithCallbackMethod_ListActiveWorkers<
+                          WithCallbackMethod_SynchronizeWorkerState<WithCallbackMethod_RequestFullStateSync<
+                              WithCallbackMethod_HealthCheck<WithCallbackMethod_QueryChunkLocations<
+                                  WithCallbackMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       CallbackService;
   typedef CallbackService ExperimentalCallbackService;
   template <class BaseClass>
@@ -2796,13 +2952,34 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
+  class WithGenericMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithGenericMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodGeneric(7);
+    }
+    ~WithGenericMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable synchronous version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+  };
+  template <class BaseClass>
   class WithGenericMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
     WithGenericMethod_RegisterWorker() {
-      ::grpc::Service::MarkMethodGeneric(7);
+      ::grpc::Service::MarkMethodGeneric(8);
     }
     ~WithGenericMethod_RegisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2823,7 +3000,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_WorkerHeartbeat() {
-      ::grpc::Service::MarkMethodGeneric(8);
+      ::grpc::Service::MarkMethodGeneric(9);
     }
     ~WithGenericMethod_WorkerHeartbeat() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2844,7 +3021,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_UnregisterWorker() {
-      ::grpc::Service::MarkMethodGeneric(9);
+      ::grpc::Service::MarkMethodGeneric(10);
     }
     ~WithGenericMethod_UnregisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2865,7 +3042,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_ListActiveWorkers() {
-      ::grpc::Service::MarkMethodGeneric(10);
+      ::grpc::Service::MarkMethodGeneric(11);
     }
     ~WithGenericMethod_ListActiveWorkers() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2886,7 +3063,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_SynchronizeWorkerState() {
-      ::grpc::Service::MarkMethodGeneric(11);
+      ::grpc::Service::MarkMethodGeneric(12);
     }
     ~WithGenericMethod_SynchronizeWorkerState() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2907,7 +3084,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_RequestFullStateSync() {
-      ::grpc::Service::MarkMethodGeneric(12);
+      ::grpc::Service::MarkMethodGeneric(13);
     }
     ~WithGenericMethod_RequestFullStateSync() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2928,7 +3105,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_HealthCheck() {
-      ::grpc::Service::MarkMethodGeneric(13);
+      ::grpc::Service::MarkMethodGeneric(14);
     }
     ~WithGenericMethod_HealthCheck() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2949,7 +3126,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_QueryChunkLocations() {
-      ::grpc::Service::MarkMethodGeneric(14);
+      ::grpc::Service::MarkMethodGeneric(15);
     }
     ~WithGenericMethod_QueryChunkLocations() override {
       BaseClassMustBeDerivedFromService(this);
@@ -2970,7 +3147,7 @@ class GlobalModelStore final {
 
    public:
     WithGenericMethod_BatchUpdateChunkStates() {
-      ::grpc::Service::MarkMethodGeneric(15);
+      ::grpc::Service::MarkMethodGeneric(16);
     }
     ~WithGenericMethod_BatchUpdateChunkStates() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3195,13 +3372,43 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
+  class WithRawMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithRawMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodRaw(7);
+    }
+    ~WithRawMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable synchronous version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    void RequestGetModelIndex(
+        ::grpc::ServerContext* context,
+        ::grpc::ByteBuffer* request,
+        ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
+        ::grpc::CompletionQueue* new_call_cq,
+        ::grpc::ServerCompletionQueue* notification_cq,
+        void* tag) {
+      ::grpc::Service::RequestAsyncUnary(7, context, request, response, new_call_cq, notification_cq, tag);
+    }
+  };
+  template <class BaseClass>
   class WithRawMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
     WithRawMethod_RegisterWorker() {
-      ::grpc::Service::MarkMethodRaw(7);
+      ::grpc::Service::MarkMethodRaw(8);
     }
     ~WithRawMethod_RegisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3221,7 +3428,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(7, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(8, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3231,7 +3438,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_WorkerHeartbeat() {
-      ::grpc::Service::MarkMethodRaw(8);
+      ::grpc::Service::MarkMethodRaw(9);
     }
     ~WithRawMethod_WorkerHeartbeat() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3251,7 +3458,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(8, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(9, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3261,7 +3468,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_UnregisterWorker() {
-      ::grpc::Service::MarkMethodRaw(9);
+      ::grpc::Service::MarkMethodRaw(10);
     }
     ~WithRawMethod_UnregisterWorker() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3281,7 +3488,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(9, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(10, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3291,7 +3498,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_ListActiveWorkers() {
-      ::grpc::Service::MarkMethodRaw(10);
+      ::grpc::Service::MarkMethodRaw(11);
     }
     ~WithRawMethod_ListActiveWorkers() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3311,7 +3518,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(10, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(11, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3321,7 +3528,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_SynchronizeWorkerState() {
-      ::grpc::Service::MarkMethodRaw(11);
+      ::grpc::Service::MarkMethodRaw(12);
     }
     ~WithRawMethod_SynchronizeWorkerState() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3341,7 +3548,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(11, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(12, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3351,7 +3558,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_RequestFullStateSync() {
-      ::grpc::Service::MarkMethodRaw(12);
+      ::grpc::Service::MarkMethodRaw(13);
     }
     ~WithRawMethod_RequestFullStateSync() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3371,7 +3578,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(12, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(13, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3381,7 +3588,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_HealthCheck() {
-      ::grpc::Service::MarkMethodRaw(13);
+      ::grpc::Service::MarkMethodRaw(14);
     }
     ~WithRawMethod_HealthCheck() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3401,7 +3608,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(13, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(14, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3411,7 +3618,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_QueryChunkLocations() {
-      ::grpc::Service::MarkMethodRaw(14);
+      ::grpc::Service::MarkMethodRaw(15);
     }
     ~WithRawMethod_QueryChunkLocations() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3431,7 +3638,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(14, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(15, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3441,7 +3648,7 @@ class GlobalModelStore final {
 
    public:
     WithRawMethod_BatchUpdateChunkStates() {
-      ::grpc::Service::MarkMethodRaw(15);
+      ::grpc::Service::MarkMethodRaw(16);
     }
     ~WithRawMethod_BatchUpdateChunkStates() override {
       BaseClassMustBeDerivedFromService(this);
@@ -3461,7 +3668,7 @@ class GlobalModelStore final {
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
-      ::grpc::Service::RequestAsyncUnary(15, context, request, response, new_call_cq, notification_cq, tag);
+      ::grpc::Service::RequestAsyncUnary(16, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
   template <class BaseClass>
@@ -3700,6 +3907,39 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
+  class WithRawCallbackMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithRawCallbackMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodRawCallback(
+          7,
+          new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
+              [this](
+                  ::grpc::CallbackServerContext* context,
+                  const ::grpc::ByteBuffer* request,
+                  ::grpc::ByteBuffer* response) { return this->GetModelIndex(context, request, response); }));
+    }
+    ~WithRawCallbackMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable synchronous version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    virtual ::grpc::ServerUnaryReactor* GetModelIndex(
+        ::grpc::CallbackServerContext* /*context*/,
+        const ::grpc::ByteBuffer* /*request*/,
+        ::grpc::ByteBuffer* /*response*/) {
+      return nullptr;
+    }
+  };
+  template <class BaseClass>
   class WithRawCallbackMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
@@ -3707,7 +3947,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_RegisterWorker() {
       ::grpc::Service::MarkMethodRawCallback(
-          7,
+          8,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3740,7 +3980,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_WorkerHeartbeat() {
       ::grpc::Service::MarkMethodRawCallback(
-          8,
+          9,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3773,7 +4013,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_UnregisterWorker() {
       ::grpc::Service::MarkMethodRawCallback(
-          9,
+          10,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3806,7 +4046,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_ListActiveWorkers() {
       ::grpc::Service::MarkMethodRawCallback(
-          10,
+          11,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3839,7 +4079,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_SynchronizeWorkerState() {
       ::grpc::Service::MarkMethodRawCallback(
-          11,
+          12,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3872,7 +4112,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_RequestFullStateSync() {
       ::grpc::Service::MarkMethodRawCallback(
-          12,
+          13,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3905,7 +4145,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_HealthCheck() {
       ::grpc::Service::MarkMethodRawCallback(
-          13,
+          14,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3938,7 +4178,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_QueryChunkLocations() {
       ::grpc::Service::MarkMethodRawCallback(
-          14,
+          15,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -3971,7 +4211,7 @@ class GlobalModelStore final {
    public:
     WithRawCallbackMethod_BatchUpdateChunkStates() {
       ::grpc::Service::MarkMethodRawCallback(
-          15,
+          16,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
@@ -4260,6 +4500,42 @@ class GlobalModelStore final {
             server_unary_streamer) = 0;
   };
   template <class BaseClass>
+  class WithStreamedUnaryMethod_GetModelIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_GetModelIndex() {
+      ::grpc::Service::MarkMethodStreamed(
+          7,
+          new ::grpc::internal::
+              StreamedUnaryHandler<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>(
+                  [this](
+                      ::grpc::ServerContext* context,
+                      ::grpc::ServerUnaryStreamer<
+                          ::global_store::GetModelIndexRequest,
+                          ::global_store::GetModelIndexResponse>* streamer) {
+                    return this->StreamedGetModelIndex(context, streamer);
+                  }));
+    }
+    ~WithStreamedUnaryMethod_GetModelIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status GetModelIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetModelIndexRequest* /*request*/,
+        ::global_store::GetModelIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedGetModelIndex(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>*
+            server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
   class WithStreamedUnaryMethod_RegisterWorker : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
@@ -4267,7 +4543,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_RegisterWorker() {
       ::grpc::Service::MarkMethodStreamed(
-          7,
+          8,
           new ::grpc::internal::
               StreamedUnaryHandler<::global_store::RegisterWorkerRequest, ::global_store::RegisterWorkerResponse>(
                   [this](
@@ -4303,7 +4579,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_WorkerHeartbeat() {
       ::grpc::Service::MarkMethodStreamed(
-          8,
+          9,
           new ::grpc::internal::
               StreamedUnaryHandler<::global_store::WorkerHeartbeatRequest, ::global_store::WorkerHeartbeatResponse>(
                   [this](
@@ -4339,7 +4615,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_UnregisterWorker() {
       ::grpc::Service::MarkMethodStreamed(
-          9,
+          10,
           new ::grpc::internal::
               StreamedUnaryHandler<::global_store::UnregisterWorkerRequest, ::global_store::UnregisterWorkerResponse>(
                   [this](
@@ -4375,7 +4651,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_ListActiveWorkers() {
       ::grpc::Service::MarkMethodStreamed(
-          10,
+          11,
           new ::grpc::internal::
               StreamedUnaryHandler<::global_store::ListActiveWorkersRequest, ::global_store::ListActiveWorkersResponse>(
                   [this](
@@ -4412,7 +4688,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_SynchronizeWorkerState() {
       ::grpc::Service::MarkMethodStreamed(
-          11,
+          12,
           new ::grpc::internal::StreamedUnaryHandler<
               ::global_store::SynchronizeWorkerStateRequest,
               ::global_store::SynchronizeWorkerStateResponse>(
@@ -4450,7 +4726,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_RequestFullStateSync() {
       ::grpc::Service::MarkMethodStreamed(
-          12,
+          13,
           new ::grpc::internal::StreamedUnaryHandler<
               ::global_store::RequestFullStateSyncRequest,
               ::global_store::RequestFullStateSyncResponse>(
@@ -4488,7 +4764,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_HealthCheck() {
       ::grpc::Service::MarkMethodStreamed(
-          13,
+          14,
           new ::grpc::internal::StreamedUnaryHandler<
               ::global_store::HealthCheckRequest,
               ::global_store::HealthCheckResponse>(
@@ -4522,7 +4798,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_QueryChunkLocations() {
       ::grpc::Service::MarkMethodStreamed(
-          14,
+          15,
           new ::grpc::internal::StreamedUnaryHandler<
               ::global_store::QueryChunkLocationsRequest,
               ::global_store::QueryChunkLocationsResponse>(
@@ -4560,7 +4836,7 @@ class GlobalModelStore final {
    public:
     WithStreamedUnaryMethod_BatchUpdateChunkStates() {
       ::grpc::Service::MarkMethodStreamed(
-          15,
+          16,
           new ::grpc::internal::StreamedUnaryHandler<
               ::global_store::BatchUpdateChunkStatesRequest,
               ::global_store::BatchUpdateChunkStatesResponse>(
@@ -4590,26 +4866,26 @@ class GlobalModelStore final {
             ::global_store::BatchUpdateChunkStatesRequest,
             ::global_store::BatchUpdateChunkStatesResponse>* server_unary_streamer) = 0;
   };
-  typedef WithStreamedUnaryMethod_RegisterModelReplica<
-      WithStreamedUnaryMethod_UpdateModelReplica<WithStreamedUnaryMethod_UnregisterModelReplica<
-          WithStreamedUnaryMethod_RequestModelReplicaTransport<WithStreamedUnaryMethod_CompleteModelReplicaTransport<
-              WithStreamedUnaryMethod_ListModelReplicas<WithStreamedUnaryMethod_GetModelInfo<
+  typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
+      WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
+          WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
+              WithStreamedUnaryMethod_GetModelInfo<WithStreamedUnaryMethod_GetModelIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<
                               WithStreamedUnaryMethod_HealthCheck<WithStreamedUnaryMethod_QueryChunkLocations<
-                                  WithStreamedUnaryMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>
+                                  WithStreamedUnaryMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       StreamedUnaryService;
   typedef Service SplitStreamedService;
-  typedef WithStreamedUnaryMethod_RegisterModelReplica<
-      WithStreamedUnaryMethod_UpdateModelReplica<WithStreamedUnaryMethod_UnregisterModelReplica<
-          WithStreamedUnaryMethod_RequestModelReplicaTransport<WithStreamedUnaryMethod_CompleteModelReplicaTransport<
-              WithStreamedUnaryMethod_ListModelReplicas<WithStreamedUnaryMethod_GetModelInfo<
+  typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
+      WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
+          WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
+              WithStreamedUnaryMethod_GetModelInfo<WithStreamedUnaryMethod_GetModelIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<
                               WithStreamedUnaryMethod_HealthCheck<WithStreamedUnaryMethod_QueryChunkLocations<
-                                  WithStreamedUnaryMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>
+                                  WithStreamedUnaryMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       StreamedService;
 };
 

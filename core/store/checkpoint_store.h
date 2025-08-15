@@ -23,11 +23,13 @@
 #include <string>
 #include <vector>
 
+#include <mutex>
+#include <optional>
 #include <string_view>
+#include <unordered_map>
 #include "absl/status/statusor.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
-#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
@@ -101,6 +103,56 @@ class CheckpointStore {
       const DeviceKey& target_device,
       PrepareMode mode = PrepareMode::AUTO,
       const LoadingHints& hints = {});
+
+  // ------------------------------------------------------------------------
+  // Memory TensorDict Registration (coalesced) – Phase A (RFC-0006)
+  // ------------------------------------------------------------------------
+
+  struct TensorDictRegistration {
+    std::string model_id; // Logical model identifier
+    std::string tensor_index_key; // Canonical JSON SHA-256 hex (lowercase)
+    std::optional<std::string> tensor_index_data; // Optional canonical JSON bytes for UPSERT
+    std::string schema_version{"v2"}; // Data-format schema version
+    std::string encoding{"json"}; // Encoding of index_data (if provided)
+    int device_id{0}; // Local CUDA device ordinal
+    uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
+    bool enable_p2p{true}; // Whether to enable remote access
+    uint32_t ttl_ms{0}; // Optional TTL for Begin→Commit (0 = no TTL)
+  };
+
+  struct RegistrationBeginResult {
+    std::string registration_id; // Opaque id for Commit/Abort
+    std::array<std::byte, sizeof(cudaIpcMemHandle_t)> cuda_ipc_handle_bytes{}; // CUDA IPC handle
+    int device_id{0};
+    uint64_t size_bytes{0};
+  };
+
+  /**
+   * @brief Begin registering an in-memory tensor dict replica.
+   * Allocates target GPU memory and returns a CUDA IPC handle for the caller
+   * (user process) to write tensor bytes directly into daemon-owned memory.
+   */
+  absl::StatusOr<RegistrationBeginResult> begin_register_tensor_dict(const TensorDictRegistration& reg);
+
+  /**
+   * @brief Commit a previously begun registration.  Finalizes the replica by
+   * exporting remote memory keys (if communication engine is enabled) and
+   * registering the memory replica with Global Store.  On success, memory
+   * ownership remains with the daemon and becomes discoverable by peers.
+   */
+  struct RegistrationCommitResult {
+    std::string registration_id;
+    std::string model_id;
+    int device_id{0};
+    uint64_t size_bytes{0};
+  };
+
+  absl::StatusOr<RegistrationCommitResult> commit_registered_tensor_dict(std::string_view registration_id);
+
+  /**
+   * @brief Abort a pending registration and release allocated memory.
+   */
+  absl::Status abort_registered_tensor_dict(std::string_view registration_id);
 
   // ------------------------------------------------------------------------
   // Query helpers (multi-device binding)
@@ -231,6 +283,28 @@ class CheckpointStore {
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Pending Memory Registration State (RFC-0006)
+  // ═══════════════════════════════════════════════════════════════════════════
+  struct PendingRegistrationEntry {
+    std::string registration_id;
+    std::string model_id;
+    int device_id{0};
+    uint64_t size_bytes{0};
+    std::string tensor_index_key;
+    std::optional<std::string> tensor_index_data;
+    std::string schema_version;
+    std::string encoding;
+    bool enable_p2p{true};
+    std::shared_ptr<Model> model; // Backing model for memory ownership
+    void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
+    cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
+    std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
+  };
+
+  std::mutex pending_mutex_;
+  std::unordered_map<std::string, PendingRegistrationEntry> pending_regs_;
 };
 
 } // namespace stepcast::store

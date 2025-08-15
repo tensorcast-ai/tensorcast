@@ -144,6 +144,24 @@ class MockGlobalModelStoreStub : public GlobalModelStore::StubInterface {
           const ::global_store::GetModelInfoRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
+      GetModelIndex,
+      ::grpc::Status(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest& request,
+          ::global_store::GetModelIndexResponse* response));
+  MOCK_METHOD3(
+      AsyncGetModelIndexRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest& request,
+          ::grpc::CompletionQueue* cq));
+  MOCK_METHOD3(
+      PrepareAsyncGetModelIndexRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*(
+          ::grpc::ClientContext* context,
+          const ::global_store::GetModelIndexRequest& request,
+          ::grpc::CompletionQueue* cq));
+  MOCK_METHOD3(
       RegisterWorker,
       ::grpc::Status(
           ::grpc::ClientContext* context,

@@ -285,6 +285,26 @@ class GetModelInfoResponse(_message.Message):
     model_info: ModelInfo
     def __init__(self, status: _Optional[_Union[Status, str]] = ..., model_info: _Optional[_Union[ModelInfo, _Mapping]] = ...) -> None: ...
 
+class GetModelIndexRequest(_message.Message):
+    __slots__ = ("model_name", "tensor_index_key")
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_KEY_FIELD_NUMBER: _ClassVar[int]
+    model_name: str
+    tensor_index_key: str
+    def __init__(self, model_name: _Optional[str] = ..., tensor_index_key: _Optional[str] = ...) -> None: ...
+
+class GetModelIndexResponse(_message.Message):
+    __slots__ = ("status", "tensor_index_data", "encoding", "schema_version")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_DATA_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
+    status: Status
+    tensor_index_data: bytes
+    encoding: str
+    schema_version: str
+    def __init__(self, status: _Optional[_Union[Status, str]] = ..., tensor_index_data: _Optional[bytes] = ..., encoding: _Optional[str] = ..., schema_version: _Optional[str] = ...) -> None: ...
+
 class ListModelReplicasRequest(_message.Message):
     __slots__ = ("model_name", "node_id", "node_address", "node_port", "memory_type", "device_id")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -315,16 +335,22 @@ class ListModelReplicasResponse(_message.Message):
     def __init__(self, model_replicas: _Optional[_Mapping[str, MemoryInfoList]] = ...) -> None: ...
 
 class RegisterModelReplicaRequest(_message.Message):
-    __slots__ = ("model_name", "mem_info", "max_concurrency", "worker_id")
+    __slots__ = ("model_name", "mem_info", "max_concurrency", "worker_id", "tensor_index_data", "encoding", "schema_version")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     MEM_INFO_FIELD_NUMBER: _ClassVar[int]
     MAX_CONCURRENCY_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_DATA_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     mem_info: MemoryInfo
     max_concurrency: int
     worker_id: str
-    def __init__(self, model_name: _Optional[str] = ..., mem_info: _Optional[_Union[MemoryInfo, _Mapping]] = ..., max_concurrency: _Optional[int] = ..., worker_id: _Optional[str] = ...) -> None: ...
+    tensor_index_data: bytes
+    encoding: str
+    schema_version: str
+    def __init__(self, model_name: _Optional[str] = ..., mem_info: _Optional[_Union[MemoryInfo, _Mapping]] = ..., max_concurrency: _Optional[int] = ..., worker_id: _Optional[str] = ..., tensor_index_data: _Optional[bytes] = ..., encoding: _Optional[str] = ..., schema_version: _Optional[str] = ...) -> None: ...
 
 class RegisterModelReplicaResponse(_message.Message):
     __slots__ = ("status", "model_name", "replica_id")
@@ -369,7 +395,7 @@ class UnregisterModelReplicaResponse(_message.Message):
     def __init__(self, status: _Optional[_Union[Status, str]] = ...) -> None: ...
 
 class MemoryInfo(_message.Message):
-    __slots__ = ("node_id", "node_address", "node_port", "memory_size", "memory_type", "device_id", "remote_memory_keys", "buffer_sizes")
+    __slots__ = ("node_id", "node_address", "node_port", "memory_size", "memory_type", "device_id", "remote_memory_keys", "buffer_sizes", "is_memory_replica", "tensor_index_key", "creation_timestamp", "source_process_id")
     NODE_ID_FIELD_NUMBER: _ClassVar[int]
     NODE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     NODE_PORT_FIELD_NUMBER: _ClassVar[int]
@@ -378,6 +404,10 @@ class MemoryInfo(_message.Message):
     DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
     REMOTE_MEMORY_KEYS_FIELD_NUMBER: _ClassVar[int]
     BUFFER_SIZES_FIELD_NUMBER: _ClassVar[int]
+    IS_MEMORY_REPLICA_FIELD_NUMBER: _ClassVar[int]
+    TENSOR_INDEX_KEY_FIELD_NUMBER: _ClassVar[int]
+    CREATION_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_PROCESS_ID_FIELD_NUMBER: _ClassVar[int]
     node_id: str
     node_address: str
     node_port: int
@@ -386,7 +416,11 @@ class MemoryInfo(_message.Message):
     device_id: int
     remote_memory_keys: _containers.RepeatedScalarFieldContainer[str]
     buffer_sizes: _containers.RepeatedScalarFieldContainer[int]
-    def __init__(self, node_id: _Optional[str] = ..., node_address: _Optional[str] = ..., node_port: _Optional[int] = ..., memory_size: _Optional[int] = ..., memory_type: _Optional[_Union[MemoryType, str]] = ..., device_id: _Optional[int] = ..., remote_memory_keys: _Optional[_Iterable[str]] = ..., buffer_sizes: _Optional[_Iterable[int]] = ...) -> None: ...
+    is_memory_replica: bool
+    tensor_index_key: str
+    creation_timestamp: int
+    source_process_id: str
+    def __init__(self, node_id: _Optional[str] = ..., node_address: _Optional[str] = ..., node_port: _Optional[int] = ..., memory_size: _Optional[int] = ..., memory_type: _Optional[_Union[MemoryType, str]] = ..., device_id: _Optional[int] = ..., remote_memory_keys: _Optional[_Iterable[str]] = ..., buffer_sizes: _Optional[_Iterable[int]] = ..., is_memory_replica: bool = ..., tensor_index_key: _Optional[str] = ..., creation_timestamp: _Optional[int] = ..., source_process_id: _Optional[str] = ...) -> None: ...
 
 class MemoryInfoList(_message.Message):
     __slots__ = ("list",)

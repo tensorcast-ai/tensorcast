@@ -8,7 +8,7 @@ uv run python -m grpc_tools.protoc \
     --python_out=scstore/proto \
     --pyi_out=scstore/proto \
     --grpc_python_out=scstore/proto \
-    --proto_path=scstore/proto \
+    --proto_path=proto \
     proto/store_daemon.proto
 
 # Generate global_store protobuf files
@@ -16,7 +16,7 @@ uv run python -m grpc_tools.protoc \
     --python_out=scstore/proto \
     --pyi_out=scstore/proto \
     --grpc_python_out=scstore/proto \
-    --proto_path=scstore/proto \
+    --proto_path=proto \
     proto/global_store.proto
 
 echo "Python protobuf files generated successfully!"

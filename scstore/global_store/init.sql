@@ -40,6 +40,10 @@ CREATE TABLE model_replicas (
     buffer_sizes BIGINT[] NULL,
     -- 关联到 workers 表
     worker_id TEXT,
+    -- Memory replica fields
+    is_memory_replica BOOLEAN DEFAULT FALSE,
+    tensor_index_key TEXT NULL,
+    source_process_id TEXT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -64,6 +68,22 @@ CREATE INDEX idx_model_replicas_updated_at ON model_replicas(updated_at);
 CREATE INDEX idx_model_replicas_node_id ON model_replicas(node_id);
 CREATE INDEX idx_model_replicas_node_address ON model_replicas(node_address);
 CREATE INDEX idx_replicas_worker ON model_replicas(worker_id);
+CREATE INDEX idx_model_replicas_tensor_index_key ON model_replicas(tensor_index_key);
+CREATE INDEX idx_model_replicas_memory_replica ON model_replicas(is_memory_replica, model_name);
+
+-- Table for storing deduplicated tensor indices
+CREATE TABLE IF NOT EXISTS model_indices (
+    index_key TEXT PRIMARY KEY,            -- SHA-256 hash of canonical JSON index
+    schema_version TEXT NOT NULL,          -- Schema version (e.g., "v2")
+    encoding TEXT NOT NULL,                -- Encoding format (e.g., "json")
+    size_bytes BIGINT NOT NULL,            -- Size of the index data
+    index_data BLOB NOT NULL,              -- Canonical JSON bytes
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for model_indices table
+CREATE INDEX idx_model_indices_created_at ON model_indices(created_at);
+CREATE INDEX idx_model_indices_size ON model_indices(size_bytes);
 
 -- Table for tracking model transports
 CREATE TABLE model_transports (

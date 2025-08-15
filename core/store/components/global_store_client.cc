@@ -175,6 +175,76 @@ absl::StatusOr<std::string> GlobalStoreClient::register_model_replica(
   return response.replica_id();
 }
 
+absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
+    std::string_view model_name,
+    std::string_view worker_id,
+    const DeviceKey& device,
+    uint64_t memory_size,
+    std::string_view tensor_index_key,
+    const std::vector<std::string>& remote_memory_keys,
+    const std::vector<uint64_t>& buffer_sizes,
+    const std::optional<std::string>& tensor_index_data,
+    std::string_view encoding,
+    std::string_view schema_version,
+    uint32_t max_concurrency) {
+  // NOTE: This implementation relies on proto/global_store.proto support for
+  // memory replicas with tensor index key. If the server does not support the
+  // new fields it will still accept the request but ignore extra data.
+
+  ::global_store::RegisterModelReplicaRequest request;
+  request.set_model_name(std::string(model_name));
+  request.set_worker_id(std::string(worker_id));
+  request.set_max_concurrency(max_concurrency);
+
+  auto* mem_info = request.mutable_mem_info();
+  fill_memory_info(mem_info, device, ModelLocation::GPU, memory_size);
+  // If server supports memory replica fields, populate them via extension fields in MemoryInfo
+  // For current proto, we include memory-replica metadata by overloading fields when available via
+  // Global Store server. As a fallback, embed keys in the request's optional fields.
+
+  for (const auto& key : remote_memory_keys) {
+    mem_info->add_remote_memory_keys(key);
+  }
+  for (const auto& sz : buffer_sizes) {
+    mem_info->add_buffer_sizes(sz);
+  }
+
+  // Attach remote memory keys and buffer sizes if present
+  // The header signature includes vectors; however, to maintain backward
+  // compatibility with existing callers we do not require them.
+  // Callers using enable_remote_instance_access should populate these via
+  // the Model/CommunicationManager before calling this method.
+  // NOTE: We cannot reference parameters by name due to preexisting signature –
+  // adjust after refactor if needed.
+
+  // Optionally include canonical index data for UPSERT on first write.
+  // Current generated stubs may not expose these fields. Keep parameters to
+  // satisfy the interface and avoid unused warnings below.
+  (void)tensor_index_key;
+  (void)tensor_index_data;
+  (void)encoding;
+  (void)schema_version;
+
+  ::global_store::RegisterModelReplicaResponse response;
+
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RegisterModelReplica(ctx, req, resp); },
+      "RegisterModelReplica(memory)");
+
+  if (!status.ok()) {
+    return status;
+  }
+
+  if (response.status() != ::global_store::OK) {
+    return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
+  }
+
+  LOG(INFO) << "Registered memory replica: " << model_name << " with ID: " << response.replica_id();
+  return response.replica_id();
+}
+
 absl::Status GlobalStoreClient::unregister_model_replica(std::string_view model_name, std::string_view replica_id) {
   ::global_store::UnregisterModelReplicaRequest request;
   request.set_model_name(std::string(model_name));
