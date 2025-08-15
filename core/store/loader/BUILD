@@ -67,6 +67,28 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "safetensors_source",
+    srcs = ["safetensors_source.cc"],
+    hdrs = ["safetensors_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "multi_safetensors_source",
+    srcs = ["multi_safetensors_source.cc"],
+    hdrs = ["multi_safetensors_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "remote_key_source",
     srcs = ["remote_key_source.cc"],
     hdrs = ["remote_key_source.h"],
@@ -135,6 +157,8 @@ sc_cc_library(
     deps = [
         ":file_partition_source",
         ":loader",
+        ":multi_safetensors_source",
+        ":safetensors_source",
         "//core/common:error_handling_lib",
         "//core/common:model_verification_lib",
         "//core/store:loading_spec",

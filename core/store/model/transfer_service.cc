@@ -10,7 +10,9 @@
 #include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
+#include "core/store/loader/multi_safetensors_source.h"
 #include "core/store/loader/pump.h"
+#include "core/store/loader/safetensors_source.h"
 #include "core/store/loader/streaming_buffer_adapter.h"
 #include "core/store/model/transfer_helpers.h"
 
@@ -219,6 +221,13 @@ absl::Status TransferService::load_from_source(
   if (total_size == 0) {
     if (auto* fps = dynamic_cast<loader::FilePartitionSource*>(source.get())) {
       total_size = fps->total_size();
+    }
+    if (total_size == 0) {
+      if (auto* ss = dynamic_cast<loader::SafetensorsSource*>(source.get())) {
+        total_size = ss->total_size();
+      } else if (auto* ms = dynamic_cast<loader::MultiSafetensorsSource*>(source.get())) {
+        total_size = ms->total_size();
+      }
     }
   }
 

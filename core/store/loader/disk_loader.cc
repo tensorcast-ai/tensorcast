@@ -2,6 +2,9 @@
 
 #include "core/store/loader/disk_loader.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -16,6 +19,8 @@
 #include "absl/strings/str_format.h"
 #include "core/common/model_verification.h"
 #include "core/store/loader/file_partition_source.h"
+#include "core/store/loader/multi_safetensors_source.h"
+#include "core/store/loader/safetensors_source.h"
 
 namespace stepcast::store {
 
@@ -118,9 +123,52 @@ absl::Status DiskLoader::initialize() {
     }
   }
 
-  // If no partitions were detected with the supported patterns report an error.
+  // If no partitions were detected with the supported patterns, probe for .safetensors files
   if (partition_paths_.empty()) {
-    return absl::NotFoundError(absl::StrFormat("No model partition files found in: %s", model_dir.string()));
+    std::vector<std::filesystem::path> safetensors_paths;
+    for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+      if (entry.is_regular_file()) {
+        const std::string filename = entry.path().filename().string();
+        const std::string ext = ".safetensors";
+        if (filename.size() >= ext.size() && filename.rfind(ext) == filename.size() - ext.size()) {
+          safetensors_paths.push_back(entry.path());
+        }
+      }
+    }
+    if (safetensors_paths.empty()) {
+      return absl::NotFoundError(
+          absl::StrFormat("No model partition files found in: %s (also no .safetensors)", model_dir.string()));
+    }
+    std::sort(safetensors_paths.begin(), safetensors_paths.end(), [](const auto& a, const auto& b) {
+      return a.filename() < b.filename();
+    });
+    for (const auto& p : safetensors_paths) {
+      int fd = ::open(p.c_str(), O_RDONLY);
+      if (fd < 0) {
+        return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", p.string(), std::strerror(errno)));
+      }
+      uint64_t header_len_le = 0;
+      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
+      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
+        ::close(fd);
+        return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
+      }
+      struct stat stbuf{};
+      if (::fstat(fd, &stbuf) != 0) {
+        ::close(fd);
+        return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
+      }
+      ::close(fd);
+      uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
+      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      if (data_start > file_size) {
+        return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
+      }
+      uint64_t data_size = file_size - data_start;
+      partition_paths_.push_back(p);
+      partition_sizes_.push_back(static_cast<size_t>(data_size));
+      model_size_ += data_size;
+    }
   }
 
   // Sort partitions by name to ensure consistent ordering
@@ -160,6 +208,20 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> DiskLoader::open_source(
     auto st = initialize();
     if (!st.ok()) {
       return st;
+    }
+  }
+  // If paths end with .safetensors, return safetensors sources
+  {
+    absl::MutexLock lock(&mutex_);
+    if (!partition_paths_.empty()) {
+      const auto first_name = partition_paths_[0].filename().string();
+      const std::string ext = ".safetensors";
+      if (first_name.size() >= ext.size() && first_name.rfind(ext) == first_name.size() - ext.size()) {
+        if (partition_paths_.size() == 1) {
+          return std::make_unique<loader::SafetensorsSource>(partition_paths_[0]);
+        }
+        return std::make_unique<loader::MultiSafetensorsSource>(partition_paths_);
+      }
     }
   }
   loader::FilePartitionSource::Options source_opts;

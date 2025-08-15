@@ -224,61 +224,99 @@ std::unordered_map<std::string, uint64_t> save_tensors(
 ModelVerificationInfo generate_model_verification_info_from_disk(
     const std::string& model_path,
     VerificationLevel max_level) {
-  // First calculate the actual model size from tensor_index.json
-  uint64_t actual_model_size = calculate_actual_model_size(model_path);
-
-  std::vector<std::filesystem::path> partition_paths;
-  std::vector<size_t> partition_sizes;
-  uint64_t total_file_size = 0;
-
   std::filesystem::path model_dir_path(model_path);
 
-  // Discover all partition files
+  // Try partitioned files first; if none, use .safetensors payloads
+  std::vector<std::filesystem::path> file_paths;
+  std::vector<size_t> data_lengths; // file size for partitions; payload size for safetensors
+  uint64_t declared_total = 0;
+  bool is_safetensors = false;
+
   for (int i = 0;; ++i) {
-    std::filesystem::path partition_file_path = model_dir_path / ("tensor.data_" + std::to_string(i));
-    if (!std::filesystem::exists(partition_file_path)) {
-      if (i == 0 && partition_paths.empty()) {
-        // Try single file format for backward compatibility
-        partition_file_path = model_dir_path / "tensor.data";
-        if (!std::filesystem::exists(partition_file_path)) {
-          LOG(FATAL) << "No tensor data files found in: " << model_path;
+    std::filesystem::path p = model_dir_path / ("tensor.data_" + std::to_string(i));
+    if (!std::filesystem::exists(p)) {
+      if (i == 0 && file_paths.empty()) {
+        p = model_dir_path / "tensor.data";
+        if (!std::filesystem::exists(p)) {
+          break;
         }
       } else {
-        break; // No more partition files
+        break;
       }
     }
-
-    if (!std::filesystem::is_regular_file(partition_file_path)) {
-      LOG(FATAL) << "Tensor data path is not a regular file: " << partition_file_path.string();
+    if (!std::filesystem::is_regular_file(p)) {
+      LOG(FATAL) << "Tensor data path is not a regular file: " << p.string();
     }
-
     std::error_code ec;
-    uint64_t file_size = std::filesystem::file_size(partition_file_path, ec);
+    uint64_t sz = std::filesystem::file_size(p, ec);
     if (ec) {
-      LOG(FATAL) << "Failed to get file size for " << partition_file_path.string() << ": " << ec.message();
+      LOG(FATAL) << "Failed to get file size for " << p.string() << ": " << ec.message();
     }
-
-    partition_paths.push_back(partition_file_path);
-    partition_sizes.push_back(file_size);
-    total_file_size += file_size;
-
-    // If we found tensor.data (not tensor.data_0), assume it's the only file
-    if (partition_file_path.filename() == "tensor.data") {
+    file_paths.push_back(p);
+    data_lengths.push_back(sz);
+    declared_total += sz;
+    if (p.filename() == "tensor.data")
       break;
+  }
+
+  if (file_paths.empty()) {
+    std::vector<std::filesystem::path> st_paths;
+    for (const auto& entry : std::filesystem::directory_iterator(model_dir_path)) {
+      if (entry.is_regular_file()) {
+        const auto name = entry.path().filename().string();
+        const std::string ext = ".safetensors";
+        if (name.size() >= ext.size() && name.rfind(ext) == name.size() - ext.size()) {
+          st_paths.push_back(entry.path());
+        }
+      }
     }
+    if (st_paths.empty()) {
+      LOG(FATAL) << "No tensor.data partitions or .safetensors files found in: " << model_path;
+    }
+    std::sort(
+        st_paths.begin(), st_paths.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    for (const auto& p : st_paths) {
+      std::error_code ec;
+      uint64_t file_size = std::filesystem::file_size(p, ec);
+      if (ec) {
+        LOG(FATAL) << "Failed to get file size for " << p.string() << ": " << ec.message();
+      }
+      uint64_t header_len_le = 0;
+      int fd = ::open(p.c_str(), O_RDONLY);
+      if (fd < 0) {
+        LOG(FATAL) << "Failed to open safetensors file: " << p.string();
+      }
+      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
+      ::close(fd);
+      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
+        LOG(FATAL) << "Invalid safetensors header length: " << p.string();
+      }
+      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      if (data_start > file_size) {
+        LOG(FATAL) << "Invalid safetensors layout: data beyond EOF in " << p.string();
+      }
+      uint64_t payload = file_size - data_start;
+      file_paths.push_back(p);
+      data_lengths.push_back(static_cast<size_t>(payload));
+      declared_total += payload;
+    }
+    is_safetensors = true;
   }
 
-  if (total_file_size == 0) {
-    LOG(FATAL) << "Total file size is 0 - no valid tensor data found";
+  uint64_t actual_model_size = 0;
+  if (!is_safetensors) {
+    actual_model_size = calculate_actual_model_size(model_path);
+    if (actual_model_size > declared_total) {
+      LOG(FATAL) << "Actual model size (" << actual_model_size << ") exceeds total file size (" << declared_total
+                 << ")";
+    }
+  } else {
+    actual_model_size = declared_total;
   }
 
-  if (actual_model_size > total_file_size) {
-    LOG(FATAL) << "Actual model size (" << actual_model_size << ") exceeds total file size (" << total_file_size << ")";
-  }
-
-  LOG(INFO) << "Generating verification info for " << partition_paths.size()
-            << " partitions, actual model size: " << actual_model_size << " bytes"
-            << " (file size: " << total_file_size << " bytes)";
+  LOG(INFO) << "Generating verification info for " << file_paths.size()
+            << (is_safetensors ? " safetensors payloads" : " partitions")
+            << ", actual model size: " << actual_model_size << " bytes (total: " << declared_total << ")";
 
   // ----------------------------------------------------------------------
   // Map each partition file into memory (read-only, private) instead of
@@ -301,27 +339,38 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
 
   uint64_t bytes_processed = 0;
 
-  for (size_t i = 0; i < partition_paths.size() && bytes_processed < actual_model_size; ++i) {
-    const auto& partition_file_path = partition_paths[i];
-    size_t partition_file_size = partition_sizes[i];
+  for (size_t i = 0; i < file_paths.size() && bytes_processed < actual_model_size; ++i) {
+    const auto& path = file_paths[i];
+    size_t len_or_payload = data_lengths[i];
 
-    if (partition_file_size == 0) {
+    if (len_or_payload == 0) {
       continue; // Skip empty partitions
     }
 
     // Only map the portion of this partition that belongs to the actual model.
-    size_t bytes_to_map = std::min(static_cast<uint64_t>(partition_file_size), actual_model_size - bytes_processed);
+    size_t bytes_to_map;
+    if (!is_safetensors) {
+      bytes_to_map = std::min(static_cast<uint64_t>(len_or_payload), actual_model_size - bytes_processed);
+    } else {
+      // For safetensors, map the whole file and shift pointer to payload
+      std::error_code ec;
+      uint64_t file_size = std::filesystem::file_size(path, ec);
+      if (ec) {
+        LOG(FATAL) << "Failed to get file size for " << path.string() << ": " << ec.message();
+      }
+      bytes_to_map = static_cast<size_t>(file_size);
+    }
 
     // Open file read-only
-    int fd = ::open(partition_file_path.c_str(), O_RDONLY);
+    int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
-      LOG(FATAL) << "Failed to open partition file: " << partition_file_path.string() << ": " << std::strerror(errno);
+      LOG(FATAL) << "Failed to open file: " << path.string() << ": " << std::strerror(errno);
     }
 
     void* addr = ::mmap(nullptr, bytes_to_map, PROT_READ, MAP_PRIVATE, fd, 0 /*offset*/);
     if (addr == MAP_FAILED) {
       ::close(fd);
-      PLOG(FATAL) << "mmap failed for file: " << partition_file_path.string();
+      PLOG(FATAL) << "mmap failed for file: " << path.string();
     }
 
     // Advise the kernel that we will access the mapping sequentially so it can
@@ -330,23 +379,37 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     ::madvise(addr, bytes_to_map, MADV_SEQUENTIAL);
 #endif
 
-    data_ptrs.push_back(addr);
+    if (!is_safetensors) {
+      data_ptrs.push_back(addr);
+    } else {
+      // Advance pointer to data payload
+      uint64_t header_len_le = 0;
+      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
+      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
+        ::munmap(addr, bytes_to_map);
+        ::close(fd);
+        LOG(FATAL) << "Invalid safetensors header length while mapping: " << path.string();
+      }
+      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      char* payload_ptr = static_cast<char*>(addr) + data_start;
+      data_ptrs.push_back(static_cast<void*>(payload_ptr));
+    }
 
     MappedFile mapping{addr, bytes_to_map, fd};
     mapped_files.push_back(mapping);
 
     // Update partition_sizes to reflect actual bytes mapped
-    partition_sizes[i] = bytes_to_map;
+    data_lengths[i] = (!is_safetensors) ? bytes_to_map : len_or_payload; // reflect payload length for safetensors
     bytes_processed += bytes_to_map;
   }
 
   // Adjust partition_sizes to only include partitions we actually read
-  partition_sizes.resize(data_ptrs.size());
+  data_lengths.resize(data_ptrs.size());
 
   // Generate verification info using CPU processing (device_id = -1)
   // This will use the actual model size, not file size
   absl::StatusOr<ModelVerificationInfo> verification_result =
-      ModelVerifier::generate_verification_info(data_ptrs, partition_sizes, -1, max_level);
+      ModelVerifier::generate_verification_info(data_ptrs, data_lengths, -1, max_level);
 
   if (!verification_result.ok()) {
     // Clean up mappings before throwing
