@@ -160,7 +160,8 @@ absl::Status DiskLoader::initialize() {
       }
       ::close(fd);
       uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
-      uint64_t data_start = sizeof(uint64_t) + header_len_le;
+      uint64_t header_len = le64toh(header_len_le); // Convert from little-endian
+      uint64_t data_start = sizeof(uint64_t) + header_len;
       if (data_start > file_size) {
         return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
       }
