@@ -36,14 +36,13 @@ jobs:
         id: claude-review
         uses: anthropics/claude-code-action@beta
         with:
-          mode: experimental-review
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           timeout_minutes: "30"
           # Optional: Specify model (defaults to Claude Sonnet 4.1, uncomment for Claude Opus 4.1)
           # model: "claude-opus-4-1-20250805"
 
           # Direct prompt for automated review (no @claude mention needed)
-          custom_instructions: |
+          direct_prompt: |
             Please review this pull request and provide feedback on:
             - Code quality and best practices
             - Potential bugs or issues
