@@ -349,27 +349,24 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph "Transfer Flow"
-        direction TB
+    subgraph "CPU (PAGEABLE_CPU)"
+        VA[DVMP Base Ptr]
+    end
 
-        subgraph "CPU (PAGEABLE_CPU)"
-            VA[DVMP Base Ptr]
-        end
+    subgraph "CUDA Operations"
+        Stream[CUDA Stream]
+        Copy["cudaMemcpyAsync (H2D) Streaming"]
+        Sync[cudaStreamSynchronize]
+    end
 
-        subgraph "CUDA Operations"
-            Stream[CUDA Stream]
-            Copy[cudaMemcpyAsync (H2D) Streaming]
-            Sync[cudaStreamSynchronize]
-        end
+    subgraph "GPU Buffer"
+        GPU[Contiguous GPU Buffer]
+    end
 
-        subgraph "GPU Buffer"
-            GPU[Contiguous GPU Buffer]
-        end
-
-        VA --> Copy
-        Copy --> GPU
-        Copy --> Stream
-        Stream --> Sync
+    VA --> Copy
+    Copy --> GPU
+    Copy --> Stream
+    Stream --> Sync
 ```
 
 - Source: `TransferService::copy_cpu_to_gpu_streaming()`
@@ -399,6 +396,7 @@ graph TB
         RCopy --> DVMPBase
         RCopy --> Stream2
         Stream2 --> Sync2
+    end
 ```
 
 - Source: `TransferService::copy_gpu_to_cpu_streaming()`
@@ -580,35 +578,6 @@ sequenceDiagram
 ```
 
 - Source: `core/store/model/memory_manager.h` (`get_cuda_ipc_handle()`)
-
-## Design Principles
-
-### 1. Asynchronous First
-- All I/O operations are asynchronous
-- Use `std::future` and `std::shared_future` for operation tracking
-- Non-blocking CUDA streams for GPU operations
-- Pump-based streaming for data transfers
-
-### 2. State-Driven
-- Clear state transition rules
-- Condition variable notifications on state changes
-- Thread-safe state queries
-
-### 3. Resource Management
-- RAII principle ensures resource release
-- Smart pointers manage object lifecycles
-- Memory pools reduce allocation overhead
-
-### 4. Error Handling
-- Use `absl::Status` for unified error reporting
-- Automatic cleanup of failed states
-- Detailed logging
-
-### 5. Extensibility
-- Plugin-style Loader design via `IModelLoader` interface
-- Unified type system (`ModelSource`, `ModelTarget`, `DeviceKey`)
-- Configuration-driven behavior via `LoadingHints`
-- Modular component structure with clear service boundaries
 
 ## Performance Optimization
 
