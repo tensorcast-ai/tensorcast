@@ -36,6 +36,12 @@ service StoreDaemon {
   // Dual-end locking mechanism for P2P transfers
   rpc LockTransportChunks(LockChunksRequest) returns (LockChunksResponse) {}
   rpc UnlockTransportChunks(UnlockChunksRequest) returns (UnlockChunksResponse) {}
+
+  // ========== Memory TensorDict Registration ==========
+  // Register in-memory tensor dict as memory replica without disk I/O
+  rpc BeginRegisterTensorDict(BeginRegisterTensorDictRequest) returns (BeginRegisterTensorDictResponse) {}
+  rpc CommitRegisteredTensorDict(CommitRegisteredTensorDictRequest) returns (CommitRegisteredTensorDictResponse) {}
+  rpc AbortRegisteredTensorDict(AbortRegisteredTensorDictRequest) returns (AbortRegisteredTensorDictResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -287,4 +293,59 @@ message UnlockChunksRequest {
 // Unlock chunks response
 message UnlockChunksResponse {
   // Empty response, returns empty message on success
+}
+
+// ========== Memory TensorDict Registration Messages ==========
+
+// Begin registration request
+message BeginRegisterTensorDictRequest {
+  string model_id = 1;                     // Model identifier
+  int32 device_id = 2;                     // Target GPU device ID
+  uint64 total_size = 3;                   // Total size in bytes (8-byte aligned)
+  bool enable_p2p = 4;                     // Enable P2P transfer
+  optional uint32 ttl_ms = 5;              // TTL for registration (milliseconds)
+
+  // Tensor index can be provided as key or data
+  oneof index {
+    string tensor_index_key = 6;           // SHA-256 hash of canonical JSON index
+    TensorIndexData tensor_index_data = 7; // Full index data
+  }
+}
+
+// Tensor index data with metadata
+message TensorIndexData {
+  bytes data = 1;                          // Canonical JSON bytes
+  string schema_version = 2;               // Schema version (e.g., "v2")
+  string encoding = 3;                     // Encoding format (e.g., "json")
+}
+
+// Begin registration response
+message BeginRegisterTensorDictResponse {
+  string registration_id = 1;              // Registration ID for commit/abort
+  bytes daemon_ipc_handle = 2;             // CUDA IPC handle for target memory
+  int32 device_id = 3;                     // Confirmed device ID
+  uint64 size = 4;                         // Allocated size
+}
+
+// Commit registration request
+message CommitRegisteredTensorDictRequest {
+  string registration_id = 1;              // Registration ID from Begin
+}
+
+// Commit registration response
+message CommitRegisteredTensorDictResponse {
+  string registration_id = 1;              // Confirmed registration ID
+  string model_id = 2;                     // Model ID
+  int32 device_id = 3;                     // Device ID
+  uint64 size = 4;                         // Total size
+}
+
+// Abort registration request
+message AbortRegisteredTensorDictRequest {
+  string registration_id = 1;              // Registration ID to abort
+}
+
+// Abort registration response
+message AbortRegisteredTensorDictResponse {
+  bool ok = 1;                             // Success status
 }

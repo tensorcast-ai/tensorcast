@@ -19,18 +19,21 @@ Execute the workflow proposed in an RFC document located under the `rfcs/` direc
 - `--with-tests` - Generate or update accompanying tests while executing the RFC
 
 ## Execution
-1. **Deep Analysis Phase**
+1. **Execution State Detection**
+   - Determine the current progress of the target RFC execution (e.g., previously completed steps, merged code changes, existing *Execution Status* section).
+   - Use this information to skip already completed tasks and resume from the correct point.
+2. **Deep Analysis Phase**
    1. Parse and understand the target RFC. Identify proposed architecture changes, affected modules, and cross-module interactions.
    2. Think thoroughly about how the proposed change integrates with existing layers. Always strive for the optimal, most elegant solution—compatibility with legacy code can be relaxed if it simplifies complexity.
-2. **Planning Output**
+3. **Planning Output**
    - Produce a detailed execution plan (TodoWrite list) outlining all code edits, new files, deletions, and documentation updates required.
-3. **Codebase Modification**
+4. **Codebase Modification**
    - Apply the plan using `Write`, `Edit`, and `MultiEdit` tools.
    - Generate or adjust tests if `--with-tests` is supplied.
-4. **RFC Synchronization**
+5. **RFC Synchronization**
    - Append an **Execution Status** section to the RFC summarizing completed steps, decisions, and deviations from the original proposal.
    - If the implementation reveals necessary RFC adjustments, modify the relevant sections directly within the RFC file.
-5. **Validation & Review**
+6. **Validation & Review**
    - Run linting, type-checking, and tests.
    - Highlight any unresolved items or open questions for reviewer attention.
 

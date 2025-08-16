@@ -81,6 +81,20 @@ class GlobalStoreClient {
       uint64_t memory_size,
       uint32_t max_concurrency = 1);
 
+  // Register a GPU memory replica (in-memory tensor dict) with tensor index key.
+  absl::StatusOr<std::string> register_memory_replica(
+      std::string_view model_name,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      uint64_t memory_size,
+      std::string_view tensor_index_key,
+      const std::vector<std::string>& remote_memory_keys,
+      const std::vector<uint64_t>& buffer_sizes,
+      const std::optional<std::string>& tensor_index_data = std::nullopt,
+      std::string_view encoding = "json",
+      std::string_view schema_version = "v2",
+      uint32_t max_concurrency = 1);
+
   absl::Status unregister_model_replica(std::string_view model_name, std::string_view replica_id);
 
   // P2P transport coordination

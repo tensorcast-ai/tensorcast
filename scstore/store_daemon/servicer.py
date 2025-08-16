@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
 import grpc
 
+from scstore import _checkpoint_store as _cs
 from scstore.logger import init_logger
 from scstore.proto import (
     global_store_pb2_grpc,
@@ -839,6 +840,141 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             context.set_details(f"Failed to get loaded models: {str(e)}")
             return store_daemon_pb2.GetLoadedModelsResponse()
 
+    # ========== Memory TensorDict Registration RPCs ==========
+
+    def BeginRegisterTensorDict(
+        self,
+        request: store_daemon_pb2.BeginRegisterTensorDictRequest,
+        context: grpc.ServicerContext,
+    ) -> store_daemon_pb2.BeginRegisterTensorDictResponse:
+        try:
+            reg: _cs.CheckpointStore.TensorDictRegistration = {
+                "model_id": request.model_id,
+                "tensor_index_key": request.tensor_index_key
+                if request.WhichOneof("index") == "tensor_index_key"
+                else "",
+                "tensor_index_data": request.tensor_index_data.data.decode("utf-8")
+                if request.WhichOneof("index") == "tensor_index_data"
+                else None,
+                "schema_version": request.tensor_index_data.schema_version
+                if request.WhichOneof("index") == "tensor_index_data"
+                else "v2",
+                "encoding": request.tensor_index_data.encoding
+                if request.WhichOneof("index") == "tensor_index_data"
+                else "json",
+                "device_id": request.device_id,
+                "total_size_bytes": int(request.total_size),
+                "enable_p2p": request.enable_p2p,
+                "ttl_ms": int(request.ttl_ms) if request.HasField("ttl_ms") else 0,
+            }
+
+            result = self.checkpoint_store.begin_register_tensor_dict(reg)
+
+            resp = store_daemon_pb2.BeginRegisterTensorDictResponse(
+                registration_id=result["registration_id"],
+                device_id=result["device_id"],
+                size=result["size_bytes"],
+            )
+            resp.daemon_ipc_handle = result["daemon_ipc_handle"]
+            return resp
+        except ValueError as e:
+            logger.exception(
+                "BeginRegisterTensorDict failed with invalid argument: %s", e
+            )
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+        except MemoryError as e:
+            logger.exception("BeginRegisterTensorDict failed with memory error: %s", e)
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            context.set_details(str(e))
+            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("BeginRegisterTensorDict failed: %s", e)
+            # Check for specific error messages in the exception string
+            error_msg = str(e).lower()
+            if "not found" in error_msg:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+            elif "invalid" in error_msg or "argument" in error_msg:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            elif "memory" in error_msg or "resource" in error_msg:
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            elif (
+                "deadline" in error_msg or "timeout" in error_msg or "ttl" in error_msg
+            ):
+                context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+
+    def CommitRegisteredTensorDict(
+        self,
+        request: store_daemon_pb2.CommitRegisteredTensorDictRequest,
+        context: grpc.ServicerContext,
+    ) -> store_daemon_pb2.CommitRegisteredTensorDictResponse:
+        try:
+            result = self.checkpoint_store.commit_registered_tensor_dict(
+                request.registration_id
+            )
+            return store_daemon_pb2.CommitRegisteredTensorDictResponse(
+                registration_id=str(result["registration_id"]),
+                model_id=str(result["model_id"]),
+                device_id=int(result["device_id"]),
+                size=int(result["size_bytes"]),
+            )
+        except ValueError as e:
+            logger.exception(
+                "CommitRegisteredTensorDict failed with invalid argument: %s", e
+            )
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return store_daemon_pb2.CommitRegisteredTensorDictResponse()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("CommitRegisteredTensorDict failed: %s", e)
+            # Check for specific error messages in the exception string
+            error_msg = str(e).lower()
+            if "not found" in error_msg:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+            elif (
+                "deadline" in error_msg or "expired" in error_msg or "ttl" in error_msg
+            ):
+                context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            elif "invalid" in error_msg:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return store_daemon_pb2.CommitRegisteredTensorDictResponse()
+
+    def AbortRegisteredTensorDict(
+        self,
+        request: store_daemon_pb2.AbortRegisteredTensorDictRequest,
+        context: grpc.ServicerContext,
+    ) -> store_daemon_pb2.AbortRegisteredTensorDictResponse:
+        try:
+            self.checkpoint_store.abort_registered_tensor_dict(request.registration_id)
+            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=True)
+        except ValueError as e:
+            logger.exception(
+                "AbortRegisteredTensorDict failed with invalid argument: %s", e
+            )
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=False)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("AbortRegisteredTensorDict failed: %s", e)
+            # Check for specific error messages in the exception string
+            error_msg = str(e).lower()
+            if "not found" in error_msg:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+            elif "invalid" in error_msg:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=False)
+
     def LockTransportChunks(
         self,
         request: store_daemon_pb2.LockChunksRequest,
@@ -852,7 +988,6 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             indices = list(request.chunk_indices)
 
             # Call checkpoint store to lock chunks
-            from scstore import _checkpoint_store as _cs
 
             dev = _cs.DeviceKey()
             dev.type = _cs.DeviceType.NONE

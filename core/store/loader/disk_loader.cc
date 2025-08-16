@@ -2,14 +2,12 @@
 
 #include "core/store/loader/disk_loader.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <memory>
-#include <thread>
 #include <vector>
 
-#include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
@@ -102,20 +100,39 @@ absl::Status DiskLoader::initialize() {
   partition_sizes_.clear();
   model_size_ = 0;
 
+  // First scan and categorize to avoid double-counting when both single-file
+  // (tensor.data) and multi-part (tensor.data_*) exist. Prefer multi-part if present.
+  bool has_single_file = false;
+  std::filesystem::path single_file_path;
+  std::vector<std::filesystem::path> multipart_paths;
+
   for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
-    if (entry.is_regular_file()) {
-      const std::string filename = entry.path().filename().string();
-      // Support only the partition naming convention defined in
-      // docs/developer-guides/core/checkpoint/data-format.md:
-      //   tensor.data        (single-file model)
-      //   tensor.data_<n>    (multi-partition model, 0-based index)
-      if (filename.starts_with("tensor.data")) {
-        partition_paths_.push_back(entry.path());
-        size_t file_size = std::filesystem::file_size(entry.path());
-        partition_sizes_.push_back(file_size);
-        model_size_ += file_size;
-      }
+    if (!entry.is_regular_file()) {
+      continue;
     }
+    const std::string filename = entry.path().filename().string();
+    if (filename == "tensor.data") {
+      has_single_file = true;
+      single_file_path = entry.path();
+    } else if (filename.starts_with("tensor.data_")) {
+      multipart_paths.push_back(entry.path());
+    }
+  }
+
+  if (!multipart_paths.empty()) {
+    // Use only multi-part files
+    for (const auto& p : multipart_paths) {
+      partition_paths_.push_back(p);
+      size_t file_size = std::filesystem::file_size(p);
+      partition_sizes_.push_back(file_size);
+      model_size_ += file_size;
+    }
+  } else if (has_single_file) {
+    // Fallback to single-file format
+    partition_paths_.push_back(single_file_path);
+    size_t file_size = std::filesystem::file_size(single_file_path);
+    partition_sizes_.push_back(file_size);
+    model_size_ += file_size;
   }
 
   // If no partitions were detected with the supported patterns report an error.
@@ -125,13 +142,13 @@ absl::Status DiskLoader::initialize() {
 
   // Sort partitions by name to ensure consistent ordering
   std::vector<std::pair<std::filesystem::path, size_t>> path_size_pairs;
+  path_size_pairs.reserve(partition_paths_.size());
   for (size_t i = 0; i < partition_paths_.size(); ++i) {
     path_size_pairs.emplace_back(partition_paths_[i], partition_sizes_[i]);
   }
 
-  std::sort(path_size_pairs.begin(), path_size_pairs.end(), [](const auto& a, const auto& b) {
-    return a.first.filename() < b.first.filename();
-  });
+  std::ranges::sort(
+      path_size_pairs, [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
 
   partition_paths_.clear();
   partition_sizes_.clear();

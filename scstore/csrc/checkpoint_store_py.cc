@@ -357,6 +357,116 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("location"),
           "Disable remote memory access for the given instance.")
       .def(
+          "begin_register_tensor_dict",
+          [](CheckpointStore& cs, const py::dict& reg_dict) {
+            CheckpointStore::TensorDictRegistration reg;
+            auto get_uint32 = [&](const char* key, uint32_t fb) -> uint32_t {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<uint32_t>();
+              }
+              return fb;
+            };
+            auto get_opt_str = [&](const char* key) -> std::optional<std::string> {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<std::string>();
+              }
+              return std::nullopt;
+            };
+            auto get_str = [&](const char* key, const char* fallback = "") -> std::string {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<std::string>();
+              }
+              return std::string(fallback);
+            };
+            auto get_uint64 = [&](const char* key, uint64_t fb) -> uint64_t {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<uint64_t>();
+              }
+              return fb;
+            };
+            auto get_int = [&](const char* key, int fb) -> int {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<int>();
+              }
+              return fb;
+            };
+            auto get_bool = [&](const char* key, bool fb) -> bool {
+              if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
+                return reg_dict[key].cast<bool>();
+              }
+              return fb;
+            };
+
+            reg.model_id = get_str("model_id");
+            reg.tensor_index_key = get_str("tensor_index_key");
+            reg.tensor_index_data = get_opt_str("tensor_index_data");
+            reg.schema_version = get_str("schema_version", "v2");
+            reg.encoding = get_str("encoding", "json");
+            reg.device_id = get_int("device_id", 0);
+            reg.total_size_bytes = get_uint64("total_size_bytes", 0);
+            reg.enable_p2p = get_bool("enable_p2p", true);
+            reg.ttl_ms = get_uint32("ttl_ms", 0);
+
+            absl::StatusOr<CheckpointStore::RegistrationBeginResult> out_or;
+            {
+              py::gil_scoped_release release;
+              out_or = cs.begin_register_tensor_dict(reg);
+            }
+            if (!out_or.ok()) {
+              PyErr_SetString(PyExc_RuntimeError, out_or.status().ToString().c_str());
+              throw py::error_already_set();
+            }
+
+            const auto& out = out_or.value();
+            py::dict py_out;
+            py_out["registration_id"] = out.registration_id;
+            py_out["device_id"] = out.device_id;
+            py_out["size_bytes"] = out.size_bytes;
+            py_out["daemon_ipc_handle"] = py::bytes(
+                reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+            return py_out;
+          },
+          py::arg("registration"),
+          "Begin registering an in-memory tensor dict and return CUDA IPC handle bytes.")
+      .def(
+          "commit_registered_tensor_dict",
+          [](CheckpointStore& cs, const std::string& registration_id) {
+            absl::StatusOr<CheckpointStore::RegistrationCommitResult> ok_or;
+            {
+              py::gil_scoped_release release;
+              ok_or = cs.commit_registered_tensor_dict(registration_id);
+            }
+            if (!ok_or.ok()) {
+              PyErr_SetString(PyExc_RuntimeError, ok_or.status().ToString().c_str());
+              throw py::error_already_set();
+            }
+            const auto& r = ok_or.value();
+            py::dict d;
+            d["registration_id"] = r.registration_id;
+            d["model_id"] = r.model_id;
+            d["device_id"] = r.device_id;
+            d["size_bytes"] = r.size_bytes;
+            return d;
+          },
+          py::arg("registration_id"),
+          "Commit a pending tensor dict registration.")
+      .def(
+          "abort_registered_tensor_dict",
+          [](CheckpointStore& cs, const std::string& registration_id) {
+            absl::Status st;
+            {
+              py::gil_scoped_release release;
+              st = cs.abort_registered_tensor_dict(registration_id);
+            }
+            if (!st.ok()) {
+              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
+              throw py::error_already_set();
+            }
+            return true;
+          },
+          py::arg("registration_id"),
+          "Abort a pending tensor dict registration and release memory.")
+      .def(
           "lock_chunks",
           [](CheckpointStore& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices) {
             absl::Status st;

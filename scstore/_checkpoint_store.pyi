@@ -1,6 +1,6 @@
 """Type stubs for scstore._checkpoint_store module"""
 
-from typing import List, Dict, Tuple, Optional, Any, Union
+from typing import List, Dict, Tuple, Optional, Any, Union, TypedDict
 from enum import Enum
 
 
@@ -50,15 +50,6 @@ class CommRegistrationInfo:
 
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
-
-
-class MemCopyChunk:
-    src_offset: int
-    size: int
-    dst_offset: int
-    handle_idx: int
-
-    def __init__(self) -> None: ...
 
 
 class DeviceKey:
@@ -119,8 +110,6 @@ class ModelHandle:
 
 
 class CheckpointStore:
-    def __init__(self) -> None: ...
-
     # ---- Unified prepare API ----
     def prepare(
         self,
@@ -143,6 +132,42 @@ class CheckpointStore:
     def get_instance_state(self, instance_key: InstanceKey, memory_type: DeviceType) -> MemoryState: ...
 
     def get_instance_gpu_ptr(self, instance_key: InstanceKey) -> int: ...
+
+    # ---- Memory TensorDict Registration (RFC-0006 Phase A) ----
+    class TensorDictRegistration(TypedDict, total=False):
+        model_id: str
+        tensor_index_key: str
+        tensor_index_data: Optional[str]
+        schema_version: str
+        encoding: str
+        device_id: int
+        total_size_bytes: int
+        enable_p2p: bool
+        ttl_ms: int
+
+    class RegistrationBeginResult(TypedDict):
+        registration_id: str
+        device_id: int
+        size_bytes: int
+        daemon_ipc_handle: bytes
+
+    class RegistrationCommitResult(TypedDict):
+        registration_id: str
+        model_id: str
+        device_id: int
+        size_bytes: int
+
+    def begin_register_tensor_dict(
+        self,
+        registration: TensorDictRegistration,
+    ) -> RegistrationBeginResult: ...
+
+    def commit_registered_tensor_dict(
+        self,
+        registration_id: str,
+    ) -> RegistrationCommitResult: ...
+
+    def abort_registered_tensor_dict(self, registration_id: str) -> bool: ...
 
     # ---- Distributed Memory Pool helpers ----
     def lock_chunks(
