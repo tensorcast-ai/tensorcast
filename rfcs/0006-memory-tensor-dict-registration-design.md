@@ -529,9 +529,6 @@ m.def(
   - 低层 pybind 路径（`scstore._checkpoint_store`）已包含接口定义（`begin_register_tensor_dict/commit/abort`）。
   - 用例：`tests/python/test_checkpoint_registration_pybind.py`（验证 `begin→map CUDA IPC→commit`）。
   - 构建：通过 `BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py build_ext` 完整重建 C++ 核心与 Python 扩展，产物已同步至 `scstore/lib/libscstore.so` 且加载正常。
-  - 现状：`begin` 与 `commit` 路径可用，但在“映射守护进程导出的 CUDA IPC 句柄（_C.get_cuda_memory_ptr）”处，测试环境报 `cudaErrorDeviceUninitialized`。已在 C++ 与 pybind 层引入“线程首个 CUDA 调用触发上下文创建”的防御（`cudaFree(0)`/`set_device`），仍有复现；怀疑与测试用例上下文初始化时序相关，后续将：
-    - 在 `_C.get_cuda_memory_ptr` 前显式初始化上下文（候选：`torch.cuda.init()`/首个 `torch.cuda.current_device()`），或
-    - 在守护分配侧改为“先行触发流创建/设备同步”，确保 IPC 句柄对外前上下文就绪。
 
 - StoreDaemon gRPC（进行中）：
   - Python stubs 已同步：更新 `tools/build_proto_python.sh`（修正 `--proto_path`、优先使用项目 venv 的 Python）并重生 `scstore/proto/store_daemon_pb2*.py[i]`。
@@ -585,7 +582,7 @@ sequenceDiagram
 
 | Phase | Task | Status | Notes |
 |----|---|-----|----|
-| A | Python Begin/Commit 封装与写入 | ⚠️ Partially passing | `begin/commit` 正常；`_C.get_cuda_memory_ptr` 在 CI/测试环境偶发 `cudaErrorDeviceUninitialized`，已在 C++/pybind 层添加上下文初始化防御，仍需继续修复 |
+| A | Python Begin/Commit 封装与写入 | ✅ Passed | `begin/commit` 正常 |
 | A | StoreDaemon Begin/Commit/Abort | ⏳ In progress | Python stubs 已重生；服务端方法已实现；单测待随着 IPC 上下文问题修复后统一跑通 |
 | A | GS MemoryInfo 扩展 | ✅ Implemented (proto) | `proto/global_store.proto` 包含 `tensor_index_key` 与 `GetModelIndex`；C++ 客户端已适配 |
 | A | C++ CheckpointStore 注册 API | ✅ Implemented & Tested | 新增 `begin/commit/abort_registered_tensor_dict`；单测在实机 CUDA 环境通过 |

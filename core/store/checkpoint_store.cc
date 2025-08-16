@@ -1066,8 +1066,10 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
   if (reg.device_id < 0) {
     return absl::InvalidArgumentError("device_id must be >= 0");
   }
-  if (reg.tensor_index_key.empty()) {
-    return absl::InvalidArgumentError("tensor_index_key must be provided");
+  // Accept either a pre-existing index key or inline index data.  Only error
+  // when both are absent.
+  if (reg.tensor_index_key.empty() && !reg.tensor_index_data.has_value()) {
+    return absl::InvalidArgumentError("tensor index key or data must be provided");
   }
 
   // Prepare minimal Model instance bound to target GPU to own the allocation.
@@ -1092,17 +1094,23 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
 
   // Check memory pressure before allocation to avoid unexpected evictions
   // This helps prevent large registrations from causing issues with existing models
-  if (dvmp_) {
-    auto gpu_pool = dvmp_->get_gpu_pool(reg.device_id);
-    if (gpu_pool) {
-      size_t available = gpu_pool->get_available_size();
-      if (reg.total_size_bytes > available) {
-        // Try to evict unused memory first
-        auto evict_status = try_evict_gpu_memory(reg.total_size_bytes, reg.device_id);
+  {
+    auto free_or = device_manager_->get_free_memory(reg.device_id);
+    if (free_or.ok()) {
+      size_t free_bytes = free_or.value();
+      if (reg.total_size_bytes > free_bytes) {
+        // Try to evict unused GPU memory first on the specific device
+        auto evict_status = try_evict_gpu_memory_impl(
+            *model_registry_, *device_manager_, *metrics_collector_, reg.device_id, reg.total_size_bytes - free_bytes);
         if (!evict_status.ok()) {
           return absl::ResourceExhaustedError(
-              absl::StrCat("Insufficient GPU memory available. Requested: ", reg.total_size_bytes,
-                           " bytes, Available: ", available, " bytes. ", evict_status.message()));
+              absl::StrCat(
+                  "Insufficient GPU memory available. Requested: ",
+                  reg.total_size_bytes,
+                  " bytes, Free: ",
+                  free_bytes,
+                  ". ",
+                  evict_status.message()));
         }
       }
     }
@@ -1192,7 +1200,7 @@ absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commi
       entry = it->second; // make a copy; we may erase after successful commit
     }
   }
-  
+
   // Release memory outside the critical section if TTL expired
   if (model_to_free) {
     (void)model_to_free->release_memory(ModelLocation::GPU, /*safe_release=*/true);

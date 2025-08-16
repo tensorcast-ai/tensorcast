@@ -5,9 +5,25 @@ import time
 import uuid
 
 import grpc
+from pathlib import Path
 import pytest
 
 from scstore.proto import store_daemon_pb2
+
+
+def _ensure_minimal_model_files(storage_root: Path, model_id: str, size_bytes: int) -> None:
+    model_dir = storage_root / model_id
+    model_dir.mkdir(parents=True, exist_ok=True)
+    # Remove any existing partition files to avoid size mismatches
+    for p in model_dir.glob("tensor.data*"):
+        try:
+            p.unlink()
+        except Exception:
+            pass
+    # Create a single-file model matching the expected size
+    data_file = model_dir / "tensor.data"
+    with data_file.open("wb") as f:
+        f.truncate(size_bytes)
 
 
 @pytest.fixture
@@ -58,6 +74,9 @@ class _Ctx:
 def test_begin_commit_abort_memory_registration(servicer):
     ctx = _Ctx()
 
+    # Ensure minimal model directory/files exist to satisfy Model::create checks
+    _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_model", 1 * 1024 * 1024)
+
     # Begin with key path
     req = store_daemon_pb2.BeginRegisterTensorDictRequest(
         model_id="py_mem_model",
@@ -94,9 +113,22 @@ def test_begin_commit_abort_memory_registration(servicer):
     # Either INTERNAL set_code or ok=False is acceptable depending on impl path
     assert (ctx.code is not None) or (a_resp.ok is False)
 
+    # Double commit should surface NOT_FOUND/INTERNAL
+    ctx2 = _Ctx()
+    servicer.CommitRegisteredTensorDict(
+        store_daemon_pb2.CommitRegisteredTensorDictRequest(
+            registration_id=resp.registration_id
+        ),
+        ctx2,
+    )
+    assert ctx2.code in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.INTERNAL)
+
 
 def test_begin_with_index_data_and_ttl(servicer):
     ctx = _Ctx()
+
+    # Ensure minimal model directory/files exist to satisfy Model::create checks
+    _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_ttl", 1024)
 
     # Provide index data oneof
     idx = store_daemon_pb2.TensorIndexData(
@@ -125,6 +157,16 @@ def test_begin_with_index_data_and_ttl(servicer):
     )
     assert ctx.code in (grpc.StatusCode.INTERNAL, grpc.StatusCode.DEADLINE_EXCEEDED)
 
+    # Abort unknown id should return NOT_FOUND/INTERNAL
+    ctx2 = _Ctx()
+    a_resp = servicer.AbortRegisteredTensorDict(
+        store_daemon_pb2.AbortRegisteredTensorDictRequest(
+            registration_id=str(uuid.uuid4())
+        ),
+        ctx2,
+    )
+    assert (ctx2.code in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.INTERNAL)) or (a_resp.ok is False)
+
 
 def test_begin_invalid_args(servicer):
     ctx = _Ctx()
@@ -138,6 +180,6 @@ def test_begin_invalid_args(servicer):
         tensor_index_key="",
     )
     resp = servicer.BeginRegisterTensorDict(req, ctx)
-    assert ctx.code == grpc.StatusCode.INTERNAL
+    assert ctx.code in (grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.INTERNAL)
 
 
