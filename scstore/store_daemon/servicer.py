@@ -878,7 +878,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             resp.daemon_ipc_handle = result["daemon_ipc_handle"]
             return resp
         except ValueError as e:
-            logger.exception("BeginRegisterTensorDict failed with invalid argument: %s", e)
+            logger.exception(
+                "BeginRegisterTensorDict failed with invalid argument: %s", e
+            )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return store_daemon_pb2.BeginRegisterTensorDictResponse()
@@ -897,7 +899,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             elif "memory" in error_msg or "resource" in error_msg:
                 context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-            elif "deadline" in error_msg or "timeout" in error_msg or "ttl" in error_msg:
+            elif (
+                "deadline" in error_msg or "timeout" in error_msg or "ttl" in error_msg
+            ):
                 context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
             else:
                 context.set_code(grpc.StatusCode.INTERNAL)
@@ -920,7 +924,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 size=int(result["size_bytes"]),
             )
         except ValueError as e:
-            logger.exception("CommitRegisteredTensorDict failed with invalid argument: %s", e)
+            logger.exception(
+                "CommitRegisteredTensorDict failed with invalid argument: %s", e
+            )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return store_daemon_pb2.CommitRegisteredTensorDictResponse()
@@ -930,7 +936,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             error_msg = str(e).lower()
             if "not found" in error_msg:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
-            elif "deadline" in error_msg or "expired" in error_msg or "ttl" in error_msg:
+            elif (
+                "deadline" in error_msg or "expired" in error_msg or "ttl" in error_msg
+            ):
                 context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
             elif "invalid" in error_msg:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -948,7 +956,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             self.checkpoint_store.abort_registered_tensor_dict(request.registration_id)
             return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=True)
         except ValueError as e:
-            logger.exception("AbortRegisteredTensorDict failed with invalid argument: %s", e)
+            logger.exception(
+                "AbortRegisteredTensorDict failed with invalid argument: %s", e
+            )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=False)
