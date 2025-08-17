@@ -191,7 +191,7 @@ def build_indices_from_safetensors(
             if name == "__metadata__":
                 continue
             # Validate tensor name for safety
-            if not name or '/' in name or '\\' in name or name.startswith('.'):
+            if not name or "/" in name or "\\" in name or name.startswith("."):
                 raise ValueError(f"Invalid tensor name: {name}")
             if name in tensor_meta_index or name in tensor_data_index:
                 raise ValueError(
