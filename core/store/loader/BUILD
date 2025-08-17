@@ -67,12 +67,23 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "safetensors_util",
+    srcs = ["safetensors_util.cc"],
+    hdrs = ["safetensors_util.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "safetensors_source",
     srcs = ["safetensors_source.cc"],
     hdrs = ["safetensors_source.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":source",
+        ":safetensors_util",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -84,6 +95,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":source",
+        ":safetensors_util",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -159,6 +171,7 @@ sc_cc_library(
         ":loader",
         ":multi_safetensors_source",
         ":safetensors_source",
+        ":safetensors_util",
         "//core/common:error_handling_lib",
         "//core/common:model_verification_lib",
         "//core/store:loading_spec",

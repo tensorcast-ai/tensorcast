@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "absl/strings/str_format.h"
+#include "core/store/loader/safetensors_util.h"
 
 namespace stepcast::store::loader {
 
@@ -86,17 +87,15 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
   total_size_ = 0;
   uint64_t running_base = 0;
   for (auto& s : segments_) {
-    uint64_t header_len_le = 0;
-    ssize_t n = ::pread(s.fd, &header_len_le, sizeof(header_len_le), 0);
-    if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
-      return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
+    // Use the shared utility function to parse the header
+    auto header_info = ParseSafetensorsHeader(s.fd);
+    if (!header_info.ok()) {
+      return header_info.status();
     }
-    uint64_t header_len = le64toh(header_len_le); // convert from little-endian to host order
-    if (header_len > (1ULL << 30)) {
-      return absl::InvalidArgumentError("Safetensors header too large");
-    }
+    
+    // Validate the JSON header content
     std::string header;
-    header.resize(static_cast<size_t>(header_len));
+    header.resize(static_cast<size_t>(header_info->header_length));
     auto got = pread_fully(s.fd, sizeof(uint64_t), header.data(), header.size());
     if (!got.ok()) {
       return got.status();
@@ -108,16 +107,9 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
       return absl::InvalidArgumentError("Malformed safetensors header: must start with '{'");
     }
 
-    struct stat stbuf{};
-    if (::fstat(s.fd, &stbuf) != 0) {
-      return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
-    }
-    auto file_size = static_cast<uint64_t>(stbuf.st_size);
-    s.data_start = sizeof(uint64_t) + header_len;
-    if (s.data_start > file_size) {
-      return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
-    }
-    s.data_size = file_size - s.data_start;
+    // Store the parsed information
+    s.data_start = header_info->data_start;
+    s.data_size = header_info->data_size;
     s.base_offset = running_base;
     running_base += s.data_size;
   }
@@ -139,18 +131,18 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
   char* ptr = static_cast<char*>(dst);
   uint64_t off = current_offset_;
   while (total < to_read) {
-    // Locate the segment containing the current offset (linear search is fine for small N)
-    size_t idx = 0;
-    for (; idx < segments_.size(); ++idx) {
-      const auto& s = segments_[idx];
-      if (off < s.base_offset + s.data_size) {
-        break;
-      }
+    // Use binary search for better performance with many files
+    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
+        [](uint64_t offset, const Segment& s) { 
+            return offset < s.base_offset + s.data_size; 
+        });
+    if (it == segments_.begin() && off < it->base_offset) {
+      break;  // offset is before the first segment
     }
-    if (idx >= segments_.size()) {
-      break;
+    if (it != segments_.begin()) {
+      --it;  // upper_bound returns iterator to first element > off, we want <=
     }
-    const auto& s = segments_[idx];
+    const auto& s = *it;
     uint64_t within = off - s.base_offset;
     auto seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
@@ -181,17 +173,18 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
   char* ptr = static_cast<char*>(dst);
   uint64_t off = offset;
   while (total < to_read) {
-    size_t idx = 0;
-    for (; idx < segments_.size(); ++idx) {
-      const auto& s = segments_[idx];
-      if (off < s.base_offset + s.data_size) {
-        break;
-      }
+    // Use binary search for better performance with many files
+    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
+        [](uint64_t offset, const Segment& s) { 
+            return offset < s.base_offset + s.data_size; 
+        });
+    if (it == segments_.begin() && off < it->base_offset) {
+      break;  // offset is before the first segment
     }
-    if (idx >= segments_.size()) {
-      break;
+    if (it != segments_.begin()) {
+      --it;  // upper_bound returns iterator to first element > off, we want <=
     }
-    const auto& s = segments_[idx];
+    const auto& s = *it;
     uint64_t within = off - s.base_offset;
     size_t seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);

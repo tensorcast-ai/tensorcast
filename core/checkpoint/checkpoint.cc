@@ -51,6 +51,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/model_verification.h" // Add verification support
+#include "core/store/loader/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"
 
@@ -277,29 +278,19 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     std::sort(
         st_paths.begin(), st_paths.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
     for (const auto& p : st_paths) {
-      std::error_code ec;
-      uint64_t file_size = std::filesystem::file_size(p, ec);
-      if (ec) {
-        LOG(FATAL) << "Failed to get file size for " << p.string() << ": " << ec.message();
-      }
-      uint64_t header_len_le = 0;
       int fd = ::open(p.c_str(), O_RDONLY);
       if (fd < 0) {
         LOG(FATAL) << "Failed to open safetensors file: " << p.string();
       }
-      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
+      // Use the shared utility function to parse the header
+      auto header_info = stepcast::store::loader::ParseSafetensorsHeader(fd);
       ::close(fd);
-      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
-        LOG(FATAL) << "Invalid safetensors header length: " << p.string();
+      if (!header_info.ok()) {
+        LOG(FATAL) << "Failed to parse safetensors header for " << p.string() << ": " << header_info.status();
       }
-      uint64_t data_start = sizeof(uint64_t) + le64toh(header_len_le);
-      if (data_start > file_size) {
-        LOG(FATAL) << "Invalid safetensors layout: data beyond EOF in " << p.string();
-      }
-      uint64_t payload = file_size - data_start;
       file_paths.push_back(p);
-      data_lengths.push_back(static_cast<size_t>(payload));
-      declared_total += payload;
+      data_lengths.push_back(static_cast<size_t>(header_info->data_size));
+      declared_total += header_info->data_size;
     }
     is_safetensors = true;
   }
@@ -383,16 +374,14 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     if (!is_safetensors) {
       data_ptrs.push_back(addr);
     } else {
-      // Advance pointer to data payload
-      uint64_t header_len_le = 0;
-      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
-      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
+      // Use the shared utility function to parse the header
+      auto header_info = stepcast::store::loader::ParseSafetensorsHeader(fd);
+      if (!header_info.ok()) {
         ::munmap(addr, bytes_to_map);
         ::close(fd);
-        LOG(FATAL) << "Invalid safetensors header length while mapping: " << path.string();
+        LOG(FATAL) << "Failed to parse safetensors header while mapping " << path.string() << ": " << header_info.status();
       }
-      uint64_t data_start = sizeof(uint64_t) + le64toh(header_len_le);
-      char* payload_ptr = static_cast<char*>(addr) + data_start;
+      char* payload_ptr = static_cast<char*>(addr) + header_info->data_start;
       data_ptrs.push_back(static_cast<void*>(payload_ptr));
     }
 

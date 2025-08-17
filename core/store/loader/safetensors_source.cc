@@ -13,6 +13,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
+#include "core/store/loader/safetensors_util.h"
 
 namespace stepcast::store::loader {
 
@@ -65,19 +66,15 @@ absl::Status SafetensorsSource::OpenFile() {
 }
 
 absl::Status SafetensorsSource::ParseHeaderLocked() {
-  // Layout: [8-byte u64 header_len][header_json][data...]
-  uint64_t header_len_le = 0;
-  ssize_t n = ::pread(fd_, &header_len_le, sizeof(header_len_le), 0);
-  if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
-    return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
+  // Use the shared utility function to parse the header
+  auto header_info = ParseSafetensorsHeader(fd_);
+  if (!header_info.ok()) {
+    return header_info.status();
   }
-  // Convert little-endian header length to host order
-  uint64_t header_len = le64toh(header_len_le);
-  if (header_len > (1ULL << 30)) {
-    return absl::InvalidArgumentError("Safetensors header too large");
-  }
+  
+  // Validate the JSON header content
   std::string header;
-  header.resize(static_cast<size_t>(header_len));
+  header.resize(static_cast<size_t>(header_info->header_length));
   auto got = pread_fully(fd_, sizeof(uint64_t), header.data(), header.size());
   if (!got.ok())
     return got.status();
@@ -88,17 +85,9 @@ absl::Status SafetensorsSource::ParseHeaderLocked() {
     return absl::InvalidArgumentError("Malformed safetensors header: must start with '{'");
   }
 
-  // Compute file size
-  struct stat stbuf{};
-  if (::fstat(fd_, &stbuf) != 0) {
-    return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
-  }
-  uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
-  data_start_ = sizeof(uint64_t) + header_len;
-  if (data_start_ > file_size) {
-    return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
-  }
-  data_size_ = file_size - data_start_;
+  // Store the parsed information
+  data_start_ = header_info->data_start;
+  data_size_ = header_info->data_size;
   return absl::OkStatus();
 }
 

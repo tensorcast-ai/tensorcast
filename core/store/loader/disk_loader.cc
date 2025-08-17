@@ -19,6 +19,7 @@
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/multi_safetensors_source.h"
 #include "core/store/loader/safetensors_source.h"
+#include "core/store/loader/safetensors_util.h"
 
 namespace stepcast::store {
 
@@ -164,28 +165,15 @@ absl::Status DiskLoader::initialize() {
       if (fd < 0) {
         return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", p.string(), std::strerror(errno)));
       }
-      uint64_t header_len_le = 0;
-      ssize_t n = ::pread(fd, &header_len_le, sizeof(header_len_le), 0);
-      if (n != static_cast<ssize_t>(sizeof(header_len_le))) {
-        ::close(fd);
-        return absl::InvalidArgumentError("Invalid safetensors file: cannot read header length");
-      }
-      struct stat stbuf{};
-      if (::fstat(fd, &stbuf) != 0) {
-        ::close(fd);
-        return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
-      }
+      // Use the shared utility function to parse the header
+      auto header_info = loader::ParseSafetensorsHeader(fd);
       ::close(fd);
-      uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
-      uint64_t header_len = le64toh(header_len_le); // Convert from little-endian
-      uint64_t data_start = sizeof(uint64_t) + header_len;
-      if (data_start > file_size) {
-        return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
+      if (!header_info.ok()) {
+        return header_info.status();
       }
-      uint64_t data_size = file_size - data_start;
       partition_paths_.push_back(p);
-      partition_sizes_.push_back(static_cast<size_t>(data_size));
-      model_size_ += data_size;
+      partition_sizes_.push_back(static_cast<size_t>(header_info->data_size));
+      model_size_ += header_info->data_size;
     }
   }
 
