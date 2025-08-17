@@ -1,7 +1,5 @@
 #  Copyright (c) 2025, StepCast Team.
 
-#  Copyright (c) 2025, STEP AI. All rights reserved.                           #
-
 import ctypes
 import json
 import os
@@ -148,6 +146,84 @@ def calculate_tensor_device_offsets(
     return tensor_device_offsets, tensor_copy_chunks
 
 
+def build_indices_from_safetensors(
+    model_dir: os.PathLike | Path,
+) -> tuple[
+    dict[str, tuple[list[int], list[int], str, int]], dict[str, tuple[int, int]]
+]:
+    """Parse all .safetensors files in the directory and build unified indices.
+
+    Returns (tensor_meta_index, tensor_data_index).
+    """
+    model_dir_path = Path(str(model_dir))
+    safetensors_files: list[Path] = sorted(model_dir_path.glob("*.safetensors"))
+    if not safetensors_files:
+        raise ValueError(f"No .safetensors found in {model_dir_path}")
+
+    tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
+    tensor_data_index: dict[str, tuple[int, int]] = {}
+    base_offset = 0
+    for st_path in safetensors_files:
+        with open(st_path, "rb") as fbin:
+            header_len_bytes = fbin.read(8)
+            if len(header_len_bytes) != 8:
+                raise ValueError(f"Invalid safetensors file: {st_path}")
+            header_len = int.from_bytes(
+                header_len_bytes, byteorder="little", signed=False
+            )
+            header_json = fbin.read(header_len)
+            if len(header_json) != header_len:
+                raise ValueError(f"Truncated safetensors header: {st_path}")
+            try:
+                header = json.loads(header_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Malformed safetensors header in {st_path}: {e}"
+                ) from e
+
+        # Compute data_start and data_size
+        file_size = st_path.stat().st_size
+        data_start = 8 + header_len
+        if data_start > file_size:
+            raise ValueError(f"Invalid safetensors layout in {st_path}")
+
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            if name in tensor_meta_index or name in tensor_data_index:
+                raise ValueError(
+                    f"Duplicate tensor key across safetensors files: {name}"
+                )
+            dtype = meta["dtype"]
+            shape = meta["shape"]
+            begin, end = meta["data_offsets"]
+            if end < begin:
+                raise ValueError(f"Invalid data_offsets for tensor {name} in {st_path}")
+            length = end - begin
+            # Row-major stride
+            stride: list[int] = []
+            if len(shape) == 0:
+                stride = []
+            else:
+                stride = [0] * len(shape)
+                acc = 1
+                for i in range(len(shape) - 1, -1, -1):
+                    stride[i] = acc
+                    acc *= int(shape[i])
+            tensor_meta_index[name] = (
+                list(map(int, shape)),
+                stride,
+                _torch_dtype_from_safetensors(dtype),
+                0,
+            )
+            tensor_data_index[name] = (base_offset + begin, length)
+
+        # Advance base_offset by payload size of this file
+        base_offset += file_size - data_start
+
+    return tensor_meta_index, tensor_data_index
+
+
 def save_dict(
     state_dict: dict[str, torch.Tensor],
     model_path: str | os.PathLike,
@@ -284,67 +360,7 @@ def load_dict(
 
     # If safetensors present and no tensor_index.json, build indices from safetensors headers
     if safetensors_files and not index_path.exists():
-        # Parse all safetensors headers and build unified indices
-        tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
-        tensor_data_index: dict[str, tuple[int, int]] = {}
-        base_offset = 0
-        for st_path in safetensors_files:
-            with open(st_path, "rb") as fbin:
-                header_len_bytes = fbin.read(8)
-                if len(header_len_bytes) != 8:
-                    raise ValueError(f"Invalid safetensors file: {st_path}")
-                header_len = int.from_bytes(
-                    header_len_bytes, byteorder="little", signed=False
-                )
-                header_json = fbin.read(header_len)
-                if len(header_json) != header_len:
-                    raise ValueError(f"Truncated safetensors header: {st_path}")
-                try:
-                    header = json.loads(header_json)
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f"Malformed safetensors header in {st_path}: {e}"
-                    ) from e
-            # Compute data_start and data_size
-            file_size = st_path.stat().st_size
-            data_start = 8 + header_len
-            if data_start > file_size:
-                raise ValueError(f"Invalid safetensors layout in {st_path}")
-            # Merge tensors
-            for name, meta in header.items():
-                if name == "__metadata__":
-                    continue
-                if name in tensor_meta_index or name in tensor_data_index:
-                    raise ValueError(
-                        f"Duplicate tensor key across safetensors files: {name}"
-                    )
-                dtype = meta["dtype"]
-                shape = meta["shape"]
-                begin, end = meta["data_offsets"]
-                if end < begin:
-                    raise ValueError(
-                        f"Invalid data_offsets for tensor {name} in {st_path}"
-                    )
-                length = end - begin
-                # Stride = row-major stride of shape
-                stride: list[int] = []
-                if len(shape) == 0:
-                    stride = []
-                else:
-                    stride = [0] * len(shape)
-                    acc = 1
-                    for i in range(len(shape) - 1, -1, -1):
-                        stride[i] = acc
-                        acc *= int(shape[i])
-                tensor_meta_index[name] = (
-                    list(map(int, shape)),
-                    stride,
-                    _torch_dtype_from_safetensors(dtype),
-                    0,
-                )
-                tensor_data_index[name] = (base_offset + begin, length)
-            # Advance base_offset by data payload size
-            base_offset += file_size - data_start
+        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(model_dir)
     else:
         with open(index_path, "r") as f:
             tensor_index = json.load(f)

@@ -11,7 +11,6 @@
 #include <cerrno>
 #include <cstring>
 
-#include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 
 namespace stepcast::store::loader {
@@ -23,12 +22,14 @@ static absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_
   while (total < bytes) {
     ssize_t got = ::pread(fd, ptr + total, bytes - total, static_cast<off_t>(off + total));
     if (got < 0) {
-      if (errno == EINTR)
+      if (errno == EINTR) {
         continue;
+      }
       return absl::InternalError(absl::StrFormat("pread failed: %s", std::strerror(errno)));
     }
-    if (got == 0)
+    if (got == 0) {
       break;
+    }
     total += static_cast<size_t>(got);
   }
   return total;
@@ -50,14 +51,14 @@ MultiSafetensorsSource::~MultiSafetensorsSource() {
 
 absl::Status MultiSafetensorsSource::OpenFiles() {
   absl::MutexLock lock(&init_mutex_);
-  if (initialized_)
+  if (initialized_) {
     return absl::OkStatus();
+  }
   if (file_paths_.empty()) {
     return absl::InvalidArgumentError("No safetensors files provided");
   }
   // Sort by filename for deterministic order
-  std::sort(
-      file_paths_.begin(), file_paths_.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+  std::ranges::sort(file_paths_, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
   segments_.clear();
   segments_.reserve(file_paths_.size());
   for (const auto& p : file_paths_) {
@@ -70,8 +71,9 @@ absl::Status MultiSafetensorsSource::OpenFiles() {
   auto st = ParseAllHeadersLocked();
   if (!st.ok()) {
     for (auto& s : segments_) {
-      if (s.fd >= 0)
+      if (s.fd >= 0) {
         ::close(s.fd);
+      }
       s.fd = -1;
     }
     return st;
@@ -96,8 +98,9 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
     std::string header;
     header.resize(static_cast<size_t>(header_len));
     auto got = pread_fully(s.fd, sizeof(uint64_t), header.data(), header.size());
-    if (!got.ok())
+    if (!got.ok()) {
       return got.status();
+    }
     if (*got != header.size()) {
       return absl::InvalidArgumentError("Truncated safetensors header");
     }
@@ -109,7 +112,7 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
     if (::fstat(s.fd, &stbuf) != 0) {
       return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
     }
-    uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
+    auto file_size = static_cast<uint64_t>(stbuf.st_size);
     s.data_start = sizeof(uint64_t) + header_len;
     if (s.data_start > file_size) {
       return absl::InvalidArgumentError("Invalid safetensors file: data starts beyond EOF");
@@ -124,8 +127,9 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
 
 absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes) {
   auto st = OpenFiles();
-  if (!st.ok())
+  if (!st.ok()) {
     return st;
+  }
   absl::MutexLock lock(&offset_mutex_);
   if (current_offset_ >= total_size_) {
     return static_cast<size_t>(0);
@@ -135,26 +139,28 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
   char* ptr = static_cast<char*>(dst);
   uint64_t off = current_offset_;
   while (total < to_read) {
-    // find segment
-    // find segment using binary search for better performance with many files
-    auto it = std::upper_bound(segments_.begin(), segments_.end(), off, [](uint64_t offset, const Segment& s) {
-      return offset < s.base_offset + s.data_size;
-    });
-    if (it == segments_.begin())
+    // Locate the segment containing the current offset (linear search is fine for small N)
+    size_t idx = 0;
+    for (; idx < segments_.size(); ++idx) {
+      const auto& s = segments_[idx];
+      if (off < s.base_offset + s.data_size) {
+        break;
+      }
+    }
+    if (idx >= segments_.size()) {
       break;
-    --it;
-    const auto& s = *it;
-    if (idx >= segments_.size())
-      break;
+    }
     const auto& s = segments_[idx];
     uint64_t within = off - s.base_offset;
-    size_t seg_remaining = static_cast<size_t>(s.data_size - within);
+    auto seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
     auto got = pread_fully(s.fd, s.data_start + within, ptr + total, want);
-    if (!got.ok())
+    if (!got.ok()) {
       return got.status();
-    if (*got == 0)
+    }
+    if (*got == 0) {
       break;
+    }
     total += *got;
     off += *got;
   }
@@ -164,8 +170,9 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
 
 absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* dst, size_t bytes) {
   auto st = OpenFiles();
-  if (!st.ok())
+  if (!st.ok()) {
     return st;
+  }
   if (offset >= total_size_) {
     return static_cast<size_t>(0);
   }
@@ -177,20 +184,24 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
     size_t idx = 0;
     for (; idx < segments_.size(); ++idx) {
       const auto& s = segments_[idx];
-      if (off < s.base_offset + s.data_size)
+      if (off < s.base_offset + s.data_size) {
         break;
+      }
     }
-    if (idx >= segments_.size())
+    if (idx >= segments_.size()) {
       break;
+    }
     const auto& s = segments_[idx];
     uint64_t within = off - s.base_offset;
     size_t seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
     auto got = pread_fully(s.fd, s.data_start + within, ptr + total, want);
-    if (!got.ok())
+    if (!got.ok()) {
       return got.status();
-    if (*got == 0)
+    }
+    if (*got == 0) {
       break;
+    }
     total += *got;
     off += *got;
   }

@@ -311,6 +311,36 @@ cc_test(
 )
 
 cc_test(
+    name = "safetensors_source_test",
+    srcs = ["safetensors_source_test.cc"],
+    deps = [
+        ":safetensors_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "multi_safetensors_source_test",
+    srcs = ["multi_safetensors_source_test.cc"],
+    deps = [
+        ":multi_safetensors_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_loader_safetensors_test",
+    srcs = ["disk_loader_safetensors_test.cc"],
+    deps = [
+        ":disk_loader",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "model_gpu_auto_release_test",
     srcs = ["model_gpu_auto_release_test.cc"],
     linkopts = select({
