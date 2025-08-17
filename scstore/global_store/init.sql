@@ -1,6 +1,4 @@
---  Copyright (c) 2025, STEP AI. All rights reserved.
---
--- ---------------------------------------------------------------------------- #
+--  Copyright (c) 2025, StepCast Team.
 
 -- Workers表
 CREATE TABLE IF NOT EXISTS workers (

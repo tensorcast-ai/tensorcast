@@ -1,7 +1,5 @@
 #  Copyright (c) 2025, StepCast Team.
 
-#  Copyright (c) 2025, STEP AI. All rights reserved.                            #
-
 """Tests for Global Store repository layer."""
 
 import pytest

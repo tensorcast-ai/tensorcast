@@ -26,6 +26,7 @@
 - Prefer `contextlib.suppress` over `try/except` for suppressing exceptions
 
 ## Dependencies & Tools
+- **Virtual Environment**: use `source ./venv/bin/activate` to activate the virtual environment
 - **Package Management**: uv
   - use `uv run xxx.py` to run python scripts instead of `python xxx.py`
 - **Testing**: pytest (destination: `tests/python/`); use `uv run pytest tests/python/xxxx` to run tests.

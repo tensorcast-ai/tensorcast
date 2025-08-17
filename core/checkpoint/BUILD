@@ -84,6 +84,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:model_verification_lib",
         "//core/common:pinned_memory_pool_lib",
+        "//core/store/loader:safetensors_util",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@libtorch",

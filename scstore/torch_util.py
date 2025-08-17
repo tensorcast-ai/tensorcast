@@ -1,13 +1,12 @@
 #  Copyright (c) 2025, StepCast Team.
 
-#  Copyright (c) 2025, STEP AI. All rights reserved.                           #
-
 import ctypes
 import json
 import os
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import torch
 
@@ -69,6 +68,28 @@ def _get_uuid():
     return str(uuid.uuid4())
 
 
+def _torch_dtype_from_safetensors(dtype: str) -> str:
+    """Map safetensors dtype to our torch dtype string used in meta index.
+
+    We intentionally return the canonical torch dtype string expected by the C++ bridge.
+    """
+    mapping = {
+        "F16": "torch.float16",
+        "BF16": "torch.bfloat16",
+        "F32": "torch.float32",
+        "F64": "torch.float64",
+        "I8": "torch.int8",
+        "I16": "torch.int16",
+        "I32": "torch.int32",
+        "I64": "torch.int64",
+        "U8": "torch.uint8",
+        "BOOL": "torch.uint8",  # stored as byte
+    }
+    if dtype not in mapping:
+        raise ValueError(f"Unsupported safetensors dtype: {dtype}")
+    return mapping[dtype]
+
+
 def calculate_tensor_device_offsets(
     tensor_index: dict[str, tuple[int, int]],
     device_id: int | torch.device = 0,
@@ -123,6 +144,87 @@ def calculate_tensor_device_offsets(
         tensor_device_offsets[device_id][tensor_name] = dst_offset
 
     return tensor_device_offsets, tensor_copy_chunks
+
+
+def build_indices_from_safetensors(
+    model_dir: os.PathLike | Path,
+) -> tuple[
+    dict[str, tuple[list[int], list[int], str, int]], dict[str, tuple[int, int]]
+]:
+    """Parse all .safetensors files in the directory and build unified indices.
+
+    Returns (tensor_meta_index, tensor_data_index).
+    """
+    model_dir_path = Path(str(model_dir))
+    safetensors_files: list[Path] = sorted(model_dir_path.glob("*.safetensors"))
+    if not safetensors_files:
+        raise ValueError(f"No .safetensors found in {model_dir_path}")
+
+    tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
+    tensor_data_index: dict[str, tuple[int, int]] = {}
+    base_offset = 0
+    for st_path in safetensors_files:
+        with open(st_path, "rb") as fbin:
+            header_len_bytes = fbin.read(8)
+            if len(header_len_bytes) != 8:
+                raise ValueError(f"Invalid safetensors file: {st_path}")
+            header_len = int.from_bytes(
+                header_len_bytes, byteorder="little", signed=False
+            )
+            header_json = fbin.read(header_len)
+            if len(header_json) != header_len:
+                raise ValueError(f"Truncated safetensors header: {st_path}")
+            try:
+                header = json.loads(header_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Malformed safetensors header in {st_path}: {e}"
+                ) from e
+
+        # Compute data_start and data_size
+        file_size = st_path.stat().st_size
+        data_start = 8 + header_len
+        if data_start > file_size:
+            raise ValueError(f"Invalid safetensors layout in {st_path}")
+
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            # Validate tensor name for safety
+            if not name or "/" in name or "\\" in name or name.startswith("."):
+                raise ValueError(f"Invalid tensor name: {name}")
+            if name in tensor_meta_index or name in tensor_data_index:
+                raise ValueError(
+                    f"Duplicate tensor key across safetensors files: {name}"
+                )
+            dtype = meta["dtype"]
+            shape = meta["shape"]
+            begin, end = meta["data_offsets"]
+            if end < begin:
+                raise ValueError(f"Invalid data_offsets for tensor {name} in {st_path}")
+            length = end - begin
+            # Row-major stride
+            stride: list[int] = []
+            if len(shape) == 0:
+                stride = []
+            else:
+                stride = [0] * len(shape)
+                acc = 1
+                for i in range(len(shape) - 1, -1, -1):
+                    stride[i] = acc
+                    acc *= int(shape[i])
+            tensor_meta_index[name] = (
+                list(map(int, shape)),
+                stride,
+                _torch_dtype_from_safetensors(dtype),
+                0,
+            )
+            tensor_data_index[name] = (base_offset + begin, length)
+
+        # Advance base_offset by payload size of this file
+        base_offset += file_size - data_start
+
+    return tensor_meta_index, tensor_data_index
 
 
 def save_dict(
@@ -254,23 +356,30 @@ def load_dict(
     if model_path is None or storage_path is None:
         raise ValueError("model_path and storage_path must be provided")
 
-    with open(
-        os.path.join(str(storage_path), str(model_path), "tensor_index.json"), "r"
-    ) as f:
-        tensor_index = json.load(f)
+    model_dir = Path(str(storage_path)) / str(model_path)
 
-    tensor_meta_index = {}
-    tensor_data_index = {}
-    for name, meta in tensor_index.items():
-        # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
-        if len(meta) == 5:
-            offset, size, shape, stride, dtype = meta
-            storage_offset = 0
-        else:
-            offset, size, shape, stride, dtype, storage_offset = meta
+    index_path = model_dir / "tensor_index.json"
+    safetensors_files: list[Path] = sorted(model_dir.glob("*.safetensors"))
 
-        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-        tensor_data_index[name] = (offset, size)
+    # If safetensors present and no tensor_index.json, build indices from safetensors headers
+    if safetensors_files and not index_path.exists():
+        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(model_dir)
+    else:
+        with open(index_path, "r") as f:
+            tensor_index = json.load(f)
+
+        tensor_meta_index = {}
+        tensor_data_index = {}
+        for name, meta in tensor_index.items():
+            # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
+            if len(meta) == 5:
+                offset, size, shape, stride, dtype = meta
+                storage_offset = 0
+            else:
+                offset, size, shape, stride, dtype, storage_offset = meta
+
+            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
+            tensor_data_index[name] = (offset, size)
 
     # tensor_device_offsets: tensor_name to offset on device
     # tensor_copy_chunks: (offset, size, device_offset[device], 0)

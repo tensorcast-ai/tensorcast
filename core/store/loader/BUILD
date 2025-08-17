@@ -67,6 +67,40 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "safetensors_util",
+    srcs = ["safetensors_util.cc"],
+    hdrs = ["safetensors_util.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "safetensors_source",
+    srcs = ["safetensors_source.cc"],
+    hdrs = ["safetensors_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        ":safetensors_util",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "multi_safetensors_source",
+    srcs = ["multi_safetensors_source.cc"],
+    hdrs = ["multi_safetensors_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        ":safetensors_util",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "remote_key_source",
     srcs = ["remote_key_source.cc"],
     hdrs = ["remote_key_source.h"],
@@ -135,6 +169,9 @@ sc_cc_library(
     deps = [
         ":file_partition_source",
         ":loader",
+        ":multi_safetensors_source",
+        ":safetensors_source",
+        ":safetensors_util",
         "//core/common:error_handling_lib",
         "//core/common:model_verification_lib",
         "//core/store:loading_spec",
@@ -281,6 +318,36 @@ cc_test(
     deps = [
         ":file_partition_source",
         "//core/checkpoint:aligned_buffer_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "safetensors_source_test",
+    srcs = ["safetensors_source_test.cc"],
+    deps = [
+        ":safetensors_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "multi_safetensors_source_test",
+    srcs = ["multi_safetensors_source_test.cc"],
+    deps = [
+        ":multi_safetensors_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "disk_loader_safetensors_test",
+    srcs = ["disk_loader_safetensors_test.cc"],
+    deps = [
+        ":disk_loader",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

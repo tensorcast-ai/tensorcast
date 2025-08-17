@@ -43,6 +43,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "rich-click>=1.8.9",
     "ruff>=0.11.2",
+    "safetensors>=0.5.3",
     "tiktoken>=0.9.0",
     "toml>=0.10.2",
     "transformers>=4.51.3",
