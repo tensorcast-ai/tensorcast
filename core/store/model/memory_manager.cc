@@ -11,12 +11,11 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_format.h"
+#include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 
 #include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
-#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/direct_write.h"
 #include "core/store/model/chunk_export_service.h"
@@ -48,7 +47,9 @@ MemoryManager::MemoryManager(
                   .model_id = model_identifier,
                   .device = {.type = ::stepcast::DeviceType::GPU, .ordinal = local_device_id},
                   .replica = 0},
-              TransferService::Config{max_buffer_bytes_, pinned_memory_timeout_})),
+              TransferService::Config{
+                  .max_buffer_bytes = max_buffer_bytes_,
+                  .pinned_memory_timeout = pinned_memory_timeout_})),
       export_service_(std::make_shared<ChunkExportService>(memory_coordinator_, dvmp_)) {
   // Populate instance_key_ using constructor inputs
   instance_key_.model_id = std::move(model_identifier);
@@ -134,8 +135,8 @@ absl::Status MemoryManager::allocate_memory(ModelLocation location) {
       return allocate_gpu_memory();
     default:
       return absl::InvalidArgumentError(
-          absl::StrFormat(
-              "MemoryManager(%s): Invalid location for allocation: %s",
+          absl::Substitute(
+              "MemoryManager($0): Invalid location for allocation: $1",
               instance_key_.model_id,
               location_to_string(location)));
   }
@@ -154,8 +155,8 @@ absl::Status MemoryManager::allocate_pageable_cpu() {
     }
     if (cpu_.state != MemoryState::UNALLOCATED) {
       return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found %s.",
+          absl::Substitute(
+              "MemoryManager($0): Cannot allocate PAGEABLE_CPU memory. Expected UNALLOCATED state, but found $1.",
               instance_key_.model_id,
               state_to_string(cpu_.state)));
     }
@@ -177,8 +178,8 @@ absl::Status MemoryManager::allocate_gpu_memory() {
     }
     if (gpu_.state != MemoryState::UNALLOCATED) {
       return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): Cannot allocate GPU memory. Expected UNALLOCATED state, but found %s.",
+          absl::Substitute(
+              "MemoryManager($0): Cannot allocate GPU memory. Expected UNALLOCATED state, but found $1.",
               instance_key_.model_id,
               state_to_string(gpu_.state)));
     }
@@ -192,8 +193,8 @@ absl::Status MemoryManager::allocate_gpu_memory() {
   if (!gpu_alloc_result.ok()) {
     (void)set_state(ModelLocation::GPU, MemoryState::FAILED);
     return absl::ResourceExhaustedError(
-        absl::StrFormat(
-            "MemoryManager(%s): Failed UMA GPU allocation on device %d: %s",
+        absl::Substitute(
+            "MemoryManager($0): Failed UMA GPU allocation on device $1: $2",
             instance_key_.model_id,
             instance_key_.device.ordinal,
             gpu_alloc_result.status().message()));
@@ -213,7 +214,7 @@ absl::Status MemoryManager::release_memory(ModelLocation location, bool safe_rel
   auto sc_or = get_state_cond_locked(location);
   if (!sc_or.ok()) {
     return absl::InvalidArgumentError(
-        absl::StrFormat("MemoryManager(%s): Invalid location for release: %s", instance_key_.model_id, loc_str));
+        absl::Substitute("MemoryManager($0): Invalid location for release: $1", instance_key_.model_id, loc_str));
   }
   MemoryState* state_ptr = sc_or->state;
   absl::CondVar* cond_ptr = sc_or->cond;
@@ -226,8 +227,8 @@ absl::Status MemoryManager::release_memory(ModelLocation location, bool safe_rel
     MemoryState current_state = *state_ptr;
     if (current_state == MemoryState::LOADING && safe_release) {
       return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): Cannot safely release PAGEABLE_CPU while LOADING.", instance_key_.model_id));
+          absl::Substitute(
+              "MemoryManager($0): Cannot safely release PAGEABLE_CPU while LOADING.", instance_key_.model_id));
     }
 
     if (current_state == MemoryState::LOADING && !safe_release) {
@@ -254,8 +255,8 @@ absl::Status MemoryManager::release_memory(ModelLocation location, bool safe_rel
       LOG(WARNING) << "MemoryManager(" << instance_key_.model_id << "): Safe release requested for " << loc_str
                    << " while LOADING. Release denied.";
       return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "MemoryManager(%s): Cannot safely release %s memory while in LOADING state.",
+          absl::Substitute(
+              "MemoryManager($0): Cannot safely release $1 memory while in LOADING state.",
               instance_key_.model_id,
               loc_str));
     }
@@ -470,7 +471,8 @@ absl::Status MemoryManager::wait_for_state(ModelLocation location, MemoryState t
   auto state_cond_or = get_state_cond_locked(location);
   if (!state_cond_or.ok()) {
     return absl::InvalidArgumentError(
-        absl::StrFormat("MemoryManager(%s): Invalid location for wait_for_state: %s", instance_key_.model_id, loc_str));
+        absl::Substitute(
+            "MemoryManager($0): Invalid location for wait_for_state: $1", instance_key_.model_id, loc_str));
   }
   MemoryState* state_ptr = state_cond_or->state;
   absl::CondVar* cond_ptr = state_cond_or->cond;
@@ -488,7 +490,7 @@ absl::Status MemoryManager::wait_for_state(ModelLocation location, MemoryState t
                      << " to reach state " << state_to_string(target_state)
                      << ". Current state: " << state_to_string(*state_ptr);
         return absl::DeadlineExceededError(
-            absl::StrFormat("Timeout waiting for %s state %s", loc_str, state_to_string(target_state)));
+            absl::Substitute("Timeout waiting for $0 state $1", loc_str, state_to_string(target_state)));
       }
       break;
     }
@@ -510,9 +512,9 @@ absl::Status MemoryManager::wait_for_state(ModelLocation location, MemoryState t
       reason = get_last_error_locked_(location);
     }
     if (!reason.empty()) {
-      return absl::FailedPreconditionError(absl::StrFormat("%s operation failed: %s", loc_str, reason));
+      return absl::FailedPreconditionError(absl::Substitute("$0 operation failed: $1", loc_str, reason));
     }
-    return absl::FailedPreconditionError(absl::StrFormat("%s operation failed", loc_str));
+    return absl::FailedPreconditionError(absl::Substitute("$0 operation failed", loc_str));
   }
   LOG(ERROR) << "MemoryManager(" << instance_key_.model_id << "): Wait loop exited with unexpected state "
              << state_to_string(*state_ptr) << " for " << loc_str;
@@ -613,13 +615,13 @@ absl::Status MemoryManager::capture_copy_context_(
   // Validate states
   if (src_state != MemoryState::LOADED) {
     return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "MemoryManager(%s): Source %s is not in LOADED state for copy.", instance_key_.model_id, src_str));
+        absl::Substitute(
+            "MemoryManager($0): Source $1 is not in LOADED state for copy.", instance_key_.model_id, src_str));
   }
   if (dst_state != MemoryState::ALLOCATED) {
     return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "MemoryManager(%s): Destination %s is not in ALLOCATED state for copy.", instance_key_.model_id, dst_str));
+        absl::Substitute(
+            "MemoryManager($0): Destination $1 is not in ALLOCATED state for copy.", instance_key_.model_id, dst_str));
   }
 
   // Validate buffers
@@ -1048,13 +1050,13 @@ std::future<absl::Status> MemoryManager::load_async_from_source(
 
         if (!pump_status.ok()) {
           this->record_failure_and_fail_(
-              target_location, absl::StrFormat("pump_ranges/load_from_source failed: %s", pump_status.message()));
+              target_location, absl::Substitute("pump_ranges/load_from_source failed: $0", pump_status.message()));
           return pump_status;
         }
 
         absl::Status fin = this->finalize_load(target_location, chunk_indices);
         if (!fin.ok()) {
-          this->record_failure_and_fail_(target_location, absl::StrFormat("finalize_load failed: %s", fin.message()));
+          this->record_failure_and_fail_(target_location, absl::Substitute("finalize_load failed: $0", fin.message()));
           return fin;
         }
 

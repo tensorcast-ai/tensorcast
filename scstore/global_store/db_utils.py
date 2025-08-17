@@ -1,6 +1,7 @@
 #  Copyright (c) 2025, StepCast Team.
 
 import os
+import re
 
 import duckdb
 from duckdb import DuckDBPyConnection
@@ -29,13 +30,14 @@ def parse_sql_file(file_path):
     current_statement = ""
 
     for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("--"):  # Skip empty lines and comments
+        # Remove inline comments and leading/trailing whitespace
+        line_without_comment = re.sub(r"--.*$", "", line).strip()
+        if not line_without_comment:
             continue
 
-        current_statement += line + " "
+        current_statement += line_without_comment + " "
 
-        if line.endswith(";"):
+        if line_without_comment.endswith(";"):
             # Clean up the statement and add to the list
             statements.append(current_statement.strip())
             current_statement = ""

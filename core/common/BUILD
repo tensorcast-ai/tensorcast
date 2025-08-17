@@ -23,6 +23,7 @@ sc_cc_library(
     deps = [
         ":error_handling_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@cuda//:cublas",
         "@cuda//:cublasLt",
         "@cuda//:cudart",

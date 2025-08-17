@@ -73,7 +73,8 @@ absl::Status CudaMemory::allocate(size_t size, int device_id) {
   device_id_ = device_id;
   allocation_type_ = AllocationType::DIRECT;
 
-  VLOG(1) << "CudaMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address " << data_;
+  VLOG(1) << "CudaMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address " << data_
+          << ", handle=" << ipc_handle_str;
   return absl::OkStatus();
 }
 
