@@ -172,6 +172,156 @@ class DaemonCtl:
             }
 
     # ------------------------------------------------------------------
+    # Memory TensorDict registration (outer-layer client API)
+    # ------------------------------------------------------------------
+
+    def begin_register_tensor_dict(
+        self,
+        *,
+        model_id: str,
+        device_id: int,
+        total_size_bytes: int,
+        enable_p2p: bool = False,
+        ttl_ms: int | None = None,
+        tensor_index_key: str | None = None,
+        tensor_index_data: bytes | None = None,
+        encoding: str = "json",
+        schema_version: str = "v2",
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Begin registration of an in-memory tensor dict.
+
+        Returns a dict with keys: registration_id, daemon_ipc_handle, device_id, size_bytes.
+        """
+
+        if not model_id or device_id < 0 or total_size_bytes <= 0:
+            raise ValueError("Invalid arguments for begin_register_tensor_dict")
+
+        if not tensor_index_key and tensor_index_data is None:
+            raise ValueError(
+                "Either tensor_index_key or tensor_index_data must be provided"
+            )
+
+        req = store_daemon_pb2.BeginRegisterTensorDictRequest(
+            model_id=model_id,
+            device_id=int(device_id),
+            total_size=int(total_size_bytes),
+            enable_p2p=bool(enable_p2p),
+        )
+
+        # Optional TTL presence should be explicit only when provided
+        if ttl_ms is not None:
+            req.ttl_ms = int(ttl_ms)
+
+        # Oneof index: key vs data
+        if tensor_index_data is not None:
+            req.tensor_index_data.CopyFrom(
+                store_daemon_pb2.TensorIndexData(
+                    data=tensor_index_data,
+                    schema_version=schema_version,
+                    encoding=encoding,
+                )
+            )
+        else:
+            req.tensor_index_key = tensor_index_key or ""
+
+        try:
+            resp = self.stub.BeginRegisterTensorDict(req, timeout=timeout_s)
+        except grpc.RpcError as e:
+            code = e.code()
+            if code == grpc.StatusCode.UNAVAILABLE:
+                raise RuntimeError(
+                    f"Local StoreDaemon ({self.server_address}) is not available."
+                ) from e
+            if code == grpc.StatusCode.INVALID_ARGUMENT:
+                raise ValueError(str(e)) from e
+            if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                raise MemoryError(str(e)) from e
+            if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise TimeoutError(str(e)) from e
+            # if code == grpc.StatusCode.NOT_FOUND:
+            # raise FileNotFoundError(str(e)) from e
+            raise RuntimeError(f"BeginRegisterTensorDict failed: {e}") from e
+
+        return {
+            "registration_id": resp.registration_id,
+            "daemon_ipc_handle": bytes(resp.daemon_ipc_handle),
+            "device_id": int(resp.device_id),
+            "size_bytes": int(resp.size),
+        }
+
+    def commit_registered_tensor_dict(
+        self,
+        registration_id: str,
+        *,
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Commit a previously begun tensor dict registration.
+
+        Returns a dict with keys: registration_id, model_id, device_id, size_bytes.
+        """
+
+        if not registration_id:
+            raise ValueError("registration_id is required")
+
+        req = store_daemon_pb2.CommitRegisteredTensorDictRequest(
+            registration_id=registration_id
+        )
+        try:
+            resp = self.stub.CommitRegisteredTensorDict(req, timeout=timeout_s)
+        except grpc.RpcError as e:
+            code = e.code()
+            if code == grpc.StatusCode.UNAVAILABLE:
+                raise RuntimeError(
+                    f"Local StoreDaemon ({self.server_address}) is not available."
+                ) from e
+            if code == grpc.StatusCode.INVALID_ARGUMENT:
+                raise ValueError(str(e)) from e
+            if code == grpc.StatusCode.NOT_FOUND:
+                raise KeyError(str(e)) from e
+            if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise TimeoutError(str(e)) from e
+            raise RuntimeError(f"CommitRegisteredTensorDict failed: {e}") from e
+
+        return {
+            "registration_id": resp.registration_id,
+            "model_id": resp.model_id,
+            "device_id": int(resp.device_id),
+            "size_bytes": int(resp.size),
+        }
+
+    def abort_registered_tensor_dict(
+        self, registration_id: str, *, timeout_s: float = 15.0
+    ) -> bool:
+        """Abort a pending tensor dict registration and free allocated memory."""
+        if not registration_id:
+            raise ValueError("registration_id is required")
+
+        req = store_daemon_pb2.AbortRegisteredTensorDictRequest(
+            registration_id=registration_id
+        )
+        try:
+            resp = self.stub.AbortRegisteredTensorDict(req, timeout=timeout_s)
+        except grpc.RpcError as e:
+            code = e.code()
+            if code == grpc.StatusCode.UNAVAILABLE:
+                raise RuntimeError(
+                    f"Local StoreDaemon ({self.server_address}) is not available."
+                ) from e
+            if code == grpc.StatusCode.INVALID_ARGUMENT:
+                raise ValueError(str(e)) from e
+            if code == grpc.StatusCode.NOT_FOUND:
+                # Treat as already-aborted/missing
+                logger.warning(
+                    "AbortRegisteredTensorDict: registration not found: %s",
+                    registration_id,
+                )
+                return False
+            raise RuntimeError(f"AbortRegisteredTensorDict failed: {e}") from e
+
+        return bool(resp.ok)
+
+    # ------------------------------------------------------------------
     # Verification helpers
     # ------------------------------------------------------------------
 

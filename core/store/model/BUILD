@@ -202,6 +202,7 @@ sc_cc_library(
         "//core/store:memory_types",
         "//core/store/loader",
         "//core/store/loader:disk_loader",
+        "//core/store/loader:inline_buffer_loader",
         "//core/store/loader:p2p_loader",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
