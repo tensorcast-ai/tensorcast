@@ -285,7 +285,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - Statement should be inside braces
 
 #### Best Practices
-- **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`
+- **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`; `absl::ErrnoToStatus` to convert errno to status
 - **Testing**: Catch2 framework with Arrange-Act-Assert pattern
 - **Concurrency**: Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
 - **Documentation**: Doxygen style for public APIs

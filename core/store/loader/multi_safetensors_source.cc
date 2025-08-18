@@ -11,13 +11,13 @@
 #include <cerrno>
 #include <cstring>
 
-#include "absl/strings/str_format.h"
+#include "absl/strings/str_cat.h"
 #include "core/store/loader/safetensors_util.h"
 
 namespace stepcast::store::loader {
 
 namespace {
-static absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
+absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
   size_t total = 0;
   char* ptr = static_cast<char*>(dst);
   while (total < bytes) {
@@ -26,7 +26,7 @@ static absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_
       if (errno == EINTR) {
         continue;
       }
-      return absl::InternalError(absl::StrFormat("pread failed: %s", std::strerror(errno)));
+      return absl::InternalError(absl::StrCat("pread failed: ", std::strerror(errno)));
     }
     if (got == 0) {
       break;
@@ -65,7 +65,7 @@ absl::Status MultiSafetensorsSource::OpenFiles() {
   for (const auto& p : file_paths_) {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0) {
-      return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", p.string(), std::strerror(errno)));
+      return absl::NotFoundError(absl::StrCat("Failed to open ", p.string(), ": ", std::strerror(errno)));
     }
     segments_.push_back(Segment{.fd = fd});
   }
@@ -92,7 +92,7 @@ absl::Status MultiSafetensorsSource::ParseAllHeadersLocked() {
     if (!header_info.ok()) {
       return header_info.status();
     }
-    
+
     // Validate the JSON header content
     std::string header;
     header.resize(static_cast<size_t>(header_info->header_length));
@@ -132,15 +132,10 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
   uint64_t off = current_offset_;
   while (total < to_read) {
     // Use binary search for better performance with many files
-    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
-        [](uint64_t offset, const Segment& s) { 
-            return offset < s.base_offset + s.data_size; 
-        });
+    auto it =
+        std::ranges::upper_bound(segments_, off, {}, [](const Segment& s) { return s.base_offset + s.data_size; });
     if (it == segments_.begin() && off < it->base_offset) {
-      break;  // offset is before the first segment
-    }
-    if (it != segments_.begin()) {
-      --it;  // upper_bound returns iterator to first element > off, we want <=
+      break; // offset is before the first segment
     }
     const auto& s = *it;
     uint64_t within = off - s.base_offset;
@@ -174,15 +169,10 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
   uint64_t off = offset;
   while (total < to_read) {
     // Use binary search for better performance with many files
-    auto it = std::upper_bound(segments_.begin(), segments_.end(), off,
-        [](uint64_t offset, const Segment& s) { 
-            return offset < s.base_offset + s.data_size; 
-        });
+    auto it =
+        std::ranges::upper_bound(segments_, off, {}, [](const Segment& s) { return s.base_offset + s.data_size; });
     if (it == segments_.begin() && off < it->base_offset) {
-      break;  // offset is before the first segment
-    }
-    if (it != segments_.begin()) {
-      --it;  // upper_bound returns iterator to first element > off, we want <=
+      break; // offset is before the first segment
     }
     const auto& s = *it;
     uint64_t within = off - s.base_offset;

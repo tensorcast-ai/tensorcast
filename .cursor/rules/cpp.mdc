@@ -41,6 +41,7 @@ alwaysApply: false
 
 ## Error Handling
 - Use `absl::Status` or `absl::StatusOr<T>` for error handling
+- Use `absl::ErrnoToStatus` to convert errno to status
 - Never use exceptions in core library code
 - Check status values immediately after calls
 - Provide meaningful error messages
