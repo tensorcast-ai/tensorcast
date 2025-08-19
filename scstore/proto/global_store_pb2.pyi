@@ -132,7 +132,7 @@ class WorkerHeartbeatRequest(_message.Message):
         "accepting_new_requests",
         "state_version",
         "state_checksum",
-        "registered_models",
+        "registered_model_ids",
         "last_successful_sync",
         "global_store_status",
     )
@@ -141,7 +141,7 @@ class WorkerHeartbeatRequest(_message.Message):
     ACCEPTING_NEW_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     STATE_VERSION_FIELD_NUMBER: _ClassVar[int]
     STATE_CHECKSUM_FIELD_NUMBER: _ClassVar[int]
-    REGISTERED_MODELS_FIELD_NUMBER: _ClassVar[int]
+    REGISTERED_MODEL_IDS_FIELD_NUMBER: _ClassVar[int]
     LAST_SUCCESSFUL_SYNC_FIELD_NUMBER: _ClassVar[int]
     GLOBAL_STORE_STATUS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
@@ -149,7 +149,7 @@ class WorkerHeartbeatRequest(_message.Message):
     accepting_new_requests: bool
     state_version: int
     state_checksum: str
-    registered_models: _containers.RepeatedScalarFieldContainer[str]
+    registered_model_ids: _containers.RepeatedScalarFieldContainer[str]
     last_successful_sync: int
     global_store_status: ConnectionStatus
     def __init__(
@@ -159,7 +159,7 @@ class WorkerHeartbeatRequest(_message.Message):
         accepting_new_requests: bool = ...,
         state_version: _Optional[int] = ...,
         state_checksum: _Optional[str] = ...,
-        registered_models: _Optional[_Iterable[str]] = ...,
+        registered_model_ids: _Optional[_Iterable[str]] = ...,
         last_successful_sync: _Optional[int] = ...,
         global_store_status: _Optional[_Union[ConnectionStatus, str]] = ...,
     ) -> None: ...
@@ -306,7 +306,7 @@ class WorkerLocalState(_message.Message):
 
 class ModelReplicaInfo(_message.Message):
     __slots__ = (
-        "model_name",
+        "model_id",
         "replica_id",
         "memory_info",
         "max_concurrency",
@@ -314,14 +314,14 @@ class ModelReplicaInfo(_message.Message):
         "is_available",
         "registered_timestamp",
     )
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
     MAX_CONCURRENCY_FIELD_NUMBER: _ClassVar[int]
     CURRENT_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     IS_AVAILABLE_FIELD_NUMBER: _ClassVar[int]
     REGISTERED_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    model_id: str
     replica_id: str
     memory_info: MemoryInfo
     max_concurrency: int
@@ -330,13 +330,40 @@ class ModelReplicaInfo(_message.Message):
     registered_timestamp: int
     def __init__(
         self,
-        model_name: _Optional[str] = ...,
+        model_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
         memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         max_concurrency: _Optional[int] = ...,
         current_requests: _Optional[int] = ...,
         is_available: bool = ...,
         registered_timestamp: _Optional[int] = ...,
+    ) -> None: ...
+
+class ModelDescriptor(_message.Message):
+    __slots__ = (
+        "model_id",
+        "index_multihash",
+        "data_multihash",
+        "schema_version",
+        "encoding",
+    )
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    INDEX_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
+    DATA_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
+    SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    index_multihash: str
+    data_multihash: str
+    schema_version: str
+    encoding: str
+    def __init__(
+        self,
+        model_id: _Optional[str] = ...,
+        index_multihash: _Optional[str] = ...,
+        data_multihash: _Optional[str] = ...,
+        schema_version: _Optional[str] = ...,
+        encoding: _Optional[str] = ...,
     ) -> None: ...
 
 class SynchronizeWorkerStateRequest(_message.Message):
@@ -433,45 +460,29 @@ class RequestFullStateSyncResponse(_message.Message):
         new_state_checksum: _Optional[str] = ...,
     ) -> None: ...
 
-class ModelInfo(_message.Message):
-    __slots__ = ("model_name", "available_replicas")
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
-    AVAILABLE_REPLICAS_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
-    available_replicas: _containers.RepeatedCompositeFieldContainer[MemoryInfo]
-    def __init__(
-        self,
-        model_name: _Optional[str] = ...,
-        available_replicas: _Optional[_Iterable[_Union[MemoryInfo, _Mapping]]] = ...,
-    ) -> None: ...
+class GetModelInfoByIdRequest(_message.Message):
+    __slots__ = ("model_id",)
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    def __init__(self, model_id: _Optional[str] = ...) -> None: ...
 
-class GetModelInfoRequest(_message.Message):
-    __slots__ = ("model_name",)
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
-    def __init__(self, model_name: _Optional[str] = ...) -> None: ...
-
-class GetModelInfoResponse(_message.Message):
-    __slots__ = ("status", "model_info")
+class GetModelInfoByIdResponse(_message.Message):
+    __slots__ = ("status", "replicas")
     STATUS_FIELD_NUMBER: _ClassVar[int]
-    MODEL_INFO_FIELD_NUMBER: _ClassVar[int]
+    REPLICAS_FIELD_NUMBER: _ClassVar[int]
     status: Status
-    model_info: ModelInfo
+    replicas: _containers.RepeatedCompositeFieldContainer[MemoryInfo]
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
-        model_info: _Optional[_Union[ModelInfo, _Mapping]] = ...,
+        replicas: _Optional[_Iterable[_Union[MemoryInfo, _Mapping]]] = ...,
     ) -> None: ...
 
 class GetModelIndexRequest(_message.Message):
-    __slots__ = ("model_name", "tensor_index_key")
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("tensor_index_key",)
     TENSOR_INDEX_KEY_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
     tensor_index_key: str
-    def __init__(
-        self, model_name: _Optional[str] = ..., tensor_index_key: _Optional[str] = ...
-    ) -> None: ...
+    def __init__(self, tensor_index_key: _Optional[str] = ...) -> None: ...
 
 class GetModelIndexResponse(_message.Message):
     __slots__ = ("status", "tensor_index_data", "encoding", "schema_version")
@@ -493,33 +504,33 @@ class GetModelIndexResponse(_message.Message):
 
 class ListModelReplicasRequest(_message.Message):
     __slots__ = (
-        "model_name",
         "node_id",
         "node_address",
         "node_port",
         "memory_type",
         "device_id",
+        "model_id",
     )
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     NODE_ID_FIELD_NUMBER: _ClassVar[int]
     NODE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     NODE_PORT_FIELD_NUMBER: _ClassVar[int]
     MEMORY_TYPE_FIELD_NUMBER: _ClassVar[int]
     DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     node_id: str
     node_address: str
     node_port: str
     memory_type: MemoryType
     device_id: int
+    model_id: str
     def __init__(
         self,
-        model_name: _Optional[str] = ...,
         node_id: _Optional[str] = ...,
         node_address: _Optional[str] = ...,
         node_port: _Optional[str] = ...,
         memory_type: _Optional[_Union[MemoryType, str]] = ...,
         device_id: _Optional[int] = ...,
+        model_id: _Optional[str] = ...,
     ) -> None: ...
 
 class ListModelReplicasResponse(_message.Message):
@@ -544,87 +555,95 @@ class ListModelReplicasResponse(_message.Message):
 
 class RegisterModelReplicaRequest(_message.Message):
     __slots__ = (
-        "model_name",
+        "model_id",
         "mem_info",
         "max_concurrency",
         "worker_id",
         "tensor_index_data",
         "encoding",
         "schema_version",
+        "disk_path",
+        "descriptor",
     )
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     MEM_INFO_FIELD_NUMBER: _ClassVar[int]
     MAX_CONCURRENCY_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     TENSOR_INDEX_DATA_FIELD_NUMBER: _ClassVar[int]
     ENCODING_FIELD_NUMBER: _ClassVar[int]
     SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    DISK_PATH_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTOR_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
     mem_info: MemoryInfo
     max_concurrency: int
     worker_id: str
     tensor_index_data: bytes
     encoding: str
     schema_version: str
+    disk_path: str
+    descriptor: ModelDescriptor
     def __init__(
         self,
-        model_name: _Optional[str] = ...,
+        model_id: _Optional[str] = ...,
         mem_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         max_concurrency: _Optional[int] = ...,
         worker_id: _Optional[str] = ...,
         tensor_index_data: _Optional[bytes] = ...,
         encoding: _Optional[str] = ...,
         schema_version: _Optional[str] = ...,
+        disk_path: _Optional[str] = ...,
+        descriptor: _Optional[_Union[ModelDescriptor, _Mapping]] = ...,
     ) -> None: ...
 
 class RegisterModelReplicaResponse(_message.Message):
-    __slots__ = ("status", "model_name", "replica_id")
+    __slots__ = ("status", "model_id", "replica_id")
     STATUS_FIELD_NUMBER: _ClassVar[int]
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     status: Status
-    model_name: str
+    model_id: str
     replica_id: str
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
-        model_name: _Optional[str] = ...,
+        model_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
     ) -> None: ...
 
 class UpdateModelReplicaRequest(_message.Message):
-    __slots__ = ("model_name", "replica_id")
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("model_id", "replica_id")
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    model_id: str
     replica_id: str
     def __init__(
-        self, model_name: _Optional[str] = ..., replica_id: _Optional[str] = ...
+        self, model_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
     ) -> None: ...
 
 class UpdateModelReplicaResponse(_message.Message):
-    __slots__ = ("status", "model_name", "replica_id")
+    __slots__ = ("status", "model_id", "replica_id")
     STATUS_FIELD_NUMBER: _ClassVar[int]
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     status: Status
-    model_name: str
+    model_id: str
     replica_id: str
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
-        model_name: _Optional[str] = ...,
+        model_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
     ) -> None: ...
 
 class UnregisterModelReplicaRequest(_message.Message):
-    __slots__ = ("model_name", "replica_id")
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("model_id", "replica_id")
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    model_id: str
     replica_id: str
     def __init__(
-        self, model_name: _Optional[str] = ..., replica_id: _Optional[str] = ...
+        self, model_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
     ) -> None: ...
 
 class UnregisterModelReplicaResponse(_message.Message):
@@ -698,20 +717,20 @@ class MemoryInfoList(_message.Message):
 
 class RequestModelReplicaTransportRequest(_message.Message):
     __slots__ = (
-        "model_name",
+        "model_id",
         "local_memory_info",
         "wait_timeout_ms",
         "source_node_id",
         "source_address",
         "source_port",
     )
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     LOCAL_MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
     WAIT_TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     SOURCE_NODE_ID_FIELD_NUMBER: _ClassVar[int]
     SOURCE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     SOURCE_PORT_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
+    model_id: str
     local_memory_info: MemoryInfo
     wait_timeout_ms: int
     source_node_id: str
@@ -719,7 +738,7 @@ class RequestModelReplicaTransportRequest(_message.Message):
     source_port: int
     def __init__(
         self,
-        model_name: _Optional[str] = ...,
+        model_id: _Optional[str] = ...,
         local_memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         wait_timeout_ms: _Optional[int] = ...,
         source_node_id: _Optional[str] = ...,
@@ -753,36 +772,6 @@ class CompleteModelReplicaTransportResponse(_message.Message):
     STATUS_FIELD_NUMBER: _ClassVar[int]
     status: Status
     def __init__(self, status: _Optional[_Union[Status, str]] = ...) -> None: ...
-
-class GetModelReplicaRequest(_message.Message):
-    __slots__ = ("model_name", "local_memory_info", "replica_id")
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
-    LOCAL_MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
-    REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    model_name: str
-    local_memory_info: MemoryInfo
-    replica_id: str
-    def __init__(
-        self,
-        model_name: _Optional[str] = ...,
-        local_memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
-        replica_id: _Optional[str] = ...,
-    ) -> None: ...
-
-class GetModelReplicaResponse(_message.Message):
-    __slots__ = ("status", "remote_memory_info", "replica_id")
-    STATUS_FIELD_NUMBER: _ClassVar[int]
-    REMOTE_MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
-    REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    status: Status
-    remote_memory_info: MemoryInfo
-    replica_id: str
-    def __init__(
-        self,
-        status: _Optional[_Union[Status, str]] = ...,
-        remote_memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
-        replica_id: _Optional[str] = ...,
-    ) -> None: ...
 
 class HealthCheckRequest(_message.Message):
     __slots__ = ()

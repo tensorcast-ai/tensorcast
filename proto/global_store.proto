@@ -16,8 +16,8 @@ service GlobalModelStore {
 
   rpc ListModelReplicas(ListModelReplicasRequest) returns (ListModelReplicasResponse) {}
 
-  // Get model metadata information
-  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse) {}
+  // Content-addressed query by model_id (mi2:...)
+  rpc GetModelInfoById(GetModelInfoByIdRequest) returns (GetModelInfoByIdResponse) {}
 
   // Get model tensor index data by key
   rpc GetModelIndex(GetModelIndexRequest) returns (GetModelIndexResponse) {}
@@ -93,7 +93,7 @@ message WorkerHeartbeatRequest {
   // Enhanced fields for HA
   uint64 state_version = 4;              // 增量状态版本
   string state_checksum = 5;             // 当前状态校验和
-  repeated string registered_models = 6; // 本地注册的模型列表
+  repeated string registered_model_ids = 6; // 本地注册的模型列表（内容寻址ID）
   int64 last_successful_sync = 7;        // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
 }
@@ -153,13 +153,22 @@ message WorkerLocalState {
 }
 
 message ModelReplicaInfo {
-  string model_name = 1;
+  string model_id = 1;                     // content-addressed model ID (mi2:...)
   string replica_id = 2;
   MemoryInfo memory_info = 3;
   uint32 max_concurrency = 4;
   uint32 current_requests = 5;
   bool is_available = 6;
   int64 registered_timestamp = 7;
+}
+
+// RFC-0007 descriptor for content-addressed identity
+message ModelDescriptor {
+  string model_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
+  string index_multihash = 2;    // Multibase over multihash (sha2-256), base32
+  string data_multihash = 3;     // Multibase over multihash (sha2-256 root), base32
+  string schema_version = 4;     // e.g., "v2"
+  string encoding = 5;           // e.g., "json" or "cbor"
 }
 
 message SynchronizeWorkerStateRequest {
@@ -199,25 +208,21 @@ message RequestFullStateSyncResponse {
   string new_state_checksum = 4;
 }
 
-// Model information message
-message ModelInfo {
-  string model_name = 1;
-  repeated MemoryInfo available_replicas = 2;
+// Removed legacy disk-path based model info messages
+
+// Content-addressed model info
+message GetModelInfoByIdRequest {
+  string model_id = 1;                      // "mi2:..."
 }
 
-message GetModelInfoRequest {
-  string model_name = 1;
-}
-
-message GetModelInfoResponse {
+message GetModelInfoByIdResponse {
   Status status = 1;
-  ModelInfo model_info = 2;
+  repeated MemoryInfo replicas = 2;         // All replicas under the content ID
 }
 
 // Get model index request
 message GetModelIndexRequest {
-  string model_name = 1;                   // Model name
-  string tensor_index_key = 2;             // SHA-256 hash of canonical index
+  string tensor_index_key = 1;             // SHA-256 hash of canonical index
 }
 
 // Get model index response
@@ -229,12 +234,12 @@ message GetModelIndexResponse {
 }
 
 message ListModelReplicasRequest {
-  optional string model_name = 1;
-  optional string node_id = 2;
-  optional string node_address = 3;
-  optional string node_port = 4;
-  optional MemoryType memory_type = 6;
-  optional uint32 device_id = 7;
+  optional string node_id = 1;
+  optional string node_address = 2;
+  optional string node_port = 3;
+  optional MemoryType memory_type = 4;
+  optional uint32 device_id = 5;
+  optional string model_id = 6;            // content-addressed filter
 }
 
 message ListModelReplicasResponse {
@@ -242,7 +247,7 @@ message ListModelReplicasResponse {
 }
 
 message RegisterModelReplicaRequest {
-  string model_name = 1;
+  string model_id = 1;                      // content-addressed ID (mi2:...), optional for disk/mixed flows
   MemoryInfo mem_info = 2;
   uint32 max_concurrency = 3;
   string worker_id = 4;
@@ -251,29 +256,32 @@ message RegisterModelReplicaRequest {
   optional bytes tensor_index_data = 5;    // Canonical JSON bytes (for UPSERT)
   optional string encoding = 6;            // Encoding format (e.g., "json")
   optional string schema_version = 7;      // Schema version (e.g., "v2")
+  // Legacy disk path for non-content-addressed cases
+  optional string disk_path = 8;
+
+  // RFC-0007: Optionally include content-addressed descriptor for persistence
+  optional ModelDescriptor descriptor = 9;
 }
 
 message RegisterModelReplicaResponse {
   Status status = 1;
-
-  string model_name = 2;
+  string model_id = 2;
   string replica_id = 3;
 }
 
 message UpdateModelReplicaRequest {
-  string model_name = 1;
+  string model_id = 1;
   string replica_id = 2;
 }
 
 message UpdateModelReplicaResponse {
   Status status = 1;
-
-  string model_name = 2;
+  string model_id = 2;
   string replica_id = 3;
 }
 
 message UnregisterModelReplicaRequest {
-  string model_name = 1;
+  string model_id = 1;
   string replica_id = 2;
 }
 
@@ -312,7 +320,7 @@ message MemoryInfoList {
 }
 
 message RequestModelReplicaTransportRequest {
-  string model_name = 1;
+  string model_id = 1;                      // content-addressed id
   MemoryInfo local_memory_info = 2;
   uint32 wait_timeout_ms = 3;
   string source_node_id = 4;
@@ -334,17 +342,7 @@ message CompleteModelReplicaTransportResponse {
   Status status = 1;
 }
 
-message GetModelReplicaRequest {
-  string model_name = 1;
-  MemoryInfo local_memory_info = 2;
-  optional string replica_id = 3;
-}
-
-message GetModelReplicaResponse {
-  Status status = 1;
-  MemoryInfo remote_memory_info = 2;
-  string replica_id = 3;
-}
+// Removed legacy GetModelReplica RPC messages
 
 // ========== Health Check ==========
 

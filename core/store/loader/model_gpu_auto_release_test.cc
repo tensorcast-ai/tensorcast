@@ -33,14 +33,17 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
   const size_t size1 = 128 * 1024 * 1024; // 128 MB
 
   fs::path base = fs::temp_directory_path() / "gpu_auto_release_test";
-  if (fs::exists(base))
+  if (fs::exists(base)) {
     fs::remove_all(base);
+  }
   fs::create_directories(base / model_subdir);
 
   fs::path path0 = base / model_subdir / p0;
   fs::path path1 = base / model_subdir / p1;
   REQUIRE(create_dummy_file(path0, size0, 'A'));
   REQUIRE(create_dummy_file(path1, size1, 'B'));
+  // RFC-0007 metadata for standard partitions
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
   // Setup pinned pool
   const size_t pool_total = 512 * 1024 * 1024; // 512MB
@@ -65,6 +68,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[model][gpu][rele
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .expected_model_size = size0 + size1,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -140,12 +144,15 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
   const size_t total_size = 256 * 1024 * 1024; // 256 MB
 
   fs::path base = fs::temp_directory_path() / "multi_gpu_release_test";
-  if (fs::exists(base))
+  if (fs::exists(base)) {
     fs::remove_all(base);
+  }
   fs::create_directories(base / model_subdir);
 
   fs::path model_file = base / model_subdir / "tensor.data";
   REQUIRE(create_dummy_file(model_file, total_size, 'M'));
+  // RFC-0007: standard partition directories must include descriptor + index
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
   // Setup pinned pool
   const size_t pool_total = 1024 * 1024 * 1024; // 1GB
@@ -164,13 +171,15 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
       disk_src.path = base / model_subdir;
 
       // Use aggregate initialization for ModelConfig
+      const size_t total_size = 256 * 1024 * 1024; // must match file above
       ModelConfig cfg{
           .source = disk_src,
           .model_identifier = model_id,
           .device_type = ::stepcast::DeviceType::CPU,
           .local_device_id = 0,
           .pinned_memory_pool = pool,
-          .dvmp = dvmp};
+          .dvmp = dvmp,
+          .expected_model_size = total_size};
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -203,13 +212,15 @@ TEST_CASE("Multi-GPU model loading with mandatory CPU release", "[model][gpu][mu
       disk_src.path = base / model_subdir;
 
       // Use aggregate initialization for ModelConfig
+      const size_t total_size2 = 256 * 1024 * 1024;
       ModelConfig cfg{
           .source = disk_src,
           .model_identifier = model_id + "_gpu1",
           .device_type = ::stepcast::DeviceType::CPU,
           .local_device_id = 1,
           .pinned_memory_pool = pool,
-          .dvmp = dvmp};
+          .dvmp = dvmp,
+          .expected_model_size = total_size2};
 
       auto mstatus = Model::create(cfg);
       REQUIRE(mstatus.ok());
@@ -246,8 +257,9 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
 
   const std::string model_subdir = "small_model_files";
   fs::path base = fs::temp_directory_path() / "small_model_test";
-  if (fs::exists(base))
+  if (fs::exists(base)) {
     fs::remove_all(base);
+  }
   fs::create_directories(base / model_subdir);
 
   // Setup pinned pool
@@ -262,6 +274,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
 
     fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'T'));
+    REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
@@ -278,6 +291,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .expected_model_size = model_size,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -309,6 +323,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
 
     fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'C'));
+    REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
@@ -326,6 +341,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .expected_model_size = model_size,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);
@@ -356,6 +372,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
 
     fs::path model_file = base / model_subdir / "tensor.data_0";
     REQUIRE(create_dummy_file(model_file, model_size, 'O'));
+    REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
     // Create DVMP
     auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
@@ -372,6 +389,7 @@ TEST_CASE("GPU auto-release with very small models (boundary condition)", "[mode
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .expected_model_size = model_size,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Model::create(cfg);

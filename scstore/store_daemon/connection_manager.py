@@ -61,7 +61,7 @@ class StateChangeQueue:
     def queue_model_registration(
         self, request: global_store_pb2.RegisterModelReplicaRequest
     ) -> None:
-        key = f"{request.model_name}:{request.mem_info.node_id}:{request.mem_info.device_id}"
+        key = f"{request.model_id}:{request.mem_info.node_id}:{request.mem_info.device_id}"
         with self._lock:
             self._model_registrations[key] = request
             self._model_unregistrations.discard(key)
@@ -74,9 +74,9 @@ class StateChangeQueue:
             )
 
     def queue_model_unregistration(
-        self, model_name: str, node_id: str, device_id: int
+        self, model_id: str, node_id: str, device_id: int
     ) -> None:
-        key = f"{model_name}:{node_id}:{device_id}"
+        key = f"{model_id}:{node_id}:{device_id}"
         with self._lock:
             self._model_unregistrations.add(key)
             self._model_registrations.pop(key, None)
@@ -205,14 +205,14 @@ class GlobalStoreConnectionManager:
         with self._state_lock:
             return self._registered_models.copy()
 
-    def _add_registered_model(self, model_name: str) -> None:
+    def _add_registered_model(self, model_id: str) -> None:
         with self._state_lock:
-            self._registered_models.add(model_name)
+            self._registered_models.add(model_id)
             metrics.HA_REGISTERED_MODELS.set(len(self._registered_models))
 
-    def _remove_registered_model(self, model_name: str) -> None:
+    def _remove_registered_model(self, model_id: str) -> None:
         with self._state_lock:
-            self._registered_models.discard(model_name)
+            self._registered_models.discard(model_id)
             metrics.HA_REGISTERED_MODELS.set(len(self._registered_models))
 
     # ------------------------------------------------------------------
@@ -503,9 +503,9 @@ class GlobalStoreConnectionManager:
                 len(pending["unregistrations"]),
             )
             for key in pending["unregistrations"]:
-                model_name, *_ = key.split(":", 1)
-                self._remove_registered_model(model_name)
-                logger.debug("Marked %s as unregistered", model_name)
+                model_id, *_ = key.split(":", 1)
+                self._remove_registered_model(model_id)
+                logger.debug("Marked %s as unregistered", model_id)
 
         self.last_successful_sync = int(time.time())
 
@@ -547,7 +547,7 @@ class GlobalStoreConnectionManager:
                 accepting_new_requests=not self._servicer.shutting_down,
                 state_version=self.local_state_version,
                 state_checksum=state_checksum,
-                registered_models=list(self.registered_models),
+                registered_model_ids=list(self.registered_models),
                 last_successful_sync=self.last_successful_sync,
                 global_store_status=global_store_pb2.CONNECTED,
             )
@@ -565,8 +565,8 @@ class GlobalStoreConnectionManager:
                     "Received %d obsolete models to remove",
                     len(response.obsolete_models),
                 )
-                for model_name in response.obsolete_models:
-                    self._remove_registered_model(model_name)
+                for model_id in response.obsolete_models:
+                    self._remove_registered_model(model_id)
 
         except Exception as exc:
             logger.error("Failed to send heartbeat: %s", exc)
@@ -614,29 +614,25 @@ class GlobalStoreConnectionManager:
             for change in resp.state_changes:
                 change_type = change.type
                 replica_info = change.replica_info
-                model_name = replica_info.model_name
+                model_id = replica_info.model_id
 
                 if change_type == global_store_pb2.StateChange.REMOVE_REPLICA:
                     try:
                         self._servicer.replica_manager.unload_model(
-                            model_name,
+                            model_id,
                             store_daemon_pb2.DEVICE_TYPE_GPU,
                         )
                     except Exception:
-                        logger.debug(
-                            "Failed to unload model %s during sync", model_name
-                        )
-                    self._remove_registered_model(model_name)
+                        logger.debug("Failed to unload model %s during sync", model_id)
+                    self._remove_registered_model(model_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="REMOVE_REPLICA"
                     ).inc()
 
                 elif change_type == global_store_pb2.StateChange.ADD_REPLICA:
                     # Add a new replica that was registered elsewhere
-                    logger.info(
-                        "Adding replica for model %s from state sync", model_name
-                    )
-                    self._add_registered_model(model_name)
+                    logger.info("Adding replica for model %s from state sync", model_id)
+                    self._add_registered_model(model_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="ADD_REPLICA"
                     ).inc()
@@ -646,10 +642,10 @@ class GlobalStoreConnectionManager:
                 elif change_type == global_store_pb2.StateChange.UPDATE_REPLICA:
                     # Update replica metadata (e.g., status changes)
                     logger.info(
-                        "Updating replica for model %s from state sync", model_name
+                        "Updating replica for model %s from state sync", model_id
                     )
                     # For now, just ensure it's in our registered set
-                    self._add_registered_model(model_name)
+                    self._add_registered_model(model_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="UPDATE_REPLICA"
                     ).inc()
@@ -675,7 +671,7 @@ class GlobalStoreConnectionManager:
             try:
                 resp = self.global_store_stub.RegisterModelReplica(request)
                 if resp.status == global_store_pb2.Status.OK:
-                    self._add_registered_model(request.model_name)
+                    self._add_registered_model(request.model_id)
                     self.local_state_version += 1
                     return True
             except Exception as exc:
@@ -685,7 +681,7 @@ class GlobalStoreConnectionManager:
         return False
 
     def unregister_model_replica(
-        self, model_name: str, replica_id: str, device_id: int = 0
+        self, model_id: str, replica_id: str, device_id: int = 0
     ) -> bool:
         if (
             self.connection_state is ConnectionState.CONNECTED
@@ -693,19 +689,19 @@ class GlobalStoreConnectionManager:
         ):
             try:
                 req = global_store_pb2.UnregisterModelReplicaRequest(
-                    model_name=model_name,
+                    model_id=model_id,
                     replica_id=replica_id,
                 )
                 resp = self.global_store_stub.UnregisterModelReplica(req)
                 if resp.status == global_store_pb2.Status.OK:
-                    self._remove_registered_model(model_name)
+                    self._remove_registered_model(model_id)
                     self.local_state_version += 1
                     return True
             except Exception as exc:
                 logger.error("UnregisterModelReplica RPC failed: %s", exc)
         # Queue for later
         self.state_change_queue.queue_model_unregistration(
-            model_name, self._servicer.node_id, device_id
+            model_id, self._servicer.node_id, device_id
         )
         return False
 

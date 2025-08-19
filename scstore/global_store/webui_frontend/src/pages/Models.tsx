@@ -27,10 +27,10 @@ const Models = () => {
 
   const columns: ColumnType<ModelSummary>[] = [
     {
-      title: 'Model Name',
-      dataIndex: 'model_name',
-      key: 'model_name',
-      sorter: (a, b) => a.model_name.localeCompare(b.model_name),
+      title: 'Model ID',
+      dataIndex: 'model_id',
+      key: 'model_id',
+      sorter: (a, b) => a.model_id.localeCompare(b.model_id),
     },
     {
       title: 'Total Replicas',
@@ -87,7 +87,7 @@ const Models = () => {
       render: (_, record) => (
         <Button
           type="link"
-          onClick={() => navigate(`/models/${encodeURIComponent(record.model_name)}`)}
+          onClick={() => navigate(`/models/${encodeURIComponent(record.model_id)}`)}
         >
           View Details
         </Button>
@@ -104,7 +104,7 @@ const Models = () => {
       <Table
         columns={columns}
         dataSource={models || []}
-        rowKey="model_name"
+        rowKey="model_id"
         loading={isLoading}
         pagination={{
           pageSize: 20,

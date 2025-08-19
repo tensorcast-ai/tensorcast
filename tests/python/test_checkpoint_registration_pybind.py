@@ -56,7 +56,8 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
 
     reg: _Reg = {
         "model_id": "pybind_mem_model",
-        "tensor_index_key": "abc123",
+        # RFC-0007: tensor_index_key must be a 32-byte sha256 hex (64 hex chars)
+        "tensor_index_key": "0" * 64,
         "device_id": 0,
         "total_size_bytes": 1 * 1024 * 1024,
         "enable_p2p": False,
@@ -78,7 +79,8 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
 
     res = cs.commit_registered_tensor_dict(out["registration_id"])
     assert res["registration_id"] == out["registration_id"]
-    assert res["model_id"] == "pybind_mem_model"
+    # RFC-0007: commit returns content-addressed model_id (mi2:...)
+    assert isinstance(res["model_id"], str) and res["model_id"].startswith("mi2:")
     assert res["device_id"] == 0
 
     # Query GPU pointer via InstanceKey
@@ -91,6 +93,8 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
     key.device = dev
     key.replica = 0
 
+    # Query using the content-addressed model_id returned by commit
+    key.model_id = res["model_id"]
     gpu_ptr = cs.get_instance_gpu_ptr(key)
     assert isinstance(gpu_ptr, int) and gpu_ptr != 0
 

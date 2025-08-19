@@ -128,9 +128,9 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
 
         # Apply filters
         result = {}
-        for model_name, replicas in self.replicas.items():
-            # Filter by model name
-            if request.model_name and request.model_name != model_name:
+        for model_id, replicas in self.replicas.items():
+            # Filter by content-addressed model_id (tests use simple names)
+            if request.HasField("model_id") and request.model_id and request.model_id != model_id:
                 continue
 
             filtered_replicas = []
@@ -150,27 +150,23 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
                 filtered_replicas.append(replica)
 
             if filtered_replicas:
-                result[model_name] = global_store_pb2.MemoryInfoList(
+                result[model_id] = global_store_pb2.MemoryInfoList(
                     list=filtered_replicas
                 )
 
         return global_store_pb2.ListModelReplicasResponse(model_replicas=result)
 
-    def GetModelInfo(self, request, context):
-        """Get model information."""
-        self._maybe_fail(context, "GetModelInfo")
+    def GetModelInfoById(self, request, context):
+        """Get model information by content-addressed model_id."""
+        self._maybe_fail(context, "GetModelInfoById")
 
-        if request.model_name in self.replicas:
-            model_info = global_store_pb2.ModelInfo(
-                model_name=request.model_name,
-                available_replicas=self.replicas[request.model_name],
-            )
-            return global_store_pb2.GetModelInfoResponse(
+        if request.model_id in self.replicas:
+            return global_store_pb2.GetModelInfoByIdResponse(
                 status=global_store_pb2.Status.OK,
-                model_info=model_info,
+                replicas=self.replicas[request.model_id],
             )
         else:
-            return global_store_pb2.GetModelInfoResponse(
+            return global_store_pb2.GetModelInfoByIdResponse(
                 status=global_store_pb2.Status.NOT_FOUND,
             )
 
@@ -355,8 +351,8 @@ class TestGlobalStoreClient:
         assert len(replicas["model-1"]) == 2
         assert len(replicas["model-2"]) == 1
 
-        # Test with model name filter
-        replicas = await client.list_model_replicas(model_name="model-1")
+        # Test with model id filter
+        replicas = await client.list_model_replicas(model_id="model-1")
         assert len(replicas) == 1
         assert "model-1" in replicas
 
@@ -389,8 +385,7 @@ class TestGlobalStoreClient:
         # Test existing model
         model_info = await client.get_model_info("model-1")
         assert model_info is not None
-        assert model_info.model_name == "model-1"
-        assert len(model_info.available_replicas) == 2
+        assert len(model_info) == 2
 
         # Test non-existing model
         model_info = await client.get_model_info("model-nonexistent")
@@ -489,7 +484,7 @@ class TestGlobalStoreClient:
         # Verify concurrent execution
         assert test_server.servicer.call_count["ListActiveWorkers"] >= 1  # Called by get_summary_stats too
         assert test_server.servicer.call_count["ListModelReplicas"] >= 1  # Called by get_summary_stats too
-        assert test_server.servicer.call_count["GetModelInfo"] >= 1
+        assert test_server.servicer.call_count["GetModelInfoById"] >= 1
 
     @pytest.mark.asyncio
     async def test_ensure_connected(self, test_server):

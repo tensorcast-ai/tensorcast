@@ -88,18 +88,30 @@ absl::StatusOr<ModelHandle> PrepareOrchestrator::run(
   // ------------------------------------------------------------------
   // 3. Disk fallback
   // ------------------------------------------------------------------
+  // Content-addressed IDs (mi2:...) are not paths. Disk fallback requires an explicit hints.disk_path.
+  if (hints.disk_path.empty()) {
+    return absl::FailedPreconditionError(
+        "Disk fallback requires hints.disk_path; content-addressed model_id must route via Global Store");
+  }
   DiskSource disk_src;
-  disk_src.path = std::filesystem::path(std::string(model_id));
+  disk_src.path = std::filesystem::path(hints.disk_path);
 
   ModelTarget target;
   target.location.type = (target_device.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
   target.location.device_id = target_device.ordinal;
 
-  auto disk_or = store_->load_from_disk_internal(std::string(model_id), disk_src, target, hints);
+  auto disk_or = store_->load_from_disk_internal(hints.disk_path, disk_src, target, hints);
   if (disk_or.ok()) {
-    // Attempt to register replica (size unknown here, pass 0)
+    // Attempt to register replica with actual size if available
+    // Query size via a public API to avoid peeking internals; tolerate failures.
+    uint64_t model_size = 0;
+    if (auto size_or = store_->get_instance_size(disk_or->instance_key); size_or.ok()) {
+      model_size = *size_or;
+    }
+    // For disk fallback, register using disk_path as a legacy attribute stored on the replica.
+    // Content-addressed routing remains via model_id in other flows.
     absl::Status reg_status = ReplicaRegistrationHelper::register_local_replica(
-        gs_client_, model_id, target_device, target.location.type, /*size_bytes=*/0);
+        gs_client_, hints.disk_path, target_device, target.location.type, model_size);
     if (!reg_status.ok()) {
       LOG(WARNING) << "register_local_replica (disk path) returned error: " << reg_status;
     }

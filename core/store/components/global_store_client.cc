@@ -141,14 +141,14 @@ absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bo
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_model_replica(
-    std::string_view model_name,
+    std::string_view model_id,
     std::string_view worker_id,
     const DeviceKey& device,
     ModelLocation location,
     uint64_t memory_size,
     uint32_t max_concurrency) {
   ::global_store::RegisterModelReplicaRequest request;
-  request.set_model_name(std::string(model_name));
+  request.set_model_id(std::string(model_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
 
@@ -171,12 +171,12 @@ absl::StatusOr<std::string> GlobalStoreClient::register_model_replica(
     return absl::InternalError(absl::StrFormat("RegisterModelReplica failed with status: %d", response.status()));
   }
 
-  LOG(INFO) << "Registered model replica: " << model_name << " with ID: " << response.replica_id();
+  LOG(INFO) << "Registered model replica: " << model_id << " with ID: " << response.replica_id();
   return response.replica_id();
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
-    std::string_view model_name,
+    std::string_view model_id,
     std::string_view worker_id,
     const DeviceKey& device,
     uint64_t memory_size,
@@ -192,7 +192,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   // new fields it will still accept the request but ignore extra data.
 
   ::global_store::RegisterModelReplicaRequest request;
-  request.set_model_name(std::string(model_name));
+  request.set_model_id(std::string(model_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
 
@@ -240,6 +240,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
       request.set_schema_version(std::string(schema_version));
     }
   }
+  // Note: descriptor attachment is handled at server-side using the parsed mi2 model_id
+  // Optionally include descriptor when available to allow GS to upsert `models` directly.
+  // Server will parse mi2 model_id and upsert models table as needed.
 
   ::global_store::RegisterModelReplicaResponse response;
 
@@ -257,13 +260,13 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
   }
 
-  LOG(INFO) << "Registered memory replica: " << model_name << " with ID: " << response.replica_id();
+  LOG(INFO) << "Registered memory replica: " << model_id << " with ID: " << response.replica_id();
   return response.replica_id();
 }
 
-absl::Status GlobalStoreClient::unregister_model_replica(std::string_view model_name, std::string_view replica_id) {
+absl::Status GlobalStoreClient::unregister_model_replica(std::string_view model_id, std::string_view replica_id) {
   ::global_store::UnregisterModelReplicaRequest request;
-  request.set_model_name(std::string(model_name));
+  request.set_model_id(std::string(model_id));
   request.set_replica_id(std::string(replica_id));
 
   ::global_store::UnregisterModelReplicaResponse response;
@@ -286,14 +289,14 @@ absl::Status GlobalStoreClient::unregister_model_replica(std::string_view model_
 }
 
 absl::StatusOr<TransportSession> GlobalStoreClient::request_model_transport(
-    std::string_view model_name,
+    std::string_view model_id,
     std::string_view source_node_id,
     std::string_view source_address,
     uint32_t source_port,
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms) {
   ::global_store::RequestModelReplicaTransportRequest request;
-  request.set_model_name(std::string(model_name));
+  request.set_model_id(std::string(model_id));
   request.set_source_node_id(std::string(source_node_id));
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
@@ -316,7 +319,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_model_transport(
 
   if (response.status() != ::global_store::OK) {
     if (response.status() == ::global_store::NOT_FOUND) {
-      return absl::NotFoundError(absl::StrFormat("No available replicas for model: %s", model_name));
+      return absl::NotFoundError(absl::StrFormat("No available replicas for model: %s", model_id));
     }
     return absl::InternalError(
         absl::StrFormat("RequestModelReplicaTransport failed with status: %d", response.status()));
@@ -356,17 +359,17 @@ absl::Status GlobalStoreClient::complete_model_transport(std::string_view transp
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_model_replicas(std::string_view model_name) {
-  ::global_store::GetModelInfoRequest request;
-  request.set_model_name(std::string(model_name));
+absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_model_replicas(std::string_view model_id) {
+  ::global_store::GetModelInfoByIdRequest request;
+  request.set_model_id(std::string(model_id));
 
-  ::global_store::GetModelInfoResponse response;
+  ::global_store::GetModelInfoByIdResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetModelInfo(ctx, req, resp); },
-      "GetModelInfo");
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetModelInfoById(ctx, req, resp); },
+      "GetModelInfoById");
 
   if (!status.ok()) {
     return status;
@@ -374,13 +377,13 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_model_repl
 
   if (response.status() != ::global_store::OK) {
     if (response.status() == ::global_store::NOT_FOUND) {
-      return absl::NotFoundError(absl::StrFormat("Model not found: %s", model_name));
+      return absl::NotFoundError(absl::StrFormat("Model not found: %s", model_id));
     }
-    return absl::InternalError(absl::StrFormat("GetModelInfo failed with status: %d", response.status()));
+    return absl::InternalError(absl::StrFormat("GetModelInfoById failed with status: %d", response.status()));
   }
 
   std::vector<RemoteReplicaInfo> replicas;
-  for (const auto& mem_info : response.model_info().available_replicas()) {
+  for (const auto& mem_info : response.replicas()) {
     replicas.push_back(convert_from_proto_memory_info(mem_info));
   }
 

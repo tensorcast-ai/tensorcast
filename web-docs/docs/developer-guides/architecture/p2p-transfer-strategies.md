@@ -83,7 +83,7 @@ WITH candidate AS (
     FROM model_replicas r
     LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
     LEFT JOIN workers w ON r.worker_id = w.worker_id
-    WHERE r.model_name = ?
+    WHERE r.model_id = ?
       AND COALESCE(rc.current_requests, 0) < r.max_concurrency
       AND r.is_available = TRUE
       AND w.accepting_new_requests = TRUE
@@ -202,7 +202,7 @@ sequenceDiagram
     CS->>PO: PrepareOrchestrator::run(model_id, device_key, hints)
 
     %% --- P2P transfer attempt ------------------------------------------------
-    PO->>GSC: request_model_transport(model_name, ..., target_device)
+    PO->>GSC: request_model_transport(model_id, ..., target_device)
     GSC->>GS: gRPC RequestModelReplicaTransport
 
     alt Transport granted
@@ -220,14 +220,14 @@ sequenceDiagram
         PO->>GSC: complete_model_transport(transport_id)
         GSC->>GS: gRPC CompleteModelReplicaTransport
 
-        PO->>GSC: register_model_replica(model_name, worker_id, ...)
+        PO->>GSC: register_model_replica(model_id, worker_id, ...)
         GSC->>GS: gRPC RegisterModelReplica
     else No replica available / transport failed
         Note over PO: Disk fallback
         PO->>CS: load_from_disk_internal(model_id, disk_source, target, hints)
         CS-->>PO: ModelHandle
 
-        PO->>GSC: register_model_replica(model_name, worker_id, ...)
+        PO->>GSC: register_model_replica(model_id, worker_id, ...)
     end
 
     PO-->>CS: ModelHandle

@@ -10,7 +10,7 @@ import unittest
 
 import torch
 
-from scstore.torch_util import save_dict, load_dict_pure_local
+from scstore.torch_util import save_dict, load_dict
 
 
 class TestStreamingSave(unittest.TestCase):
@@ -54,8 +54,9 @@ class TestStreamingSave(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(save_path, "tensor_index.json")))
         self.assertTrue(os.path.exists(os.path.join(save_path, "tensor.data_0")))
 
-        # Load and verify
-        _, loaded_state_dict = load_dict_pure_local(save_path)
+        # Load and verify (pure local path removed; reuse daemon-less path via load_dict with wait=False?)
+        # For unit test simplicity, call load_dict in sync mode with a dummy storage path
+        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
 
         # Compare tensors
         for name, original_tensor in state_dict.items():
@@ -81,8 +82,8 @@ class TestStreamingSave(unittest.TestCase):
         save_dict(state_dict, streaming_path, use_streaming=True)
 
         # Load both
-        _, traditional_loaded = load_dict_pure_local(traditional_path)
-        _, streaming_loaded = load_dict_pure_local(streaming_path)
+        traditional_loaded = load_dict(traditional_path, device_id=0, storage_path="", enable_verification=False)
+        streaming_loaded = load_dict(streaming_path, device_id=0, storage_path="", enable_verification=False)
 
         # Compare all tensors
         for name in state_dict.keys():
@@ -110,7 +111,7 @@ class TestStreamingSave(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(save_path, "tensor_index.json")))
 
         # Load and verify
-        _, loaded_state_dict = load_dict_pure_local(save_path)
+        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
         self.assertEqual(len(loaded_state_dict), len(state_dict))
 
     def test_empty_model(self):
@@ -139,7 +140,7 @@ class TestStreamingSave(unittest.TestCase):
         save_path = os.path.join(self.test_dir, "mixed_sizes")
         save_dict(state_dict, save_path, use_streaming=True)
 
-        _, loaded_state_dict = load_dict_pure_local(save_path)
+        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
 
         for name, original_tensor in state_dict.items():
             loaded_tensor = loaded_state_dict[name]

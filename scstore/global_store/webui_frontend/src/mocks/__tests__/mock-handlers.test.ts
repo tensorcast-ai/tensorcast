@@ -90,11 +90,11 @@ describe('Mock API Handlers', () => {
   });
 
   it('should return single model with data wrapper', async () => {
-    const response = await fetch('/api/models/text-classifier');
+    const response = await fetch('/api/models/mi2:inx1:data1');
     const data = await response.json();
 
     expect(response.ok).toBe(true);
     expect(data).toHaveProperty('data');
-    expect(data.data).toHaveProperty('model_name', 'text-classifier');
+    expect(data.data).toHaveProperty('model_id', 'mi2:inx1:data1');
   });
 });

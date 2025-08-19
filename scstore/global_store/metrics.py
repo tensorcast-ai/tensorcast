@@ -78,20 +78,20 @@ MODEL_REPLICAS_GAUGE = Gauge(
 REPLICA_REGISTER_COUNTER = Counter(
     "global_store_replica_register_total",
     "Total number of model replicas registered (create or update).",
-    labelnames=("model_name", "memory_type"),
+    labelnames=("model_id", "memory_type"),
 )
 
 REPLICA_UNREGISTER_COUNTER = Counter(
     "global_store_replica_unregister_total",
     "Total number of model replicas unregistered/deleted.",
-    labelnames=("model_name", "memory_type"),
+    labelnames=("model_id", "memory_type"),
 )
 
 # Per-model replica gauge – allows tracking of hot models.
 MODEL_REPLICA_PER_MODEL_GAUGE = Gauge(
     "global_store_model_replicas_per_model",
-    "Current number of replicas per model name.",
-    labelnames=("model_name",),
+    "Current number of replicas per model (content-addressed model_id).",
+    labelnames=("model_id",),
 )
 
 # Per-memory-type gauge – GPU/RAM/DISK spread.
@@ -106,13 +106,13 @@ MODEL_REPLICA_PER_MEMTYPE_GAUGE = Gauge(
 TRANSPORT_REQUEST_COUNTER = Counter(
     "global_store_transport_requests_total",
     "Total number of transport requests processed by the Global Store.",
-    labelnames=("model_name", "status"),  # status=success|timeout|error
+    labelnames=("model_id", "status"),  # status=success|timeout|error
 )
 
 TRANSPORT_WAIT_SECONDS = Histogram(
     "global_store_transport_wait_seconds",
     "Time spent waiting for an available replica during transport request.",
-    labelnames=("model_name",),
+    labelnames=("model_id",),
     buckets=(
         0.0,
         0.05,
@@ -179,26 +179,22 @@ def set_model_replicas(count: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def inc_replica_register(model_name: str, memory_type: str) -> None:
+def inc_replica_register(model_id: str, memory_type: str) -> None:
     """Increment the replica register counter and update per-model gauges."""
 
-    REPLICA_REGISTER_COUNTER.labels(
-        model_name=model_name, memory_type=memory_type
-    ).inc()
+    REPLICA_REGISTER_COUNTER.labels(model_id=model_id, memory_type=memory_type).inc()
 
 
-def inc_replica_unregister(model_name: str, memory_type: str) -> None:
+def inc_replica_unregister(model_id: str, memory_type: str) -> None:
     """Increment the replica unregister counter."""
 
-    REPLICA_UNREGISTER_COUNTER.labels(
-        model_name=model_name, memory_type=memory_type
-    ).inc()
+    REPLICA_UNREGISTER_COUNTER.labels(model_id=model_id, memory_type=memory_type).inc()
 
 
-def set_replicas_per_model(model_name: str, count: int) -> None:
+def set_replicas_per_model(model_id: str, count: int) -> None:
     """Set per-model replica gauge."""
 
-    MODEL_REPLICA_PER_MODEL_GAUGE.labels(model_name=model_name).set(count)
+    MODEL_REPLICA_PER_MODEL_GAUGE.labels(model_id=model_id).set(count)
 
 
 def set_replicas_per_memtype(memory_type: str, count: int) -> None:
@@ -212,16 +208,16 @@ def set_replicas_per_memtype(memory_type: str, count: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def inc_transport_request(model_name: str, status: str) -> None:
+def inc_transport_request(model_id: str, status: str) -> None:
     """Increment transport request counter with *status*."""
 
-    TRANSPORT_REQUEST_COUNTER.labels(model_name=model_name, status=status).inc()
+    TRANSPORT_REQUEST_COUNTER.labels(model_id=model_id, status=status).inc()
 
 
-def observe_transport_wait(model_name: str, wait_seconds: float) -> None:
+def observe_transport_wait(model_id: str, wait_seconds: float) -> None:
     """Record *wait_seconds* into histogram."""
 
-    TRANSPORT_WAIT_SECONDS.labels(model_name=model_name).observe(wait_seconds)
+    TRANSPORT_WAIT_SECONDS.labels(model_id=model_id).observe(wait_seconds)
 
 
 def inc_active_transports() -> None:

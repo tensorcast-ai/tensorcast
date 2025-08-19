@@ -126,22 +126,22 @@ class MockGlobalModelStoreStub : public GlobalModelStore::StubInterface {
           const ::global_store::ListModelReplicasRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      GetModelInfo,
+      GetModelInfoById,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest& request,
-          ::global_store::GetModelInfoResponse* response));
+          const ::global_store::GetModelInfoByIdRequest& request,
+          ::global_store::GetModelInfoByIdResponse* response));
   MOCK_METHOD3(
-      AsyncGetModelInfoRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>*(
+      AsyncGetModelInfoByIdRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest& request,
+          const ::global_store::GetModelInfoByIdRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncGetModelInfoRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>*(
+      PrepareAsyncGetModelInfoByIdRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest& request,
+          const ::global_store::GetModelInfoByIdRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
       GetModelIndex,

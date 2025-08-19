@@ -258,7 +258,7 @@ class DaemonCtl:
     ) -> dict:
         """Commit a previously begun tensor dict registration.
 
-        Returns a dict with keys: registration_id, model_id, device_id, size_bytes.
+        Returns a dict with keys: registration_id, model_id, device_id, size_bytes, descriptor.
         """
 
         if not registration_id:
@@ -283,11 +283,22 @@ class DaemonCtl:
                 raise TimeoutError(str(e)) from e
             raise RuntimeError(f"CommitRegisteredTensorDict failed: {e}") from e
 
+        desc = resp.descriptor
+        assert desc is not None
+        descriptor_dict = {
+            "model_id": desc.model_id,
+            "index_multihash": desc.index_multihash,
+            "data_multihash": desc.data_multihash,
+            "schema_version": desc.schema_version,
+            "encoding": desc.encoding,
+            "total_size": int(desc.total_size),
+        }
         return {
             "registration_id": resp.registration_id,
             "model_id": resp.model_id,
             "device_id": int(resp.device_id),
             "size_bytes": int(resp.size),
+            "descriptor": descriptor_dict,
         }
 
     def abort_registered_tensor_dict(

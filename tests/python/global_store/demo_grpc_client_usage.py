@@ -21,7 +21,7 @@ from scstore.global_store.webui_backend.grpc_client import (
     GlobalStoreClientConfig,
 )
 from scstore.proto import global_store_pb2, global_store_pb2_grpc
-from tests.python.global_store.test_grpc_client import TestGlobalModelStoreServicer
+from tests.python.global_store.test_grpc_client import MockGlobalModelStoreServicer
 
 
 async def demo_basic_usage():
@@ -30,7 +30,7 @@ async def demo_basic_usage():
 
     # 1. Start test server
     print("1. Starting test gRPC server...")
-    servicer = TestGlobalModelStoreServicer()
+    servicer = MockGlobalModelStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
@@ -61,18 +61,18 @@ async def demo_basic_usage():
 
     # List model replicas
     print("\n   b) List model replicas:")
-    replicas = await client.list_model_replicas()
-    for model_name, replica_list in replicas.items():
-        print(f"      - {model_name}: {len(replica_list)} replicas")
+    replicas_by_model = await client.list_model_replicas()
+    for model_id, replica_list in replicas_by_model.items():
+        print(f"      - {model_id}: {len(replica_list)} replicas")
         for r in replica_list:
             mem_type = ["GPU", "RAM", "DISK"][r.memory_type]
             print(f"        • {mem_type} on {r.node_id}")
 
     # Get model info
     print("\n   c) Get model info:")
-    model_info = await client.get_model_info("model-1")
-    if model_info:
-        print(f"      - {model_info.model_name}: {len(model_info.available_replicas)} available replicas")
+    model_replicas = await client.get_model_info("model-1")
+    if model_replicas is not None:
+        print(f"      - model-1: {len(model_replicas)} available replicas")
 
     # Get summary
     print("\n   d) Get summary statistics:")
@@ -93,7 +93,7 @@ async def demo_error_handling():
     print("=== Error Handling Demo ===\n")
 
     # Start server
-    servicer = TestGlobalModelStoreServicer()
+    servicer = MockGlobalModelStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
@@ -135,7 +135,7 @@ async def demo_concurrent_usage():
     print("=== Concurrent Usage Demo ===\n")
 
     # Start server
-    servicer = TestGlobalModelStoreServicer()
+    servicer = MockGlobalModelStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=20))
     global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')

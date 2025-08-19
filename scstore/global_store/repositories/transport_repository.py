@@ -33,16 +33,17 @@ class TransportRepository(BaseRepository):
         cursor.execute(
             """
             INSERT INTO model_transports (
-                transport_id, replica_id, model_name,
+                transport_id, replica_id, model_id, disk_path,
                 source_node_id, source_address, source_port,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
-                transport.model_name,
+                transport.model_id,
+                transport.disk_path,
                 transport.source_node_id,
                 transport.source_address,
                 transport.source_port,
@@ -57,16 +58,17 @@ class TransportRepository(BaseRepository):
         cursor.execute(
             """
             INSERT INTO model_transports (
-                transport_id, replica_id, model_name,
+                transport_id, replica_id, model_id, disk_path,
                 source_node_id, source_address, source_port,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
-                transport.model_name,
+                transport.model_id,
+                transport.disk_path,
                 transport.source_node_id,
                 transport.source_address,
                 transport.source_port,
@@ -170,11 +172,12 @@ class TransportRepository(BaseRepository):
         return Transport(
             transport_id=transport_id,
             replica_id=replica_id,
-            model_name=row[2],
-            source_node_id=row[3],
-            source_address=row[4],
-            source_port=row[5],
-            created_at=row[6],
-            completed_at=row[7] if len(row) > 7 else None,
-            status=row[8] if len(row) > 8 else "in_progress",
+            model_id=row[2],
+            disk_path=row[3],
+            source_node_id=row[4],
+            source_address=row[5],
+            source_port=row[6],
+            created_at=row[7],
+            completed_at=row[8] if len(row) > 8 else None,
+            status=row[9] if len(row) > 9 else "in_progress",
         )

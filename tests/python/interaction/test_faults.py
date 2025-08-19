@@ -14,7 +14,7 @@ from tests.python.interaction.fakes.fake_p2p import FakeP2PNetwork
 # Helper utilities
 # -----------------------------------------------------------------------------
 
-def _register_single_gpu_replica(gs, model_name: str, replica_id: str, *, max_concurrency: int = 1):
+def _register_single_gpu_replica(gs, model_id: str, replica_id: str, *, max_concurrency: int = 1):
     """Register a worker and single GPU replica for testing."""
 
     # 1) Register worker first so replica is considered available
@@ -40,7 +40,7 @@ def _register_single_gpu_replica(gs, model_name: str, replica_id: str, *, max_co
         device_id=0,
     )
     req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model_name,
+        model_id=model_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -58,19 +58,19 @@ def test_transport_failure_keeps_counter(global_store_service):
     """Scenario 6 – transport fails, counter remains incremented and new request times-out."""
 
     gs = global_store_service
-    model_name = "phi2-1.7b"
+    model_id = "phi2-1.7b"
 
     # 1. Register single replica with capacity 1
-    _register_single_gpu_replica(gs, model_name, replica_id="R_FAIL", max_concurrency=1)
+    _register_single_gpu_replica(gs, model_id, replica_id="R_FAIL", max_concurrency=1)
 
     # 2. First transport allocation succeeds
-    req_ok = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model_name)
+    req_ok = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model_id)
     resp_ok = gs.RequestModelReplicaTransport(req_ok, FakeContext())
     assert resp_ok.status == global_store_pb2.Status.OK
 
     # 3. Immediately request another transport – should time-out because capacity is saturated
     req_to = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_name=model_name, wait_timeout_ms=5
+        model_id=model_id, wait_timeout_ms=5
     )
     start = time.perf_counter()
     resp_to = gs.RequestModelReplicaTransport(req_to, FakeContext())
@@ -81,7 +81,7 @@ def test_transport_failure_keeps_counter(global_store_service):
     assert elapsed_ms >= 4
 
     # Internal counter should still be 1 (because CompleteTransport not called)
-    replica = gs.model_replica_repository.find_by_model(model_name)[0]
+    replica = gs.model_replica_repository.find_by_model(model_id)[0]
     assert replica.current_requests == 1
 
     # Clean-up: complete the lingering transport so that other tests are unaffected
@@ -99,7 +99,7 @@ def test_complete_transport_with_invalid_id_returns_not_found(global_store_servi
     _register_single_gpu_replica(gs, model, replica_id="R1", max_concurrency=2)
 
     # Acquire a real transport first (sanity)
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model)
+    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
     resp = gs.RequestModelReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 

@@ -60,7 +60,7 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
         # Generate model replicas
         self.replicas = {}
         for i in range(num_models):
-            model_name = f"model-{i}"
+            model_id = f"model-{i}"
             replicas = []
 
             # Each model has 1-5 replicas
@@ -85,7 +85,7 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
                     )
                 )
 
-            self.replicas[model_name] = replicas
+            self.replicas[model_id] = replicas
 
 
 async def measure_latency(

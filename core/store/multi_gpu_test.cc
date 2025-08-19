@@ -42,7 +42,10 @@ TEST_CASE("B1: Same model on multiple GPUs", "[checkpoint_store][multi_gpu][b1]"
   // Load model to each GPU
   std::vector<ModelHandle> handles;
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    auto handle_or = store->prepare(model_id, make_gpu_key(gpu));
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle_or = store->prepare(make_gpu_key(gpu), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(handle_or.ok());
     handles.push_back(std::move(handle_or).value());
   }
@@ -129,10 +132,15 @@ TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
   auto store = make_test_store(fixture.root());
 
   // First load to GPU 0
-  auto handle0_or = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY);
-  REQUIRE(handle0_or.ok());
-  auto handle0 = std::move(handle0_or).value();
-  REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle0_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(handle0_or.ok());
+    auto handle0 = std::move(handle0_or).value();
+    REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
+  }
 
   // Verify loaded on GPU 0
   auto loaded_devices = store->get_loaded_devices(model_id);
@@ -141,10 +149,14 @@ TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
 
   // Now copy to GPU 1 using COPY_ONLY (GPU-to-GPU transfer enforced).
   auto copy_start = std::chrono::high_resolution_clock::now();
-  auto handle1_or = store->prepare(model_id, make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY);
-  REQUIRE(handle1_or.ok());
-  auto handle1 = std::move(handle1_or).value();
-  REQUIRE(handle1.wait_ready(std::chrono::milliseconds(30000)).ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    auto handle1_or = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    REQUIRE(handle1_or.ok());
+    auto handle1 = std::move(handle1_or).value();
+    REQUIRE(handle1.wait_ready(std::chrono::milliseconds(30000)).ok());
+  }
   auto copy_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - copy_start);
 
@@ -224,7 +236,9 @@ TEST_CASE("B4: Multi-GPU load balancing", "[checkpoint_store][multi_gpu][b4]") {
   // Load models with round-robin distribution
   for (size_t i = 0; i < model_ids.size(); ++i) {
     int target_gpu = i % gpu_count;
-    auto handle_or = store->prepare(model_ids[i], make_gpu_key(target_gpu));
+    stepcast::store::LoadingHints hints;
+    hints.disk_path = model_ids[i];
+    auto handle_or = store->prepare(make_gpu_key(target_gpu), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       REQUIRE(handle_or.value().wait_ready(std::chrono::milliseconds(30000)).ok());
     }
@@ -265,8 +279,11 @@ TEST_CASE("B5: Device-specific operations", "[checkpoint_store][multi_gpu][b5]")
   auto store = make_test_store(fixture.root());
 
   // Load to both GPU 0 and GPU 1
-  auto handle0 = store->prepare(model_id, make_gpu_key(0));
-  auto handle1 = store->prepare(model_id, make_gpu_key(1));
+  stepcast::store::LoadingHints hints;
+
+  hints.disk_path = model_id;
+  auto handle0 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle1 = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
 
   REQUIRE(handle0.ok());
   REQUIRE(handle1.ok());

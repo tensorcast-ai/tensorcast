@@ -57,7 +57,7 @@ def _register_replica(gs, *, model: str, replica_id: str, capacity: int = 1):
         device_id=0,
     )
     rep_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model,
+        model_id=model,
         mem_info=mem_info,
         max_concurrency=capacity,
         worker_id=w_resp.worker_id,
@@ -89,7 +89,7 @@ def test_metrics_consistency(global_store_service):
     _register_replica(gs, model=model, replica_id="METRIC", capacity=1)
 
     # ---- Acquire first transport ----
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model)
+    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
     resp = gs.RequestModelReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 
@@ -98,15 +98,15 @@ def test_metrics_consistency(global_store_service):
 
     # ---- Acquire second request with wait_timeout so that it times out ----
     to_req = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_name=model,
+        model_id=model,
         wait_timeout_ms=5,
     )
     to_resp = gs.RequestModelReplicaTransport(to_req, FakeContext())
     assert to_resp.status == global_store_pb2.Status.TIMED_OUT
 
     # Counter check
-    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_name=model, status="success") == 1
-    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_name=model, status="timeout") == 1
+    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_id=model, status="success") == 1
+    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_id=model, status="timeout") == 1
 
     # ---- Complete first transport ----
     comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(
@@ -126,6 +126,6 @@ def test_metrics_consistency(global_store_service):
     hist_count = next(
         s.value
         for s in samples
-        if s.name.endswith("_count") and s.labels.get("model_name") == model
+        if s.name.endswith("_count") and s.labels.get("model_id") == model
     )
     assert hist_count >= 2

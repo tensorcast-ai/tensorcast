@@ -36,7 +36,7 @@ static CheckpointStore make_store(
 }
 
 static DeviceKey make_gpu_key(int ordinal) {
-  return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
+  return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
 }
 
 TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint_store][memory-registration]") {
@@ -60,7 +60,8 @@ TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint
 
   CheckpointStore::TensorDictRegistration reg;
   reg.model_id = model_id;
-  reg.tensor_index_key = "0123456789abcdef"; // any non-empty hex string
+  // RFC-0007: tensor_index_key must be a 32-byte sha256 hex string (64 hex chars)
+  reg.tensor_index_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   reg.device_id = 0;
   reg.total_size_bytes = size_bytes;
   reg.enable_p2p = false; // no comm manager in this test
@@ -78,7 +79,11 @@ TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint
   REQUIRE(commit_or.ok());
   auto commit = commit_or.value();
   REQUIRE(commit.registration_id == begin.registration_id);
-  REQUIRE(commit.model_id == model_id);
+  // RFC-0007: Commit returns content-addressed model_id (mi2:<index_mh>:<data_mh>)
+  REQUIRE(commit.model_id.rfind("mi2:", 0) == 0);
+  REQUIRE_FALSE(commit.index_multihash.empty());
+  REQUIRE_FALSE(commit.data_multihash.empty());
+  REQUIRE(commit.model_id == (std::string("mi2:") + commit.index_multihash + ":" + commit.data_multihash));
   REQUIRE(commit.device_id == 0);
   REQUIRE(commit.size_bytes == size_bytes);
 
@@ -117,7 +122,8 @@ TEST_CASE("Memory TensorDict registration: abort releases allocation", "[checkpo
 
   CheckpointStore::TensorDictRegistration reg;
   reg.model_id = model_id;
-  reg.tensor_index_key = "deadbeef";
+  // Use a valid 64-hex digest placeholder
+  reg.tensor_index_key = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
   reg.device_id = 0;
   reg.total_size_bytes = size_bytes;
 
@@ -166,7 +172,8 @@ TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[checkp
 
   CheckpointStore::TensorDictRegistration reg;
   reg.model_id = model_id;
-  reg.tensor_index_key = "0123";
+  // Use a valid 64-hex digest placeholder
+  reg.tensor_index_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
   reg.device_id = 0;
   reg.total_size_bytes = size_bytes;
   reg.ttl_ms = 5; // expire quickly
@@ -264,7 +271,8 @@ TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[ch
 
   CheckpointStore::TensorDictRegistration reg;
   reg.model_id = model_id;
-  reg.tensor_index_key = "0011";
+  // Use a valid 64-hex digest placeholder
+  reg.tensor_index_key = "0011001100110011001100110011001100110011001100110011001100110011";
   reg.device_id = 0;
   reg.total_size_bytes = size_bytes;
 

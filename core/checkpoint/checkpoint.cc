@@ -257,8 +257,9 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     file_paths.push_back(p);
     data_lengths.push_back(sz);
     declared_total += sz;
-    if (p.filename() == "tensor.data")
+    if (p.filename() == "tensor.data") {
       break;
+    }
   }
 
   if (file_paths.empty()) {
@@ -379,7 +380,8 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
       if (!header_info.ok()) {
         ::munmap(addr, bytes_to_map);
         ::close(fd);
-        LOG(FATAL) << "Failed to parse safetensors header while mapping " << path.string() << ": " << header_info.status();
+        LOG(FATAL) << "Failed to parse safetensors header while mapping " << path.string() << ": "
+                   << header_info.status();
       }
       char* payload_ptr = static_cast<char*>(addr) + header_info->data_start;
       data_ptrs.push_back(static_cast<void*>(payload_ptr));

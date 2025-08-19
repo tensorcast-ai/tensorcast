@@ -27,7 +27,7 @@ def test_request_timeout_raises(global_store_service):
         # Craft a request that is guaranteed to wait because the model name has
         # *no* registered replicas.
         req = global_store_pb2.RequestModelReplicaTransportRequest(
-            model_name="non_existent_model",
+            model_id="non_existent_model",
             wait_timeout_ms=200,  # Server will loop for ~200ms then respond TIMED_OUT
         )
 

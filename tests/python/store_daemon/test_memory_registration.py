@@ -77,13 +77,18 @@ def test_begin_commit_abort_memory_registration(servicer):
     # Ensure minimal model directory/files exist to satisfy Model::create checks
     _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_model", 1 * 1024 * 1024)
 
-    # Begin with key path
+    # Begin with index data path to ensure deterministic index hashing
+    idx = store_daemon_pb2.TensorIndexData(
+        data=b"{}",
+        schema_version="v2",
+        encoding="json",
+    )
     req = store_daemon_pb2.BeginRegisterTensorDictRequest(
         model_id="py_mem_model",
         device_id=0,
         total_size=1 * 1024 * 1024,
         enable_p2p=False,
-        tensor_index_key="012345",
+        tensor_index_data=idx,
     )
     resp = servicer.BeginRegisterTensorDict(req, ctx)
     assert ctx.code is None
@@ -99,7 +104,13 @@ def test_begin_commit_abort_memory_registration(servicer):
     )
     assert ctx.code is None
     assert c_resp.registration_id == resp.registration_id
-    assert c_resp.model_id == "py_mem_model"
+    # Enforce content addressing (mi2) per RFC-0007
+    assert c_resp.model_id.startswith("mi2:")
+    assert c_resp.descriptor.model_id == c_resp.model_id
+    # Multihashes must be populated under content-addressing
+    assert c_resp.descriptor.index_multihash != ""
+    assert c_resp.descriptor.data_multihash != ""
+    assert c_resp.descriptor.total_size == c_resp.size
     assert c_resp.device_id == 0
     assert c_resp.size == 1 * 1024 * 1024
 

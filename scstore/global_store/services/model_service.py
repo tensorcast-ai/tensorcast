@@ -38,8 +38,8 @@ class ModelService:
             Registered or updated replica
         """
         # Validate replica
-        if not replica.model_name:
-            raise ValidationError("Model name is required")
+        if not replica.model_id:
+            raise ValidationError("model_id is required")
         if not replica.node_id:
             raise ValidationError("Node ID is required")
         if not replica.worker_id:
@@ -68,37 +68,37 @@ class ModelService:
             result = self.replica_repository.create_or_update_atomic(replica, cursor)
 
             # Update metrics after successful transaction
-            inc_replica_register(result.model_name, result.memory_type.value)
+            inc_replica_register(result.model_id, result.memory_type.value)
 
         # Update gauges outside transaction to avoid lock contention
         self._update_replica_gauges()
 
-        logger.info(f"Registered replica {result.replica_id} for {replica.model_name}")
+        logger.info(f"Registered replica {result.replica_id} for {replica.model_id}")
         return result
 
-    def update_heartbeat(self, replica_id: UUID, model_name: str) -> bool:
+    def update_heartbeat(self, replica_id: UUID, model_id: str) -> bool:
         """Update replica heartbeat timestamp."""
-        success = self.replica_repository.update_heartbeat(replica_id, model_name)
+        success = self.replica_repository.update_heartbeat(replica_id, model_id)
         if not success:
             logger.warning(f"Failed to update heartbeat for replica {replica_id}")
         return success
 
-    def unregister_replica(self, replica_id: UUID, model_name: str) -> bool:
+    def unregister_replica(self, replica_id: UUID, model_id: str) -> bool:
         """Unregister a model replica."""
-        success = self.replica_repository.delete(replica_id, model_name)
+        success = self.replica_repository.delete(replica_id, model_id)
         if success:
-            logger.info(f"Unregistered replica {replica_id} for {model_name}")
+            logger.info(f"Unregistered replica {replica_id} for {model_id}")
             # Metrics
             # We don't have memory_type here. Fetching is expensive; skip label.
-            inc_replica_unregister(model_name, "unknown")
+            inc_replica_unregister(model_id, "unknown")
             self._update_replica_gauges()
         else:
             logger.warning(f"Failed to unregister replica {replica_id}")
         return success
 
-    def get_model_replicas(self, model_name: str) -> List[ModelReplica]:
+    def get_model_replicas(self, model_id: str) -> List[ModelReplica]:
         """Get all available replicas for a model."""
-        replicas = self.replica_repository.find_by_filters(model_name=model_name)
+        replicas = self.replica_repository.find_by_filters(model_id=model_id)
 
         # Filter only available replicas
         available = [r for r in replicas if r.is_available]
@@ -121,13 +121,13 @@ class ModelService:
 
     def list_replicas(
         self,
-        model_name: Optional[str] = None,
+        model_id: Optional[str] = None,
         node_id: Optional[str] = None,
         memory_type: Optional[MemoryType] = None,
     ) -> List[ModelReplica]:
         """List replicas with optional filters."""
         return self.replica_repository.find_by_filters(
-            model_name=model_name,
+            model_id=model_id,
             node_id=node_id,
             memory_type=memory_type,
         )
@@ -154,13 +154,13 @@ class ModelService:
         per_memtype: dict[str, int] = {}
 
         for rep in replicas:
-            per_model[rep.model_name] = per_model.get(rep.model_name, 0) + 1
+            per_model[rep.model_id] = per_model.get(rep.model_id, 0) + 1
             per_memtype[rep.memory_type.value] = (
                 per_memtype.get(rep.memory_type.value, 0) + 1
             )
 
-        for model_name, count in per_model.items():
-            set_replicas_per_model(model_name, count)
+        for model_id, count in per_model.items():
+            set_replicas_per_model(model_id, count)
 
         for memtype, count in per_memtype.items():
             set_replicas_per_memtype(memtype, count)

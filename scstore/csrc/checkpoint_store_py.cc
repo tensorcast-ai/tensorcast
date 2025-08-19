@@ -202,7 +202,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(
           "prepare",
           [](CheckpointStore& cs,
-             const std::string& model_id,
              const py::object& target_device_obj,
              CheckpointStore::PrepareMode mode,
              const py::kwargs& kwargs) {
@@ -242,11 +241,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 hints.pinned_timeout = std::chrono::milliseconds(t);
               }
             }
+            if (kwargs.contains("model_id") && !kwargs["model_id"].is_none()) {
+              hints.model_id = kwargs["model_id"].cast<std::string>();
+            }
+            if (kwargs.contains("disk_path") && !kwargs["disk_path"].is_none()) {
+              hints.disk_path = kwargs["disk_path"].cast<std::string>();
+            }
 
             absl::StatusOr<ModelHandle> h_or;
             {
               py::gil_scoped_release release;
-              h_or = cs.prepare(model_id, dev_key, mode, hints);
+              h_or = cs.prepare(dev_key, mode, hints);
             }
             if (!h_or.ok()) {
               PyErr_SetString(PyExc_RuntimeError, h_or.status().ToString().c_str());
@@ -254,7 +259,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
             return h_or.value();
           },
-          py::arg("model_id"),
           py::arg("target_device") = std::string("gpu:0"),
           py::arg("mode") = CheckpointStore::PrepareMode::AUTO,
           "Prepare a model instance on the specified device and return a ModelHandle.")
@@ -446,6 +450,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             d["model_id"] = r.model_id;
             d["device_id"] = r.device_id;
             d["size_bytes"] = r.size_bytes;
+            // RFC-0007: include descriptor components for callers
+            d["index_multihash"] = r.index_multihash;
+            d["data_multihash"] = r.data_multihash;
+            d["schema_version"] = r.schema_version;
+            d["encoding"] = r.encoding;
             return d;
           },
           py::arg("registration_id"),

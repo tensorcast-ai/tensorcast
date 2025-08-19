@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
@@ -192,6 +193,42 @@ absl::Status DiskLoader::initialize() {
   for (const auto& [path, size] : path_size_pairs) {
     partition_paths_.push_back(path);
     partition_sizes_.push_back(size);
+  }
+
+  // RFC-0007: For standard partition format, require descriptor and index presence
+  // (model_descriptor.json + tensor_index.(json|cbor)). Safetensors is exempt (may be backfilled later).
+  if (!partition_paths_.empty()) {
+    const auto first_name = partition_paths_[0].filename().string();
+    const std::string st_ext = ".safetensors";
+    const bool is_safetensors =
+        first_name.size() >= st_ext.size() && first_name.rfind(st_ext) == first_name.size() - st_ext.size();
+    if (!is_safetensors) {
+      const auto descriptor_path = model_dir / "model_descriptor.json";
+      const auto index_json_path = model_dir / "tensor_index.json";
+      const auto index_cbor_path = model_dir / "tensor_index.cbor";
+
+      if (!std::filesystem::exists(descriptor_path) ||
+          (!std::filesystem::exists(index_json_path) && !std::filesystem::exists(index_cbor_path))) {
+        return absl::FailedPreconditionError(
+            "MODEL_DESCRIPTOR_REQUIRED: missing model_descriptor.json or tensor_index.(json|cbor)");
+      }
+
+      // Basic validation of descriptor JSON using nlohmann/json
+      try {
+        std::ifstream f(descriptor_path);
+        if (!f.is_open()) {
+          return absl::FailedPreconditionError("MODEL_DESCRIPTOR_REQUIRED: cannot open model_descriptor.json");
+        }
+        nlohmann::json j;
+        f >> j;
+        if (!j.contains("model_id") || !j.contains("index_multihash") || !j.contains("data_multihash")) {
+          return absl::InvalidArgumentError(
+              "Invalid model_descriptor.json: missing required fields (model_id, index_multihash, data_multihash)");
+        }
+      } catch (const std::exception& e) {
+        return absl::InvalidArgumentError(absl::StrFormat("Failed to parse model_descriptor.json: %s", e.what()));
+      }
+    }
   }
 
   // Try to load verification info

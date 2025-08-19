@@ -917,11 +917,21 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             result = self.checkpoint_store.commit_registered_tensor_dict(
                 request.registration_id
             )
+            # Build descriptor from returned dict
+            desc = store_daemon_pb2.ModelDescriptor(
+                model_id=str(result["model_id"]),
+                index_multihash=str(result.get("index_multihash", "")),
+                data_multihash=str(result.get("data_multihash", "")),
+                schema_version=str(result.get("schema_version", "")),
+                encoding=str(result.get("encoding", "")),
+                total_size=int(result.get("size_bytes", 0)),
+            )
             return store_daemon_pb2.CommitRegisteredTensorDictResponse(
                 registration_id=str(result["registration_id"]),
                 model_id=str(result["model_id"]),
                 device_id=int(result["device_id"]),
                 size=int(result["size_bytes"]),
+                descriptor=desc,
             )
         except ValueError as e:
             logger.exception(

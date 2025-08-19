@@ -57,7 +57,7 @@ class ReplicaOut(BaseModel):
     """Model replica output model."""
 
     replica_id: str
-    model_name: str
+    model_id: str
     node_id: str
     node_address: str
     node_port: int
@@ -76,7 +76,7 @@ class ReplicaOut(BaseModel):
 class ModelSummary(BaseModel):
     """Model summary information."""
 
-    model_name: str
+    model_id: str
     total_replicas: int
     available_replicas: int
     gpu_replicas: int
@@ -103,7 +103,7 @@ class TransportOut(BaseModel):
 
     transport_id: str
     replica_id: str
-    model_name: str
+    model_id: str
     source_node_id: str
     source_address: str
     source_port: int
@@ -138,7 +138,7 @@ class ListWorkersRequest(BaseModel):
 class ListReplicasRequest(BaseModel):
     """List replicas request parameters."""
 
-    model_name: str | None = None
+    model_id: str | None = None
     node_id: str | None = None
     memory_type: MemoryType | None = None
     worker_id: str | None = None
@@ -150,7 +150,7 @@ class ListTransportsRequest(BaseModel):
     """List transports request parameters."""
 
     status: str | None = None
-    model_name: str | None = None
+    model_id: str | None = None
     page: int = Field(1, ge=1)
     page_size: int = Field(50, ge=1, le=1000)
 

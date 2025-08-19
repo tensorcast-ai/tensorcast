@@ -70,7 +70,7 @@ const Dashboard = () => {
 
   // Prepare chart data
   const replicaDistribution = models?.slice(0, 10).map((model: ModelSummary) => ({
-    name: model.model_name,
+    name: model.model_id,
     gpu: model.gpu_replicas,
     ram: model.ram_replicas,
     disk: model.disk_replicas,

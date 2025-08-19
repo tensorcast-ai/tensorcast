@@ -58,14 +58,14 @@ class TestConcurrency:
 
     def test_concurrent_replica_registrations(self, services):
         """Test multiple replicas registering for the same model simultaneously."""
-        model_name = "concurrent_test_model"
+        model_id = "concurrent_test_model"
         num_replicas = 20
         replicas = []
 
         # Create unique replicas for the same model
         for i in range(num_replicas):
             replicas.append(ModelReplica(
-                model_name=model_name,
+                model_id=model_id,
                 node_id=f"node_replica_{i}",
                 node_address=f"192.168.{100 + i // 255}.{i % 255 + 1}",
                 node_port=30000 + i,
@@ -96,12 +96,12 @@ class TestConcurrency:
         assert len(results) >= num_replicas * 0.8  # At least 80% success rate
 
         # Verify replicas are in the system
-        registered_replicas = services["model"].list_replicas(model_name=model_name)
+        registered_replicas = services["model"].list_replicas(model_id=model_id)
         assert len(registered_replicas) > 0
 
     def test_concurrent_transport_requests(self, services, repositories):
         """Test multiple transport requests for the same model."""
-        model_name = "transport_test_model"
+        model_id = "transport_test_model"
 
         # First register workers
         worker_ids = []
@@ -121,7 +121,7 @@ class TestConcurrency:
         # Create multiple replicas with limited concurrency
         for i in range(5):
             replica = ModelReplica(
-                model_name=model_name,
+                model_id=model_id,
                 node_id=f"transport_node_{i}",
                 node_address=f"192.168.200.{i+1}",
                 node_port=35000 + i,
@@ -138,10 +138,10 @@ class TestConcurrency:
         for i in range(5):
             repositories["replica"].update_heartbeat(
                 replica_id=repositories["replica"].find_by_filters(
-                    model_name=model_name,
+                    model_id=model_id,
                     node_id=f"transport_node_{i}"
                 )[0].replica_id,
-                model_name=model_name
+                model_id=model_id
             )
 
         # Request transports concurrently (more than total capacity)
@@ -152,7 +152,7 @@ class TestConcurrency:
         def request_transport(request_id):
             try:
                 replica, transport_id = services["transport"].request_transport(
-                    model_name=model_name,
+                    model_id=model_id,
                     source_node_id=f"source_{request_id}",
                     source_address="192.168.201.1",
                     source_port=36000 + request_id,
@@ -258,7 +258,7 @@ class TestConcurrency:
 
     def test_replica_concurrency_limits(self, services, repositories):
         """Test that replica concurrency limits are properly enforced."""
-        model_name = "concurrency_limit_model"
+        model_id = "concurrency_limit_model"
         max_concurrency = 3
 
         # First register a worker
@@ -276,7 +276,7 @@ class TestConcurrency:
 
         # Create a single replica with limited concurrency
         replica = ModelReplica(
-            model_name=model_name,
+            model_id=model_id,
             node_id="limit_node",
             node_address="192.168.220.1",
             node_port=39000,
@@ -292,7 +292,7 @@ class TestConcurrency:
         # Update heartbeat to make it available
         repositories["replica"].update_heartbeat(
             replica_id=created_replica.replica_id,
-            model_name=model_name
+            model_id=model_id
         )
 
         # Request more transports than max_concurrency
@@ -303,7 +303,7 @@ class TestConcurrency:
         def request_with_timeout(i):
             try:
                 _, transport_id = services["transport"].request_transport(
-                    model_name=model_name,
+                    model_id=model_id,
                     source_node_id=f"source_{i}",
                     source_address="192.168.221.1",
                     source_port=40000 + i,
@@ -333,12 +333,12 @@ class TestConcurrency:
 
     def test_concurrent_model_updates(self, services):
         """Test concurrent updates to the same model from different nodes."""
-        model_name = "update_test_model"
+        model_id = "update_test_model"
         num_updates = 20
 
         # Create initial replica
         initial_replica = ModelReplica(
-            model_name=model_name,
+            model_id=model_id,
             node_id="update_node_0",
             node_address="192.168.230.1",
             node_port=41000,
@@ -351,7 +351,7 @@ class TestConcurrency:
         # Concurrently update from different nodes
         def update_replica(i):
             replica = ModelReplica(
-                model_name=model_name,
+                model_id=model_id,
                 node_id="update_node_0",  # Same node
                 node_address="192.168.230.1",
                 node_port=41000,
@@ -374,7 +374,7 @@ class TestConcurrency:
         assert len(successful_updates) > 0
 
         # Final state should be consistent
-        final_replicas = services["model"].list_replicas(model_name=model_name)
+        final_replicas = services["model"].list_replicas(model_id=model_id)
         assert len(final_replicas) == 1  # Should still be just one replica
 
     def test_database_connection_pool_stress(self, repositories):
@@ -412,7 +412,7 @@ class TestRaceConditions:
 
     def test_transport_complete_race(self, services, repositories):
         """Test race condition when completing transport while new requests arrive."""
-        model_name = "race_test_model"
+        model_id = "race_test_model"
 
         # First register a worker
         worker = Worker(
@@ -429,7 +429,7 @@ class TestRaceConditions:
 
         # Create a replica with concurrency = 1
         replica = ModelReplica(
-            model_name=model_name,
+            model_id=model_id,
             node_id="race_node",
             node_address="192.168.240.1",
             node_port=42000,
@@ -445,12 +445,12 @@ class TestRaceConditions:
         # Update heartbeat to make it available
         repositories["replica"].update_heartbeat(
             replica_id=created_replica.replica_id,
-            model_name=model_name
+            model_id=model_id
         )
 
         # Get initial transport
         _, transport_id = services["transport"].request_transport(
-            model_name=model_name,
+            model_id=model_id,
             source_node_id="source_1",
             source_address="192.168.241.1",
             source_port=43000,
@@ -471,7 +471,7 @@ class TestRaceConditions:
             nonlocal new_transport_id, error
             try:
                 _, new_id = services["transport"].request_transport(
-                    model_name=model_name,
+                    model_id=model_id,
                     source_node_id="source_2",
                     source_address="192.168.241.2",
                     source_port=43001,
@@ -515,7 +515,7 @@ class TestRaceConditions:
         replica_ids = []
         for i in range(5):
             replica = ModelReplica(
-                model_name=f"unregister_model_{i}",
+                model_id=f"unregister_model_{i}",
                 node_id="unregister_node",
                 node_address="192.168.250.1",
                 node_port=45000 + i,
@@ -536,7 +536,7 @@ class TestRaceConditions:
                 try:
                     for i in range(5):
                         replicas = services["model"].list_replicas(
-                            model_name=f"unregister_model_{i}"
+                            model_id=f"unregister_model_{i}"
                         )
                         time.sleep(0.01)
                 except Exception as e:
@@ -557,7 +557,7 @@ class TestRaceConditions:
         # Verify replicas are marked unavailable
         for i in range(5):
             replicas = services["model"].list_replicas(
-                model_name=f"unregister_model_{i}"
+                model_id=f"unregister_model_{i}"
             )
             if replicas:  # Some might have been cleaned up
                 assert not replicas[0].is_available

@@ -44,6 +44,9 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   REQUIRE(create_dummy_file(path0, size0, 'S'));
   REQUIRE(create_dummy_file(path1, size1, 'T'));
 
+  // RFC-0007: ensure descriptor and canonical index exist
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
+
   // Read combined data for verification
   auto data0 = read_file_content(path0);
   auto data1 = read_file_content(path1);

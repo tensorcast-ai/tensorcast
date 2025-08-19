@@ -4,6 +4,7 @@
 #include <torch/extension.h>
 #include "scstore/csrc/logging.h"
 
+#include <algorithm>
 #include <cstdint>
 
 #include "absl/status/status.h"
@@ -11,11 +12,24 @@
 #include "core/checkpoint/checkpoint.h"
 #include "core/checkpoint/checkpoint_streaming.h"
 #include "core/common/logging_init.h"
+#include "core/common/model_hash.h"
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 #include "core/common/model_verification.h"
+#include "core/store/loader/file_partition_source.h"
+#include "core/store/loader/source_hash.h"
 
 namespace py = pybind11;
 
 using namespace stepcast::store;
+using stepcast::store::model_hash::compute_index_multihash;
 
 // Helper function to convert ModelVerificationInfo to Python dictionary
 py::dict verification_info_to_dict(const ModelVerificationInfo& info) {
@@ -181,6 +195,341 @@ static bool close_cuda_memory_handle_wrapper(int device_id, std::uint64_t cuda_m
   return true;
 }
 
+// ------------------------------------------------------------------
+// Unified Save: write data partitions, tensor_index.json, model_descriptor.json
+// ------------------------------------------------------------------
+static py::dict save_model_to_disk_wrapper(
+    const std::vector<std::string>& tensor_names,
+    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>& tensor_data,
+    const py::dict& meta_state_dict,
+    const std::string& path,
+    const py::dict& config = py::dict()) {
+  // Write data partitions using streaming writer
+  StreamingTensorWriter::Config writer_config;
+  if (config.contains("num_buffers")) {
+    writer_config.num_buffers = config["num_buffers"].cast<size_t>();
+  }
+  if (config.contains("buffer_size_mb")) {
+    writer_config.buffer_size_mb = config["buffer_size_mb"].cast<size_t>();
+  }
+  if (config.contains("enable_async_write")) {
+    writer_config.enable_async_write = config["enable_async_write"].cast<bool>();
+  }
+
+  const auto offsets = save_tensors_streaming(tensor_names, tensor_data, path, writer_config);
+
+  // Compute canonical storage size per offset (max over aliases)
+  std::unordered_map<uint64_t, uint64_t> offset_max_size;
+  for (const auto& name : tensor_names) {
+    const auto off_it = offsets.find(name);
+    if (off_it == offsets.end()) {
+      continue;
+    }
+    const uint64_t off = off_it->second;
+    const uint64_t sz = tensor_data.at(name).second;
+    auto it = offset_max_size.find(off);
+    if (it == offset_max_size.end()) {
+      offset_max_size.emplace(off, sz);
+    } else if (sz > it->second) {
+      it->second = sz;
+    }
+  }
+
+  // Build v2 tensor_index JSON (deterministic order: tensor name ascending)
+  nlohmann::json j;
+  std::vector<std::string> sorted_names = tensor_names;
+  std::ranges::sort(sorted_names);
+  for (const auto& name : sorted_names) {
+    const auto off_it = offsets.find(name);
+    if (off_it == offsets.end()) {
+      continue;
+    }
+    const uint64_t off = off_it->second;
+    const uint64_t sz = offset_max_size.at(off);
+
+    // meta_state_dict[name] = (shape, stride, dtype, storage_offset)
+    if (!meta_state_dict.contains(name.c_str())) {
+      throw std::runtime_error("meta_state_dict missing tensor: " + name);
+    }
+    auto tpl = meta_state_dict[name.c_str()].cast<py::tuple>();
+    if (tpl.size() != 4) {
+      throw std::runtime_error("meta_state_dict entry must be a 4-tuple");
+    }
+    auto shape = tpl[0].cast<std::vector<int64_t>>();
+    auto stride = tpl[1].cast<std::vector<int64_t>>();
+    auto dtype = tpl[2].cast<std::string>();
+    auto storage_offset = tpl[3].cast<uint64_t>();
+
+    // v2 tuple: [offset, size, shape[], stride[], dtype, storage_offset]
+    nlohmann::json arr = nlohmann::json::array();
+    arr.push_back(off);
+    arr.push_back(sz);
+    // shape and stride as arrays
+    nlohmann::json j_shape = nlohmann::json::array();
+    for (auto v : shape) {
+      j_shape.push_back(static_cast<uint64_t>(v));
+    }
+    nlohmann::json j_stride = nlohmann::json::array();
+    for (auto v : stride) {
+      j_stride.push_back(static_cast<uint64_t>(v));
+    }
+    arr.push_back(j_shape);
+    arr.push_back(j_stride);
+    arr.push_back(dtype);
+    arr.push_back(storage_offset);
+    j[name] = arr;
+  }
+
+  // Serialize canonical JSON with sorted keys and minimal separators
+  const std::string index_json = j.dump();
+  const std::filesystem::path dir(path);
+  std::filesystem::create_directories(dir);
+  {
+    std::ofstream out(dir / "tensor_index.json");
+    if (!out.is_open()) {
+      throw std::runtime_error("Failed to write tensor_index.json");
+    }
+    out << index_json;
+    out.close();
+  }
+  // Additionally write CBOR encoding (preferred for canonical index persistence)
+  {
+    std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(j);
+    std::ofstream oc(dir / "tensor_index.cbor", std::ios::binary);
+    if (!oc.is_open()) {
+      throw std::runtime_error("Failed to write tensor_index.cbor");
+    }
+    oc.write(reinterpret_cast<const char*>(cbor.data()), static_cast<std::streamsize>(cbor.size()));
+    oc.close();
+  }
+
+  // Compute descriptor fields
+  absl::StatusOr<std::string> idx_mh_or =
+      compute_index_multihash(std::optional<std::string>(index_json), /*index_key_hex=*/"");
+  if (!idx_mh_or.ok()) {
+    throw std::runtime_error(idx_mh_or.status().ToString());
+  }
+  // Compute data multihash via unified SeekableSource pipeline
+  auto compute_mh_via_source = [&](const std::string& dir_path) -> absl::StatusOr<std::string> {
+    namespace fs = std::filesystem;
+    fs::path dir(dir_path);
+    // Collect partition files deterministically
+    std::vector<fs::path> parts;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const auto name = entry.path().filename().string();
+      if (name.rfind("tensor.data_", 0) == 0) {
+        parts.push_back(entry.path());
+      }
+    }
+    std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    if (parts.empty()) {
+      fs::path single = dir / "tensor.data";
+      if (fs::exists(single)) {
+        parts.push_back(single);
+      }
+    }
+    if (parts.empty()) {
+      return absl::NotFoundError("No tensor.data partitions found");
+    }
+    // Determine logical total size from canonical index (we just wrote j)
+    uint64_t total_size = 0;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+      const auto& arr = it.value();
+      if (!arr.is_array() || arr.size() < 2) {
+        continue;
+      }
+      uint64_t off = arr[0].get<uint64_t>();
+      uint64_t sz = arr[1].get<uint64_t>();
+      total_size = std::max<uint64_t>(total_size, off + sz);
+    }
+    stepcast::store::loader::FilePartitionSource::Options opts;
+    for (const auto& p : parts) {
+      opts.partition_paths.push_back(p);
+      opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
+    }
+    opts.total_size = total_size;
+    opts.chunk_size = 128 * 1024 * 1024;
+    opts.use_direct_io = (total_size > 5ULL * 1024 * 1024 * 1024);
+    stepcast::store::loader::FilePartitionSource src(std::move(opts));
+    return stepcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
+  };
+  absl::StatusOr<std::string> data_mh_or = compute_mh_via_source(path);
+  if (!data_mh_or.ok()) {
+    throw std::runtime_error(data_mh_or.status().ToString());
+  }
+
+  // Compute total size: max(offset+size)
+  uint64_t total_size = 0;
+  for (const auto& [off, sz] : offset_max_size) {
+    total_size = std::max<uint64_t>(total_size, off + sz);
+  }
+
+  nlohmann::json desc;
+  desc["model_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
+  desc["index_multihash"] = *idx_mh_or;
+  desc["data_multihash"] = *data_mh_or;
+  desc["schema_version"] = "v2";
+  desc["encoding"] = "json";
+  desc["total_size"] = total_size;
+  nlohmann::json hash_params;
+  hash_params["chunk_size"] = 4 * 1024 * 1024;
+  hash_params["fanout"] = 2;
+  desc["hash_params"] = hash_params;
+
+  {
+    std::ofstream out(dir / "model_descriptor.json");
+    if (!out.is_open()) {
+      throw std::runtime_error("Failed to write model_descriptor.json");
+    }
+    out << desc.dump(2);
+    out.close();
+  }
+
+  // Return descriptor to Python
+  py::dict result;
+  result["model_id"] = desc["model_id"].get<std::string>();
+  result["index_multihash"] = desc["index_multihash"].get<std::string>();
+  result["data_multihash"] = desc["data_multihash"].get<std::string>();
+  result["schema_version"] = desc["schema_version"].get<std::string>();
+  result["encoding"] = desc["encoding"].get<std::string>();
+  result["total_size"] = total_size;
+  return result;
+}
+
+static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) {
+  const std::filesystem::path dir(path);
+  const auto desc_path = dir / "model_descriptor.json";
+  if (std::filesystem::exists(desc_path)) {
+    std::ifstream in(desc_path);
+    if (!in.is_open()) {
+      throw std::runtime_error("Failed to open model_descriptor.json");
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    in.close();
+    nlohmann::json j = nlohmann::json::parse(buffer.str());
+    py::dict result;
+    result["model_id"] = j["model_id"].get<std::string>();
+    result["index_multihash"] = j["index_multihash"].get<std::string>();
+    result["data_multihash"] = j["data_multihash"].get<std::string>();
+    result["schema_version"] = j["schema_version"].get<std::string>();
+    result["encoding"] = j["encoding"].get<std::string>();
+    result["total_size"] = j["total_size"].get<uint64_t>();
+    return result;
+  }
+
+  // Compute index multihash from tensor_index.json
+  std::ifstream idx_in(dir / "tensor_index.json");
+  if (!idx_in.is_open()) {
+    throw std::runtime_error("tensor_index.json not found");
+  }
+  std::stringstream idx_ss;
+  idx_ss << idx_in.rdbuf();
+  idx_in.close();
+  const std::string index_json = idx_ss.str();
+
+  absl::StatusOr<std::string> idx_mh_or =
+      compute_index_multihash(std::optional<std::string>(index_json), /*index_key_hex=*/"");
+  if (!idx_mh_or.ok()) {
+    throw std::runtime_error(idx_mh_or.status().ToString());
+  }
+  // Compute data multihash via unified SeekableSource pipeline
+  auto compute_mh_via_source2 = [&](const std::string& dir_path) -> absl::StatusOr<std::string> {
+    namespace fs = std::filesystem;
+    fs::path dir2(dir_path);
+    std::vector<fs::path> parts;
+    for (const auto& entry : fs::directory_iterator(dir2)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const auto name = entry.path().filename().string();
+      if (name.rfind("tensor.data_", 0) == 0) {
+        parts.push_back(entry.path());
+      }
+    }
+    std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    if (parts.empty()) {
+      fs::path single = dir2 / "tensor.data";
+      if (fs::exists(single)) {
+        parts.push_back(single);
+      }
+    }
+    if (parts.empty()) {
+      return absl::NotFoundError("No tensor.data partitions found");
+    }
+    // Determine logical total size from index_json
+    uint64_t total_size2 = 0;
+    nlohmann::json idx_j2 = nlohmann::json::parse(index_json);
+    for (auto it = idx_j2.begin(); it != idx_j2.end(); ++it) {
+      const auto& arr = it.value();
+      if (!arr.is_array() || arr.size() < 2) {
+        continue;
+      }
+      uint64_t off = arr[0].get<uint64_t>();
+      uint64_t sz = arr[1].get<uint64_t>();
+      total_size2 = std::max<uint64_t>(total_size2, off + sz);
+    }
+    stepcast::store::loader::FilePartitionSource::Options opts2;
+    for (const auto& p : parts) {
+      opts2.partition_paths.push_back(p);
+      opts2.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
+    }
+    opts2.total_size = total_size2;
+    opts2.chunk_size = 128 * 1024 * 1024;
+    opts2.use_direct_io = (total_size2 > 5ULL * 1024 * 1024 * 1024);
+    stepcast::store::loader::FilePartitionSource src2(std::move(opts2));
+    return stepcast::store::loader::compute_data_multihash_from_seekable_source(src2, total_size2);
+  };
+  absl::StatusOr<std::string> data_mh_or = compute_mh_via_source2(path);
+  if (!data_mh_or.ok()) {
+    throw std::runtime_error(data_mh_or.status().ToString());
+  }
+
+  // Compute total size from index JSON
+  nlohmann::json idx_j = nlohmann::json::parse(index_json);
+  uint64_t total_size = 0;
+  for (auto it = idx_j.begin(); it != idx_j.end(); ++it) {
+    const auto& arr = it.value();
+    if (!arr.is_array() || arr.size() < 2) {
+      continue;
+    }
+    uint64_t off = arr[0].get<uint64_t>();
+    uint64_t sz = arr[1].get<uint64_t>();
+    total_size = std::max<uint64_t>(total_size, off + sz);
+  }
+
+  nlohmann::json desc;
+  desc["model_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
+  desc["index_multihash"] = *idx_mh_or;
+  desc["data_multihash"] = *data_mh_or;
+  desc["schema_version"] = "v2";
+  desc["encoding"] = "json";
+  desc["total_size"] = total_size;
+  nlohmann::json hash_params;
+  hash_params["chunk_size"] = 4 * 1024 * 1024;
+  hash_params["fanout"] = 2;
+  desc["hash_params"] = hash_params;
+
+  std::ofstream out(desc_path);
+  if (!out.is_open()) {
+    throw std::runtime_error("Failed to write model_descriptor.json");
+  }
+  out << desc.dump(2);
+  out.close();
+
+  py::dict result;
+  result["model_id"] = desc["model_id"].get<std::string>();
+  result["index_multihash"] = desc["index_multihash"].get<std::string>();
+  result["data_multihash"] = desc["data_multihash"].get<std::string>();
+  result["schema_version"] = desc["schema_version"].get<std::string>();
+  result["encoding"] = desc["encoding"].get<std::string>();
+  result["total_size"] = total_size;
+  return result;
+}
+
 // define pybind11 module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Initialize logging only once across all modules
@@ -199,6 +548,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("tensor_data"),
           py::arg("path"),
           py::arg("config") = py::dict())
+      .def(
+          "save_model_to_disk",
+          &save_model_to_disk_wrapper,
+          py::arg("tensor_names"),
+          py::arg("tensor_data"),
+          py::arg("meta_state_dict"),
+          py::arg("path"),
+          py::arg("config") = py::dict(),
+          "Unified save: writes data, tensor_index.json, model_descriptor.json and returns descriptor")
       .def("restore_tensors", &restore_tensors, "Restore a state dict")
       .def(
           "restore_tensors_from_model_path",
@@ -251,4 +609,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("expected_verification"),
           py::arg("verification_level"),
           "Verify model data integrity from GPU memory");
+
+  m.def(
+      "inspect_or_generate_descriptor",
+      &inspect_or_generate_descriptor_wrapper,
+      py::arg("model_path"),
+      "Return model descriptor if present; otherwise compute multihashes and write model_descriptor.json");
 }

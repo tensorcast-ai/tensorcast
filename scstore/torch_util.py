@@ -56,13 +56,11 @@ def get_daemon_address() -> str:
 
 ctypes.CDLL(os.path.join(os.path.dirname(__file__), "lib/libscstore.so"))
 from scstore._C import (  # noqa: E402
-    generate_model_verification_info,
     get_cuda_memory_ptr,
     get_device_uuid_map,
+    inspect_or_generate_descriptor,
     restore_tensors,
-    restore_tensors_from_model_path,
-    save_tensors,
-    save_tensors_streaming,
+    save_model_to_disk,
 )
 
 
@@ -125,7 +123,9 @@ def calculate_tensor_device_offsets(
     ALIGN: int = 8  # bytes – writer guarantees 64-bit alignment
     seen: dict[tuple[int, int], int] = {}
 
-    for tensor_name, (src_offset, size) in tensor_index.items():
+    # Enforce deterministic iteration order to stabilize coalesced layout
+    for tensor_name in sorted(tensor_index.keys()):
+        src_offset, size = tensor_index[tensor_name]
         if (src_offset, size) in seen:
             dst_offset = seen[(src_offset, size)]
         else:
@@ -234,91 +234,27 @@ def save_dict(
     model_path: str | os.PathLike,
     use_streaming: bool = True,
     streaming_config: dict | None = None,
-):
-    tensor_names = list(state_dict.keys())
-    tensor_data_index = {}
+) -> dict:
+    # Prepare inputs for unified C++ save: tensor_names, tensor_data, meta_state_dict
+    tensor_names = sorted(state_dict.keys())
+    tensor_data_index: dict[str, tuple[int, int]] = {}
+    meta_state_dict: dict[str, tuple[list[int], list[int], str, int]] = {}
     for name, param in state_dict.items():
-        param_storage = param.untyped_storage()
-        data_ptr = param_storage.data_ptr()
-        size = param_storage.size()  # storage.size is the memory size in bytes
-        tensor_data_index[name] = (data_ptr, size)
-
-    if not os.path.exists(model_path):
-        os.makedirs(model_path, exist_ok=True)
-
-    # Choose between streaming or traditional save
-    if use_streaming:
-        config = streaming_config or {}
-        logger.info(f"Using streaming save with config: {config}")
-        tensor_offsets = save_tensors_streaming(
-            tensor_names, tensor_data_index, model_path, config
-        )
-    else:
-        tensor_offsets = save_tensors(tensor_names, tensor_data_index, model_path)
-
-    # Build a mapping from offset -> max storage size.  This mirrors the
-    # pointer-based deduplication performed in the C++ layer where the backing
-    # storage is written exactly once using the *largest* slice.
-    offset_max_size: dict[int, int] = {}
-    for name in tensor_names:
-        off = tensor_offsets[name]
-        sz = tensor_data_index[name][1]
-        offset_max_size[off] = max(offset_max_size.get(off, 0), sz)
-
-    # The new v2 index additionally records each tensor's *storage offset* (in
-    # **elements**, not bytes) so that views/slices that start at a non-zero
-    # offset inside the underlying storage can be reconstructed correctly on
-    # load.  The tuple layout therefore becomes:
-    #   (file_offset, storage_size, shape, stride, dtype, storage_offset)
-    #
-    # Older checkpoints did not include the final element.  The loader keeps
-    # backward-compatibility by treating the offset as 0 when the 6th element
-    # is absent.
-
-    tensor_index: dict[
-        str, tuple[int, int, tuple[int, ...], tuple[int, ...], str, int]
-    ] = {}
-    for name, param in state_dict.items():
-        off = tensor_offsets[name]
-        # Use the canonical (max) size for all aliases that map to the same storage.
-        sz = offset_max_size[off]
-        tensor_index[name] = (
-            off,  # File offset inside tensor.data_*
-            sz,  # Canonical storage size (bytes)
-            tuple(param.shape),
-            tuple(param.stride()),
+        storage = param.untyped_storage()
+        tensor_data_index[name] = (int(storage.data_ptr()), int(storage.size()))
+        meta_state_dict[name] = (
+            list(map(int, param.shape)),
+            list(map(int, param.stride())),
             str(param.dtype),
-            int(param.storage_offset()),  # <-- NEW FIELD (elements)
+            int(param.storage_offset()),
         )
 
-    with open(os.path.join(model_path, "tensor_index.json"), "w") as f:
-        json.dump(tensor_index, f)
-
-    # Skip verification generation if no tensors were saved (e.g., empty model)
-    if not tensor_names:
-        logger.info("No tensors to verify; skipping verification info generation.")
-        return
-
-    # Generate and save verification information
-    try:
-        logger.info("Generating model verification information...")
-        start_time = time.time()
-
-        # Generate verification info for saved partitions
-        verification_info = generate_model_verification_info(model_path)
-
-        # Save verification info to file
-        verification_path = os.path.join(model_path, "verification.json")
-        with open(verification_path, "w") as f:
-            json.dump(verification_info, f, indent=2)
-
-        duration = time.time() - start_time
-        logger.info(
-            f"Model verification info generated and saved in {duration:.3f}s to {verification_path}"
-        )
-
-    except Exception as e:
-        logger.warning(f"Failed to generate model verification info: {e}")
+    config = streaming_config or {}
+    # Delegate to C++ to write partitions, tensor_index.json, and model_descriptor.json
+    descriptor = save_model_to_disk(
+        tensor_names, tensor_data_index, meta_state_dict, str(model_path), config
+    )
+    return dict(descriptor)
 
 
 def load_dict(
@@ -489,6 +425,12 @@ def load_dict(
 
         t.start()
 
+    # Per RFC-0007: after load completes, ensure model_descriptor.json exists.
+    try:
+        _ = inspect_or_generate_descriptor(str(model_dir))
+    except Exception as e:
+        logger.warning("Failed to ensure model_descriptor.json: %s", e)
+
     # Return based on mode
     if wait_for_completion:
         return state_dict
@@ -530,69 +472,6 @@ def load_dict(
         return state_dict, confirm_load
 
 
-def load_dict_pure_local(
-    model_path: str | os.PathLike, device_id: int | torch.device = 0
-):
-    # Normalize device_id early to avoid runtime type checks
-    device_id_int: int = resolve_device(device_id)
-
-    with open(os.path.join(model_path, "tensor_index.json"), "r") as f:
-        tensor_index = json.load(f)
-
-    tensor_meta_index = {}
-    tensor_data_index = {}
-    for name, meta in tensor_index.items():
-        # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
-        if len(meta) == 5:
-            offset, size, shape, stride, dtype = meta
-            storage_offset = 0
-        else:
-            offset, size, shape, stride, dtype, storage_offset = meta
-
-        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-        tensor_data_index[name] = (offset, size)
-
-    start = time.time()
-
-    # ------------------------------------------------------------------
-    # Pure-local restore expects the *in-memory* layout to match the on-disk
-    # byte representation **exactly** because we simply stream every byte of
-    # each partition into a contiguous GPU buffer in
-    # `restore_tensors_from_model_path`.  Any additional alignment or
-    # compaction here would introduce gaps and therefore corrupt the logical
-    # view of a tensor.  In distributed/daemon-based paths we still rely on
-    # `calculate_tensor_device_offsets` for efficiency, but for the local
-    # fast-path we must adopt the identity mapping (dst_offset == src_offset).
-    # ------------------------------------------------------------------
-
-    tensor_device_offsets: dict[int, dict[str, int]] = {
-        device_id_int: {name: offset for name, (offset, _) in tensor_data_index.items()}
-    }
-
-    # The copy-schedule returned from `calculate_tensor_device_offsets` is not
-    # required here because the C++ helper streams the entire file verbatim.
-    # We therefore skip its computation to avoid the additional 8-byte
-    # realignment logic that caused the observed 4-byte data shift on certain
-    # filesystems when O_DIRECT is enabled.
-    # ------------------------------------------------------------------
-
-    state_dict = restore_tensors_from_model_path(
-        tensor_meta_index,
-        model_path,
-        tensor_device_offsets[device_id_int],  # Use offsets for the single device
-    )
-
-    logger.info(f"restore state_dict takes {time.time() - start} seconds")
-
-    # To maintain backwards-compatibility with older call-sites that expect
-    # `load_dict_pure_local()` to return a 2-tuple of `(meta, state_dict)` we
-    # now return `None` as a placeholder for the deprecated metadata value.
-    #
-    # Newer callers should simply ignore the first element (e.g. “_ , sd = …”) or
-    # switch to the single-value form if the metadata is not required.
-    return None, state_dict
-
-
 def register_tensor_dict(
     tensor_dict: dict[str, torch.Tensor],
     model_id: str,
@@ -601,10 +480,13 @@ def register_tensor_dict(
     enable_p2p: bool = True,
     ttl_ms: int | None = None,
     daemon_address: str | None = None,
-) -> dict[str, torch.Tensor]:
+) -> tuple[dict[str, torch.Tensor], dict]:
     """Register an in-memory tensor dict as a coalesced GPU memory replica.
 
-    Returns a state_dict whose tensors reference the daemon-owned memory.
+    Returns a tuple ``(state_dict, commit_info)`` where:
+    - ``state_dict``: tensors reference the daemon-owned memory
+    - ``commit_info``: includes ``registration_id``, ``model_id`` (mi2:...),
+      ``device_id``, ``size_bytes``, and ``descriptor`` (RFC-0007 ModelDescriptor)
     """
     if not tensor_dict:
         raise ValueError("tensor_dict must not be empty")
@@ -671,7 +553,8 @@ def register_tensor_dict(
 
     # Build v2-equivalent index JSON using destination offsets
     tensor_index_v2: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
-    for name, (shape, stride, dtype, storage_offset) in tensor_meta_index.items():
+    for name in sorted(tensor_meta_index.keys()):
+        shape, stride, dtype, storage_offset = tensor_meta_index[name]
         # Use canonical storage size per name from source index
         _, storage_size = tensor_source_index[name]
         dst_off = int(tensor_device_offsets[target_device_id][name])
@@ -684,7 +567,10 @@ def register_tensor_dict(
             int(storage_offset),
         )
 
-    index_bytes = json.dumps(tensor_index_v2, separators=(",", ":")).encode("utf-8")
+    # Serialize with sorted keys to enforce canonical outer key order
+    index_bytes = json.dumps(
+        tensor_index_v2, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
 
     # Begin registration with inline index data
     ctl = DaemonCtl(daemon_address or get_daemon_address())
@@ -736,7 +622,9 @@ def register_tensor_dict(
     # Ensure writes complete before commit
     torch.cuda.synchronize(target_device_id)
 
-    # Finalize registration
-    ctl.commit_registered_tensor_dict(begin["registration_id"], timeout_s=60.0)
+    # Finalize registration and optionally return content-addressed descriptor
+    commit_info = ctl.commit_registered_tensor_dict(
+        begin["registration_id"], timeout_s=60.0
+    )
 
-    return dest_state_dict
+    return dest_state_dict, commit_info

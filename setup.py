@@ -453,6 +453,20 @@ if BUILD_EXTENSION:
     }
 
     for name, sources in EXTENSIONS.items():
+        # Build include dirs dynamically to avoid None concatenation when CUDA_DIR is unset
+        _include_dirs = [
+            dir_path,
+            dir_path + "/scstore/csrc",
+            dir_path + "/external/abseil-cpp+",
+            dir_path + "/external/grpc+/include",
+            dir_path + "/external/protobuf+/src",
+            dir_path + "/external/gsl+",
+            # Header-only JSON library used by pybind wrappers
+            dir_path + "/external/nlohmann_json+/include",
+        ]
+        if CUDA_DIR:
+            _include_dirs.append(CUDA_DIR + "/include")
+
         ext_modules += [
             CUDAExtension(
                 f"scstore.{name}",
@@ -461,17 +475,7 @@ if BUILD_EXTENSION:
                     (dir_path + "/scstore/lib"),
                 ],
                 libraries=["scstore"],
-                include_dirs=(
-                    [
-                        dir_path,
-                        dir_path + "/scstore/csrc",
-                        CUDA_DIR + "/include",
-                        dir_path + "/external/abseil-cpp+",
-                        dir_path + "/external/grpc+/include",
-                        dir_path + "/external/protobuf+/src",
-                        dir_path + "/external/gsl+",
-                    ]
-                ),
+                include_dirs=_include_dirs,
                 extra_compile_args=(
                     [
                         "-std=c++20",

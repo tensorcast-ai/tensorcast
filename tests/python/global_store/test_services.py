@@ -100,7 +100,7 @@ class TestServices:
         # Register a replica for this worker
         replica = model_service.register_replica(
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -116,7 +116,7 @@ class TestServices:
         assert success is True
 
         # Verify replica is marked unavailable
-        found_replicas = model_service.list_replicas(model_name="test_model")
+        found_replicas = model_service.list_replicas(model_id="test_model")
         assert len(found_replicas) == 1
         assert found_replicas[0].is_available is False
 
@@ -168,7 +168,7 @@ class TestServices:
 
         # Register replica
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -183,7 +183,7 @@ class TestServices:
 
         # Register again (should update)
         replica2 = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -218,7 +218,7 @@ class TestServices:
 
         replica = model_service.register_replica(
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -234,7 +234,7 @@ class TestServices:
         assert success is True
 
         # Verify replica is removed
-        found_replicas = model_service.list_replicas(model_name="test_model")
+        found_replicas = model_service.list_replicas(model_id="test_model")
         assert len(found_replicas) == 0
 
     def test_model_service_list_replicas(self, services):
@@ -258,7 +258,7 @@ class TestServices:
         for i in range(3):
             model_service.register_replica(
                 ModelReplica(
-                    model_name=f"model_{i}",
+                    model_id=f"model_{i}",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080 + i,
@@ -274,9 +274,9 @@ class TestServices:
         assert len(all_replicas) >= 3
 
         # List replicas for specific model
-        model_0_replicas = model_service.list_replicas(model_name="model_0")
+        model_0_replicas = model_service.list_replicas(model_id="model_0")
         assert len(model_0_replicas) == 1
-        assert model_0_replicas[0].model_name == "model_0"
+        assert model_0_replicas[0].model_id == "model_0"
 
     def test_transport_service_request(self, services, repositories):
         """Test transport request logic."""
@@ -298,7 +298,7 @@ class TestServices:
 
         replica = model_service.register_replica(
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -312,7 +312,7 @@ class TestServices:
 
         # Request transport
         selected, transport_id = transport_service.request_transport(
-            model_name="test_model",
+            model_id="test_model",
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
@@ -333,7 +333,7 @@ class TestServices:
         # No replicas available
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
-                model_name="nonexistent_model",
+                model_id="nonexistent_model",
                 source_node_id="source",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -360,7 +360,7 @@ class TestServices:
 
         replica = model_service.register_replica(
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -376,7 +376,7 @@ class TestServices:
         transport_ids = []
         for i in range(2):
             _, transport_id = transport_service.request_transport(
-                model_name="test_model",
+                model_id="test_model",
                 source_node_id=f"source_{i}",
                 source_address="192.168.2.1",
                 source_port=9090 + i,
@@ -386,7 +386,7 @@ class TestServices:
         # Third request should timeout (no capacity)
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
-                model_name="test_model",
+                model_id="test_model",
                 source_node_id="source_3",
                 source_address="192.168.2.1",
                 source_port=9093,
@@ -398,7 +398,7 @@ class TestServices:
 
         # Now request should succeed
         _, transport_id = transport_service.request_transport(
-            model_name="test_model",
+            model_id="test_model",
             source_node_id="source_3",
             source_address="192.168.2.1",
             source_port=9093,
@@ -417,11 +417,11 @@ class TestServices:
         """Test model service validation."""
         model_service = services["model"]
 
-        # Missing model name
+        # Missing model id
         with pytest.raises(ValidationError):
             model_service.register_replica(
                 ModelReplica(
-                    model_name="",  # Empty model name
+                    model_id="",  # Empty model id
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -461,7 +461,7 @@ class TestServices:
         for i, (load, mem_type) in enumerate(zip(loads, memory_types)):
             replica = model_service.register_replica(
                 ModelReplica(
-                    model_name="balanced_model",
+                    model_id="balanced_model",
                     node_id=f"node_{i}",
                     node_address=f"192.168.1.{i+1}",
                     node_port=8080,
@@ -477,7 +477,7 @@ class TestServices:
 
         # Request transport - should select GPU replica with lower load (node_1)
         selected, transport_id = transport_service.request_transport(
-            model_name="balanced_model",
+            model_id="balanced_model",
             source_node_id="client",
             source_address="192.168.2.1",
             source_port=9000,

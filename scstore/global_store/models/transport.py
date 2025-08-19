@@ -15,7 +15,8 @@ class Transport:
     # Identity
     transport_id: UUID = field(default_factory=uuid4)
     replica_id: UUID = field(default_factory=uuid4)
-    model_name: str = ""
+    model_id: str = ""  # content-addressed ID
+    disk_path: str | None = None
 
     # Source information
     source_node_id: str = ""

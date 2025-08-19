@@ -121,7 +121,7 @@ class ModelService:
     def update_heartbeat(self, replica_id: UUID) -> None:
         """Update replica's last heartbeat timestamp."""
 
-    def get_model_replicas(self, model_name: str) -> List[ModelReplica]:
+    def get_model_replicas(self, model_id: str) -> List[ModelReplica]:
         """Get all replicas for a model, prioritized by availability."""
 ```
 
@@ -132,7 +132,7 @@ Coordinates model transfers with intelligent load balancing.
 class TransportService:
     def request_transport(
         self,
-        model_name: str,
+        model_id: str,
         target_node_id: str
     ) -> Tuple[ModelReplica, UUID]:
         """Request model transport with load balancing."""
@@ -270,7 +270,7 @@ from scstore.global_store.metrics import (
 )
 
 # In service methods
-REPLICA_GAUGE.labels(model_name=model_name).inc()
+REPLICA_GAUGE.labels(model_id=model_id).inc()
 TRANSPORT_COUNTER.labels(status="success").inc()
 ```
 

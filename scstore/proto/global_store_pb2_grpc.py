@@ -47,10 +47,10 @@ class GlobalModelStoreStub(object):
             request_serializer=global__store__pb2.ListModelReplicasRequest.SerializeToString,
             response_deserializer=global__store__pb2.ListModelReplicasResponse.FromString,
         )
-        self.GetModelInfo = channel.unary_unary(
-            "/global_store.GlobalModelStore/GetModelInfo",
-            request_serializer=global__store__pb2.GetModelInfoRequest.SerializeToString,
-            response_deserializer=global__store__pb2.GetModelInfoResponse.FromString,
+        self.GetModelInfoById = channel.unary_unary(
+            "/global_store.GlobalModelStore/GetModelInfoById",
+            request_serializer=global__store__pb2.GetModelInfoByIdRequest.SerializeToString,
+            response_deserializer=global__store__pb2.GetModelInfoByIdResponse.FromString,
         )
         self.GetModelIndex = channel.unary_unary(
             "/global_store.GlobalModelStore/GetModelIndex",
@@ -143,8 +143,8 @@ class GlobalModelStoreServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def GetModelInfo(self, request, context):
-        """Get model metadata information"""
+    def GetModelInfoById(self, request, context):
+        """Content-addressed query by model_id (mi2:...)"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -244,10 +244,10 @@ def add_GlobalModelStoreServicer_to_server(servicer, server):
             request_deserializer=global__store__pb2.ListModelReplicasRequest.FromString,
             response_serializer=global__store__pb2.ListModelReplicasResponse.SerializeToString,
         ),
-        "GetModelInfo": grpc.unary_unary_rpc_method_handler(
-            servicer.GetModelInfo,
-            request_deserializer=global__store__pb2.GetModelInfoRequest.FromString,
-            response_serializer=global__store__pb2.GetModelInfoResponse.SerializeToString,
+        "GetModelInfoById": grpc.unary_unary_rpc_method_handler(
+            servicer.GetModelInfoById,
+            request_deserializer=global__store__pb2.GetModelInfoByIdRequest.FromString,
+            response_serializer=global__store__pb2.GetModelInfoByIdResponse.SerializeToString,
         ),
         "GetModelIndex": grpc.unary_unary_rpc_method_handler(
             servicer.GetModelIndex,
@@ -485,7 +485,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def GetModelInfo(
+    def GetModelInfoById(
         request,
         target,
         options=(),
@@ -500,9 +500,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/GetModelInfo",
-            global__store__pb2.GetModelInfoRequest.SerializeToString,
-            global__store__pb2.GetModelInfoResponse.FromString,
+            "/global_store.GlobalModelStore/GetModelInfoById",
+            global__store__pb2.GetModelInfoByIdRequest.SerializeToString,
+            global__store__pb2.GetModelInfoByIdResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -41,6 +41,9 @@ TEST_CASE("Model Verification System", "[model][verification]") {
   REQUIRE(create_dummy_file(path0, size0, 'A'));
   REQUIRE(create_dummy_file(path1, size1, 'X'));
 
+  // RFC-0007 metadata for standard partitions
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
+
   auto data0 = read_file_content(path0);
   auto data1 = read_file_content(path1);
 

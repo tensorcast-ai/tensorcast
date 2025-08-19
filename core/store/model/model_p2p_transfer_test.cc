@@ -16,6 +16,7 @@
 #include "core/common/cuda_api.h" // Use unified CUDA API
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/testing/common.h"
 
 // #include "absl/log/check.h" // Avoid macro conflict with Catch2
 #include "absl/log/globals.h"
@@ -37,6 +38,7 @@
 
 namespace fs = std::filesystem;
 using namespace stepcast::store;
+using namespace stepcast::tests;
 
 // ---------------------------------------------------------------------------
 // Test configuration structure
@@ -238,6 +240,14 @@ class P2PTestServer {
 
     // Create the dummy model file
     if (!create_dummy_file(resources.dummy_file_path, model_size)) {
+      resources.cleanup();
+      return;
+    }
+    // RFC-0007 metadata for standard partitions
+    auto st_desc =
+        ::stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(resources.temp_dir / MODEL_SUBDIR);
+    if (!st_desc.ok()) {
+      LOG(ERROR) << "Failed to write descriptor/index: " << st_desc;
       resources.cleanup();
       return;
     }

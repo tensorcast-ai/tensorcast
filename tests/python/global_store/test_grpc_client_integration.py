@@ -103,8 +103,8 @@ async def run_integration_test():
         )
 
         # Display replicas
-        for model_name, replicas in all_replicas.items():
-            console.print(f"\n[bold]Model: {model_name}[/bold]")
+        for model_id, replicas in all_replicas.items():
+            console.print(f"\n[bold]Model: {model_id}[/bold]")
             for i, r in enumerate(replicas):
                 mem_type = ["GPU", "RAM", "DISK"][r.memory_type]
                 size_gb = r.memory_size / 1024**3
@@ -115,10 +115,10 @@ async def run_integration_test():
         # Test 4: Filtered Queries
         print_header("Test 4: Filtered Queries")
 
-        # Filter by model name
-        model1_replicas = await client.list_model_replicas(model_name="model-1")
+        # Filter by model id
+        model1_replicas = await client.list_model_replicas(model_id="model-1")
         print_test(
-            "Filter by model name",
+            "Filter by model id",
             "model-1" in model1_replicas,
             f"Found {len(model1_replicas.get('model-1', []))} replicas for model-1",
         )

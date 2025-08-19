@@ -44,11 +44,11 @@ export async function testAllMockEndpoints() {
     // Filtered endpoints
     { name: 'Replicas (all)', path: '/replicas' },
     { name: 'Replicas (by worker)', path: '/replicas', params: { worker_id: 'worker-1' } },
-    { name: 'Replicas (by model)', path: '/replicas', params: { model_name: 'text-classifier' } },
+    { name: 'Replicas (by model)', path: '/replicas', params: { model_id: 'mi2:inx1:data1' } },
 
     // Single item endpoints
     { name: 'Single Worker', path: '/workers/worker-1' },
-    { name: 'Single Model', path: '/models/text-classifier' },
+    { name: 'Single Model', path: '/models/mi2:inx1:data1' },
     { name: 'Single Replica', path: '/replicas/replica-1' },
   ];
 

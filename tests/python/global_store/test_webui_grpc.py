@@ -113,7 +113,7 @@ async def test_api_endpoints_with_grpc(mock_grpc_client):
     # Test models endpoint
     models_response = await list_models(mock_grpc_client)
     assert len(models_response.data) == 1
-    assert models_response.data[0]["model_name"] == "model1"
+    assert models_response.data[0]["model_id"] == "model1"
     assert models_response.data[0]["gpu_replicas"] == 1
 
 

@@ -20,7 +20,7 @@ using namespace stepcast::memory;
 
 TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mmap]") {
   // System page size
-  const long page_sz_long = ::sysconf(_SC_PAGESIZE);
+  const int64_t page_sz_long = static_cast<int64_t>(::sysconf(_SC_PAGESIZE));
   REQUIRE(page_sz_long > 0);
   const auto page_sz = static_cast<size_t>(page_sz_long);
 
@@ -35,14 +35,18 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
   const std::string p1 = "tensor.data_1";
 
   fs::path base = fs::temp_directory_path() / "aligned_cpu_test";
-  if (fs::exists(base))
+  if (fs::exists(base)) {
     fs::remove_all(base);
+  }
   fs::create_directories(base / model_subdir);
 
   fs::path path0 = base / model_subdir / p0;
   fs::path path1 = base / model_subdir / p1;
   REQUIRE(create_dummy_file(path0, size0, 'C'));
   REQUIRE(create_dummy_file(path1, size1, 'D'));
+
+  // RFC-0007 metadata for standard partitions
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
   // Combined expected data
   auto data0 = read_file_content(path0);
@@ -74,6 +78,7 @@ TEST_CASE("DiskModel page-aligned load to CPU via mmap", "[model][disk][cpu][mma
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
+      .expected_model_size = total_size,
       .max_buffer_bytes = pool_total};
 
   auto mstatus = Model::create(cfg);

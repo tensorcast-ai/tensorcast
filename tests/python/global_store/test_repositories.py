@@ -95,7 +95,7 @@ class TestRepositories:
 
         # Create
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -105,7 +105,7 @@ class TestRepositories:
             worker_id="worker1",
         )
         created = replica_repo.create(replica)
-        assert created.model_name == "test_model"
+        assert created.model_id == "test_model"
 
         # Find by ID
         found = replica_repo.find_by_id(created.replica_id, "test_model")
@@ -128,7 +128,7 @@ class TestRepositories:
         # Create replicas for different models
         for i in range(3):
             replica = ModelReplica(
-                model_name=f"model_{i % 2}",  # Two different models
+                model_id=f"model_{i % 2}",  # Two different models
                 node_id=f"node_{i}",
                 node_address=f"192.168.1.{i+1}",
                 node_port=8080,
@@ -168,7 +168,7 @@ class TestRepositories:
         # Create replicas with different priorities
         replicas = [
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -179,7 +179,7 @@ class TestRepositories:
                 worker_id="worker1",
             ),
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node2",
                 node_address="192.168.1.2",
                 node_port=8080,
@@ -190,7 +190,7 @@ class TestRepositories:
                 worker_id="worker1",
             ),
             ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id="node3",
                 node_address="192.168.1.3",
                 node_port=8080,
@@ -245,7 +245,7 @@ class TestRepositories:
 
         # Create replica at full capacity
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -270,7 +270,7 @@ class TestRepositories:
 
         # Create a replica first for foreign key constraint
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -285,13 +285,13 @@ class TestRepositories:
         from scstore.global_store.models import Transport
         transport = Transport(
             replica_id=created_replica.replica_id,
-            model_name="test_model",
+            model_id="test_model",
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9000,
         )
         created_transport = transport_repo.create(transport)
-        assert created_transport.model_name == "test_model"
+        assert created_transport.model_id == "test_model"
 
         # Find by ID
         found = transport_repo.find_by_id(created_transport.transport_id)
@@ -323,7 +323,7 @@ class TestRepositories:
         # Create replicas for this worker
         for i in range(3):
             replica = ModelReplica(
-                model_name=f"worker_model_{i}",
+                model_id=f"worker_model_{i}",
                 node_id="temp_node",
                 node_address="192.168.1.100",
                 node_port=8080 + i,

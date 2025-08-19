@@ -72,12 +72,8 @@ def create_mock_client():
         "model2": [replica2],
     }
 
-    # Mock model info
-    model_info = global_store_pb2.ModelInfo(
-        model_name="model1",
-        available_replicas=[replica1],
-    )
-    client.get_model_info.return_value = model_info
+    # Mock model info: WebUI client returns list[MemoryInfo] for a model_id
+    client.get_model_info.return_value = [replica1]
 
     # Mock summary stats
     client.get_summary_stats.return_value = {
@@ -134,7 +130,7 @@ async def test_replica_endpoints():
     # Test list replicas
     response = await list_replicas(
         client,
-        model_name=None,
+        model_id=None,
         node_id=None,
         memory_type=None,
         worker_id=None,
@@ -148,7 +144,7 @@ async def test_replica_endpoints():
     # Test list replicas with filters
     response = await list_replicas(
         client,
-        model_name="model1",
+        model_id="model1",
         node_id=None,
         memory_type=MemoryType.GPU,
         worker_id=None,
@@ -156,12 +152,12 @@ async def test_replica_endpoints():
         page_size=100
     )
     assert len(response.data) == 1
-    assert response.data[0]["model_name"] == "model1"
+    assert response.data[0]["model_id"] == "model1"
 
     # Test get specific replica
     response = await get_replica("replica-0", client)
     assert response.data["replica_id"] == "replica-0"
-    assert response.data["model_name"] == "model1"
+    assert response.data["model_id"] == "model1"
 
 
 @pytest.mark.asyncio
@@ -172,14 +168,14 @@ async def test_model_endpoints():
     # Test list models
     response = await list_models(client)
     assert len(response.data) == 2
-    assert response.data[0]["model_name"] == "model1"
+    assert response.data[0]["model_id"] == "model1"
     assert response.data[0]["gpu_replicas"] == 1
-    assert response.data[1]["model_name"] == "model2"
+    assert response.data[1]["model_id"] == "model2"
     assert response.data[1]["ram_replicas"] == 1
 
     # Test get specific model
     response = await get_model("model1", client)
-    assert response.data["model_name"] == "model1"
+    assert response.data["model_id"] == "model1"
     assert response.data["replica_count"] == 1
     assert len(response.data["nodes"]) == 1
 
@@ -207,7 +203,7 @@ async def test_transports_endpoint():
     response = await list_transports(
         client,
         status=None,
-        model_name=None,
+        model_id=None,
         page=1,
         page_size=50
     )

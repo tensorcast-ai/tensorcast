@@ -72,6 +72,12 @@ struct LoadingHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
   uint32_t pipeline_concurrency = 4;
+  // Content-addressed identity (mi2:...) when available.
+  std::string model_id;
+  // Optional: explicitly provide a disk path as a source hint.
+  // When non-empty and content-addressed routing is unavailable, the loader
+  // may use this path via DiskLoader as an explicit override.
+  std::string disk_path;
 
   // Hint: Prefer loading the model into the Pageable-Chunk CPU Cache (UPC-Cache)
   // instead of the traditional pinned host memory path. When set to true the

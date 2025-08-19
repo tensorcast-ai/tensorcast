@@ -54,8 +54,8 @@ class TestLifecycleIntegration:
         # Prepare dummy model files expected by the various lifecycle tests.
         # ------------------------------------------------------------------
         storage_root = config.server.storage_path
-        for model_name in [f"model{i}" for i in range(5)] + [f"test_model_{i}" for i in range(3)]:
-            create_dummy_model(storage_root, model_name)
+        for model_id in [f"model{i}" for i in range(5)] + [f"test_model_{i}" for i in range(3)]:
+            create_dummy_model(storage_root, model_id)
 
         # Create the servicer with the real CheckpointStore
         servicer = StoreDaemonServicer(config=config)

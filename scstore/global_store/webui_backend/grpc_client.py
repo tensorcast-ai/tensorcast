@@ -241,7 +241,7 @@ class GlobalStoreClient:
 
     async def list_model_replicas(
         self,
-        model_name: Optional[str] = None,
+        model_id: Optional[str] = None,
         node_id: Optional[str] = None,
         memory_type: Optional[int] = None,  # Use int instead of proto enum
         device_id: Optional[int] = None,
@@ -250,8 +250,8 @@ class GlobalStoreClient:
 
         Parameters
         ----------
-        model_name : str, optional
-                Filter by model name
+        model_id : str, optional
+                Filter by content-addressed model ID (mi2:...)
         node_id : str, optional
                 Filter by node ID
         memory_type : MemoryType, optional
@@ -262,14 +262,14 @@ class GlobalStoreClient:
         Returns
         -------
         dict[str, list[MemoryInfo]]
-                Map of model names to their replica memory info
+                Map of model_id to their replica memory info
         """
 
         def _call():
             request = global_store_pb2.ListModelReplicasRequest()
 
-            if model_name is not None:
-                request.model_name = model_name
+            if model_id is not None:
+                request.model_id = model_id
             if node_id is not None:
                 request.node_id = node_id
             if memory_type is not None:
@@ -283,39 +283,41 @@ class GlobalStoreClient:
 
             # Convert to Python dict
             result = {}
-            for model, mem_list in response.model_replicas.items():
-                result[model] = list(mem_list.list)
+            for mid, mem_list in response.model_replicas.items():
+                result[mid] = list(mem_list.list)
             return result
 
         return await self._execute_with_retry(_call) or {}
 
     async def get_model_info(
-        self, model_name: str
-    ) -> Optional[global_store_pb2.ModelInfo]:
-        """Get information about a specific model.
+        self, model_id: str
+    ) -> Optional[list[global_store_pb2.MemoryInfo]]:
+        """Get replicas information for a specific content-addressed model.
 
         Parameters
         ----------
-        model_name : str
-                Name of the model
+        model_id : str
+                Content-addressed model ID (mi2:...)
 
         Returns
         -------
-        ModelInfo or None
-                Model information if found
+        list[MemoryInfo] or None
+                Replica memory info list if found
         """
 
         def _call():
-            request = global_store_pb2.GetModelInfoRequest(model_name=model_name)
-            response = self._stub.GetModelInfo(request, timeout=self.config.timeout)  # type: ignore[union-attr]
+            request = global_store_pb2.GetModelInfoByIdRequest(model_id=model_id)
+            response = self._stub.GetModelInfoById(  # type: ignore[union-attr]
+                request, timeout=self.config.timeout
+            )
 
             if response.status == global_store_pb2.Status.OK:
-                return response.model_info
+                return list(response.replicas)
             elif response.status == global_store_pb2.Status.NOT_FOUND:
                 return None
             else:
                 raise RuntimeError(
-                    f"Failed to get model info: status={response.status}"
+                    f"Failed to get model info by id: status={response.status}"
                 )
 
         return await self._execute_with_retry(_call)

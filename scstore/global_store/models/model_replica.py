@@ -33,7 +33,8 @@ class ModelReplica:
 
     # Identity
     replica_id: UUID = field(default_factory=uuid4)
-    model_name: str = ""
+    model_id: str = ""  # content-addressed model ID (mi2:...)
+    disk_path: str | None = None  # physical path for disk-based replicas (optional)
 
     # Location
     node_id: str = ""

@@ -240,24 +240,23 @@ class RecoveryService:
 
         # Convert to sets for comparison
         local_replica_keys = {
-            (r.model_name, str(r.memory_info.memory_type), r.memory_info.device_id)
+            (r.model_id, str(r.memory_info.memory_type), r.memory_info.device_id)
             for r in local_state.local_replicas
         }
 
         global_replica_keys = {
-            (r.model_name, str(r.memory_type.value), r.device_id)
-            for r in global_replicas
+            (r.model_id, str(r.memory_type.value), r.device_id) for r in global_replicas
         }
 
         # Find replicas to add (in local but not in global)
         to_add = local_replica_keys - global_replica_keys
-        for model_name, memory_type, device_id in to_add:
+        for model_id, memory_type, device_id in to_add:
             # Find the local replica info
             local_replica = next(
                 r
                 for r in local_state.local_replicas
                 if (
-                    r.model_name == model_name
+                    r.model_id == model_id
                     and str(r.memory_info.memory_type) == memory_type
                     and r.memory_info.device_id == device_id
                 )
@@ -284,13 +283,13 @@ class RecoveryService:
             # No inventory → do **not** remove anything.
             to_remove = set()
 
-        for model_name, memory_type, device_id in to_remove:
+        for model_id, memory_type, device_id in to_remove:
             # Find the global replica
             global_replica = next(
                 r
                 for r in global_replicas
                 if (
-                    r.model_name == model_name
+                    r.model_id == model_id
                     and str(r.memory_type.value) == memory_type
                     and r.device_id == device_id
                 )
@@ -320,16 +319,14 @@ class RecoveryService:
                         change.replica_info, worker_id
                     )
                     self.model_replica_repository.create_or_update(replica)
-                    logger.debug(f"Added replica: {replica.model_name}")
+                    logger.debug(f"Added replica: {replica.model_id}")
 
                 elif change.type == global_store_pb2.StateChange.REMOVE_REPLICA:
                     # Remove replica
                     if change.replica_info.replica_id:
                         replica_id = UUID(change.replica_info.replica_id)
                         self.model_replica_repository.delete(replica_id)
-                        logger.debug(
-                            f"Removed replica: {change.replica_info.model_name}"
-                        )
+                        logger.debug(f"Removed replica: {change.replica_info.model_id}")
 
                 elif change.type == global_store_pb2.StateChange.UPDATE_REPLICA:
                     # Update replica
@@ -337,7 +334,7 @@ class RecoveryService:
                         change.replica_info, worker_id
                     )
                     self.model_replica_repository.create_or_update(replica)
-                    logger.debug(f"Updated replica: {replica.model_name}")
+                    logger.debug(f"Updated replica: {replica.model_id}")
 
             except Exception as e:
                 logger.error(f"Failed to apply state change {change.type}: {e}")
@@ -358,7 +355,7 @@ class RecoveryService:
         )
 
         return global_store_pb2.ModelReplicaInfo(
-            model_name=replica.model_name,
+            model_id=replica.model_id,
             replica_id=str(replica.replica_id),
             memory_info=memory_info,
             max_concurrency=replica.max_concurrency,
@@ -379,7 +376,7 @@ class RecoveryService:
             replica_id=UUID(proto_replica.replica_id)
             if proto_replica.replica_id
             else uuid4(),
-            model_name=proto_replica.model_name,
+            model_id=proto_replica.model_id,
             node_id=proto_replica.memory_info.node_id,
             node_address=proto_replica.memory_info.node_address,
             node_port=proto_replica.memory_info.node_port,
@@ -400,13 +397,13 @@ class RecoveryService:
         """Compute checksum of replica state for consistency checking."""
         # Sort replicas by a stable key for consistent checksum
         sorted_replicas = sorted(
-            replicas, key=lambda r: (r.model_name, r.node_id, r.device_id)
+            replicas, key=lambda r: (r.model_id, r.node_id, r.device_id)
         )
 
         # Create string representation of state
         state_str = ""
         for replica in sorted_replicas:
-            state_str += f"{replica.model_name}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
+            state_str += f"{replica.model_id}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
 
         # Compute MD5 hash
         return hashlib.md5(state_str.encode()).hexdigest()
@@ -467,21 +464,21 @@ class RecoveryService:
         return self._compute_state_checksum(replicas)
 
     def get_obsolete_models(
-        self, worker_id: str, registered_models: list[str] | tuple[str, ...]
+        self, worker_id: str, registered_model_ids: list[str] | tuple[str, ...]
     ) -> list[str]:
         """Determine models that exist on the worker but not in the global state.
 
         Args:
             worker_id: Worker identifier.
-            registered_models: Models currently reported by the worker.
+            registered_model_ids: Model IDs currently reported by the worker.
 
         Returns:
-            List of model names that should be removed from the worker.
+            List of model IDs that should be removed from the worker.
         """
         try:
             replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
-            global_models = {replica.model_name for replica in replicas}
-            return [m for m in registered_models if m not in global_models]
+            global_models = {replica.model_id for replica in replicas}
+            return [m for m in registered_model_ids if m not in global_models]
         except Exception as e:
             logger.error(f"Failed to compute obsolete models for {worker_id}: {e}")
             return []
