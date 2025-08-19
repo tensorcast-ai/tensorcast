@@ -104,6 +104,7 @@ sc_cc_library(
         ":cuda_api_lib",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
+        "@boringssl//:crypto",
     ],
 )
 
