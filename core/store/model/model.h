@@ -12,6 +12,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "gsl/pointers"
 
 #include "core/common/model_verification.h"
 #include "core/communicator/engine/engine.h"
@@ -208,8 +209,8 @@ class Model {
 
   mutable absl::Mutex mutex_; // Protects internal state consistency, loader/manager access
 
-  const std::unique_ptr<IModelLoader> loader_;
-  const std::shared_ptr<MemoryManager> memory_manager_;
+  const gsl::not_null<std::unique_ptr<IModelLoader>> loader_;
+  const gsl::not_null<std::shared_ptr<MemoryManager>> memory_manager_;
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
   const ModelLocation original_source_type_;

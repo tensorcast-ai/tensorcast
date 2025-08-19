@@ -49,6 +49,7 @@ alwaysApply: false
 ## Memory Management
 - Always use RAII principles
 - Avoid manual memory allocation
+- Use `gsl::not_null` for non-null pointers
 
 ## Concurrency
 - Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
@@ -68,6 +69,7 @@ alwaysApply: false
 - Include usage examples in header comments
 
 ## Bazel BUILD Rules
+Use `tools/bazel` instead of raw `bazel` in the command line.
 
 ### Core Principles
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`

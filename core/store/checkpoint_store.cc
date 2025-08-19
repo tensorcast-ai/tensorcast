@@ -1072,18 +1072,12 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
     return absl::InvalidArgumentError("tensor index key or data must be provided");
   }
 
-  // Prepare minimal Model instance bound to target GPU to own the allocation.
-  // Use a real on-disk path (if available) to satisfy Model::create() loader initialization,
-  // though we will only allocate memory and not load data in this flow.
-  DiskSource dummy_source;
-  if (!storage_path_.empty()) {
-    dummy_source.path = storage_path_ / std::string(reg.model_id);
-  } else {
-    // Fallback: treat model_id as a fully qualified path if storage root is empty
-    dummy_source.path = std::filesystem::path(std::string(reg.model_id));
-  }
+  // Prepare a memory-only Model instance bound to target GPU to own the allocation.
+  // Use InlineBufferSource with the known total size so Model::create() can
+  // construct MemoryManager without requiring any on-disk layout.
+  InlineBufferSource ib_source{.data = nullptr, .size_bytes = reg.total_size_bytes};
   ModelConfig cfg{
-      .source = dummy_source,
+      .source = ib_source,
       .model_identifier = reg.model_id,
       .device_type = DeviceType::GPU,
       .local_device_id = reg.device_id,
@@ -1116,6 +1110,10 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
     }
   }
 
+  // Try to create the model with DiskSource first. If the loader fails due to
+  // missing directory or missing partitions, fall back to a memory-only path
+  // that uses InlineBufferSource to construct a size-known Model and allocate
+  // GPU memory without touching disk.
   auto model_or = Model::create(cfg);
   if (!model_or.ok()) {
     return model_or.status();

@@ -82,8 +82,8 @@ sc_cc_library(
     hdrs = ["safetensors_source.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":source",
         ":safetensors_util",
+        ":source",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -94,8 +94,8 @@ sc_cc_library(
     hdrs = ["multi_safetensors_source.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":source",
         ":safetensors_util",
+        ":source",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -205,6 +205,21 @@ sc_cc_library(
 config_setting(
     name = "use_fake_cuda",
     define_values = {"use_fake_cuda": "true"},
+)
+
+# Minimal loader for memory-only path (InlineBufferSource)
+sc_header_only_library(
+    name = "inline_buffer_loader",
+    hdrs = ["inline_buffer_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":loader",
+        "//core/store:loading_spec",
+        "//core/store/model:model_location",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/synchronization",
+    ],
 )
 
 # Tests

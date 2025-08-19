@@ -31,7 +31,9 @@ def resolve_device(device: int | torch.device) -> int:
     Raises:
         ValueError: If device is CPU (not supported yet)
     """
-    # LEGACY-DYNAMIC: Required for torch.device vs int handling
+    if device is None:
+        raise ValueError("device is required")
+
     if isinstance(device, torch.device):
         if device.type == "cpu":
             raise ValueError("CPU is not supported yet")
@@ -589,3 +591,152 @@ def load_dict_pure_local(
     # Newer callers should simply ignore the first element (e.g. “_ , sd = …”) or
     # switch to the single-value form if the metadata is not required.
     return None, state_dict
+
+
+def register_tensor_dict(
+    tensor_dict: dict[str, torch.Tensor],
+    model_id: str,
+    *,
+    device_id: int | torch.device | None = None,
+    enable_p2p: bool = True,
+    ttl_ms: int | None = None,
+    daemon_address: str | None = None,
+) -> dict[str, torch.Tensor]:
+    """Register an in-memory tensor dict as a coalesced GPU memory replica.
+
+    Returns a state_dict whose tensors reference the daemon-owned memory.
+    """
+    if not tensor_dict:
+        raise ValueError("tensor_dict must not be empty")
+
+    # Resolve and validate device per spec:
+    # a) device_id is None: infer from tensor_dict → all tensors must be CUDA and on the same device
+    # b) device_id is provided: tensor_dict must be CPU tensors only
+    if device_id is None:
+        # Require all tensors to be CUDA and on the same device
+        dev_index: int | None = None
+        for t in tensor_dict.values():
+            if not t.is_cuda:
+                raise ValueError(
+                    "When device_id is None, all tensors must be CUDA tensors on the same device"
+                )
+            if dev_index is None:
+                dev_index = t.device.index if t.device.index is not None else 0
+            else:
+                if (t.device.index if t.device.index is not None else 0) != dev_index:
+                    raise ValueError(
+                        "All CUDA tensors must be on the same device when inferring device_id"
+                    )
+        if dev_index is None:
+            raise ValueError(
+                "tensor_dict is empty or has no tensors to infer device from"
+            )
+        target_device_id = int(dev_index)
+        input_mode = "cuda"
+    else:
+        target_device_id = resolve_device(device_id)
+        # Enforce CPU-only input in this mode
+        for t in tensor_dict.values():
+            if t.is_cuda:
+                raise ValueError(
+                    "When device_id is specified, tensor_dict must contain CPU tensors only"
+                )
+        input_mode = "cpu"
+
+    # Build canonical meta index and source storage info
+    tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
+    tensor_source_index: dict[str, tuple[int, int]] = {}
+    for name, t in tensor_dict.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("All tensor_dict keys must be non-empty strings")
+        storage = t.untyped_storage()
+        data_ptr = int(storage.data_ptr())
+        size_bytes = int(storage.size())
+        tensor_source_index[name] = (data_ptr, size_bytes)
+        tensor_meta_index[name] = (
+            list(map(int, t.shape)),
+            list(map(int, t.stride())),
+            str(t.dtype),
+            int(t.storage_offset()),
+        )
+
+    # Plan coalesced layout (8B aligned) and compute total size
+    tensor_device_offsets, tensor_copy_chunks = calculate_tensor_device_offsets(
+        tensor_source_index, target_device_id
+    )
+    unique_chunks = tensor_copy_chunks.get(target_device_id, [])
+    if not unique_chunks:
+        raise ValueError("Failed to compute coalesced layout for tensor_dict")
+    total_size_bytes = max(dst + sz for _, sz, dst, _ in unique_chunks)
+
+    # Build v2-equivalent index JSON using destination offsets
+    tensor_index_v2: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+    for name, (shape, stride, dtype, storage_offset) in tensor_meta_index.items():
+        # Use canonical storage size per name from source index
+        _, storage_size = tensor_source_index[name]
+        dst_off = int(tensor_device_offsets[target_device_id][name])
+        tensor_index_v2[name] = (
+            dst_off,
+            int(storage_size),
+            list(shape),
+            list(stride),
+            dtype,
+            int(storage_offset),
+        )
+
+    index_bytes = json.dumps(tensor_index_v2, separators=(",", ":")).encode("utf-8")
+
+    # Begin registration with inline index data
+    ctl = DaemonCtl(daemon_address or get_daemon_address())
+    begin = ctl.begin_register_tensor_dict(
+        model_id=model_id,
+        device_id=target_device_id,
+        total_size_bytes=total_size_bytes,
+        enable_p2p=enable_p2p,
+        ttl_ms=ttl_ms if ttl_ms is not None else 0,
+        tensor_index_data=index_bytes,
+        encoding="json",
+        schema_version="v2",
+        timeout_s=60.0,
+    )
+
+    cuda_handle = begin["daemon_ipc_handle"]
+    # Map daemon-owned memory into this process
+    base_ptr = get_cuda_memory_ptr(target_device_id, cuda_handle)
+
+    # Create destination tensors that reference the mapped memory
+    dest_state_dict = restore_tensors(
+        tensor_meta_index,
+        {target_device_id: int(base_ptr)},
+        tensor_device_offsets,
+        True,
+    )
+
+    # Copy payloads into daemon memory
+    for name, src in tensor_dict.items():
+        dst = dest_state_dict[name]
+        local = src
+        if input_mode == "cpu":
+            # Move CPU → target GPU
+            local = local.to(torch.device("cuda", target_device_id), non_blocking=True)
+        else:
+            # Already CUDA; validate on the same device
+            if local.device.index != target_device_id:
+                raise ValueError(
+                    f"Tensor '{name}' device mismatch: expected cuda:{target_device_id}, got {local.device}"
+                )
+        if local.dtype != dst.dtype:
+            local = local.to(dst.dtype)
+        if tuple(local.shape) != tuple(dst.shape):
+            raise ValueError(
+                f"Shape mismatch for tensor '{name}': {tuple(local.shape)} vs {tuple(dst.shape)}"
+            )
+        dst.copy_(local, non_blocking=True)
+
+    # Ensure writes complete before commit
+    torch.cuda.synchronize(target_device_id)
+
+    # Finalize registration
+    ctl.commit_registered_tensor_dict(begin["registration_id"], timeout_s=60.0)
+
+    return dest_state_dict

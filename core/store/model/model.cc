@@ -12,9 +12,9 @@
 #include "absl/strings/str_format.h"
 
 #include "core/store/loader/disk_loader.h"
+#include "core/store/loader/inline_buffer_loader.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loader/p2p_loader.h"
-#include "core/store/loader/source.h"
 #include "core/store/model/memory_manager.h"
 
 namespace stepcast::store {
@@ -48,16 +48,17 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
               return absl::OkStatus(); // Return OK status
             },
             [&](const P2PSource& p2p_source) -> absl::Status { // Explicitly return absl::Status
-              VLOG(1) << "Model(" << config.model_identifier << "): Configuring P2PLoader from "
-                      << p2p_source.ip << ":" << p2p_source.port;
+              VLOG(1) << "Model(" << config.model_identifier << "): Configuring P2PLoader from " << p2p_source.ip << ":"
+                      << p2p_source.port;
               loader = std::make_unique<P2PLoader>(p2p_source);
               source_type = ModelLocation::REMOTE;
               return absl::OkStatus(); // Return OK status
             },
             [&](const InlineBufferSource& buffer_source) -> absl::Status {
               VLOG(1) << "Model(" << config.model_identifier << "): Configuring InlineBufferLoader";
-              // TODO: Implement InlineBufferLoader
-              return absl::UnimplementedError("InlineBufferSource not yet supported");
+              loader = std::make_unique<InlineBufferLoader>(buffer_source);
+              source_type = ModelLocation::PAGEABLE_CPU; // semantic placeholder for in-memory
+              return absl::OkStatus();
             }},
         config.source);
   } catch (const std::exception& e) {
@@ -127,7 +128,7 @@ absl::StatusOr<std::unique_ptr<Model>> Model::create(ModelConfig config) {
     dev_key.ordinal = -1;
   }
 
-  InstanceKey inst_key{config.model_identifier, dev_key, /*replica=*/0};
+  InstanceKey inst_key{.model_id = config.model_identifier, .device = dev_key, /*replica=*/.replica = 0};
 
   // Use absl::WrapUnique to manage the private constructor call
   auto model_ptr =
@@ -192,10 +193,6 @@ const std::string& Model::model_id() const {
 }
 
 absl::StatusOr<uint64_t> Model::get_model_size() const {
-  // memory_manager_ is unique_ptr, assumed valid. get_model_size is thread-safe.
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
   uint64_t size = memory_manager_->get_model_size();
   if (size == 0) {
     return absl::FailedPreconditionError("Model size not set or is zero.");
@@ -259,12 +256,8 @@ std::shared_future<absl::Status> Model::ensure_loaded_async(
   {
     absl::MutexLock lock(&mutex_);
 
-    if (!memory_manager_ || !loader_) {
-      return make_ready_future(absl::InternalError("Model loader or memory manager is invalid."));
-    }
-
     // Get raw pointer under lock
-    mm_ptr = memory_manager_.get();
+    mm_ptr = memory_manager_.get().get();
 
     if (target_location == ModelLocation::PAGEABLE_CPU) {
       member_future = &cpu_load_future_;
@@ -459,9 +452,6 @@ absl::StatusOr<ModelLocation> Model::find_best_source_for_target(ModelLocation t
 
 absl::Status Model::release_memory(ModelLocation location, bool safe_release) {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
 
   VLOG(2) << "Model(" << key_.model_id << "): Releasing memory for " << location_to_string(location)
           << ", safe=" << safe_release;
@@ -489,26 +479,16 @@ absl::Status Model::release_memory(ModelLocation location, bool safe_release) {
 
 MemoryState Model::get_memory_state(ModelLocation location) const {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    LOG(WARNING) << "Model(" << key_.model_id << "): MemoryManager is null, returning UNINITIALIZED state.";
-    return MemoryState::UNINITIALIZED;
-  }
   return memory_manager_->get_state(location);
 }
 
 std::vector<void*> Model::get_data_pointer(ModelLocation location) const {
   // memory_manager_->get_pointer is thread-safe
-  if (!memory_manager_) {
-    return {};
-  }
   return memory_manager_->get_pointer(location);
 }
 
 absl::Status Model::wait_until_loaded(ModelLocation location, absl::Duration timeout) {
   // memory_manager_->wait_for_state is thread-safe
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
   VLOG(1) << "Model(" << key_.model_id << "): Waiting until loaded for " << location_to_string(location)
           << ", timeout=" << timeout;
   return memory_manager_->wait_for_state(location, MemoryState::LOADED, timeout);
@@ -516,10 +496,6 @@ absl::Status Model::wait_until_loaded(ModelLocation location, absl::Duration tim
 
 MemoryManager& Model::get_memory_manager() const {
   // Returning reference to unique_ptr's managed object. Okay if Model lifetime > caller usage.
-  if (!memory_manager_) {
-    // This should ideally not happen if create() succeeded.
-    LOG(FATAL) << "Internal error: MemoryManager is null in Model.";
-  }
   return *memory_manager_;
 }
 
@@ -527,9 +503,6 @@ absl::StatusOr<CommRegistrationInfo> Model::enable_remote_memory_access(
     ModelLocation location,
     stepcast::communicator::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
 
   // Build full chunk list using DVMP metadata snapshot.
   absl::Span<const store::ChunkMeta> meta = memory_manager_->chunk_snapshot();
@@ -545,10 +518,6 @@ absl::StatusOr<CommRegistrationInfo> Model::enable_remote_memory_access(
 
 absl::StatusOr<ModelVerificationInfo> Model::generate_verification_info(ModelLocation location) const {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
-
   // Check if data is loaded at the specified location
   MemoryState state = memory_manager_->get_state(location);
   if (state != MemoryState::LOADED) {
@@ -591,9 +560,6 @@ absl::Status Model::verify_model_data(
     const ModelVerificationInfo& expected_info,
     VerificationLevel level) const {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
 
   // Check if data is loaded at the specified location
   MemoryState state = memory_manager_->get_state(location);
@@ -634,10 +600,6 @@ absl::Status Model::verify_model_data(
 
 absl::Status Model::verify_key_points(ModelLocation location, const ModelVerificationInfo& expected_info) const {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
-
   // Check if data is loaded at the specified location
   MemoryState state = memory_manager_->get_state(location);
   if (state != MemoryState::LOADED) {
@@ -678,9 +640,6 @@ absl::Status Model::disable_remote_memory_access(
     ModelLocation location,
     stepcast::communicator::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
-  if (!memory_manager_) {
-    return absl::InternalError("MemoryManager is null.");
-  }
 
   // Use chunk-scoped unexport. Chunks parameter is currently ignored internally.
   std::vector<uint32_t> empty;
