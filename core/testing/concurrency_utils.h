@@ -130,6 +130,11 @@ class TempModelFixture {
     if (!create_dummy_file(data_file, size_bytes)) {
       throw std::runtime_error("Failed to create dummy model file");
     }
+    // Ensure RFC-0007 metadata so DiskLoader can initialize
+    auto st = write_rfc0007_descriptor_for_standard_model_dir(model_dir);
+    if (!st.ok()) {
+      throw std::runtime_error(std::string("Failed to write descriptor/index: ") + st.message());
+    }
     return model_dir;
   }
 

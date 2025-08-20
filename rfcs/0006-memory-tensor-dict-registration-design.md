@@ -85,7 +85,7 @@ Semantics: delegates to StoreDaemon via client; returns `ModelHandle` consistent
 ### 3.4 Global Store (metadata/protocol)
 
 - Replicas store `tensor_index_key` (required) and `is_memory_replica`; no per-replica `tensor_index_data` blobs.
-- New RPC: `GetModelIndex(model_name, tensor_index_key) -> (tensor_index_data, encoding, schema_version)`.
+- New RPC: `GetModelIndex(index_key) -> (tensor_index_data, encoding, schema_version)`.
 - Persistence: table `model_indices(index_key PK, schema_version INT, encoding TEXT, size_bytes BIGINT, index_data BLOB, created_at TIMESTAMP)`; replicas reference keys and are indexed by `tensor_index_key`.
 - Protocol: key-first; include index blob only to upsert when the key is missing. Consumers receive keys from `GetModelInfo` and fetch blobs via `GetModelIndex` on demand (cache locally).
 

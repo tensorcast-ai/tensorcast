@@ -15,12 +15,12 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
 #include "core/store/model/model_config.h"
 #include "core/store/model/model_location.h"
+#include "core/testing/common.h"
 
 namespace fs = std::filesystem;
 using namespace stepcast::store;
@@ -94,6 +94,8 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     fs::create_directories(model_data_path);
     fs::path dummy_file_path = model_data_path / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, model_size));
+    // RFC-0007 metadata for standard partitions
+    REQUIRE(::stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_data_path).ok());
 
     int device_id = 0;
     int device_count;
@@ -203,6 +205,8 @@ TEST_CASE("Model Communication Memory Registration", "[model][comm_registration]
     fs::create_directories(model_data_path);
     fs::path dummy_file_path = model_data_path / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, model_size));
+    // RFC-0007 metadata for standard partitions
+    REQUIRE(::stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_data_path).ok());
 
     // Note: No CUDA pool needed for CPU-only test
     int dummy_device_id = 0; // Still need a device ID for config

@@ -34,14 +34,18 @@ TEST_CASE("DiskModel load to CPU then GPU and verify content", "[model][disk][co
   const size_t total_size = size0 + size1;
 
   fs::path base = fs::temp_directory_path() / "cpu_to_gpu_test";
-  if (fs::exists(base))
+  if (fs::exists(base)) {
     fs::remove_all(base);
+  }
   fs::create_directories(base / model_subdir);
 
   fs::path path0 = base / model_subdir / p0;
   fs::path path1 = base / model_subdir / p1;
   REQUIRE(create_dummy_file(path0, size0, 'X'));
   REQUIRE(create_dummy_file(path1, size1, 'Y'));
+
+  // RFC-0007 metadata for standard partitions
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
   // Combined original data
   auto data0 = read_file_content(path0);
@@ -74,6 +78,7 @@ TEST_CASE("DiskModel load to CPU then GPU and verify content", "[model][disk][co
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
+      .expected_model_size = total_size,
       .max_buffer_bytes = pool_total};
 
   auto mstatus = Model::create(cfg);

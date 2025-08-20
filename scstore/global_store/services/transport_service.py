@@ -39,7 +39,7 @@ class TransportService:
 
     def request_transport(
         self,
-        model_name: str,
+        model_id: str,
         source_node_id: str,
         source_address: str,
         source_port: int,
@@ -49,7 +49,7 @@ class TransportService:
         Request a model transport with load balancing.
 
         Args:
-            model_name: Name of the model to transport
+            model_id: Content-addressed model id (mi2:...)
             source_node_id: Source node ID
             source_address: Source node address
             source_port: Source node port
@@ -68,7 +68,7 @@ class TransportService:
             try:
                 # Try to find and claim an available replica
                 replica = self.replica_repository.find_available_for_transport(
-                    model_name=model_name,
+                    model_id=model_id,
                     heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 )
 
@@ -76,7 +76,7 @@ class TransportService:
                     # Create transport record
                     transport = Transport(
                         replica_id=replica.replica_id,
-                        model_name=model_name,
+                        model_id=model_id,
                         source_node_id=source_node_id,
                         source_address=source_address,
                         source_port=source_port,
@@ -85,13 +85,13 @@ class TransportService:
                     self.transport_repository.create(transport)
 
                     # Metrics
-                    inc_transport_request(model_name, "success")
+                    inc_transport_request(model_id, "success")
                     wait_sec = time.time() - start_time
-                    observe_transport_wait(model_name, wait_sec)
+                    observe_transport_wait(model_id, wait_sec)
                     inc_active_transports()
 
                     logger.info(
-                        f"Transport requested for {model_name}, "
+                        f"Transport requested for {model_id}, "
                         f"replica: {replica.replica_id}, "
                         f"transport: {transport.transport_id}, "
                         f"load: {replica.current_requests}/{replica.max_concurrency}"
@@ -105,11 +105,11 @@ class TransportService:
 
             # Check timeout
             if time.time() >= end_time:
-                inc_transport_request(model_name, "timeout")
+                inc_transport_request(model_id, "timeout")
                 wait_sec = time.time() - start_time
-                observe_transport_wait(model_name, wait_sec)
+                observe_transport_wait(model_id, wait_sec)
                 raise TimeoutError(
-                    f"No available replica for model {model_name} within timeout"
+                    f"No available replica for model {model_id} within timeout"
                 )
 
             # Wait before retry
@@ -148,7 +148,7 @@ class TransportService:
         dec_active_transports()
 
         logger.info(
-            f"Completed transport {transport_id} for {transport.model_name}, "
+            f"Completed transport {transport_id} for {transport.model_id}, "
             f"replica: {transport.replica_id}, "
             f"new load: {current}/{max_conc}"
         )

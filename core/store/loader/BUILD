@@ -67,12 +67,36 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "disk_dir_hash",
+    srcs = ["disk_dir_hash.cc"],
+    hdrs = ["disk_dir_hash.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":file_partition_source",
+        ":source_hash",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "canonical_index",
+    srcs = ["canonical_index.cc"],
+    hdrs = ["canonical_index.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
     name = "safetensors_util",
     srcs = ["safetensors_util.cc"],
     hdrs = ["safetensors_util.h"],
     visibility = ["//visibility:public"],
     deps = [
         "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -123,6 +147,21 @@ sc_cc_library(
     ],
 )
 
+# Unified hashing over SeekableSource
+sc_cc_library(
+    name = "source_hash",
+    srcs = ["source_hash.cc"],
+    hdrs = ["source_hash.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":file_partition_source",
+        ":source",
+        "//core/common:cuda_api_lib",
+        "//core/common:model_hash_lib",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
 # Sink implementations
 sc_cc_library(
     name = "gpu_memory_sink",
@@ -135,6 +174,8 @@ sc_cc_library(
         "//core/common:device_guard_lib",
     ],
 )
+
+## Removed separate in-memory source targets in favor of local classes in source_hash.cc
 
 sc_cc_library(
     name = "dvmp_region_sink",
@@ -507,6 +548,7 @@ cc_test(
         ":streaming_buffer_adapter",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:model_hash_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
         "//core/store/model",

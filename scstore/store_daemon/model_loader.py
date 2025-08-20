@@ -18,6 +18,7 @@ from typing import (
 
 import grpc
 
+from scstore import _checkpoint_store as _cs
 from scstore.logger import init_logger
 from scstore.proto import store_daemon_pb2
 from scstore.store_daemon.utils import resolve_device_id
@@ -183,7 +184,23 @@ class ModelLoader:
             - cuda_ipc_handle_bytes: CUDA IPC handle for GPU loads
             - loading_future: Future that resolves when loading completes
         """
-        model_path = request.model_path
+        # Inputs separation: prefer explicit model_id (mi2:...) when present; otherwise use disk_path
+        # (backward-compat: fall back to legacy model_path as disk path).
+        model_id_input: str | None = None
+        disk_path_input: str | None = None
+        try:
+            # New fields may not exist on older stubs; guard via getattr
+            model_id_input = request.model_id if hasattr(request, "model_id") else None
+        except Exception:
+            model_id_input = None
+        try:
+            disk_path_input = (
+                request.disk_path if hasattr(request, "disk_path") else None
+            )
+        except Exception:
+            disk_path_input = None
+        # Backward compatibility: use legacy model_path as disk path when explicit fields absent
+        legacy_model_path = request.model_path
         device_type = request.target_device_type
         device_type_label = get_device_type_label(device_type)
 
@@ -204,7 +221,11 @@ class ModelLoader:
             return False, None, future
 
         # Validate request
-        if not self._validate_load_request(model_path, context):
+        effective_disk_path = disk_path_input or legacy_model_path
+        # Validate: at least one of (model_id mi2) or disk_path must be provided
+        if not model_id_input and not self._validate_load_request(
+            effective_disk_path, context
+        ):
             MODELS_LOAD_FAILURES_TOTAL.labels(
                 device_type=device_type_label,
                 error_type="invalid_request",
@@ -239,10 +260,35 @@ class ModelLoader:
                     "Memory eviction attempt failed – continuing with prepare()"
                 )
 
-            model_handle = self.checkpoint_store.prepare(
-                request.model_path,
-                target_device_spec,
-            )
+            # Prefer Global Store orchestrated AUTO routing only when the caller supplies
+            # a content-addressed model_id (mi2:...). Never treat a disk path as model_id.
+            if (
+                self.servicer.global_store_enabled
+                and isinstance(model_id_input, str)
+                and model_id_input.startswith("mi2:")
+            ):
+                model_handle = self.checkpoint_store.prepare(
+                    target_device_spec,
+                    _cs.PrepareMode.AUTO,
+                    pinned_timeout_ms=(
+                        pinned_allocation_timeout_ms
+                        if pinned_allocation_timeout_ms > 0
+                        else None
+                    ),
+                    model_id=model_id_input,
+                )
+            else:
+                # Local-only path: load from disk explicitly.
+                model_handle = self.checkpoint_store.prepare(
+                    target_device_spec,
+                    _cs.PrepareMode.LOAD_ONLY,
+                    pinned_timeout_ms=(
+                        pinned_allocation_timeout_ms
+                        if pinned_allocation_timeout_ms > 0
+                        else None
+                    ),
+                    disk_path=effective_disk_path,
+                )
 
             mem_handle = MemoryHandle(
                 handle_bytes=model_handle.ipc_handle_bytes,

@@ -99,7 +99,6 @@ class CheckpointStore {
    * @param hints         Advanced tuning knobs (reuse existing struct).
    */
   absl::StatusOr<ModelHandle> prepare(
-      std::string_view model_id,
       const DeviceKey& target_device,
       PrepareMode mode = PrepareMode::AUTO,
       const LoadingHints& hints = {});
@@ -145,6 +144,12 @@ class CheckpointStore {
     std::string model_id;
     int device_id{0};
     uint64_t size_bytes{0};
+    // RFC-0007: Expose content-address components for callers who need
+    // authoritative descriptor details without recomputation.
+    std::string index_multihash; // multibase(base32)-encoded multihash of canonical index
+    std::string data_multihash; // multibase(base32)-encoded multihash of tree-hash root
+    std::string schema_version; // e.g. "v2"
+    std::string encoding; // e.g. "json" or "cbor"
   };
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_tensor_dict(std::string_view registration_id);
@@ -176,6 +181,8 @@ class CheckpointStore {
   int unload_instance(const InstanceKey& key);
   [[nodiscard]] MemoryState get_instance_state(const InstanceKey& key, DeviceType memory_type) const;
   absl::StatusOr<uint64_t> get_instance_gpu_ptr(const InstanceKey& key);
+  // Return total model size in bytes for the given instance.
+  absl::StatusOr<uint64_t> get_instance_size(const InstanceKey& key);
 
   // Remote memory registration helpers (InstanceKey version)
   absl::StatusOr<CommRegistrationInfo> enable_remote_instance_access(const InstanceKey& key, ModelLocation location);
@@ -232,6 +239,7 @@ class CheckpointStore {
   // Configuration
   // ═══════════════════════════════════════════════════════════════════════════
 
+  const CheckpointStoreOptions options_;
   const std::filesystem::path storage_path_;
   const size_t memory_pool_size_;
   const int num_thread_;
@@ -259,19 +267,19 @@ class CheckpointStore {
   void initialize_communication_manager(const CheckpointStoreOptions& opts);
 
   // Model loading helpers - using new unified types
-  absl::StatusOr<::stepcast::store::ModelHandle> load_from_disk_internal(
+  absl::StatusOr<ModelHandle> load_from_disk_internal(
       const std::string& model_identifier,
       const DiskSource& source,
       const ModelTarget& target,
       const LoadingHints& hints);
 
-  absl::StatusOr<::stepcast::store::ModelHandle> load_from_p2p_internal(
+  absl::StatusOr<ModelHandle> load_from_p2p_internal(
       const std::string& model_identifier,
       const P2PSource& source,
       const ModelTarget& target,
       const LoadingHints& hints);
 
-  absl::StatusOr<::stepcast::store::ModelHandle> load_from_buffer_internal(
+  static absl::StatusOr<ModelHandle> load_from_buffer_internal(
       const std::string& model_identifier,
       const InlineBufferSource& source,
       const ModelTarget& target,

@@ -61,6 +61,9 @@ TEST_CASE("DiskModel creation errors", "[model][disk][error]") {
     // Create a file larger than the 1 KiB minimum to pass DiskLoader's size validation.
     REQUIRE(create_dummy_file(file0, 2048, 'Z'));
 
+    // RFC-0007: standard partition directories must include descriptor + canonical index
+    REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / subdir).ok());
+
     // Use new DiskSource with empty directory
     DiskSource disk_src;
     disk_src.path = base / subdir;

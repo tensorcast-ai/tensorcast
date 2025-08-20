@@ -14,7 +14,7 @@ const Replicas = () => {
   useWebSocket()
 
   const [filters, setFilters] = useState({
-    model_name: undefined as string | undefined,
+    model_id: undefined as string | undefined,
     node_id: undefined as string | undefined,
     memory_type: undefined as string | undefined,
   })
@@ -53,9 +53,9 @@ const Replicas = () => {
 
   const columns: ColumnType<ReplicaOut>[] = [
     {
-      title: 'Model Name',
-      dataIndex: 'model_name',
-      key: 'model_name',
+      title: 'Model ID',
+      dataIndex: 'model_id',
+      key: 'model_id',
       fixed: 'left',
       width: 200,
       ellipsis: true,
@@ -143,9 +143,9 @@ const Replicas = () => {
         <Row gutter={16}>
           <Col span={8}>
             <Search
-              placeholder="Search model name"
+              placeholder="Search model id"
               allowClear
-              onSearch={(value) => setFilters({ ...filters, model_name: value || undefined })}
+              onSearch={(value) => setFilters({ ...filters, model_id: value || undefined })}
             />
           </Col>
           <Col span={8}>

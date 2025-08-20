@@ -9,24 +9,24 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 
 const ModelDetail = () => {
   useWebSocket()
-  const { modelName } = useParams<{ modelName: string }>()
+  const { modelName: modelId } = useParams<{ modelName: string }>()
 
   const { data: model } = useQuery({
     queryKey: ['model', modelName],
     queryFn: async () => {
-      const res = await api.getModel(modelName!)
+      const res = await api.getModel(modelId!)
       return res.data.data
     },
-    enabled: !!modelName,
+    enabled: !!modelId,
   })
 
   const { data: replicasData } = useQuery({
-    queryKey: ['replicas', { model_name: modelName }],
+    queryKey: ['replicas', { model_id: modelId }],
     queryFn: async () => {
-      const res = await api.getReplicas({ model_name: modelName, page: 1, page_size: 100 })
+      const res = await api.getReplicas({ model_id: modelId, page: 1, page_size: 100 })
       return res.data
     },
-    enabled: !!modelName,
+    enabled: !!modelId,
   })
 
   const replicas = replicasData?.data || []
@@ -107,7 +107,7 @@ const ModelDetail = () => {
   return (
     <div>
       <div className="page-header">
-        <h1>{modelName}</h1>
+        <h1>{modelId}</h1>
       </div>
 
       <Row gutter={[16, 16]}>

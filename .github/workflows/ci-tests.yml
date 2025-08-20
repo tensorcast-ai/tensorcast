@@ -62,7 +62,8 @@ jobs:
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
             --define use_fake_cuda=true \
             --test_output=errors \
-            --test_summary=detailed
+            --test_summary=detailed \
+            --test_timeout=300
 
       - name: Run stress C++ tests
         timeout-minutes: 30

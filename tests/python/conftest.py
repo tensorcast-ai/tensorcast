@@ -41,9 +41,15 @@ def in_memory_db():
     Fixture that provides an in-memory DuckDB database for testing.
     This is used by the GlobalModelStoreServicer internally.
     """
+    if duckdb is None:
+        # Skip only if a test actually requests this fixture in an environment
+        # without DuckDB installed.
+        pytest.skip("duckdb is not installed; skipping tests requiring in_memory_db")
     conn = duckdb.connect(":memory:")
-    yield conn
-    conn.close()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @pytest.fixture(scope="function")

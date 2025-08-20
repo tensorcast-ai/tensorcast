@@ -6,7 +6,7 @@ from typing import Sequence
 
 import torch
 
-from scstore.torch_util import save_dict, load_dict_pure_local
+from scstore.torch_util import save_dict, load_dict
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -47,7 +47,7 @@ def test_shared_storage_roundtrip(tmp_path):
     # Use non-streaming path to target save_tensors directly; streaming path is tested elsewhere.
     save_dict(state_dict, str(save_path), use_streaming=False)
 
-    _, loaded_state_dict = load_dict_pure_local(str(save_path))
+    loaded_state_dict = load_dict(str(save_path), device_id=0, storage_path="", enable_verification=False)
 
     # -----------------------
     # (1) Value equality check for every tensor

@@ -49,7 +49,6 @@ const sidebars: SidebarsConfig = {
       label: 'Internals',
       items: [
         'developer-guides/internals/save_dict_flow',
-        'developer-guides/internals/load_dict_pure_local_flow',
         'developer-guides/internals/model-loading',
         'developer-guides/internals/adding-metrics',
       ],

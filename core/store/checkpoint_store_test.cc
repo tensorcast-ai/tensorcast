@@ -58,18 +58,23 @@ TEST_CASE("CheckpointStore prepare() GPU workflow", "[checkpoint_store][prepare]
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", model_size));
 
+  // RFC-0007: standard partitions require descriptor and canonical index
+  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_dir).ok());
+
   CheckpointStore store = make_store(temp_root);
 
   // Load to GPU (Now only GPU is supported)
   REQUIRE(stepcast::tests::is_cuda_available());
-  auto gpu_handle_or = store.prepare(model_id, make_gpu_key(0));
+  stepcast::store::LoadingHints hints;
+  hints.disk_path = model_id;
+  auto gpu_handle_or = store.prepare(make_gpu_key(0), stepcast::store::CheckpointStore::PrepareMode::LOAD_ONLY, hints);
   REQUIRE(gpu_handle_or.ok());
   auto gpu_handle = std::move(gpu_handle_or).value();
   REQUIRE(wait_ready(gpu_handle).ok());
   REQUIRE(gpu_handle.gpu_base_ptr != nullptr);
 
-  DeviceKey gpu0{DeviceType::GPU, 0, ""};
-  InstanceKey key{model_id, gpu0, 0};
+  DeviceKey gpu0{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  InstanceKey key{.model_id = model_id, .device = gpu0, .replica = 0};
   REQUIRE(store.wait_instance_ready(key) == 0);
 
   REQUIRE(store.unload_instance(key) == 0);
@@ -97,11 +102,17 @@ TEST_CASE("CheckpointStore helper queries after prepare()", "[checkpoint_store][
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", model_size));
 
+  // RFC-0007: standard partitions require descriptor and canonical index
+  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_dir).ok());
+
   CheckpointStore store = make_store(temp_root);
 
   // Load to GPU.
   {
-    auto gpu_handle_or = store.prepare(model_id, make_gpu_key(0));
+    stepcast::store::LoadingHints hints2;
+    hints2.disk_path = model_id;
+    auto gpu_handle_or =
+        store.prepare(make_gpu_key(0), stepcast::store::CheckpointStore::PrepareMode::LOAD_ONLY, hints2);
     REQUIRE(gpu_handle_or.ok());
     auto gpu_handle = std::move(gpu_handle_or).value();
     REQUIRE(wait_ready(gpu_handle).ok());
@@ -109,7 +120,7 @@ TEST_CASE("CheckpointStore helper queries after prepare()", "[checkpoint_store][
 
   // Verify get_loaded_devices()
   auto devices = store.get_loaded_devices(model_id);
-  REQUIRE(devices.size() >= 1);
+  REQUIRE(!devices.empty());
 
   // Verify list_device_models() on GPU 0.
   auto gpu_models = store.list_device_models(make_gpu_key(0));

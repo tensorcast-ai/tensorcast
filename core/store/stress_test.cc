@@ -216,7 +216,10 @@ class StressWorker {
 
     stats_->prepare_attempts.fetch_add(1);
 
-    auto handle_or = store_->prepare(model_id, make_gpu_key(gpu_ordinal));
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle_or = store_->prepare(make_gpu_key(gpu_ordinal), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(5000));

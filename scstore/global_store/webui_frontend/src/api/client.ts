@@ -56,7 +56,7 @@ export interface WorkerOut {
 
 export interface ReplicaOut {
   replica_id: string
-  model_name: string
+  model_id: string
   node_id: string
   node_address: string
   node_port: number
@@ -73,7 +73,7 @@ export interface ReplicaOut {
 }
 
 export interface ModelSummary {
-  model_name: string
+  model_id: string
   total_replicas: number
   available_replicas: number
   gpu_replicas: number
@@ -96,7 +96,7 @@ export interface NodeSummary {
 export interface TransportOut {
   transport_id: string
   replica_id: string
-  model_name: string
+  model_id: string
   source_node_id: string
   source_address: string
   source_port: number

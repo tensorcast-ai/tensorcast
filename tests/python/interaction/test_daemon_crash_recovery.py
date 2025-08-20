@@ -40,7 +40,7 @@ def _register_single_replica(gs, model: str, node_id: str, *, max_concurrency: i
         device_id=0,
     )
     reg = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model,
+        model_id=model,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -58,7 +58,7 @@ def test_daemon_crash_releases_counters(global_store_service):
     _register_single_replica(gs, model, node_id="CRASH", max_concurrency=1)
 
     # Acquire transport (simulate load) – but DO NOT complete it.
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model)
+    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
     resp = gs.RequestModelReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 

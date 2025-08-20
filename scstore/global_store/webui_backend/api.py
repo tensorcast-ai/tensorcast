@@ -170,7 +170,7 @@ async def get_worker(worker_id: str, client: GrpcClient) -> ApiResponse:
 @api_router.get("/replicas", response_model=ApiResponse)
 async def list_replicas(
     client: GrpcClient,
-    model_name: str | None = Query(None),
+    model_id: str | None = Query(None),
     node_id: str | None = Query(None),
     memory_type: MemoryType | None = _memory_type_query_none,
     worker_id: str | None = Query(None),
@@ -198,7 +198,7 @@ async def list_replicas(
     # ------------------------------------------------------------------
 
     all_replicas = await client.list_model_replicas(
-        model_name=model_name,
+        model_id=model_id,
         node_id=node_id,
         memory_type=proto_memory_type,
     )
@@ -228,9 +228,9 @@ async def list_replicas(
     replica_list = []
     replica_id_counter = 0  # Generate replica IDs since proto doesn't have them
 
-    for model_name_key, replicas in all_replicas.items():
-        # Apply *model_name* filter locally in case the server ignored it
-        if model_name and model_name_key != model_name:
+    for model_id_key, replicas in all_replicas.items():
+        # Apply *model_id* filter locally in case the server ignored it
+        if model_id and model_id_key != model_id:
             continue
 
         for r in replicas:
@@ -246,7 +246,7 @@ async def list_replicas(
             replica_list.append(
                 {
                     "replica_id": f"replica-{replica_id_counter}",
-                    "model_name": model_name_key,
+                    "model_id": model_id_key,
                     "node_id": r.node_id,
                     "node_address": r.node_address,
                     "node_port": r.node_port,
@@ -288,12 +288,12 @@ async def get_replica(replica_id: str, client: GrpcClient) -> ApiResponse:
     all_replicas = await client.list_model_replicas()
 
     replica_id_counter = 0
-    for model_name, replicas in all_replicas.items():
+    for model_id_key, replicas in all_replicas.items():
         for r in replicas:
             if f"replica-{replica_id_counter}" == replica_id:
                 replica_data = {
                     "replica_id": replica_id,
-                    "model_name": model_name,
+                    "model_id": model_id_key,
                     "node_id": r.node_id,
                     "node_address": r.node_address,
                     "node_port": r.node_port,
@@ -320,7 +320,7 @@ async def list_models(client: GrpcClient) -> ApiResponse:
 
     # Build model statistics
     models = []
-    for model_name, replicas in all_replicas.items():
+    for model_id, replicas in all_replicas.items():
         gpu_count = sum(1 for r in replicas if r.memory_type == 0)  # GPU = 0
         ram_count = sum(1 for r in replicas if r.memory_type == 1)  # RAM = 1
         disk_count = sum(1 for r in replicas if r.memory_type == 2)  # DISK = 2
@@ -330,7 +330,7 @@ async def list_models(client: GrpcClient) -> ApiResponse:
 
         models.append(
             {
-                "model_name": model_name,
+                "model_id": model_id,
                 "replica_count": len(replicas),
                 "gpu_replicas": gpu_count,
                 "ram_replicas": ram_count,
@@ -343,17 +343,17 @@ async def list_models(client: GrpcClient) -> ApiResponse:
     return ApiResponse(data=models)
 
 
-@api_router.get("/models/{model_name}", response_model=ApiResponse)
-async def get_model(model_name: str, client: GrpcClient) -> ApiResponse:
-    """Get a specific model's summary."""
+@api_router.get("/models/{model_id}", response_model=ApiResponse)
+async def get_model(model_id: str, client: GrpcClient) -> ApiResponse:
+    """Get a specific model's summary by model_id."""
     # Get model info
-    model_info = await client.get_model_info(model_name)
+    model_info = await client.get_model_info(model_id)
     if not model_info:
         raise HTTPException(status_code=404, detail="Model not found")
 
     # Get detailed replica information
-    all_replicas = await client.list_model_replicas(model_name=model_name)
-    replicas = all_replicas.get(model_name, [])
+    all_replicas = await client.list_model_replicas(model_id=model_id)
+    replicas = all_replicas.get(model_id, [])
 
     gpu_count = sum(1 for r in replicas if r.memory_type == 0)
     ram_count = sum(1 for r in replicas if r.memory_type == 1)
@@ -386,7 +386,7 @@ async def get_model(model_name: str, client: GrpcClient) -> ApiResponse:
             nodes_data[r.node_id]["disk_replicas"] += 1  # type: ignore[operator]
 
     model_data = {
-        "model_name": model_name,
+        "model_id": model_id,
         "replica_count": len(replicas),
         "gpu_replicas": gpu_count,
         "ram_replicas": ram_count,
@@ -433,7 +433,7 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
                 nodes_data[w.node_id]["active_workers"] += 1
 
     # Add replica statistics
-    for model_name, replicas in all_replicas.items():
+    for model_id_key, replicas in all_replicas.items():
         for r in replicas:
             if r.node_id not in nodes_data:
                 # Node has replicas but no active workers
@@ -452,7 +452,7 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
                 }
 
             nodes_data[r.node_id]["replica_count"] += 1
-            nodes_data[r.node_id]["models"].add(model_name)
+            nodes_data[r.node_id]["models"].add(model_id_key)
             nodes_data[r.node_id]["total_memory"] += int(r.memory_size)
 
             if r.memory_type == 0:  # GPU
@@ -479,7 +479,7 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
 async def list_transports(
     client: GrpcClient,
     status: str | None = Query(None),
-    model_name: str | None = Query(None),
+    model_id: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
 ) -> ApiResponse:
@@ -503,8 +503,8 @@ async def list_transports(
     # Apply filters if any transports exist
     if status:
         transports = [t for t in transports if t.get("status") == status]
-    if model_name:
-        transports = [t for t in transports if t.get("model_name") == model_name]
+    if model_id:
+        transports = [t for t in transports if t.get("model_id") == model_id]
 
     # Apply pagination
     total_count = len(transports)

@@ -25,14 +25,15 @@ def _to_uuid(value: str | UUID) -> UUID:
 class ModelReplicaRepository(BaseRepository):
     """Repository for managing model replicas in the database."""
 
-    def find_by_id(self, replica_id: UUID, model_name: str) -> ModelReplica | None:
-        """Find a replica by ID and model name."""
+    def find_by_id(self, replica_id: UUID, model_id: str) -> ModelReplica | None:
+        """Find a replica by ID and content-addressed model_id."""
         cursor = self.get_cursor()
         result = cursor.execute(
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -49,9 +50,9 @@ class ModelReplicaRepository(BaseRepository):
                 mr.updated_at
             FROM model_replicas mr
             LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.replica_id = ? AND mr.model_name = ?
+            WHERE mr.replica_id = ? AND mr.model_id = ?
             """,
-            [str(replica_id), model_name],
+            [str(replica_id), model_id],
         ).fetchone()
 
         if result:
@@ -60,7 +61,7 @@ class ModelReplicaRepository(BaseRepository):
 
     def find_existing(
         self,
-        model_name: str,
+        model_id: str,
         node_id: str,
         node_address: str,
         node_port: int,
@@ -73,7 +74,7 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -90,7 +91,7 @@ class ModelReplicaRepository(BaseRepository):
                 mr.updated_at
             FROM model_replicas mr
             LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.model_name = ?
+            WHERE mr.model_id = ?
               AND mr.node_id = ?
               AND mr.node_address = ?
               AND mr.node_port = ?
@@ -98,7 +99,7 @@ class ModelReplicaRepository(BaseRepository):
               AND mr.device_id = ?
             """,
             [
-                model_name,
+                model_id,
                 node_id,
                 node_address,
                 node_port,
@@ -112,7 +113,7 @@ class ModelReplicaRepository(BaseRepository):
         return None
 
     def find_available_for_transport(
-        self, model_name: str, heartbeat_timeout_seconds: float
+        self, model_id: str, heartbeat_timeout_seconds: float
     ) -> ModelReplica | None:
         """
         Find best available replica for transport with load balancing.
@@ -130,7 +131,7 @@ class ModelReplicaRepository(BaseRepository):
                 FROM model_replicas r
                 LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
                 LEFT JOIN workers w ON r.worker_id = w.worker_id
-                WHERE r.model_name = ?
+                WHERE r.model_id = ?
                   AND COALESCE(rc.current_requests, 0) < r.max_concurrency
                   AND r.is_available = TRUE
                   AND w.accepting_new_requests = TRUE
@@ -160,7 +161,7 @@ class ModelReplicaRepository(BaseRepository):
             WHERE replica_id = (SELECT replica_id FROM candidate)
             RETURNING replica_id
             """,
-            [model_name, cutoff],
+            [model_id, cutoff],
         )
 
         row = result.fetchone()
@@ -174,7 +175,8 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -208,14 +210,14 @@ class ModelReplicaRepository(BaseRepository):
         cursor.execute(
             """
             INSERT INTO model_replicas (
-                replica_id, model_name, node_id, node_address, node_port,
+                replica_id, model_id, node_id, node_address, node_port,
                 memory_size, memory_type, device_id, max_concurrency,
                 is_available, remote_memory_keys, buffer_sizes, worker_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(replica.replica_id),
-                replica.model_name,
+                replica.model_id,
                 replica.node_id,
                 replica.node_address,
                 replica.node_port,
@@ -252,7 +254,7 @@ class ModelReplicaRepository(BaseRepository):
     def create_or_update(self, replica: ModelReplica) -> ModelReplica:
         """Create a new replica or update existing one."""
         existing = self.find_existing(
-            replica.model_name,
+            replica.model_id,
             replica.node_id,
             replica.node_address,
             replica.node_port,
@@ -285,12 +287,12 @@ class ModelReplicaRepository(BaseRepository):
         existing_result = cursor.execute(
             """
             SELECT replica_id FROM model_replicas
-            WHERE model_name = ? AND node_id = ? AND node_address = ?
+            WHERE model_id = ? AND node_id = ? AND node_address = ?
               AND node_port = ? AND memory_type = ?
               AND COALESCE(device_id, -1) = COALESCE(?, -1)
             """,
             [
-                replica.model_name,
+                replica.model_id,
                 replica.node_id,
                 replica.node_address,
                 replica.node_port,
@@ -331,14 +333,14 @@ class ModelReplicaRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO model_replicas (
-                    replica_id, model_name, node_id, node_address, node_port,
+                    replica_id, model_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
                     is_available, remote_memory_keys, buffer_sizes, worker_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
-                    replica.model_name,
+                    replica.model_id,
                     replica.node_id,
                     replica.node_address,
                     replica.node_port,
@@ -406,7 +408,7 @@ class ModelReplicaRepository(BaseRepository):
 
         return replica
 
-    def update_heartbeat(self, replica_id: UUID, model_name: str) -> bool:
+    def update_heartbeat(self, replica_id: UUID, model_id: str) -> bool:
         """Update the heartbeat timestamp for a replica."""
         cursor = self.get_cursor()
 
@@ -414,10 +416,10 @@ class ModelReplicaRepository(BaseRepository):
             """
             UPDATE model_replicas
             SET updated_at = CURRENT_TIMESTAMP
-            WHERE replica_id = ? AND model_name = ?
+            WHERE replica_id = ? AND model_id = ?
             RETURNING replica_id
             """,
-            [str(replica_id), model_name],
+            [str(replica_id), model_id],
         )
 
         return result.fetchone() is not None
@@ -459,7 +461,7 @@ class ModelReplicaRepository(BaseRepository):
 
         return current_requests, max_conc
 
-    def delete(self, replica_id: UUID, model_name: str | None = None) -> bool:
+    def delete(self, replica_id: UUID, model_id: str | None = None) -> bool:
         """Delete a replica."""
         cursor = self.get_cursor()
 
@@ -473,14 +475,14 @@ class ModelReplicaRepository(BaseRepository):
         )
 
         # Then delete from model_replicas
-        if model_name:
+        if model_id:
             result = cursor.execute(
                 """
                 DELETE FROM model_replicas
-                WHERE replica_id = ? AND model_name = ?
+                WHERE replica_id = ? AND model_id = ?
                 RETURNING replica_id
                 """,
-                [str(replica_id), model_name],
+                [str(replica_id), model_id],
             )
         else:
             result = cursor.execute(
@@ -494,13 +496,13 @@ class ModelReplicaRepository(BaseRepository):
 
         return result.fetchone() is not None
 
-    def find_by_model(self, model_name: str) -> list[ModelReplica]:
-        """Convenience helper to list replicas for a given model name."""
-        return self.find_by_filters(model_name=model_name)
+    def find_by_model(self, model_id: str) -> list[ModelReplica]:
+        """Convenience helper to list replicas for a given content-addressed model_id."""
+        return self.find_by_filters(model_id=model_id)
 
     def find_by_filters(
         self,
-        model_name: str | None = None,
+        model_id: str | None = None,
         node_id: str | None = None,
         node_address: str | None = None,
         node_port: int | None = None,
@@ -513,7 +515,7 @@ class ModelReplicaRepository(BaseRepository):
         # Build dynamic query joining with replica_counters
         query = (
             "SELECT "
-            "mr.replica_id, mr.model_name, mr.node_id, mr.node_address, mr.node_port, "
+            "mr.replica_id, mr.model_id, mr.node_id, mr.node_address, mr.node_port, "
             "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
             "COALESCE(rc.current_requests, 0) AS current_requests, "
             "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.worker_id, "
@@ -524,9 +526,9 @@ class ModelReplicaRepository(BaseRepository):
         )
         params: list = []
 
-        if model_name is not None:
-            query += " AND mr.model_name = ?"
-            params.append(model_name)
+        if model_id is not None:
+            query += " AND mr.model_id = ?"
+            params.append(model_id)
 
         if node_id is not None:
             query += " AND mr.node_id = ?"
@@ -589,7 +591,7 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -660,7 +662,7 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -695,7 +697,7 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -748,7 +750,7 @@ class ModelReplicaRepository(BaseRepository):
             """
             SELECT
                 mr.replica_id,
-                mr.model_name,
+                mr.model_id,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -799,25 +801,89 @@ class ModelReplicaRepository(BaseRepository):
         return cleaned_up_count
 
     def _row_to_model(self, row: tuple) -> ModelReplica:
-        """Convert a database row to ModelReplica object."""
-        # Get column names from cursor description
-        # DuckDB returns UUID objects for UUID columns, need to convert consistently
+        """Convert a database row to ModelReplica object.
+
+        The repository has historically used slightly different SELECT column
+        orders across methods.  This helper normalises the tuple layout by
+        detecting whether ``disk_path`` is present after ``model_id``.
+        """
+
         replica_id = _to_uuid(row[0])
+        model_id = row[1]
+
+        # Layout A (with disk_path):
+        # [replica_id, model_id, disk_path, node_id, node_address, node_port, ...]
+        # Layout B (without disk_path):
+        # [replica_id, model_id, node_id, node_address, node_port, ...]
+        has_disk_path = len(row) >= 17
+
+        idx = 2
+        disk_path = row[idx] if has_disk_path else None
+        if has_disk_path:
+            idx += 1
+
+        node_id = row[idx]
+        node_address = row[idx + 1]
+        node_port = row[idx + 2]
+        memory_size = row[idx + 3]
+        memory_type = MemoryType(row[idx + 4])
+        device_id = row[idx + 5]
+        max_concurrency = row[idx + 6]
+        current_requests = row[idx + 7]
+        is_available = row[idx + 8]
+        remote_memory_keys = row[idx + 9] if row[idx + 9] else []
+        buffer_sizes = row[idx + 10] if row[idx + 10] else []
+        worker_id = row[idx + 11]
+        created_at = row[idx + 12]
+        updated_at = row[idx + 13]
+
         return ModelReplica(
             replica_id=replica_id,
-            model_name=row[1],
-            node_id=row[2],
-            node_address=row[3],
-            node_port=row[4],
-            memory_size=row[5],
-            memory_type=MemoryType(row[6]),
-            device_id=row[7],
-            max_concurrency=row[8],
-            current_requests=row[9],
-            is_available=row[10],
-            remote_memory_keys=row[11] if row[11] else [],
-            buffer_sizes=row[12] if row[12] else [],
-            worker_id=row[13],
-            created_at=row[14],
-            updated_at=row[15],
+            model_id=model_id,
+            disk_path=disk_path,
+            node_id=node_id,
+            node_address=node_address,
+            node_port=node_port,
+            memory_size=memory_size,
+            memory_type=memory_type,
+            device_id=device_id,
+            max_concurrency=max_concurrency,
+            current_requests=current_requests,
+            is_available=is_available,
+            remote_memory_keys=remote_memory_keys,
+            buffer_sizes=buffer_sizes,
+            worker_id=worker_id,
+            created_at=created_at,
+            updated_at=updated_at,
         )
+
+    def find_by_disk_path(self, disk_path: str) -> list[ModelReplica]:
+        """Find all replicas registered under a given disk path (legacy flow)."""
+        cursor = self.get_cursor()
+        result = cursor.execute(
+            """
+            SELECT
+                mr.replica_id,
+                mr.model_id,
+                mr.disk_path,
+                mr.node_id,
+                mr.node_address,
+                mr.node_port,
+                mr.memory_size,
+                mr.memory_type,
+                mr.device_id,
+                mr.max_concurrency,
+                COALESCE(rc.current_requests, 0) AS current_requests,
+                mr.is_available,
+                mr.remote_memory_keys,
+                mr.buffer_sizes,
+                mr.worker_id,
+                mr.created_at,
+                mr.updated_at
+            FROM model_replicas mr
+            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
+            WHERE mr.disk_path = ?
+            """,
+            [disk_path],
+        )
+        return [self._row_to_model(row) for row in result.fetchall()]

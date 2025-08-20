@@ -113,11 +113,12 @@ class CheckpointStore:
     # ---- Unified prepare API ----
     def prepare(
         self,
-        model_id: str,
         target_device: Union[DeviceKey, str, int] = "gpu:0",
         mode: PrepareMode = PrepareMode.AUTO,
         *,
-        pinned_timeout_ms: Optional[int] = None
+        pinned_timeout_ms: Optional[int] = None,
+        model_id: Optional[str] = None,
+        disk_path: Optional[str] = None,
     ) -> ModelHandle: ...
 
     # ---- Multi-device helpers ----
@@ -132,6 +133,8 @@ class CheckpointStore:
     def get_instance_state(self, instance_key: InstanceKey, memory_type: DeviceType) -> MemoryState: ...
 
     def get_instance_gpu_ptr(self, instance_key: InstanceKey) -> int: ...
+
+    def get_instance_size(self, instance_key: InstanceKey) -> int: ...
 
     # ---- Memory TensorDict Registration (RFC-0006 Phase A) ----
     class TensorDictRegistration(TypedDict, total=False):
@@ -156,6 +159,11 @@ class CheckpointStore:
         model_id: str
         device_id: int
         size_bytes: int
+        # RFC-0007 descriptor fields (content-addressed identity)
+        index_multihash: str
+        data_multihash: str
+        schema_version: str
+        encoding: str
 
     def begin_register_tensor_dict(
         self,

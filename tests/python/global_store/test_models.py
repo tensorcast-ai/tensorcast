@@ -13,7 +13,7 @@ class TestModels:
     def test_model_replica_creation(self):
         """Test ModelReplica creation and properties."""
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -24,7 +24,7 @@ class TestModels:
             current_requests=5,
         )
 
-        assert replica.model_name == "test_model"
+        assert replica.model_id == "test_model"
         assert replica.memory_type == MemoryType.GPU
         assert replica.load_ratio == 0.5
         assert replica.has_capacity is True
@@ -41,7 +41,7 @@ class TestModels:
     def test_model_replica_no_capacity(self):
         """Test replica at max capacity."""
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -58,7 +58,7 @@ class TestModels:
     def test_model_replica_zero_concurrency(self):
         """Test replica with zero max concurrency."""
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -141,13 +141,13 @@ class TestModels:
         transport = Transport(
             transport_id="transport_1",
             replica_id="replica_1",
-            model_name="test_model",
+            model_id="test_model",
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
         )
 
-        assert transport.model_name == "test_model"
+        assert transport.model_id == "test_model"
         assert transport.source_node_id == "source_node"
         assert transport.source_address == "192.168.1.2"
         assert transport.source_port == 9000

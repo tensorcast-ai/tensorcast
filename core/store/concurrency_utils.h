@@ -130,6 +130,11 @@ class TempModelFixture {
     if (!create_dummy_file(data_file, size_bytes)) {
       throw std::runtime_error("Failed to create dummy model file");
     }
+    // Ensure RFC-0007 metadata so DiskLoader can initialize
+    auto st = write_rfc0007_descriptor_for_standard_model_dir(model_dir);
+    if (!st.ok()) {
+      throw std::runtime_error(std::string("Failed to write descriptor/index: ") + std::string(st.message()));
+    }
     return model_dir;
   }
 
@@ -159,11 +164,11 @@ inline std::unique_ptr<store::CheckpointStore> make_test_store(
 
 // Device key helpers
 inline store::DeviceKey make_gpu_key(int ordinal, const std::string& uuid = "") {
-  return store::DeviceKey{DeviceType::GPU, ordinal, uuid};
+  return store::DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, .uuid = uuid};
 }
 
 inline store::InstanceKey make_instance_key(const std::string& model_id, int gpu_ordinal) {
-  return store::InstanceKey{model_id, make_gpu_key(gpu_ordinal), 0};
+  return store::InstanceKey{.model_id = model_id, .device = make_gpu_key(gpu_ordinal), .replica = 0};
 }
 
 } // namespace stepcast::tests::checkpoint_store

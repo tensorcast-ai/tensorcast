@@ -921,11 +921,13 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       waiter_buffers.push_back(buffer);
     }
 
-    // Start waiter reads in separate threads
+    // Start waiter reads in separate threads and keep thread handles to avoid races
+    std::vector<std::thread> waiter_threads;
+    waiter_threads.reserve(num_waiters);
     for (int i = 0; i < num_waiters; ++i) {
-      std::thread([&, i]() {
+      waiter_threads.emplace_back([&, i]() {
         LOG(INFO) << "Waiter " << i << " starting read (will wait for buffer)";
-        waiters_started++;
+        // Assign future before updating the started counter to avoid races
         waiter_futures[i] = waiter_engines[i]->read_tensor(
             "deadlock_test",
             reinterpret_cast<uint64_t>(waiter_buffers[i]),
@@ -934,12 +936,20 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
             0,
             "127.0.0.1",
             source_port);
-      }).detach();
+        waiters_started++;
+      });
     }
 
     // Wait for all waiters to start
     while (waiters_started.load() < num_waiters) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Ensure waiter threads have assigned their futures
+    for (auto& th : waiter_threads) {
+      if (th.joinable()) {
+        th.join();
+      }
     }
 
     LOG(INFO) << "All waiters started, now completing holder reads";

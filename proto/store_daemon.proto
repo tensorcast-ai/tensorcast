@@ -71,7 +71,14 @@ message MemCopyHandle {
 }
 
 message LoadModelRequest {
+  // RFC-0007: Use content-addressed model_id when available.
+  // Exactly one of model_id or disk_path (or legacy model_path) should be provided.
+  optional string model_id = 9;    // Content-addressed ID (mi2:...)
+  optional string disk_path = 10;  // On-disk path for legacy/disk loads
+
+  // Legacy field (deprecated): treated as disk_path when model_id is absent.
   string model_path = 1;
+
   string replica_uuid = 2;
   string device_uuid = 3;
   DeviceType target_device_type = 4;
@@ -332,12 +339,23 @@ message CommitRegisteredTensorDictRequest {
   string registration_id = 1;              // Registration ID from Begin
 }
 
+// Model descriptor conveying content-addressed identity and related metadata
+message ModelDescriptor {
+  string model_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
+  string index_multihash = 2;    // Multibase over multihash (sha2-256), base32
+  string data_multihash = 3;     // Multibase over multihash (sha2-256 root), base32
+  string schema_version = 4;     // e.g., "v2"
+  string encoding = 5;           // e.g., "json" or "cbor"
+  uint64 total_size = 6;         // Total coalesced size in bytes
+}
+
 // Commit registration response
 message CommitRegisteredTensorDictResponse {
   string registration_id = 1;              // Confirmed registration ID
   string model_id = 2;                     // Model ID
   int32 device_id = 3;                     // Device ID
   uint64 size = 4;                         // Total size
+  ModelDescriptor descriptor = 5;          // Content-addressed descriptor (RFC-0007)
 }
 
 // Abort registration request

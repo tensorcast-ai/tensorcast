@@ -4,7 +4,7 @@ from scstore.proto import global_store_pb2
 
 from tests.python.interaction.utils import FakeContext
 
-def _register_replica(gs, model_name: str, node_id: str, max_concurrency: int, size_bytes: int = 1_000_000):
+def _register_replica(gs, model_id: str, node_id: str, max_concurrency: int, size_bytes: int = 1_000_000):
     """Helper: register worker then replica so that replica is available for transport."""
 
     # 1) Register worker
@@ -30,7 +30,7 @@ def _register_replica(gs, model_name: str, node_id: str, max_concurrency: int, s
         device_id=0,
     )
     req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model_name,
+        model_id=model_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -51,17 +51,17 @@ def test_load_balancing_concurrency(global_store_service):
 
     gs = global_store_service  # alias
 
-    model_name = "llama-2-7b"
+    model_id = "llama-2-7b"
 
     # Register three replicas: capacities 1, 4, 8 -> total 13 concurrent slots
     capacities = {"R1": 1, "R2": 4, "R3": 8}
     for node_id, cap in capacities.items():
-        _register_replica(gs, model_name, node_id=node_id, max_concurrency=cap)
+        _register_replica(gs, model_id, node_id=node_id, max_concurrency=cap)
 
     # Helper to request a transport and return response
     def _request(wait_ms: int = 0):
         req = global_store_pb2.RequestModelReplicaTransportRequest(
-            model_name=model_name,
+            model_id=model_id,
             wait_timeout_ms=wait_ms,
         )
         return gs.RequestModelReplicaTransport(req, FakeContext())
@@ -76,7 +76,7 @@ def test_load_balancing_concurrency(global_store_service):
         successes.append(resp)
 
     # Validate internal replica counters do not exceed capacity
-    for replica in gs.model_replica_repository.find_by_model(model_name):
+    for replica in gs.model_replica_repository.find_by_model(model_id):
         assert replica.current_requests <= replica.max_concurrency
 
     # ------------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_load_balancing_concurrency(global_store_service):
         assert comp.status == global_store_pb2.Status.OK
 
     # After completion, all counters should be back to zero
-    for replica in gs.model_replica_repository.find_by_model(model_name):
+    for replica in gs.model_replica_repository.find_by_model(model_id):
         assert replica.current_requests == 0
 
     # Finally, issue one more request and confirm it succeeds now that

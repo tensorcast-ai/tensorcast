@@ -17,7 +17,7 @@ class TestGRPCService:
         """Test updating a model replica"""
         # First register a replica
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name="test_model",
+            model_id="test_model",
             mem_info=memory_info,
             max_concurrency=10,
             worker_id=registered_worker,
@@ -28,19 +28,19 @@ class TestGRPCService:
 
         # Now update it
         update_request = global_store_pb2.UpdateModelReplicaRequest(
-            model_name="test_model", replica_id=register_response.replica_id
+            model_id="test_model", replica_id=register_response.replica_id
         )
 
         update_response = servicer.UpdateModelReplica(update_request, test_context)
 
         assert update_response.status == global_store_pb2.Status.OK
-        assert update_response.model_name == "test_model"
+        assert update_response.model_id == "test_model"
         assert update_response.replica_id == register_response.replica_id
 
     def test_update_nonexistent_model_replica(self, servicer, test_context):
         """Test updating a model replica that doesn't exist"""
         request = global_store_pb2.UpdateModelReplicaRequest(
-            model_name="nonexistent_model", replica_id=str(uuid.uuid4())
+            model_id="nonexistent_model", replica_id=str(uuid.uuid4())
         )
 
         response = servicer.UpdateModelReplica(request, test_context)
@@ -53,7 +53,7 @@ class TestGRPCService:
         """Test unregistering a model replica"""
         # First register a replica
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name="test_model",
+            model_id="test_model",
             mem_info=memory_info,
             max_concurrency=10,
             worker_id=registered_worker,
@@ -64,7 +64,7 @@ class TestGRPCService:
 
         # Now unregister it
         unregister_request = global_store_pb2.UnregisterModelReplicaRequest(
-            model_name="test_model", replica_id=register_response.replica_id
+            model_id="test_model", replica_id=register_response.replica_id
         )
 
         unregister_response = servicer.UnregisterModelReplica(
@@ -76,7 +76,7 @@ class TestGRPCService:
     def test_unregister_nonexistent_model_replica(self, servicer, test_context):
         """Test unregistering a model replica that doesn't exist"""
         request = global_store_pb2.UnregisterModelReplicaRequest(
-            model_name="nonexistent_model", replica_id=str(uuid.uuid4())
+            model_id="nonexistent_model", replica_id=str(uuid.uuid4())
         )
 
         response = servicer.UnregisterModelReplica(request, test_context)
@@ -88,10 +88,10 @@ class TestGRPCService:
     ):
         """Test listing model replicas"""
         # Register multiple replicas
-        model_names = ["model1", "model2", "model3"]
-        for model_name in model_names:
+        model_ids = ["model1", "model2", "model3"]
+        for model_id in model_ids:
             request = global_store_pb2.RegisterModelReplicaRequest(
-                model_name=model_name,
+                model_id=model_id,
                 mem_info=memory_info,
                 max_concurrency=10,
                 worker_id=registered_worker,
@@ -103,17 +103,17 @@ class TestGRPCService:
         list_response = servicer.ListModelReplicas(list_request, test_context)
 
         assert len(list_response.model_replicas) >= 3
-        for model_name in model_names:
-            assert model_name in list_response.model_replicas
+        for model_id in model_ids:
+            assert model_id in list_response.model_replicas
 
     def test_list_model_replicas_with_filter(
         self, servicer, test_context, memory_info, registered_worker
     ):
         """Test listing model replicas with a filter"""
         # Register a specific model
-        model_name = "filtered_model"
+        model_id = "filtered_model"
         request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model_name,
+            model_id=model_id,
             mem_info=memory_info,
             max_concurrency=10,
             worker_id=registered_worker,
@@ -121,11 +121,11 @@ class TestGRPCService:
         servicer.RegisterModelReplica(request, test_context)
 
         # List replicas with filter
-        list_request = global_store_pb2.ListModelReplicasRequest(model_name=model_name)
+        list_request = global_store_pb2.ListModelReplicasRequest(model_id=model_id)
         list_response = servicer.ListModelReplicas(list_request, test_context)
 
         assert len(list_response.model_replicas) == 1
-        assert model_name in list_response.model_replicas
+        assert model_id in list_response.model_replicas
 
     def test_request_model_replica_transport(
         self, servicer, test_context, memory_info, registered_worker
@@ -133,7 +133,7 @@ class TestGRPCService:
         """Test requesting a model replica transport"""
         # First register a replica
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name="test_model",
+            model_id="test_model",
             mem_info=memory_info,
             max_concurrency=3,
             worker_id=registered_worker,
@@ -150,7 +150,7 @@ class TestGRPCService:
 
         # Now request transport
         transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
-            model_name="test_model",
+            model_id="test_model",
             local_memory_info=memory_info,
             wait_timeout_ms=1000,
             source_node_id="source_node",
@@ -172,7 +172,7 @@ class TestGRPCService:
         """Test completing a model replica transport"""
         # First register a replica
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name="test_model",
+            model_id="test_model",
             mem_info=memory_info,
             max_concurrency=3,
             worker_id=registered_worker,
@@ -189,7 +189,7 @@ class TestGRPCService:
 
         # Request transport
         transport_request = global_store_pb2.RequestModelReplicaTransportRequest(
-            model_name="test_model",
+            model_id="test_model",
             local_memory_info=memory_info,
             wait_timeout_ms=1000,
             source_node_id="source_node",
@@ -241,7 +241,7 @@ class TestGRPCService:
 
             # Register a model
             register_request = global_store_pb2.RegisterModelReplicaRequest(
-                model_name="persistent_model",
+                model_id="persistent_model",
                 mem_info=memory_info,
                 max_concurrency=10,
                 worker_id=worker_response.worker_id,
@@ -253,7 +253,7 @@ class TestGRPCService:
 
             # List models and verify the registered model is there
             list_request = global_store_pb2.ListModelReplicasRequest(
-                model_name="persistent_model"
+                model_id="persistent_model"
             )
             list_response = servicer2.ListModelReplicas(list_request, test_context)
 
@@ -275,9 +275,9 @@ class TestGRPCService:
         5) Lists replicas again and verifies the replica no longer exists
         """
         # 1. Register a model replica
-        model_name = "e2e_test_model"
+        model_id = "e2e_test_model"
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model_name,
+            model_id=model_id,
             mem_info=memory_info,
             max_concurrency=10,
             worker_id=registered_worker,
@@ -290,24 +290,24 @@ class TestGRPCService:
         replica_id = register_response.replica_id
 
         # 2. List replicas to get replica information
-        list_request = global_store_pb2.ListModelReplicasRequest(model_name=model_name)
+        list_request = global_store_pb2.ListModelReplicasRequest(model_id=model_id)
         list_response = servicer.ListModelReplicas(list_request, test_context)
 
         # 3. Verify the replica exists
-        assert model_name in list_response.model_replicas
-        assert len(list_response.model_replicas[model_name].list) == 1
+        assert model_id in list_response.model_replicas
+        assert len(list_response.model_replicas[model_id].list) == 1
         assert (
-            list_response.model_replicas[model_name].list[0].node_id
+            list_response.model_replicas[model_id].list[0].node_id
             == memory_info.node_id
         )
         assert (
-            list_response.model_replicas[model_name].list[0].remote_memory_keys[0]
+            list_response.model_replicas[model_id].list[0].remote_memory_keys[0]
             == memory_info.remote_memory_keys[0]
         )
 
         # 4. Unregister the replica
         unregister_request = global_store_pb2.UnregisterModelReplicaRequest(
-            model_name=model_name, replica_id=replica_id
+            model_id=model_id, replica_id=replica_id
         )
         unregister_response = servicer.UnregisterModelReplica(
             unregister_request, test_context
@@ -319,8 +319,8 @@ class TestGRPCService:
         list_response = servicer.ListModelReplicas(list_request, test_context)
 
         assert (
-            model_name not in list_response.model_replicas
-            or len(list_response.model_replicas[model_name].list) == 0
+            model_id not in list_response.model_replicas
+            or len(list_response.model_replicas[model_id].list) == 0
         )
 
     def test_worker_registration(self, servicer, test_context):
@@ -420,11 +420,11 @@ class TestGRPCService:
         self, servicer, test_context, memory_info, registered_worker
     ):
         """Test getting model information"""
-        model_name = "info_test_model"
+        model_id = "info_test_model"
 
         # Register a replica
         register_request = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model_name,
+            model_id=model_id,
             mem_info=memory_info,
             max_concurrency=10,
             worker_id=registered_worker,
@@ -432,23 +432,19 @@ class TestGRPCService:
         servicer.RegisterModelReplica(register_request, test_context)
 
         # Get model info
-        info_request = global_store_pb2.GetModelInfoRequest(model_name=model_name)
-        info_response = servicer.GetModelInfo(info_request, test_context)
+        # New API: GetModelInfoById
+        info_request = global_store_pb2.GetModelInfoByIdRequest(model_id=model_id)
+        info_response = servicer.GetModelInfoById(info_request, test_context)
 
         assert info_response.status == global_store_pb2.Status.OK
-        assert info_response.model_info.model_name == model_name
-        assert len(info_response.model_info.available_replicas) == 1
-        assert (
-            info_response.model_info.available_replicas[0].node_id
-            == memory_info.node_id
-        )
+        assert len(info_response.replicas) == 1
+        assert info_response.replicas[0].node_id == memory_info.node_id
 
     def test_get_nonexistent_model_info(self, servicer, test_context):
         """Test getting info for a model that doesn't exist"""
-        info_request = global_store_pb2.GetModelInfoRequest(
-            model_name="nonexistent_model"
+        info_request = global_store_pb2.GetModelInfoByIdRequest(
+            model_id="nonexistent_model"
         )
-        info_response = servicer.GetModelInfo(info_request, test_context)
+        info_response = servicer.GetModelInfoById(info_request, test_context)
 
         assert info_response.status == global_store_pb2.Status.NOT_FOUND
-        assert len(info_response.model_info.available_replicas) == 0

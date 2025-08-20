@@ -7,7 +7,7 @@ from pathlib import Path
 __all__ = ["create_dummy_model", "create_dummy_safetensors_model"]
 
 
-def create_dummy_model(storage_root: Path, model_name: str, size_bytes: int = 1 * 1024 * 1024) -> None:
+def create_dummy_model(storage_root: Path, disk_path: str, size_bytes: int = 1 * 1024 * 1024) -> None:
     """Create a minimal on-disk representation of a model for unit-tests.
 
     The native C++ ``CheckpointStore`` expects each model to live in its own
@@ -19,14 +19,14 @@ def create_dummy_model(storage_root: Path, model_name: str, size_bytes: int = 1 
     ----------
     storage_root:
         Root directory configured for the local ``CheckpointStore`` instance.
-    model_name:
-        The logical model identifier (sub-directory name).
+    disk_path:
+        Relative on-disk path used for legacy/disk-based loading (sub-directory name).
     size_bytes:
         Size of the dummy tensor file, defaults to 1 MiB – ample for allocation
         logic without impacting test runtime.
     """
 
-    model_dir = storage_root / model_name
+    model_dir = storage_root / disk_path
     model_dir.mkdir(parents=True, exist_ok=True)
 
     tensor_file = model_dir / "tensor.data_0"
@@ -44,12 +44,12 @@ def create_dummy_model(storage_root: Path, model_name: str, size_bytes: int = 1 
             remaining -= len(chunk)
 
 
-def create_dummy_safetensors_model(storage_root: Path, model_name: str) -> None:
+def create_dummy_safetensors_model(storage_root: Path, disk_path: str) -> None:
     """Create a minimal .safetensors-based model directory for tests using the safetensors library."""
     from safetensors.torch import save_file
     import torch
 
-    model_dir = storage_root / model_name
+    model_dir = storage_root / disk_path
     model_dir.mkdir(parents=True, exist_ok=True)
 
     path = model_dir / "weights.safetensors"

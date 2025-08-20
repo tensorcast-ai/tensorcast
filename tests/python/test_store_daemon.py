@@ -89,7 +89,7 @@ def servicer(tmp_path):
     # ------------------------------------------------------------------
     # Prepare dummy model files expected by the various test cases.
     # ------------------------------------------------------------------
-    for model_name in [
+    for disk_path in [
         "test_model",
         "failing_model",
         "model1",
@@ -97,7 +97,7 @@ def servicer(tmp_path):
         "model3",
         "test_model_loaded",
     ]:
-        create_dummy_model(config.server.storage_path, model_name)
+        create_dummy_model(config.server.storage_path, disk_path)
 
     try:
         yield servicer
@@ -177,7 +177,7 @@ def servicer_with_global_store(tmp_path):
         servicer.model_loader.global_store_stub = mock_instance
 
         # Create the same set of dummy model files as for the local-only fixture
-        for model_name in [
+        for disk_path in [
             "test_model",
             "failing_model",
             "model1",
@@ -185,7 +185,7 @@ def servicer_with_global_store(tmp_path):
             "model3",
             "test_model_loaded",
         ]:
-            create_dummy_model(config.server.storage_path, model_name)
+            create_dummy_model(config.server.storage_path, disk_path)
 
         try:
             yield servicer, mock_instance
@@ -511,16 +511,13 @@ def test_load_model_with_global_store(servicer_with_global_store, test_context):
         device_id=0,
     )
 
-    # Mock the GetModelInfo response
-    model_info_response = global_store_pb2.GetModelInfoResponse(
+    # Mock the GetModelInfoById response
+    get_info_response = global_store_pb2.GetModelInfoByIdResponse(
         status=global_store_pb2.Status.OK,
-        model_info=global_store_pb2.ModelInfo(
-            model_name="test_model",
-            available_replicas=[replica_memory_info],
-        ),
+        replicas=[replica_memory_info],
     )
     # Setup async mock responses
-    mock_global_store.GetModelInfo = mock.MagicMock(return_value=model_info_response)
+    mock_global_store.GetModelInfoById = mock.MagicMock(return_value=get_info_response)
 
     # Mock the RequestModelReplicaTransport response
     transport_id = str(uuid.uuid4())

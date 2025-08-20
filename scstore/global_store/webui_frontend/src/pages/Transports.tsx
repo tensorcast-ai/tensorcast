@@ -8,7 +8,7 @@ import type { ColumnsType } from 'antd/es/table';
 interface Transport {
   transport_id: string;
   replica_id: string;
-  model_name: string;
+  model_id: string;
   source_node_id: string;
   source_address: string;
   source_port: number;
@@ -31,7 +31,7 @@ interface TransportResponse {
 const Transports: React.FC = () => {
   const [filters, setFilters] = React.useState({
     status: undefined as string | undefined,
-    model_name: undefined as string | undefined,
+    model_id: undefined as string | undefined,
     page: 1,
     page_size: 50,
   });
@@ -75,9 +75,9 @@ const Transports: React.FC = () => {
       ),
     },
     {
-      title: 'Model',
-      dataIndex: 'model_name',
-      key: 'model_name',
+      title: 'Model ID',
+      dataIndex: 'model_id',
+      key: 'model_id',
       width: 200,
     },
     {
@@ -201,10 +201,10 @@ const Transports: React.FC = () => {
 
           <Input.Search
             style={{ width: 200 }}
-            placeholder="Filter by model"
+            placeholder="Filter by model id"
             allowClear
-            value={filters.model_name}
-            onChange={(e) => setFilters({ ...filters, model_name: e.target.value || undefined, page: 1 })}
+            value={filters.model_id}
+            onChange={(e) => setFilters({ ...filters, model_id: e.target.value || undefined, page: 1 })}
           />
         </Space>
 

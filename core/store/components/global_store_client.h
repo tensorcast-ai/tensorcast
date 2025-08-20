@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,7 +75,7 @@ class GlobalStoreClient {
 
   // Model replica management
   absl::StatusOr<std::string> register_model_replica(
-      std::string_view model_name,
+      std::string_view model_id,
       std::string_view worker_id,
       const DeviceKey& device,
       ModelLocation location,
@@ -83,7 +84,7 @@ class GlobalStoreClient {
 
   // Register a GPU memory replica (in-memory tensor dict) with tensor index key.
   absl::StatusOr<std::string> register_memory_replica(
-      std::string_view model_name,
+      std::string_view model_id,
       std::string_view worker_id,
       const DeviceKey& device,
       uint64_t memory_size,
@@ -95,11 +96,11 @@ class GlobalStoreClient {
       std::string_view schema_version = "v2",
       uint32_t max_concurrency = 1);
 
-  absl::Status unregister_model_replica(std::string_view model_name, std::string_view replica_id);
+  absl::Status unregister_model_replica(std::string_view model_id, std::string_view replica_id);
 
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_model_transport(
-      std::string_view model_name,
+      std::string_view model_id,
       std::string_view source_node_id,
       std::string_view source_address,
       uint32_t source_port,
@@ -109,7 +110,7 @@ class GlobalStoreClient {
   absl::Status complete_model_transport(std::string_view transport_id);
 
   // Model information queries
-  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_model_replicas(std::string_view model_name);
+  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_model_replicas(std::string_view model_id);
 
   // Chunk-level queries for unified memory management
   struct ChunkLocationInfo {

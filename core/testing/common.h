@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
+#include "absl/status/status.h"
 
 // Command line arguments
 extern std::string g_actor;
@@ -34,6 +35,13 @@ std::vector<char> read_file_content(const std::filesystem::path& path);
 
 // Helper utility to query CUDA device availability at runtime.
 bool is_cuda_available();
+
+// RFC-0007 test helper: generate minimal canonical `tensor_index.json` and
+// `model_descriptor.json` for a standard partition model directory that
+// contains `tensor.data` or `tensor.data_*` files. This enables DiskLoader's
+// descriptor gate in unit tests without requiring full Python save flows.
+// Returns OK on success.
+absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesystem::path& model_dir);
 
 } // namespace stepcast::tests
 

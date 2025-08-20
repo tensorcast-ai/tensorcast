@@ -27,6 +27,9 @@ from scstore.global_store.repositories import (
     TransportRepository,
     WorkerRepository,
 )
+from scstore.global_store.repositories.model_index_repository import (
+    ModelIndexRepository,
+)
 from scstore.global_store.services import (
     ChunkService,
     ModelService,
@@ -72,6 +75,11 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
         # Initialize repositories
         self.model_replica_repository = ModelReplicaRepository(self.connection)
+        # Repository for RFC-0007 `models` table
+        from scstore.global_store.repositories.model_repository import ModelRepository
+
+        self.model_repository = ModelRepository(self.connection)
+        self.model_index_repository = ModelIndexRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
@@ -154,55 +162,38 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
     # ========== Model Replica Methods ==========
 
-    def GetModelInfo(
+    def GetModelInfoById(
         self,
-        request: global_store_pb2.GetModelInfoRequest,
+        request: global_store_pb2.GetModelInfoByIdRequest,
         context: grpc.ServicerContext,
-    ) -> global_store_pb2.GetModelInfoResponse:
-        """Get model information and available replicas."""
-        model_name = request.model_name
+    ) -> global_store_pb2.GetModelInfoByIdResponse:
+        """Content-addressed query by model_id (mi2:...)."""
+        model_id = request.model_id
         try:
-            if not model_name:
+            if not model_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("Model name is required")
-                return global_store_pb2.GetModelInfoResponse(
+                context.set_details("model_id is required")
+                return global_store_pb2.GetModelInfoByIdResponse(
                     status=global_store_pb2.Status.ERROR
                 )
 
-            # Get available replicas
-            replicas = self.model_service.get_model_replicas(model_name)
-
-            # Convert to proto format
-            available_replicas = []
-            for replica in replicas:
-                mem_info = self._replica_to_memory_info(replica)
-                available_replicas.append(mem_info)
-
-            # Create response
-            model_info = global_store_pb2.ModelInfo(
-                model_name=model_name, available_replicas=available_replicas
-            )
+            replicas = self.model_service.get_model_replicas(model_id)
+            available_replicas = [self._replica_to_memory_info(r) for r in replicas]
 
             status = (
                 global_store_pb2.Status.OK
                 if available_replicas
                 else global_store_pb2.Status.NOT_FOUND
             )
-
-            logger.info(
-                f"GetModelInfo for {model_name}: "
-                f"found {len(available_replicas)} replicas"
-            )
-
-            return global_store_pb2.GetModelInfoResponse(
-                status=status, model_info=model_info
+            return global_store_pb2.GetModelInfoByIdResponse(
+                status=status, replicas=available_replicas
             )
 
         except Exception as e:
-            logger.exception(f"Error getting model info for {model_name}")
+            logger.exception(f"Error getting model info by id for {model_id}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return global_store_pb2.GetModelInfoResponse(
+            return global_store_pb2.GetModelInfoByIdResponse(
                 status=global_store_pb2.Status.ERROR
             )
 
@@ -214,9 +205,9 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
         """Register or update a model replica."""
         try:
             # Convert proto to domain model
-            replica = self._memory_info_to_replica(
+            replica = self._memory_info_to_replica_model_id(
                 request.mem_info,
-                request.model_name,
+                request.model_id,
                 request.max_concurrency,
                 request.worker_id,
             )
@@ -224,9 +215,56 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             # Register replica
             registered = self.model_service.register_replica(replica)
 
+            # RFC-0007: Persist content-addressed descriptor into `models` table if possible.
+            # Parse `mi2:` model_id and extract index/data multihash when present. If the
+            # upstream StoreDaemon later extends the proto to include descriptor, prefer that.
+            model_id = registered.model_id
+            if model_id and model_id.startswith("mi2:"):
+                # Expected format: mi2:<index_multihash>:<data_multihash>
+                parts = model_id.split(":", 2)
+                if len(parts) == 3 and parts[1] and parts[2]:
+                    index_mh = parts[1]
+                    data_mh = parts[2]
+                    # Best-effort encoding/schema; can be refined when descriptor is carried in proto
+                    schema_version = "v2"
+                    encoding = "json"
+                    try:
+                        self.model_repository.upsert_model(
+                            model_id=model_id,
+                            index_multihash=index_mh,
+                            data_multihash=data_mh,
+                            schema_version=schema_version,
+                            encoding=encoding,
+                            hash_params_json=None,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        # Do not fail the registration if descriptor persistence fails
+                        logger.warning(
+                            f"Failed to upsert models entry for {model_id}: {e}"
+                        )
+
+            # If canonical index data is provided, store it for de-duplication
+            if request.HasField("tensor_index_data") and request.tensor_index_data:
+                try:
+                    _ = self.model_index_repository.upsert_index(
+                        index_data=request.tensor_index_data,
+                        encoding=(
+                            request.encoding if request.HasField("encoding") else "json"
+                        ),
+                        schema_version=(
+                            request.schema_version
+                            if request.HasField("schema_version")
+                            else "v2"
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to upsert model_indices for model_id={model_id}: {e}"
+                    )
+
             return global_store_pb2.RegisterModelReplicaResponse(
                 status=global_store_pb2.Status.OK,
-                model_name=registered.model_name,
+                model_id=registered.model_id,
                 replica_id=str(registered.replica_id),
             )
 
@@ -253,9 +291,9 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
         """Update model replica heartbeat."""
         try:
             replica_id = UUID(request.replica_id)
-            model_name = request.model_name
+            model_id = request.model_id
 
-            success = self.model_service.update_heartbeat(replica_id, model_name)
+            success = self.model_service.update_heartbeat(replica_id, model_id)
 
             status = (
                 global_store_pb2.Status.OK
@@ -265,7 +303,7 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
             return global_store_pb2.UpdateModelReplicaResponse(
                 status=status,
-                model_name=model_name,
+                model_id=model_id,
                 replica_id=request.replica_id,
             )
 
@@ -275,7 +313,7 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             context.set_details(str(e))
             return global_store_pb2.UpdateModelReplicaResponse(
                 status=global_store_pb2.Status.ERROR,
-                model_name=request.model_name,
+                model_id=request.model_id,
                 replica_id=request.replica_id,
             )
 
@@ -287,9 +325,9 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
         """Unregister a model replica."""
         try:
             replica_id = UUID(request.replica_id)
-            model_name = request.model_name
+            model_id = request.model_id
 
-            success = self.model_service.unregister_replica(replica_id, model_name)
+            success = self.model_service.unregister_replica(replica_id, model_id)
 
             status = (
                 global_store_pb2.Status.OK
@@ -315,8 +353,8 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
         """List model replicas with optional filters."""
         try:
             # Apply filters
-            model_name_filter: str | None = (
-                request.model_name if request.HasField("model_name") else None
+            model_id_filter: str | None = (
+                request.model_id if request.HasField("model_id") else None
             )
             node_id_filter: str | None = (
                 request.node_id if request.HasField("node_id") else None
@@ -329,21 +367,21 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
             # Get replicas
             replicas = self.model_service.list_replicas(
-                model_name=model_name_filter,
+                model_id=model_id_filter,
                 node_id=node_id_filter,
                 memory_type=memory_type_filter,
             )
 
-            # Group by model name
+            # Group by model_id
             model_replicas = {}
             for replica in replicas:
-                if replica.model_name not in model_replicas:
-                    model_replicas[replica.model_name] = (
-                        global_store_pb2.MemoryInfoList(list=[])
+                if replica.model_id not in model_replicas:
+                    model_replicas[replica.model_id] = global_store_pb2.MemoryInfoList(
+                        list=[]
                     )
 
                 mem_info = self._replica_to_memory_info(replica)
-                model_replicas[replica.model_name].list.append(mem_info)
+                model_replicas[replica.model_id].list.append(mem_info)
 
             return global_store_pb2.ListModelReplicasResponse(
                 model_replicas=model_replicas
@@ -354,6 +392,45 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.ListModelReplicasResponse()
+
+    def GetModelIndex(
+        self,
+        request: global_store_pb2.GetModelIndexRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetModelIndexResponse:
+        """Fetch canonical tensor index bytes by key for de-duplication/UPSERT."""
+        try:
+            if not request.tensor_index_key:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("tensor_index_key is required")
+                return global_store_pb2.GetModelIndexResponse(
+                    status=global_store_pb2.Status.ERROR
+                )
+
+            # Lazy import if repository not present (should be set in __init__)
+            if not hasattr(self, "model_index_repository"):
+                self.model_index_repository = ModelIndexRepository(self.connection)
+
+            data = self.model_index_repository.get(request.tensor_index_key)
+            if data is None:
+                return global_store_pb2.GetModelIndexResponse(
+                    status=global_store_pb2.Status.NOT_FOUND
+                )
+
+            # Defaults until we persist per-key metadata
+            return global_store_pb2.GetModelIndexResponse(
+                status=global_store_pb2.Status.OK,
+                tensor_index_data=data,
+                encoding="json",
+                schema_version="v2",
+            )
+        except Exception as e:
+            logger.exception("Error getting model index")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.GetModelIndexResponse(
+                status=global_store_pb2.Status.ERROR
+            )
 
     # ========== Transport Methods ==========
 
@@ -368,7 +445,7 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
             # Request transport
             replica, transport_id = self.transport_service.request_transport(
-                model_name=request.model_name,
+                model_id=request.model_id,
                 source_node_id=request.source_node_id,
                 source_address=request.source_address,
                 source_port=request.source_port,
@@ -385,7 +462,7 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             )
 
         except TimeoutError:
-            logger.warning(f"Timeout waiting for model {request.model_name}")
+            logger.warning(f"Timeout waiting for model {request.model_id}")
             return global_store_pb2.RequestModelReplicaTransportResponse(
                 status=global_store_pb2.Status.TIMED_OUT
             )
@@ -587,9 +664,9 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
 
             # Detect obsolete models reported by the worker but not present in global state
             obsolete_models: list[str] = []
-            if request.registered_models:
+            if request.registered_model_ids:
                 obsolete_models = self.recovery_service.get_obsolete_models(
-                    request.worker_id, list(request.registered_models)
+                    request.worker_id, list(request.registered_model_ids)
                 )
 
             # If obsolete models exist instruct state sync
@@ -844,14 +921,14 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             buffer_sizes=replica.buffer_sizes,
         )
 
-    def _memory_info_to_replica(
+    def _memory_info_to_replica_model_id(
         self,
         mem_info: global_store_pb2.MemoryInfo,
-        model_name: str,
+        model_id: str,
         max_concurrency: int,
         worker_id: str,
     ) -> ModelReplica:
-        """Convert MemoryInfo proto to ModelReplica."""
+        """Convert MemoryInfo proto to ModelReplica using content-addressed model_id."""
         # Derive transport chunk sizes if client omitted them.
         remote_keys = list(mem_info.remote_memory_keys)
         buffer_sizes = list(mem_info.buffer_sizes)
@@ -861,7 +938,7 @@ class GlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
             buffer_sizes = [mem_info.memory_size]
 
         return ModelReplica(
-            model_name=model_name,
+            model_id=model_id,
             node_id=mem_info.node_id,
             node_address=mem_info.node_address,
             node_port=mem_info.node_port,

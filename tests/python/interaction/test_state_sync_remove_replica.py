@@ -48,11 +48,13 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     worker_id = daemon.worker_id
     node_id = daemon.node_id
     conn_mgr = daemon.connection_manager
+    # Narrow Optional for type-checkers
+    assert conn_mgr is not None
 
     # ------------------------------------------------------------------
     # 2) Manually register a replica for *this* worker directly in the GS
     # ------------------------------------------------------------------
-    model_name = "debug-model.ckpt"
+    model_id = "debug-model.ckpt"
     replica_uuid = str(uuid.uuid4())
 
     mem_info = global_store_pb2.MemoryInfo(
@@ -67,7 +69,7 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     )
 
     reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model_name,
+        model_id=model_id,
         mem_info=mem_info,
         max_concurrency=1,
         worker_id=worker_id,
@@ -78,8 +80,8 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     # ------------------------------------------------------------------
     # 3) Pretend the daemon already knows about this replica locally
     # ------------------------------------------------------------------
-    conn_mgr._add_registered_model(model_name)  # pyright: ignore[reportOptionalMemberAccess]
-    assert model_name in conn_mgr.registered_models # pyright: ignore[reportOptionalMemberAccess]
+    conn_mgr._add_registered_model(model_id)  # pyright: ignore[reportOptionalMemberAccess]
+    assert model_id in conn_mgr.registered_models # pyright: ignore[reportOptionalMemberAccess]
 
     # ------------------------------------------------------------------
     # 4) Trigger a *full* state synchronisation
@@ -89,6 +91,6 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     # ------------------------------------------------------------------
     # 5) Replica should still be in the daemon's registered set – but bug removes it
     # ------------------------------------------------------------------
-    assert model_name in conn_mgr.registered_models, (  # pyright: ignore[reportOptionalMemberAccess]
+    assert model_id in conn_mgr.registered_models, (  # pyright: ignore[reportOptionalMemberAccess]
         "Replica was erroneously removed after state sync – bug reproduced"
     )

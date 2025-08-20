@@ -10,13 +10,13 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/strings/match.h"
 #include "absl/types/span.h"
 #include "core/common/cuda_api.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
-#include "core/store/loader/p2p_loader.h"
-#include "core/store/loader/source.h"
+// p2p_loader.h and source.h are included indirectly via other headers. Avoid unused includes.
 #include "core/store/model/memory_manager.h"
 #include "core/store/model/model_memory_coordinator.h"
 
@@ -407,7 +407,12 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
   // Create disk loader
   // Note: We'd need the actual disk source path from MemoryManager
   // For now, use the instance key to construct the path
-  std::filesystem::path disk_path = mem_manager->instance_key().model_id;
+  const std::string& model_id = mem_manager->instance_key().model_id;
+  if (absl::StartsWith(model_id, "mi2:")) {
+    return absl::FailedPreconditionError(
+        "ChunkAwareLoadingStrategy: disk load path is undefined for content-addressed model_id; require GS routing");
+  }
+  std::filesystem::path disk_path = model_id;
   auto loader = std::make_unique<DiskLoader>(DiskSource{.path = disk_path, .expected_size = std::nullopt});
 
   // Initialize loader

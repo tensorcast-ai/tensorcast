@@ -14,7 +14,7 @@ from tests.python.interaction.utils import FakeContext
 # Helper
 # -----------------------------------------------------------------------------
 
-def _register_replica(gs, *, model_name: str, node_id: str, max_concurrency: int = 1):
+def _register_replica(gs, *, model_id: str, node_id: str, max_concurrency: int = 1):
     """Register a worker + GPU replica.  Returns the *worker_id*."""
 
     worker_req = global_store_pb2.RegisterWorkerRequest(
@@ -38,7 +38,7 @@ def _register_replica(gs, *, model_name: str, node_id: str, max_concurrency: int
         device_id=0,
     )
     reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model_name,
+        model_id=model_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -61,7 +61,7 @@ def test_worker_heartbeat_stale(global_store_service):
     model = "stale-worker-model"
 
     # Register single replica
-    worker_id = _register_replica(gs, model_name=model, node_id="STALE")
+    worker_id = _register_replica(gs, model_id=model, node_id="STALE")
 
     # Mark the worker as stale – simulate heartbeat older than timeout
     # The repository helper sets `last_heartbeat` to 1970-01-01, well beyond any cutoff.
@@ -70,7 +70,7 @@ def test_worker_heartbeat_stale(global_store_service):
     # Attempt to request transport; should time out quickly because the only replica
     # belongs to the stale worker and thus is filtered out.
     req = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_name=model,
+        model_id=model,
         wait_timeout_ms=10,  # small timeout to keep test fast
     )
 

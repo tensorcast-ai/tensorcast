@@ -67,7 +67,7 @@ def _register_replica(gs, model: str, node_id: str, max_concurrency: int) -> Non
         device_id=0,
     )
     reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model,
+        model_id=model,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -85,12 +85,12 @@ def test_property_based_concurrency(global_store_service):
     """Hypothesis-based state machine exercising Acquire/Complete behaviour."""
 
     gs = global_store_service
-    model_name = "hypothesis-llama"
+    model_id = "hypothesis-llama"
 
     # Register three replicas with varying capacities for richer state space
     capacities = {"A": 2, "B": 3, "C": 5}
     for node, cap in capacities.items():
-        _register_replica(gs, model_name, node_id=node, max_concurrency=cap)
+        _register_replica(gs, model_id, node_id=node, max_concurrency=cap)
 
     class ConcurrencySM(RuleBasedStateMachine):
         """Rule-based state machine driving transport Acquire / Complete."""
@@ -99,7 +99,7 @@ def test_property_based_concurrency(global_store_service):
         def __init__(self):
             super().__init__()
             self.gs = gs
-            self.model = model_name
+            self.model = model_id
             self.active_transport_ids: List[str] = []
 
         # ---------- Operations ----------
@@ -107,7 +107,7 @@ def test_property_based_concurrency(global_store_service):
         def request_transport(self):
             """Attempt to acquire transport (may succeed or time-out)."""
             req = global_store_pb2.RequestModelReplicaTransportRequest(
-                model_name=self.model,
+                model_id=self.model,
                 # Occasionally request with 1ms timeout to increase branching
                 wait_timeout_ms=1 if random.random() < 0.2 else 0,
             )

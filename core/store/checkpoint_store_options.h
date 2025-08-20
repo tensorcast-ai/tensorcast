@@ -64,6 +64,12 @@ struct CheckpointStoreOptions {
   // This controls the granularity of memory allocations for model chunks.
   // Default: 256 MiB for optimal GPU transfer performance.
   size_t dvmp_chunk_size{256ULL << 20}; // 256 MiB
+
+  // RFC-0007: Enable strong verification (FULL_DIGEST) by default on load.
+  // When true, the loader will compute the data_multihash from the loaded
+  // GPU buffer to strongly validate content-addressed identity without the
+  // caller needing to set LoadingHints::verify = FULL_DIGEST.
+  bool force_full_digest_on_load{false};
 };
 
 } // namespace store

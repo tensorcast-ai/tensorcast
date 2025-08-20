@@ -5,14 +5,20 @@
 #include "core/testing/common.h"
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/model_hash.h"
+#include "core/store/loader/file_partition_source.h"
+#include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/model.h"
 #include "core/store/model/model_config.h"
@@ -20,6 +26,95 @@
 namespace fs = std::filesystem;
 using namespace stepcast::store;
 using namespace stepcast::tests;
+
+namespace {
+// Write minimal RFC-0007 metadata for a standard partition directory:
+// - tensor_index.json: one dummy entry covering [0, total_size)
+// - model_descriptor.json: with model_id = "mi2:<index_mh>:<data_mh>"
+absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64_t total_size) {
+  using nlohmann::json;
+  // 1) Build minimal canonical index JSON
+  json idx = json::object();
+  json entry = json::array();
+  entry.push_back(0); // offset
+  entry.push_back(total_size); // size
+  entry.push_back(json::array()); // shape
+  entry.push_back(json::array()); // stride
+  entry.push_back("torch.uint8"); // dtype
+  entry.push_back(static_cast<int64_t>(0)); // storage_offset
+  idx["__dummy__"] = std::move(entry);
+
+  const auto index_json_path = dir / "tensor_index.json";
+  {
+    std::ofstream of(index_json_path);
+    if (!of.is_open()) {
+      return absl::InternalError("Failed to open tensor_index.json for writing");
+    }
+    of << idx.dump();
+  }
+
+  // 2) Compute index/data multihash
+  auto index_mh_or = model_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+  // Use unified SeekableSource hashing pipeline instead of ad-hoc disk dir hashing
+  stepcast::store::loader::FilePartitionSource::Options opts;
+  // Collect all standard partition files (tensor.data, tensor.data_0, tensor.data_1, ...)
+  std::vector<std::filesystem::path> parts;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto& name = entry.path().filename().string();
+    if (name == "tensor.data" || name.starts_with("tensor.data_")) {
+      parts.push_back(entry.path());
+    }
+  }
+  std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+  if (parts.empty()) {
+    // Fallback to the common single-file name
+    parts.push_back(dir / "tensor.data_0");
+  }
+  uint64_t size_sum = 0;
+  for (const auto& p : parts) {
+    const auto sz = static_cast<size_t>(std::filesystem::file_size(p));
+    opts.partition_paths.push_back(p);
+    opts.partition_sizes.push_back(sz);
+    size_sum += sz;
+  }
+  opts.total_size = size_sum;
+  stepcast::store::loader::FilePartitionSource src(std::move(opts));
+  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_seekable_source(src, size_sum);
+  if (!data_mh_or.ok()) {
+    return data_mh_or.status();
+  }
+
+  // 3) Write model_descriptor.json
+  const auto descriptor_path = dir / "model_descriptor.json";
+  json desc;
+  desc["model_id"] = std::string("mi2:") + *index_mh_or + ":" + *data_mh_or;
+  desc["index_multihash"] = *index_mh_or;
+  desc["data_multihash"] = *data_mh_or;
+  desc["schema_version"] = "v2";
+  desc["encoding"] = "json";
+  desc["total_size"] = size_sum;
+  json hp;
+  hp["chunk_size"] = 4 * 1024 * 1024;
+  hp["fanout"] = 2;
+  hp["algorithm"] = "sha2-256";
+  desc["hash_params"] = hp;
+  {
+    std::ofstream of(descriptor_path);
+    if (!of.is_open()) {
+      return absl::InternalError("Failed to open model_descriptor.json for writing");
+    }
+    of << desc.dump(2);
+  }
+
+  return absl::OkStatus();
+}
+} // namespace
 
 TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
   // Setup dummy model with two partitions
@@ -56,6 +151,12 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
   combined.insert(combined.end(), data1.begin(), data1.end());
   REQUIRE(combined.size() == total_size);
 
+  // RFC-0007: Write minimal canonical index + descriptor for standard partitions
+  {
+    auto st = write_descriptor_and_index(base / model_subdir, static_cast<uint64_t>(total_size));
+    REQUIRE(st.ok());
+  }
+
   // Pinned pool for streaming
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096; // Use 4 KiB-aligned chunk size per alignment requirements
@@ -76,6 +177,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[model][disk][streaming]") {
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
+      .expected_model_size = std::nullopt,
       .max_buffer_bytes = 1024 * 2 // 2 KB buffer to force streaming
   };
 

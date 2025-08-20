@@ -164,24 +164,25 @@ class GlobalModelStore final {
       return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>>(
           PrepareAsyncListModelReplicasRaw(context, request, cq));
     }
-    virtual ::grpc::Status GetModelInfo(
+    virtual ::grpc::Status GetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
-        ::global_store::GetModelInfoResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>> AsyncGetModelInfo(
+        const ::global_store::GetModelInfoByIdRequest& request,
+        ::global_store::GetModelInfoByIdResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>
+    AsyncGetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>>(
-          AsyncGetModelInfoRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>(
+          AsyncGetModelInfoByIdRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>>
-    PrepareAsyncGetModelInfo(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>
+    PrepareAsyncGetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>>(
-          PrepareAsyncGetModelInfoRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>(
+          PrepareAsyncGetModelInfoByIdRaw(context, request, cq));
     }
     virtual ::grpc::Status GetModelIndex(
         ::grpc::ClientContext* context,
@@ -449,15 +450,15 @@ class GlobalModelStore final {
           const ::global_store::ListModelReplicasRequest* request,
           ::global_store::ListModelReplicasResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void GetModelInfo(
+      virtual void GetModelInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest* request,
-          ::global_store::GetModelInfoResponse* response,
+          const ::global_store::GetModelInfoByIdRequest* request,
+          ::global_store::GetModelInfoByIdResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void GetModelInfo(
+      virtual void GetModelInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest* request,
-          ::global_store::GetModelInfoResponse* response,
+          const ::global_store::GetModelInfoByIdRequest* request,
+          ::global_store::GetModelInfoByIdResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
       virtual void GetModelIndex(
           ::grpc::ClientContext* context,
@@ -629,14 +630,15 @@ class GlobalModelStore final {
         ::grpc::ClientContext* context,
         const ::global_store::ListModelReplicasRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>* AsyncGetModelInfoRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*
+    AsyncGetModelInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoResponse>*
-    PrepareAsyncGetModelInfoRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*
+    PrepareAsyncGetModelInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
     virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
         ::grpc::ClientContext* context,
@@ -858,23 +860,24 @@ class GlobalModelStore final {
       return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>>(
           PrepareAsyncListModelReplicasRaw(context, request, cq));
     }
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
-        ::global_store::GetModelInfoResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>> AsyncGetModelInfo(
+        const ::global_store::GetModelInfoByIdRequest& request,
+        ::global_store::GetModelInfoByIdResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>> AsyncGetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>>(
-          AsyncGetModelInfoRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>(
+          AsyncGetModelInfoByIdRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>> PrepareAsyncGetModelInfo(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>
+    PrepareAsyncGetModelInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>>(
-          PrepareAsyncGetModelInfoRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>(
+          PrepareAsyncGetModelInfoByIdRaw(context, request, cq));
     }
     ::grpc::Status GetModelIndex(
         ::grpc::ClientContext* context,
@@ -1130,15 +1133,15 @@ class GlobalModelStore final {
           const ::global_store::ListModelReplicasRequest* request,
           ::global_store::ListModelReplicasResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void GetModelInfo(
+      void GetModelInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest* request,
-          ::global_store::GetModelInfoResponse* response,
+          const ::global_store::GetModelInfoByIdRequest* request,
+          ::global_store::GetModelInfoByIdResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void GetModelInfo(
+      void GetModelInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoRequest* request,
-          ::global_store::GetModelInfoResponse* response,
+          const ::global_store::GetModelInfoByIdRequest* request,
+          ::global_store::GetModelInfoByIdResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
       void GetModelIndex(
           ::grpc::ClientContext* context,
@@ -1309,13 +1312,13 @@ class GlobalModelStore final {
         ::grpc::ClientContext* context,
         const ::global_store::ListModelReplicasRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>* AsyncGetModelInfoRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>* AsyncGetModelInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoResponse>* PrepareAsyncGetModelInfoRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>* PrepareAsyncGetModelInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoRequest& request,
+        const ::global_store::GetModelInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) override;
     ::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
         ::grpc::ClientContext* context,
@@ -1405,7 +1408,7 @@ class GlobalModelStore final {
     const ::grpc::internal::RpcMethod rpcmethod_RequestModelReplicaTransport_;
     const ::grpc::internal::RpcMethod rpcmethod_CompleteModelReplicaTransport_;
     const ::grpc::internal::RpcMethod rpcmethod_ListModelReplicas_;
-    const ::grpc::internal::RpcMethod rpcmethod_GetModelInfo_;
+    const ::grpc::internal::RpcMethod rpcmethod_GetModelInfoById_;
     const ::grpc::internal::RpcMethod rpcmethod_GetModelIndex_;
     const ::grpc::internal::RpcMethod rpcmethod_RegisterWorker_;
     const ::grpc::internal::RpcMethod rpcmethod_WorkerHeartbeat_;
@@ -1449,10 +1452,10 @@ class GlobalModelStore final {
         ::grpc::ServerContext* context,
         const ::global_store::ListModelReplicasRequest* request,
         ::global_store::ListModelReplicasResponse* response);
-    virtual ::grpc::Status GetModelInfo(
+    virtual ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* context,
-        const ::global_store::GetModelInfoRequest* request,
-        ::global_store::GetModelInfoResponse* response);
+        const ::global_store::GetModelInfoByIdRequest* request,
+        ::global_store::GetModelInfoByIdResponse* response);
     virtual ::grpc::Status GetModelIndex(
         ::grpc::ServerContext* context,
         const ::global_store::GetModelIndexRequest* request,
@@ -1675,29 +1678,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_GetModelInfo : public BaseClass {
+  class WithAsyncMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_GetModelInfo() {
+    WithAsyncMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodAsync(6);
     }
-    ~WithAsyncMethod_GetModelInfo() override {
+    ~WithAsyncMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelInfo(
+    void RequestGetModelInfoById(
         ::grpc::ServerContext* context,
-        ::global_store::GetModelInfoRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::GetModelInfoResponse>* response,
+        ::global_store::GetModelInfoByIdRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::GetModelInfoByIdResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -2007,7 +2010,7 @@ class GlobalModelStore final {
   typedef WithAsyncMethod_RegisterModelReplica<WithAsyncMethod_UpdateModelReplica<
       WithAsyncMethod_UnregisterModelReplica<WithAsyncMethod_RequestModelReplicaTransport<
           WithAsyncMethod_CompleteModelReplicaTransport<WithAsyncMethod_ListModelReplicas<
-              WithAsyncMethod_GetModelInfo<WithAsyncMethod_GetModelIndex<WithAsyncMethod_RegisterWorker<
+              WithAsyncMethod_GetModelInfoById<WithAsyncMethod_GetModelIndex<WithAsyncMethod_RegisterWorker<
                   WithAsyncMethod_WorkerHeartbeat<WithAsyncMethod_UnregisterWorker<WithAsyncMethod_ListActiveWorkers<
                       WithAsyncMethod_SynchronizeWorkerState<WithAsyncMethod_RequestFullStateSync<
                           WithAsyncMethod_HealthCheck<WithAsyncMethod_QueryChunkLocations<
@@ -2292,47 +2295,47 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_GetModelInfo : public BaseClass {
+  class WithCallbackMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_GetModelInfo() {
+    WithCallbackMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodCallback(
           6,
           new ::grpc::internal::
-              CallbackUnaryHandler<::global_store::GetModelInfoRequest, ::global_store::GetModelInfoResponse>(
+              CallbackUnaryHandler<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>(
                   [this](
                       ::grpc::CallbackServerContext* context,
-                      const ::global_store::GetModelInfoRequest* request,
-                      ::global_store::GetModelInfoResponse* response) {
-                    return this->GetModelInfo(context, request, response);
+                      const ::global_store::GetModelInfoByIdRequest* request,
+                      ::global_store::GetModelInfoByIdResponse* response) {
+                    return this->GetModelInfoById(context, request, response);
                   }));
     }
-    void SetMessageAllocatorFor_GetModelInfo(
-        ::grpc::MessageAllocator<::global_store::GetModelInfoRequest, ::global_store::GetModelInfoResponse>*
+    void SetMessageAllocatorFor_GetModelInfoById(
+        ::grpc::MessageAllocator<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>*
             allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(6);
-      static_cast<::grpc::internal::
-                      CallbackUnaryHandler<::global_store::GetModelInfoRequest, ::global_store::GetModelInfoResponse>*>(
-          handler)
+      static_cast<::grpc::internal::CallbackUnaryHandler<
+          ::global_store::GetModelInfoByIdRequest,
+          ::global_store::GetModelInfoByIdResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_GetModelInfo() override {
+    ~WithCallbackMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelInfo(
+    virtual ::grpc::ServerUnaryReactor* GetModelInfoById(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) {
       return nullptr;
     }
   };
@@ -2796,7 +2799,7 @@ class GlobalModelStore final {
   typedef WithCallbackMethod_RegisterModelReplica<
       WithCallbackMethod_UpdateModelReplica<WithCallbackMethod_UnregisterModelReplica<
           WithCallbackMethod_RequestModelReplicaTransport<WithCallbackMethod_CompleteModelReplicaTransport<
-              WithCallbackMethod_ListModelReplicas<WithCallbackMethod_GetModelInfo<
+              WithCallbackMethod_ListModelReplicas<WithCallbackMethod_GetModelInfoById<
                   WithCallbackMethod_GetModelIndex<WithCallbackMethod_RegisterWorker<WithCallbackMethod_WorkerHeartbeat<
                       WithCallbackMethod_UnregisterWorker<WithCallbackMethod_ListActiveWorkers<
                           WithCallbackMethod_SynchronizeWorkerState<WithCallbackMethod_RequestFullStateSync<
@@ -2931,22 +2934,22 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_GetModelInfo : public BaseClass {
+  class WithGenericMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_GetModelInfo() {
+    WithGenericMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodGeneric(6);
     }
-    ~WithGenericMethod_GetModelInfo() override {
+    ~WithGenericMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
@@ -3342,26 +3345,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_GetModelInfo : public BaseClass {
+  class WithRawMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_GetModelInfo() {
+    WithRawMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodRaw(6);
     }
-    ~WithRawMethod_GetModelInfo() override {
+    ~WithRawMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelInfo(
+    void RequestGetModelInfoById(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3874,32 +3877,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_GetModelInfo : public BaseClass {
+  class WithRawCallbackMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_GetModelInfo() {
+    WithRawCallbackMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodRawCallback(
           6,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->GetModelInfo(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->GetModelInfoById(context, request, response); }));
     }
-    ~WithRawCallbackMethod_GetModelInfo() override {
+    ~WithRawCallbackMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelInfo(
+    virtual ::grpc::ServerUnaryReactor* GetModelInfoById(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -4464,39 +4467,39 @@ class GlobalModelStore final {
             ::global_store::ListModelReplicasResponse>* server_unary_streamer) = 0;
   };
   template <class BaseClass>
-  class WithStreamedUnaryMethod_GetModelInfo : public BaseClass {
+  class WithStreamedUnaryMethod_GetModelInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithStreamedUnaryMethod_GetModelInfo() {
+    WithStreamedUnaryMethod_GetModelInfoById() {
       ::grpc::Service::MarkMethodStreamed(
           6,
           new ::grpc::internal::
-              StreamedUnaryHandler<::global_store::GetModelInfoRequest, ::global_store::GetModelInfoResponse>(
+              StreamedUnaryHandler<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>(
                   [this](
                       ::grpc::ServerContext* context,
                       ::grpc::ServerUnaryStreamer<
-                          ::global_store::GetModelInfoRequest,
-                          ::global_store::GetModelInfoResponse>* streamer) {
-                    return this->StreamedGetModelInfo(context, streamer);
+                          ::global_store::GetModelInfoByIdRequest,
+                          ::global_store::GetModelInfoByIdResponse>* streamer) {
+                    return this->StreamedGetModelInfoById(context, streamer);
                   }));
     }
-    ~WithStreamedUnaryMethod_GetModelInfo() override {
+    ~WithStreamedUnaryMethod_GetModelInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable regular version of this method
-    ::grpc::Status GetModelInfo(
+    ::grpc::Status GetModelInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoRequest* /*request*/,
-        ::global_store::GetModelInfoResponse* /*response*/) override {
+        const ::global_store::GetModelInfoByIdRequest* /*request*/,
+        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
     // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedGetModelInfo(
+    virtual ::grpc::Status StreamedGetModelInfoById(
         ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<::global_store::GetModelInfoRequest, ::global_store::GetModelInfoResponse>*
+        ::grpc::ServerUnaryStreamer<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>*
             server_unary_streamer) = 0;
   };
   template <class BaseClass>
@@ -4869,7 +4872,7 @@ class GlobalModelStore final {
   typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
       WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
           WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
-              WithStreamedUnaryMethod_GetModelInfo<WithStreamedUnaryMethod_GetModelIndex<
+              WithStreamedUnaryMethod_GetModelInfoById<WithStreamedUnaryMethod_GetModelIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<
@@ -4880,7 +4883,7 @@ class GlobalModelStore final {
   typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
       WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
           WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
-              WithStreamedUnaryMethod_GetModelInfo<WithStreamedUnaryMethod_GetModelIndex<
+              WithStreamedUnaryMethod_GetModelInfoById<WithStreamedUnaryMethod_GetModelIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<

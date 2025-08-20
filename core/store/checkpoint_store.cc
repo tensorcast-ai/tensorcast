@@ -10,23 +10,37 @@
 #include <future>
 #include <memory>
 #include <random>
+// For reading/writing descriptor and canonical index files
+#include <fstream>
+#include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/model_hash.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/loading/prepare_orchestrator.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_config.h"
+// RFC-0007 helpers for safetensors canonical index
+#include <nlohmann/json.hpp>
+#include "core/store/loader/canonical_index.h"
+#include "core/store/loader/safetensors_util.h"
+// Unified hashing over SeekableSource for CPU/GPU/P2P
+#include "core/store/loader/source_hash.h"
 // #include "core/store/loading/replica_registration_helper.h"
 
 namespace stepcast::store {
+namespace {} // namespace
+// (hashing utilities moved to core/common/model_hash.*)
 // Forward declaration for GPU eviction helper defined later in this file.
 absl::Status try_evict_gpu_memory_impl(
     ModelRegistry& registry,
@@ -41,7 +55,8 @@ absl::Status try_evict_gpu_memory_impl(
 
 // New unified constructor based on CheckpointStoreOptions (Phase-3+)
 CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
-    : storage_path_(opts.storage_path),
+    : options_(opts),
+      storage_path_(opts.storage_path),
       memory_pool_size_(opts.memory_pool_size),
       num_thread_(opts.num_thread),
       chunk_size_(opts.chunk_size),
@@ -314,17 +329,213 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
     return wait_status;
   }
 
+  // RFC-0007: After loading, compute/verify content-addressed identity when possible.
+  // Only perform strong verification when the model is resident in GPU memory (fast path).
+  std::optional<std::string> computed_data_mh;
+  std::optional<std::string> computed_index_mh;
+  std::optional<std::string> existing_index_mh;
+  std::optional<std::string> existing_data_mh;
+  std::filesystem::path model_dir = resolved_source.path;
+  bool is_safetensors = false;
+  {
+    // Probe directory for .safetensors to differentiate formats
+    for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+      if (entry.is_regular_file()) {
+        const auto name = entry.path().filename().string();
+        if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+          is_safetensors = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Try to read descriptor if present
+  const auto descriptor_path = model_dir / "model_descriptor.json";
+  if (std::filesystem::exists(descriptor_path)) {
+    std::ifstream f(descriptor_path);
+    if (f.is_open()) {
+      try {
+        nlohmann::json j;
+        f >> j;
+        if (j.contains("index_multihash") && j["index_multihash"].is_string()) {
+          existing_index_mh = j["index_multihash"].get<std::string>();
+        }
+        if (j.contains("data_multihash") && j["data_multihash"].is_string()) {
+          existing_data_mh = j["data_multihash"].get<std::string>();
+        }
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Ignoring malformed model_descriptor.json: " << e.what();
+      }
+    }
+  }
+
+  // Compute data multihash from GPU memory when requested by hints
+  uint64_t verify_size = 0;
+  const bool force_full_digest = options_.force_full_digest_on_load;
+  if (hints.verify == LoadingHints::Verify::FULL_DIGEST || force_full_digest) {
+    if (auto sz_or = model->get_model_size(); sz_or.ok()) {
+      verify_size = *sz_or;
+    }
+    if (target_location == ModelLocation::GPU) {
+      const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+      if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && verify_size > 0) {
+        auto data_mh_or = loader::compute_data_multihash_from_gpu_memory(gpu_ptrs[0], verify_size, target_device_id);
+        if (data_mh_or.ok()) {
+          computed_data_mh = *data_mh_or;
+        } else {
+          LOG(WARNING) << "Data multihash computation (GPU) failed: " << data_mh_or.status();
+        }
+      }
+    } else if (target_location == ModelLocation::PAGEABLE_CPU) {
+      const auto cpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::PAGEABLE_CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && verify_size > 0) {
+        auto data_mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_ptrs[0], verify_size);
+        if (data_mh_or.ok()) {
+          computed_data_mh = *data_mh_or;
+        } else {
+          LOG(WARNING) << "Data multihash computation (CPU) failed: " << data_mh_or.status();
+        }
+      }
+    }
+  }
+
+  // Compute or obtain index multihash
+  if (is_safetensors) {
+    if (existing_index_mh.has_value()) {
+      computed_index_mh = existing_index_mh; // trust descriptor when present
+    } else {
+      // Build canonical index from safetensors headers
+      std::vector<std::filesystem::path> st_files;
+      for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+        if (entry.is_regular_file()) {
+          const auto name = entry.path().filename().string();
+          if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+            st_files.push_back(entry.path());
+          }
+        }
+      }
+      auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+      if (index_bytes_or.ok()) {
+        // compute_index_multihash prefers inline data
+        auto index_mh_or = model_hash::compute_index_multihash(std::optional<std::string>(index_bytes_or.value()), "");
+        if (index_mh_or.ok()) {
+          computed_index_mh = *index_mh_or;
+        } else {
+          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+        }
+      } else {
+        LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
+      }
+    }
+  } else {
+    // Standard partition format – read tensor_index.(json|cbor) and canonicalize bytes via nlohmann::json
+    const auto index_json_path = model_dir / "tensor_index.json";
+    const auto index_cbor_path = model_dir / "tensor_index.cbor";
+    try {
+      // Read canonical index (CBOR preferred), then rebuild with stable grouping
+      std::string raw_json;
+      if (std::filesystem::exists(index_cbor_path)) {
+        std::ifstream f(index_cbor_path, std::ios::binary);
+        std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        nlohmann::json j = nlohmann::json::from_cbor(buf);
+        raw_json = j.dump();
+      } else if (std::filesystem::exists(index_json_path)) {
+        std::ifstream f(index_json_path);
+        nlohmann::json j;
+        f >> j;
+        raw_json = j.dump();
+      }
+      if (!raw_json.empty()) {
+        // Apply stable canonicalization using C++ authority
+        auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
+        const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
+        auto index_mh_or = model_hash::compute_index_multihash(std::optional<std::string>(canonical_json), "");
+        if (index_mh_or.ok()) {
+          computed_index_mh = *index_mh_or;
+        } else {
+          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+        }
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Failed to read/parse tensor_index.(json|cbor): " << e.what();
+    }
+  }
+
+  // If descriptor exists, verify data_multihash matches when we computed it
+  if (existing_data_mh.has_value() && computed_data_mh.has_value()) {
+    if (*existing_data_mh != *computed_data_mh) {
+      return absl::DataLossError("MODEL_ID_MISMATCH: data_multihash does not match loaded data");
+    }
+  }
+
+  // If safetensors path lacks descriptor, write it back when we have both hashes
+  if (is_safetensors && !std::filesystem::exists(descriptor_path)) {
+    if (computed_index_mh.has_value() && computed_data_mh.has_value()) {
+      try {
+        // 1) Persist model_descriptor.json
+        nlohmann::json j;
+        j["model_id"] = std::string("mi2:") + *computed_index_mh + ":" + *computed_data_mh;
+        j["index_multihash"] = *computed_index_mh;
+        j["data_multihash"] = *computed_data_mh;
+        j["schema_version"] = "v2";
+        j["encoding"] = "json";
+        j["total_size"] = verify_size;
+        nlohmann::json hp;
+        hp["chunk_size"] = 4 * 1024 * 1024;
+        hp["fanout"] = 2;
+        hp["algorithm"] = "sha2-256";
+        j["hash_params"] = hp;
+        std::ofstream of(descriptor_path);
+        if (!of.is_open()) {
+          return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write model_descriptor.json");
+        }
+        of << j.dump(2);
+
+        // 2) Optionally persist canonical index (CBOR preferred) if not already present
+        const auto index_json_path = model_dir / "tensor_index.json";
+        const auto index_cbor_path = model_dir / "tensor_index.cbor";
+        if (!std::filesystem::exists(index_cbor_path) && !std::filesystem::exists(index_json_path)) {
+          // Rebuild canonical index bytes from safetensors headers
+          std::vector<std::filesystem::path> st_files;
+          for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+            if (entry.is_regular_file()) {
+              const auto name = entry.path().filename().string();
+              if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+                st_files.push_back(entry.path());
+              }
+            }
+          }
+          auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+          if (index_bytes_or.ok()) {
+            // Parse to JSON then write CBOR bytes
+            nlohmann::json idx_json = nlohmann::json::parse(index_bytes_or.value(), nullptr, true);
+            std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(idx_json);
+            std::ofstream oc(index_cbor_path, std::ios::binary);
+            if (!oc.is_open()) {
+              return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write tensor_index.cbor");
+            }
+            oc.write(reinterpret_cast<const char*>(cbor.data()), static_cast<std::streamsize>(cbor.size()));
+            oc.close();
+          }
+        }
+      } catch (const std::exception& e) {
+        return absl::PermissionDeniedError(std::string("DESCRIPTOR_NOT_WRITABLE: ") + e.what());
+      }
+    }
+  }
+
   // Build result using new ModelHandle structure
   ModelHandle handle;
 
   // Compose InstanceKey
   DeviceKey dev_key;
   if (target_location == ModelLocation::GPU) {
-    dev_key = DeviceKey{DeviceType::GPU, target_device_id, ""};
+    dev_key = DeviceKey{.type = DeviceType::GPU, .ordinal = target_device_id, .uuid = ""};
   } else {
-    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+    dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.instance_key = InstanceKey{model_identifier, dev_key, /*replica=*/0};
+  handle.instance_key = InstanceKey{.model_id = model_identifier, .device = dev_key, /*replica=*/.replica = 0};
 
   // Loading future and states
   handle.ready_future = load_future;
@@ -419,11 +630,11 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
 
   DeviceKey dev_key;
   if (target_location == ModelLocation::GPU) {
-    dev_key = DeviceKey{DeviceType::GPU, target.location.device_id, ""};
+    dev_key = DeviceKey{.type = DeviceType::GPU, .ordinal = target.location.device_id, .uuid = ""};
   } else {
-    dev_key = DeviceKey{DeviceType::CPU, -1, ""};
+    dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.instance_key = InstanceKey{model_identifier, dev_key, /*replica=*/0};
+  handle.instance_key = InstanceKey{.model_id = model_identifier, .device = dev_key, /*replica=*/.replica = 0};
 
   // Ready future is already resolved (synchronous path)
   std::promise<absl::Status> promise;
@@ -579,7 +790,6 @@ absl::Status ModelHandle::wait_ready(std::chrono::milliseconds timeout) {
 // decision complexity.
 // ---------------------------------------------------------------------------
 absl::StatusOr<ModelHandle> CheckpointStore::prepare(
-    std::string_view model_id,
     const DeviceKey& target_device,
     PrepareMode mode,
     const LoadingHints& hints) {
@@ -604,7 +814,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
   // ────────────────────────────────────────────────────────────────────
   // Fast-path: instance already present on the requested device.
   // ────────────────────────────────────────────────────────────────────
-  const InstanceKey dst_key{.model_id = std::string(model_id), .device = target_device, /*replica=*/.replica = 0};
+  const InstanceKey dst_key{.model_id = hints.model_id, .device = target_device, /*replica=*/.replica = 0};
   if (auto existing_or = model_registry_->find(dst_key); existing_or.ok()) {
     const auto& model = existing_or.value();
 
@@ -636,14 +846,23 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
 
   // Helper lambda: minimal disk-loading path.
   auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<ModelHandle> {
+    // Guard: content-addressed IDs (mi2:...) are not paths.
+    if (absl::StartsWith(hints.model_id, "mi2:")) {
+      return absl::FailedPreconditionError(
+          "LOAD_ONLY/disk fallback disabled for content-addressed model_id; Global Store routing required");
+    }
     DiskSource disk_src;
-    disk_src.path = std::filesystem::path(std::string(model_id));
+    if (!hints.disk_path.empty()) {
+      disk_src.path = std::filesystem::path(hints.disk_path);
+    } else {
+      disk_src.path = std::filesystem::path(hints.model_id);
+    }
 
     ModelTarget target;
     target.location.type = (dev_key.type == DeviceType::GPU) ? ModelLocation::GPU : ModelLocation::PAGEABLE_CPU;
     target.location.device_id = dev_key.ordinal;
 
-    return load_from_disk_internal(std::string(model_id), disk_src, target, hints);
+    return load_from_disk_internal(hints.disk_path.empty() ? hints.model_id : hints.disk_path, disk_src, target, hints);
   };
 
   // ────────────────────────────────────────────────────────────────────
@@ -656,7 +875,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
         return absl::InvalidArgumentError("COPY_ONLY mode requires a GPU target device");
       }
 
-      const auto candidates = model_registry_->find_by_model(model_id);
+      const auto candidates = model_registry_->find_by_model(hints.model_id);
       for (const auto& cand_key : candidates) {
         if (cand_key.device.type != DeviceType::GPU) {
           continue;
@@ -671,21 +890,24 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
           continue;
         }
 
-        // Create destination model configuration. Provide a valid DiskSource path so Model::create can
-        // initialize the loader to determine model size, even though data will be provided via GPU copy.
-        DiskSource disk_src;
-        disk_src.path = std::filesystem::path(std::string(model_id));
-        if (!storage_path_.empty() && !disk_src.path.is_absolute()) {
-          disk_src.path = storage_path_ / disk_src.path;
+        // Create destination model configuration using an inline buffer source to
+        // avoid any dependency on on-disk paths when performing GPU→GPU copy.
+        // The inline buffer loader requires a known total size.
+        uint64_t expected_size = 0;
+        if (auto sz_or = src_model->get_model_size(); sz_or.ok()) {
+          expected_size = *sz_or;
+        } else {
+          return sz_or.status();
         }
+        InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
         ModelConfig cfg{
-            .source = disk_src,
-            .model_identifier = std::string(model_id),
+            .source = ib_source,
+            .model_identifier = hints.model_id,
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_memory_pool = memory_pool_,
             .dvmp = dvmp_,
-            .expected_model_size = std::nullopt};
+            .expected_model_size = expected_size};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
         auto dst_or = Model::create(cfg);
@@ -724,16 +946,16 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
     }
 
     case PrepareMode::AUTO: {
-      if (global_store_client_ && global_store_client_->is_connected()) {
+      if (global_store_client_ && global_store_client_->is_connected() && !hints.model_id.empty()) {
         PrepareOrchestrator orchestrator(this, global_store_client_.get());
-        auto orchestrated_or = orchestrator.run(model_id, target_device, hints);
+        auto orchestrated_or = orchestrator.run(hints.model_id, target_device, hints);
         if (orchestrated_or.ok()) {
           return *orchestrated_or;
         }
         LOG(WARNING) << "PrepareOrchestrator failed: " << orchestrated_or.status() << "; falling back to disk load";
       }
-      // Fallback: disk load.
-      return load_from_disk(target_device);
+      return absl::FailedPreconditionError(
+          "AUTO prepare requires a content-addressed hints.model_id with Global Store routing or an explicit hints.disk_path");
     }
   }
 
@@ -946,6 +1168,18 @@ absl::StatusOr<uint64_t> CheckpointStore::get_instance_gpu_ptr(const InstanceKey
     return absl::FailedPreconditionError("GPU memory not available");
   }
   return reinterpret_cast<uint64_t>(ptrs[0]);
+}
+
+absl::StatusOr<uint64_t> CheckpointStore::get_instance_size(const InstanceKey& key) {
+  auto model_res = model_registry_->find(key);
+  if (!model_res.ok()) {
+    return absl::NotFoundError("Model instance not found");
+  }
+  auto size_or = model_res.value()->get_model_size();
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  return *size_or;
 }
 
 absl::StatusOr<CommRegistrationInfo> CheckpointStore::enable_remote_instance_access(
@@ -1205,6 +1439,40 @@ absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commi
     return absl::DeadlineExceededError("registration expired (TTL)");
   }
 
+  // Compute content-addressed model_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
+  // 1) index_multihash from canonical index bytes when provided, otherwise from key (sha256 hex)
+  absl::StatusOr<std::string> index_mh_or =
+      model_hash::compute_index_multihash(entry.tensor_index_data, entry.tensor_index_key);
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+
+  // 2) data_multihash from GPU memory tree-hash root (sha2-256 leaves, base32 multibase)
+  void* gpu_ptr = nullptr;
+  {
+    const auto ptrs = entry.model->get_memory_manager().get_pointer(ModelLocation::GPU);
+    gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+  }
+  absl::StatusOr<std::string> data_mh_or =
+      model_hash::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
+  if (!data_mh_or.ok()) {
+    return data_mh_or.status();
+  }
+
+  const std::string model_id_mi2 = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
+
+  // Replace entry.model_id with the content-addressed ID for registration and return
+  entry.model_id = model_id_mi2;
+
+  // Also add a registry mapping for the content-addressed model_id so callers can
+  // subsequently reference the instance by its mi2: identifier (in addition to the
+  // original logical model_id used during Begin/Commit).
+  {
+    DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = entry.device_id, .uuid = ""};
+    InstanceKey mi2_key{.model_id = entry.model_id, .device = dev_key, /*replica=*/.replica = 0};
+    (void)model_registry_->emplace(mi2_key, entry.model);
+  }
+
   // Export remote memory keys if communication is enabled (GPU location).
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
@@ -1250,6 +1518,11 @@ absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commi
   result.model_id = entry.model_id;
   result.device_id = entry.device_id;
   result.size_bytes = entry.size_bytes;
+  // RFC-0007: Fill descriptor fields for upstream layers
+  result.index_multihash = *index_mh_or;
+  result.data_multihash = *data_mh_or;
+  result.schema_version = entry.schema_version;
+  result.encoding = entry.encoding;
   return result;
 }
 

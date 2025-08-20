@@ -14,8 +14,8 @@ from tests.python.interaction.utils import FakeContext
 # Helpers – keep self-contained to avoid cross-test dependencies
 # -----------------------------------------------------------------------------
 
-def _register_gpu_replica(gs, *, model_name: str, node_id: str, max_concurrency: int) -> None:
-    """Register a worker + single-GPU replica with *max_concurrency* for *model_name*."""
+def _register_gpu_replica(gs, *, model_id: str, node_id: str, max_concurrency: int) -> None:
+    """Register a worker + single-GPU replica with *max_concurrency* for *model_id*."""
 
     # 1) Worker registration (must precede replica)
     worker_req = global_store_pb2.RegisterWorkerRequest(
@@ -39,7 +39,7 @@ def _register_gpu_replica(gs, *, model_name: str, node_id: str, max_concurrency:
         device_id=0,
     )
     reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_name=model_name,
+        model_id=model_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
@@ -64,15 +64,15 @@ def test_replica_selection_order(global_store_service, capacities):
     """
 
     gs = global_store_service
-    model_name = "llama-replica-order"
+    model_id = "llama-replica-order"
 
     # Register replicas **largest capacity first** so that the tie-break
     # `updated_at DESC` does not influence the desired deterministic order.
     for node_id, cap in sorted(capacities.items(), key=lambda kv: kv[1], reverse=True):
-        _register_gpu_replica(gs, model_name=model_name, node_id=node_id, max_concurrency=cap)
+        _register_gpu_replica(gs, model_id=model_id, node_id=node_id, max_concurrency=cap)
 
     def _request():
-        req = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model_name)
+        req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model_id)
         resp = gs.RequestModelReplicaTransport(req, FakeContext())
         assert resp.status == global_store_pb2.Status.OK
         return resp.remote_memory_info.node_id

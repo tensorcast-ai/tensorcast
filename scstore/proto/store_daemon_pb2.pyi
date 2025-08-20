@@ -91,6 +91,8 @@ class MemCopyHandle(_message.Message):
 
 class LoadModelRequest(_message.Message):
     __slots__ = (
+        "model_id",
+        "disk_path",
         "model_path",
         "replica_uuid",
         "device_uuid",
@@ -100,6 +102,8 @@ class LoadModelRequest(_message.Message):
         "keep_for_global",
         "size_bytes",
     )
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    DISK_PATH_FIELD_NUMBER: _ClassVar[int]
     MODEL_PATH_FIELD_NUMBER: _ClassVar[int]
     REPLICA_UUID_FIELD_NUMBER: _ClassVar[int]
     DEVICE_UUID_FIELD_NUMBER: _ClassVar[int]
@@ -108,6 +112,8 @@ class LoadModelRequest(_message.Message):
     PID_FIELD_NUMBER: _ClassVar[int]
     KEEP_FOR_GLOBAL_FIELD_NUMBER: _ClassVar[int]
     SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    disk_path: str
     model_path: str
     replica_uuid: str
     device_uuid: str
@@ -118,6 +124,8 @@ class LoadModelRequest(_message.Message):
     size_bytes: int
     def __init__(
         self,
+        model_id: _Optional[str] = ...,
+        disk_path: _Optional[str] = ...,
         model_path: _Optional[str] = ...,
         replica_uuid: _Optional[str] = ...,
         device_uuid: _Optional[str] = ...,
@@ -620,22 +628,56 @@ class CommitRegisteredTensorDictRequest(_message.Message):
     registration_id: str
     def __init__(self, registration_id: _Optional[str] = ...) -> None: ...
 
+class ModelDescriptor(_message.Message):
+    __slots__ = (
+        "model_id",
+        "index_multihash",
+        "data_multihash",
+        "schema_version",
+        "encoding",
+        "total_size",
+    )
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    INDEX_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
+    DATA_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
+    SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ENCODING_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_SIZE_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    index_multihash: str
+    data_multihash: str
+    schema_version: str
+    encoding: str
+    total_size: int
+    def __init__(
+        self,
+        model_id: _Optional[str] = ...,
+        index_multihash: _Optional[str] = ...,
+        data_multihash: _Optional[str] = ...,
+        schema_version: _Optional[str] = ...,
+        encoding: _Optional[str] = ...,
+        total_size: _Optional[int] = ...,
+    ) -> None: ...
+
 class CommitRegisteredTensorDictResponse(_message.Message):
-    __slots__ = ("registration_id", "model_id", "device_id", "size")
+    __slots__ = ("registration_id", "model_id", "device_id", "size", "descriptor")
     REGISTRATION_ID_FIELD_NUMBER: _ClassVar[int]
     MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTOR_FIELD_NUMBER: _ClassVar[int]
     registration_id: str
     model_id: str
     device_id: int
     size: int
+    descriptor: ModelDescriptor
     def __init__(
         self,
         registration_id: _Optional[str] = ...,
         model_id: _Optional[str] = ...,
         device_id: _Optional[int] = ...,
         size: _Optional[int] = ...,
+        descriptor: _Optional[_Union[ModelDescriptor, _Mapping]] = ...,
     ) -> None: ...
 
 class AbortRegisteredTensorDictRequest(_message.Message):

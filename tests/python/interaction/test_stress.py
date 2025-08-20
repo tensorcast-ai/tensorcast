@@ -53,7 +53,7 @@ def test_mixed_fault_stress(global_store_service):
             device_id=0,
         )
         reg = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model,
+            model_id=model,
             mem_info=mem_info,
             max_concurrency=capacities[node_id],
             worker_id=worker_resp.worker_id,
@@ -77,7 +77,7 @@ def test_mixed_fault_stress(global_store_service):
         # ~5%: attempt request that is expected to time-out (simulate saturation)
         if action_pick < FAULT_RATE + TIMEOUT_RATE:
             req_to = global_store_pb2.RequestModelReplicaTransportRequest(
-                model_name=model,
+                model_id=model,
                 wait_timeout_ms=1,
             )
             resp = gs.RequestModelReplicaTransport(req_to, FakeContext())
@@ -91,7 +91,7 @@ def test_mixed_fault_stress(global_store_service):
             continue
 
         # Otherwise request a normal transport
-        req = global_store_pb2.RequestModelReplicaTransportRequest(model_name=model)
+        req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
         resp = gs.RequestModelReplicaTransport(req, FakeContext())
         if resp.status == global_store_pb2.Status.OK:
             active_transport_ids.append(resp.transport_id)

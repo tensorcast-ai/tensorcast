@@ -25,7 +25,7 @@ class TestErrorHandling:
     def test_register_replica_invalid_memory_size(self, services):
         """Test registering replica with invalid memory size."""
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -42,7 +42,7 @@ class TestErrorHandling:
     def test_register_replica_invalid_max_concurrency(self, services):
         """Test registering replica with invalid max concurrency."""
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -61,7 +61,7 @@ class TestErrorHandling:
         """Test requesting transport when no replicas exist."""
         with pytest.raises(TimeoutError) as exc_info:
             services["transport"].request_transport(
-                model_name="nonexistent_model",
+                model_id="nonexistent_model",
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -75,7 +75,7 @@ class TestErrorHandling:
         replicas = []
         for i in range(3):
             replica = ModelReplica(
-                model_name="test_model",
+                model_id="test_model",
                 node_id=f"node{i}",
                 node_address=f"192.168.1.{i+1}",
                 node_port=8080 + i,
@@ -92,7 +92,7 @@ class TestErrorHandling:
         # Request should timeout when all replicas are at capacity
         with pytest.raises(TimeoutError) as exc_info:
             services["transport"].request_transport(
-                model_name="test_model",
+                model_id="test_model",
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -145,7 +145,7 @@ class TestErrorHandling:
         """Test concurrent updates to the same replica."""
         # Create initial replica
         replica = ModelReplica(
-            model_name="test_model",
+            model_id="test_model",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -160,7 +160,7 @@ class TestErrorHandling:
         def update_replica(thread_id):
             try:
                 updated_replica = ModelReplica(
-                    model_name="test_model",
+                    model_id="test_model",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -185,7 +185,7 @@ class TestErrorHandling:
             thread.join()
 
         # Verify replica exists and has valid state
-        replicas = services["model"].list_replicas(model_name="test_model")
+        replicas = services["model"].list_replicas(model_id="test_model")
         assert len(replicas) == 1
         assert replicas[0].memory_size > 0
 
@@ -199,10 +199,10 @@ class TestErrorHandling:
                 node_address="192.168.1.1",
                 node_port=8080,
                 memory_size=1024,
-                memory_type=999,  # Invalid enum value
+                memory_type=999,  # Invalid enum value # type: ignore
                 device_id=0,
             ),
-            model_name="test_model",
+            model_id="test_model",
             worker_id=registered_worker,
         )
 
@@ -271,7 +271,7 @@ class TestEdgeCases:
         # Memory utilization calculation should handle large values
         assert large_worker.mem_pool_total_size == large_memory
 
-    def test_unicode_model_names(self, services):
+    def test_unicode_model_ids(self, services):
         """Test handling of unicode characters in model names."""
         unicode_names = [
             "模型_测试",  # Chinese
@@ -281,9 +281,9 @@ class TestEdgeCases:
             "model\u200b_test",  # Zero-width space
         ]
 
-        for model_name in unicode_names:
+        for model_id in unicode_names:
             replica = ModelReplica(
-                model_name=model_name,
+                model_id=model_id,
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -297,9 +297,9 @@ class TestEdgeCases:
             assert replica_id
 
             # Verify retrieval works
-            replicas = services["model"].list_replicas(model_name=model_name)
+            replicas = services["model"].list_replicas(model_id=model_id)
             assert len(replicas) == 1
-            assert replicas[0].model_name == model_name
+            assert replicas[0].model_id == model_id
 
     def test_rapid_heartbeat_updates(self, services, repositories):
         """Test rapid heartbeat updates don't cause issues."""
@@ -336,7 +336,7 @@ class TestEdgeCases:
         """Test transport request with zero timeout."""
         # Create a replica with unique identifiers
         replica = ModelReplica(
-            model_name="zero_timeout_model",
+            model_id="zero_timeout_model",
             node_id="zero_timeout_node",
             node_address="192.168.60.1",  # Unique address
             node_port=8180,
@@ -350,20 +350,20 @@ class TestEdgeCases:
         # Request with zero timeout should work if replica is immediately available
         try:
             selected_replica, transport_id = services["transport"].request_transport(
-                model_name="zero_timeout_model",
+                model_id="zero_timeout_model",
                 source_node_id="zero_timeout_source",
                 source_address="192.168.60.2",  # Different from replica address
                 source_port=8181,
                 wait_timeout_ms=0
             )
             assert transport_id
-            assert selected_replica.model_name == "zero_timeout_model"
+            assert selected_replica.model_id == "zero_timeout_model"
         except TimeoutError:
             # Zero timeout might fail if replica isn't immediately available
             # This is acceptable behavior for zero timeout
             pass
 
-    def test_model_name_with_special_characters(self, services):
+    def test_model_id_with_special_characters(self, services):
         """Test model names with special characters."""
         special_names = [
             "model/with/slashes",
@@ -379,9 +379,9 @@ class TestEdgeCases:
             "model\nwith\nnewlines",
         ]
 
-        for model_name in special_names:
+        for model_id in special_names:
             replica = ModelReplica(
-                model_name=model_name,
+                model_id=model_id,
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -393,7 +393,7 @@ class TestEdgeCases:
             try:
                 replica_id = services["model"].register_replica(replica)
                 # If successful, verify retrieval
-                replicas = services["model"].list_replicas(model_name=model_name)
+                replicas = services["model"].list_replicas(model_id=model_id)
                 assert len(replicas) == 1
             except ValidationError:
                 # Some characters might be rejected by validation

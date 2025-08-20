@@ -31,6 +31,15 @@ def save_tensors_streaming(
 ) -> Dict[str, _Offset]: ...
 
 
+def save_model_to_disk(
+    tensor_names: Sequence[str],
+    tensor_data: MutableMapping[str, Tuple[_Ptr, _Size]],
+    meta_state_dict: Mapping[str, Tuple[Sequence[int], Sequence[int], str, int]],
+    path: _PathLike,
+    config: Optional[Mapping[str, Union[int, bool]]] = None,
+) -> Mapping[str, Union[str, int]]: ...
+
+
 def restore_tensors(
     meta_state_dict: Mapping[str, Tuple[Sequence[int], Sequence[int], str, int]],
     memory_base_address: Mapping[_DeviceId, _Ptr],
@@ -75,6 +84,11 @@ def close_cuda_memory_handle(
     device_id: int,
     cuda_memory_ptr: _Ptr,
 ) -> bool: ...
+
+
+def inspect_or_generate_descriptor(model_path: _PathLike) -> Mapping[str, Union[str, int]]: ...
+
+def build_canonical_index_from_safetensors(model_dir: _PathLike) -> bytes: ...
 
 # -----------------------------------------------------------------------------
 # Verification utilities

@@ -27,7 +27,7 @@ export const handlers = [
   rest.get('/api/replicas', (req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
     const url = new URL(req.url)
     const workerId = url.searchParams.get('worker_id')
-    const modelName = url.searchParams.get('model_name')
+    const modelId = url.searchParams.get('model_id')
     const nodeId = url.searchParams.get('node_id')
     const memoryType = url.searchParams.get('memory_type')
 
@@ -36,9 +36,9 @@ export const handlers = [
     if (workerId) {
       filteredReplicas = filteredReplicas.filter(r => r.worker_id === workerId)
     }
-    if (modelName) {
+    if (modelId) {
       filteredReplicas = filteredReplicas.filter(r =>
-        r.model_name.toLowerCase().includes(modelName.toLowerCase())
+        r.model_id.toLowerCase().includes(modelId.toLowerCase())
       )
     }
     if (nodeId) {
@@ -65,7 +65,7 @@ export const handlers = [
 
   rest.get('/api/models/:modelName', (req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
     const { modelName } = req.params as { modelName: string }
-    const model = models.find((m) => m.model_name === modelName)
+    const model = models.find((m) => m.model_id === modelName)
     if (!model) return res(ctx.status(404))
     return res(ctx.status(200), ctx.json(envelope(model)))
   }),
@@ -81,16 +81,16 @@ export const handlers = [
     const page = parseInt(url.searchParams.get('page') || '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') || '50', 10)
     const status = url.searchParams.get('status')
-    const modelName = url.searchParams.get('model_name')
+    const modelId = url.searchParams.get('model_id')
 
     // Filter transports based on query params
     let filteredTransports = [...transports]
     if (status) {
       filteredTransports = filteredTransports.filter(t => t.status === status)
     }
-    if (modelName) {
+    if (modelId) {
       filteredTransports = filteredTransports.filter(t =>
-        t.model_name.toLowerCase().includes(modelName.toLowerCase())
+        t.model_id.toLowerCase().includes(modelId.toLowerCase())
       )
     }
 

@@ -212,7 +212,7 @@ def sample_worker():
 def sample_replica():
     """Create a sample ModelReplica instance for testing."""
     return ModelReplica(
-        model_name="test_model",
+        model_id="test_model",
         node_id="node1",
         node_address="192.168.1.1",
         node_port=8080,
@@ -238,7 +238,7 @@ def temp_db_file():
 # Test utilities
 # =============================================================================
 
-def create_test_replicas(num_replicas, model_name="test_model", memory_types=None):
+def create_test_replicas(num_replicas, model_id="test_model", memory_types=None):
     """Create multiple test replicas with varied configurations."""
     if memory_types is None:
         memory_types = [MemoryType.GPU, MemoryType.RAM, MemoryType.DISK]
@@ -246,7 +246,7 @@ def create_test_replicas(num_replicas, model_name="test_model", memory_types=Non
     replicas = []
     for i in range(num_replicas):
         replicas.append(ModelReplica(
-            model_name=model_name,
+            model_id=model_id,
             node_id=f"node{i}",
             node_address=f"192.168.1.{i+1}",
             node_port=8080 + i,

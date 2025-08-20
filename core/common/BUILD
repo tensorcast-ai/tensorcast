@@ -94,6 +94,20 @@ sc_cc_library(
     ],
 )
 
+# Content-addressed hashing utilities (RFC-0007)
+sc_cc_library(
+    name = "model_hash_lib",
+    srcs = ["model_hash.cc"],
+    hdrs = ["model_hash.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@boringssl//:crypto",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",
@@ -334,6 +348,7 @@ sc_cc_library(
         ":metric_objects_lib",
         ":metrics_export_lib",
         ":metrics_registry_lib",
+        ":model_hash_lib",
         ":model_verification_lib",
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",

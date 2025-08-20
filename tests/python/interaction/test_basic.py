@@ -164,17 +164,18 @@ def test_remote_load_between_two_daemons(global_store_service):
         daemons_to_cleanup.append(daemon_a)
         ctx = _MockContext()
 
-        model_name = "mistral-7b.ckpt"
+        content_model_id = "mi2:test-index:test-data"  # Simulated content-addressed ID
+        disk_path = "mistral-7b.ckpt"
 
         # Create dummy model file on daemon A's local storage so that disk load succeeds
         # Use 4 MiB to match the registered buffer size for P2P fallback consistency
-        create_dummy_model(daemon_a.config.server.storage_path, model_name, size_bytes=4 * 1024 * 1024)
+        create_dummy_model(daemon_a.config.server.storage_path, disk_path, size_bytes=4 * 1024 * 1024)
 
         device_uuid_a = str(uuid.uuid4())
         replica_uuid_a = str(uuid.uuid4())
 
         load_req_a = store_daemon_pb2.LoadModelRequest(
-            model_path=model_name,
+            model_path=disk_path,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             device_uuid=device_uuid_a,
             replica_uuid=replica_uuid_a,
@@ -189,7 +190,7 @@ def test_remote_load_between_two_daemons(global_store_service):
 
         # Confirm to finish lifecycle and trigger registration path in connection manager
         confirm_req_a = store_daemon_pb2.ConfirmModelRequest(
-            model_path=model_name,
+            model_path=disk_path,
             replica_uuid=replica_uuid_a,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
@@ -218,7 +219,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         dev.uuid = ""
 
         inst_key = _cs.InstanceKey()
-        inst_key.model_id = model_name
+        inst_key.model_id = disk_path  # Instance is keyed by disk path for local load
         inst_key.device = dev
         inst_key.replica = 0
 
@@ -237,7 +238,7 @@ def test_remote_load_between_two_daemons(global_store_service):
             device_id=dev.ordinal,
         )
         reg_req = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model_name,
+            model_id=content_model_id,
             mem_info=mem_info,
             max_concurrency=2,
             worker_id=worker_resp_a.worker_id,
@@ -255,7 +256,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         replica_uuid_b = str(uuid.uuid4())
 
         load_req_b = store_daemon_pb2.LoadModelRequest(
-            model_path=model_name,
+            model_id=content_model_id,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             device_uuid=device_uuid_b,
             replica_uuid=replica_uuid_b,
@@ -270,14 +271,13 @@ def test_remote_load_between_two_daemons(global_store_service):
         )
         assert resp_b.mem_handle.cuda_ipc_handle != b""
 
-        # Ensure P2P path was used: GS recorded exactly one in-progress that is now completed
+        # Ensure there are no lingering in-progress records at this point
         assert global_store_service.transport_repository.count_with_filters("in_progress") == 0
-        assert global_store_service.transport_repository.count_with_filters("completed") >= 1
 
         # Confirming should call CompleteModelReplicaTransport underneath.  We don't
         # test that directly but ensure confirmation passes.
         confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-            model_path=model_name,
+            model_path=disk_path,
             replica_uuid=replica_uuid_b,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
@@ -287,8 +287,8 @@ def test_remote_load_between_two_daemons(global_store_service):
         # ------------------------------------------------------------------
         # Finally, ensure Global Store transport counter is decremented (<= max)
         # ------------------------------------------------------------------
-        model_info = global_store_service.GetModelInfo(
-            global_store_pb2.GetModelInfoRequest(model_name=model_name), ctx
+        model_info = global_store_service.GetModelInfoById(
+            global_store_pb2.GetModelInfoByIdRequest(model_id=content_model_id), ctx
         )
         # Replica count may include duplicates due to automatic registration from
         # both daemons.  Ensure *at least one* replica reports the expected size
@@ -296,7 +296,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         expected_size = mem_info.memory_size
         assert any(
             rep.memory_size == expected_size
-            for rep in model_info.model_info.available_replicas
+            for rep in model_info.replicas
         ), f"Expected replica with {expected_size} bytes memory_size not found"
 
         # All in-flight transports should be completed after confirmation – the
@@ -308,6 +308,8 @@ def test_remote_load_between_two_daemons(global_store_service):
             )
             == 0
         )
+        # Completed transports should be recorded by GS after confirmation
+        assert global_store_service.transport_repository.count_with_filters("completed") >= 1
 
     finally:
         # Clean up daemons
@@ -340,7 +342,8 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
         daemons_to_cleanup.append(daemon_a)
         ctx = _MockContext()
 
-        model_name = "falcon-7b.ckpt"
+        model_id = "falcon-7b.ckpt"
+        disk_path = model_id
 
         # Register worker A
         worker_req_a = global_store_pb2.RegisterWorkerRequest(
@@ -366,7 +369,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
             device_id=0,
         )
         reg_req = global_store_pb2.RegisterModelReplicaRequest(
-            model_name=model_name,
+            model_id=model_id,
             mem_info=mem_info_bad,
             max_concurrency=1,
             worker_id=worker_resp_a.worker_id,
@@ -392,10 +395,10 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
             ctx_b = _MockContext()
 
             # Prepare local disk so fallback path can succeed
-            create_dummy_model(daemon_b.config.server.storage_path, model_name)
+            create_dummy_model(daemon_b.config.server.storage_path, disk_path)
 
             load_req_b = store_daemon_pb2.LoadModelRequest(
-                model_path=model_name,
+                model_path=disk_path,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 device_uuid=str(uuid.uuid4()),
                 replica_uuid=str(uuid.uuid4()),
@@ -416,7 +419,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
 
             # Confirm the model to complete the lifecycle
             confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-                model_path=model_name,
+                model_path=disk_path,
                 replica_uuid=load_req_b.replica_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
@@ -428,7 +431,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
 
         # Confirm the model to complete the lifecycle
         confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-            model_path=model_name,
+            model_path=disk_path,
             replica_uuid=load_req_b.replica_uuid,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )

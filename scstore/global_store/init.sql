@@ -23,9 +23,25 @@ CREATE INDEX idx_workers_accepting_requests ON workers (accepting_new_requests, 
 CREATE INDEX idx_workers_node_id ON workers (node_id);
 CREATE INDEX idx_workers_registered_at ON workers (registered_at);
 
+-- Models table for content-addressed model IDs (RFC-0007)
+CREATE TABLE IF NOT EXISTS models (
+    model_id TEXT PRIMARY KEY,             -- "mi2:<index_multihash>:<data_multihash>"
+    index_multihash TEXT NOT NULL,         -- Multibase over multihash (sha2-256), base32
+    data_multihash TEXT NOT NULL,          -- Multibase over multihash (sha2-256 root), base32
+    schema_version TEXT NOT NULL,          -- e.g., "v2"
+    encoding TEXT NOT NULL,                -- e.g., "json" or future "cbor"
+    hash_params_json TEXT NULL,            -- JSON string for hashing params (e.g., chunk_size, fanout)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_models_index_mh ON models(index_multihash);
+CREATE INDEX IF NOT EXISTS idx_models_data_mh ON models(data_multihash);
+CREATE INDEX IF NOT EXISTS idx_models_created_at ON models(created_at);
+
 CREATE TABLE model_replicas (
     replica_id UUID PRIMARY KEY,
-    model_name VARCHAR NOT NULL,
+    model_id TEXT NOT NULL,                -- Content-addressed ID (FK to models.model_id)
+    disk_path TEXT NULL,                   -- Original on-disk path (if applicable)
     node_id TEXT NOT NULL,
     node_address VARCHAR NOT NULL,
     node_port INTEGER NOT NULL,
@@ -60,14 +76,15 @@ CREATE TABLE IF NOT EXISTS replica_counters (
 CREATE INDEX idx_replica_counters_current_requests ON replica_counters(current_requests);
 CREATE INDEX idx_replica_counters_last_assigned ON replica_counters(last_assigned_at);
 
-CREATE INDEX idx_model_replicas_model_name ON model_replicas(model_name);
-CREATE INDEX idx_model_replicas_model_name_available ON model_replicas(model_name, is_available);
+CREATE INDEX idx_model_replicas_model_id ON model_replicas(model_id);
+-- Optional lookup by disk path for disk-based flows
+CREATE INDEX idx_model_replicas_disk_path ON model_replicas(disk_path);
 CREATE INDEX idx_model_replicas_updated_at ON model_replicas(updated_at);
 CREATE INDEX idx_model_replicas_node_id ON model_replicas(node_id);
 CREATE INDEX idx_model_replicas_node_address ON model_replicas(node_address);
 CREATE INDEX idx_replicas_worker ON model_replicas(worker_id);
 CREATE INDEX idx_model_replicas_tensor_index_key ON model_replicas(tensor_index_key);
-CREATE INDEX idx_model_replicas_memory_replica ON model_replicas(is_memory_replica, model_name);
+CREATE INDEX idx_model_replicas_memory_replica ON model_replicas(is_memory_replica, model_id);
 
 -- Table for storing deduplicated tensor indices
 CREATE TABLE IF NOT EXISTS model_indices (
@@ -87,7 +104,8 @@ CREATE INDEX idx_model_indices_size ON model_indices(size_bytes);
 CREATE TABLE model_transports (
     transport_id UUID PRIMARY KEY,
     replica_id UUID NOT NULL,
-    model_name VARCHAR NOT NULL,
+    model_id TEXT NOT NULL,
+    disk_path TEXT NULL,
     source_node_id VARCHAR NOT NULL,
     source_address VARCHAR NOT NULL,
     source_port INTEGER NOT NULL,

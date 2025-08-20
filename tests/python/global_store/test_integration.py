@@ -30,7 +30,7 @@ class TestIntegration:
         for i in range(3):
             model_service.register_replica(
                 ModelReplica(
-                    model_name=f"model_{i}",
+                    model_id=f"model_{i}",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -86,7 +86,7 @@ class TestIntegration:
         for i, (worker_id, mem_type, current_requests) in enumerate(replicas_data):
             model_service.register_replica(
                 ModelReplica(
-                    model_name="distributed_model",
+                    model_id="distributed_model",
                     node_id=f"node{i}",
                     node_address=f"192.168.1.{i+1}",
                     node_port=8080,
@@ -101,7 +101,7 @@ class TestIntegration:
 
         # Request should go to GPU node with lowest load (node0)
         selected, _ = transport_service.request_transport(
-            model_name="distributed_model",
+            model_id="distributed_model",
             source_node_id="client",
             source_address="10.0.0.100",
             source_port=9999,
@@ -130,7 +130,7 @@ class TestIntegration:
 
         replica = model_service.register_replica(
             ModelReplica(
-                model_name="concurrent_model",
+                model_id="concurrent_model",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -146,7 +146,7 @@ class TestIntegration:
         transport_ids = []
         for i in range(3):
             selected, transport_id = transport_service.request_transport(
-                model_name="concurrent_model",
+                model_id="concurrent_model",
                 source_node_id=f"client_{i}",
                 source_address="192.168.2.1",
                 source_port=9000 + i,
@@ -155,7 +155,7 @@ class TestIntegration:
             assert selected.replica_id == replica.replica_id
 
         # Verify current load
-        updated_replicas = model_service.list_replicas(model_name="concurrent_model")
+        updated_replicas = model_service.list_replicas(model_id="concurrent_model")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].current_requests == 3
 
@@ -165,7 +165,7 @@ class TestIntegration:
             assert result is not None
 
         # Verify load is back to zero
-        final_replicas = model_service.list_replicas(model_name="concurrent_model")
+        final_replicas = model_service.list_replicas(model_id="concurrent_model")
         assert len(final_replicas) == 1
         assert final_replicas[0].current_requests == 0
 
@@ -189,7 +189,7 @@ class TestIntegration:
         # Register replica for this worker
         model_service.register_replica(
             ModelReplica(
-                model_name="heartbeat_model",
+                model_id="heartbeat_model",
                 node_id="heartbeat_node",
                 node_address="192.168.1.100",
                 node_port=8080,
@@ -217,7 +217,7 @@ class TestIntegration:
         assert success is True
 
         # Verify replica is marked unavailable
-        updated_replicas = model_service.list_replicas(model_name="heartbeat_model")
+        updated_replicas = model_service.list_replicas(model_id="heartbeat_model")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].is_available is False
 
@@ -241,7 +241,7 @@ class TestIntegration:
         # Initial replica registration
         initial_replica = model_service.register_replica(
             ModelReplica(
-                model_name="update_model",
+                model_id="update_model",
                 node_id="update_node",
                 node_address="192.168.1.200",
                 node_port=8080,
@@ -254,7 +254,7 @@ class TestIntegration:
         )
 
         # Verify initial state
-        replicas = model_service.list_replicas(model_name="update_model")
+        replicas = model_service.list_replicas(model_id="update_model")
         assert len(replicas) == 1
         assert replicas[0].max_concurrency == 5
         assert replicas[0].memory_size == 1024
@@ -262,7 +262,7 @@ class TestIntegration:
         # Update replica with different parameters
         updated_replica = model_service.register_replica(
             ModelReplica(
-                model_name="update_model",
+                model_id="update_model",
                 node_id="update_node",
                 node_address="192.168.1.200",
                 node_port=8080,
@@ -280,7 +280,7 @@ class TestIntegration:
         assert updated_replica.max_concurrency == 10
 
         # Verify in database
-        updated_replicas = model_service.list_replicas(model_name="update_model")
+        updated_replicas = model_service.list_replicas(model_id="update_model")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].memory_size == 2048
         assert updated_replicas[0].max_concurrency == 10
@@ -306,7 +306,7 @@ class TestIntegration:
         # Register replica
         model_service.register_replica(
             ModelReplica(
-                model_name="consistency_model",
+                model_id="consistency_model",
                 node_id="consistency_node",
                 node_address="192.168.1.150",
                 node_port=8080,
@@ -320,7 +320,7 @@ class TestIntegration:
 
         # Request transport
         selected, transport_id = transport_service.request_transport(
-            model_name="consistency_model",
+            model_id="consistency_model",
             source_node_id="consistency_client",
             source_address="192.168.2.100",
             source_port=9000,
@@ -328,7 +328,7 @@ class TestIntegration:
 
         # Verify consistency across services
         # Model service should show updated current_requests
-        model_replicas = model_service.list_replicas(model_name="consistency_model")
+        model_replicas = model_service.list_replicas(model_id="consistency_model")
         assert len(model_replicas) == 1
         assert model_replicas[0].current_requests == 1
 
@@ -342,7 +342,7 @@ class TestIntegration:
         assert result is not None
 
         # Verify consistency after completion
-        final_replicas = model_service.list_replicas(model_name="consistency_model")
+        final_replicas = model_service.list_replicas(model_id="consistency_model")
         assert len(final_replicas) == 1
         assert final_replicas[0].current_requests == 0
 
@@ -365,13 +365,13 @@ class TestIntegration:
         )
 
         # Register multiple models on same worker
-        model_names = ["model_a", "model_b", "model_c"]
+        model_ids = ["model_a", "model_b", "model_c"]
         replicas = []
 
-        for i, model_name in enumerate(model_names):
+        for i, model_id in enumerate(model_ids):
             replica = model_service.register_replica(
                 ModelReplica(
-                    model_name=model_name,
+                    model_id=model_id,
                     node_id="multi_model_node",
                     node_address="192.168.1.250",
                     node_port=8080 + i,
@@ -386,19 +386,19 @@ class TestIntegration:
 
         # Request transports for different models
         transport_ids = {}
-        for model_name in model_names:
+        for model_id in model_ids:
             selected, transport_id = transport_service.request_transport(
-                model_name=model_name,
+                model_id=model_id,
                 source_node_id="multi_client",
                 source_address="192.168.3.1",
                 source_port=9000,
             )
-            transport_ids[model_name] = transport_id
+            transport_ids[model_id] = transport_id
             assert selected.worker_id == worker.worker_id
 
         # Verify each model has one active request
-        for model_name in model_names:
-            model_replicas = model_service.list_replicas(model_name=model_name)
+        for model_id in model_ids:
+            model_replicas = model_service.list_replicas(model_id=model_id)
             assert len(model_replicas) == 1
             assert model_replicas[0].current_requests == 1
 
@@ -407,7 +407,7 @@ class TestIntegration:
         assert success is True
 
         # Verify all replicas are marked unavailable
-        for model_name in model_names:
-            model_replicas = model_service.list_replicas(model_name=model_name)
+        for model_id in model_ids:
+            model_replicas = model_service.list_replicas(model_id=model_id)
             assert len(model_replicas) == 1
             assert model_replicas[0].is_available is False

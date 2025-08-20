@@ -579,7 +579,7 @@ class ReplicaManager:
 
             try:
                 success = self._servicer.connection_manager.unregister_model_replica(
-                    model_name=model_path,
+                    model_id=model_path,
                     replica_id=replica_id,
                     device_id=device_id,
                 )

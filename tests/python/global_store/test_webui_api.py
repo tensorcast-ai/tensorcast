@@ -206,13 +206,13 @@ class TestWebUIAPI:
         assert len(data["data"]) == 2
         assert data["meta"]["total_count"] == 2
 
-        # Test with model filter
-        response = client.get("/api/replicas?model_name=model1")
+        # Test with model filter (by model_id)
+        response = client.get("/api/replicas?model_id=model1")
         assert response.status_code == 200
 
         data = response.json()
         assert len(data["data"]) == 1
-        assert data["data"][0]["model_name"] == "model1"
+        assert data["data"][0]["model_id"] == "model1"
 
         # Test with memory type filter
         response = client.get("/api/replicas?memory_type=GPU")
@@ -253,7 +253,7 @@ class TestWebUIAPI:
         assert len(models) == 2
 
         # Check model1
-        model1 = next(m for m in models if m["model_name"] == "model1")
+        model1 = next(m for m in models if m["model_id"] == "model1")
         assert model1["total_replicas"] == 2
         assert model1["available_replicas"] == 2
         assert model1["gpu_replicas"] == 1
@@ -278,7 +278,7 @@ class TestWebUIAPI:
         assert response.status_code == 200
 
         model = response.json()["data"]
-        assert model["model_name"] == "model1"
+        assert model["model_id"] == "model1"
         assert model["total_replicas"] == 1
 
         # Test non-existent model
@@ -343,7 +343,7 @@ class TestWebUIAPI:
 
         transport = data["data"][0]
         assert transport["transport_id"] == transport_id
-        assert transport["model_name"] == "model1"
+        assert transport["model_id"] == "model1"
         assert transport["status"] == "in_progress"
 
     @pytest.mark.skip(
@@ -370,12 +370,12 @@ class TestWebUIAPI:
         assert len(data["data"]) == 1
         assert data["data"][0]["status"] == "completed"
 
-        # Test model_name filter
-        response = client.get("/api/transports?model_name=model0")
+        # Test model_id filter
+        response = client.get("/api/transports?model_id=model0")
         assert response.status_code == 200
         data = response.json()
         assert len(data["data"]) == 1
-        assert data["data"][0]["model_name"] == "model0"
+        assert data["data"][0]["model_id"] == "model0"
 
     @pytest.mark.skip(
         reason="Needs refactoring to use mocked gRPC client instead of direct DB access"

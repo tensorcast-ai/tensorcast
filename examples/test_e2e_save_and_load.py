@@ -2,7 +2,7 @@
 
 import torch
 
-from scstore.torch_util import load_dict_pure_local, save_dict
+from scstore.torch_util import load_dict, save_dict
 
 # sudo python examples/save_vllm_model.py --model-name DeepSeek-R1-0528 --local-model-path /mnt/host0/DeepSeek-R1-0528  --storage-path /mnt/host0/scstore --tensor-parallel-size 8
 directory = "/mnt/host0/scstore/DeepSeek-R1-0528-layer-8-tp-1/rank_0"
@@ -42,7 +42,7 @@ def assert_dict_equal(
 tmp_dir = "/mnt/host0/scstore/DeepSeek-R1-0528-layer-8-tp-1/rank_test"  # ssd
 # tmp_dir = "/tmp/rank_test" # tmpfs
 save_dict(ori_dict, tmp_dir, use_streaming=True)
-sc_dict = load_dict_pure_local(tmp_dir, device_id=0)
+sc_dict = load_dict(tmp_dir, device_id=0, storage_path="", enable_verification=False)
 
 # Validate that tensors are identical within numerical tolerance.
 assert_dict_equal(ori_dict, sc_dict)

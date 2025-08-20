@@ -10,16 +10,15 @@ from scstore.torch_util import register_tensor_dict
 
 init()
 
-model_name = "Qwen/Qwen3-0.6B"
+hf_model_name = "Qwen/Qwen3-0.6B"
 # Load a model from HuggingFace model hub.
 model = AutoModelForCausalLM.from_pretrained(
-    model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
+    hf_model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
 )
 
 state_dict = model.state_dict()
 
-
-saved_dict = register_tensor_dict(state_dict, "Qwen3-0.6B", device_id=0)
+saved_dict, commit_info = register_tensor_dict(state_dict, "Qwen3-0.6B", device_id=0)
 
 
 def assert_state_dict_equal(

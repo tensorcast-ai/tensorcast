@@ -52,6 +52,8 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[model][disk][multi_gpu]") {
   fs::path p1 = base / model_subdir / f1;
   REQUIRE(create_dummy_file(p0, s0, 'M'));
   REQUIRE(create_dummy_file(p1, s1, 'N'));
+  // RFC-0007 metadata for standard partitions
+  REQUIRE(write_rfc0007_descriptor_for_standard_model_dir(base / model_subdir).ok());
 
   // Prepare original combined data
   std::vector<char> d0 = read_file_content(p0);
@@ -81,11 +83,12 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[model][disk][multi_gpu]") {
     // Set max_buffer_bytes to match the available pool size
     ModelConfig cfg{
         .source = disk_src,
-        .model_identifier = model_id + std::to_string(dev),
+        .model_identifier = model_id,
         .device_type = ::stepcast::DeviceType::CPU,
         .local_device_id = dev,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
+        .expected_model_size = total,
         .max_buffer_bytes = pool_total};
 
     auto mstat = Model::create(cfg);

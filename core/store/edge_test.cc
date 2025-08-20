@@ -29,18 +29,35 @@ TEST_CASE("E1: Invalid device ordinal", "[checkpoint_store][edge][e1]") {
   auto store = make_test_store(fixture.root());
 
   // Test negative ordinal
-  auto neg_handle = store->prepare(model_id, DeviceKey{stepcast::DeviceType::GPU, -1, ""});
-  REQUIRE(!neg_handle.ok());
-  REQUIRE(neg_handle.status().code() == absl::StatusCode::kInvalidArgument);
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto neg_handle =
+        store->prepare(DeviceKey{stepcast::DeviceType::GPU, -1, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+    REQUIRE(!neg_handle.ok());
+    REQUIRE(neg_handle.status().code() == absl::StatusCode::kInvalidArgument);
+  }
 
   // Test very large ordinal
-  auto large_handle = store->prepare(model_id, DeviceKey{stepcast::DeviceType::GPU, 999, ""});
-  REQUIRE(!large_handle.ok());
-  REQUIRE(large_handle.status().code() == absl::StatusCode::kInvalidArgument);
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto large_handle =
+        store->prepare(DeviceKey{stepcast::DeviceType::GPU, 999, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+    REQUIRE(!large_handle.ok());
+    REQUIRE(large_handle.status().code() == absl::StatusCode::kInvalidArgument);
+  }
 
   // Test CPU device (not supported)
-  auto cpu_handle = store->prepare(model_id, DeviceKey{stepcast::DeviceType::CPU, 0, ""});
-  REQUIRE(!cpu_handle.ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    auto cpu_handle =
+        store->prepare(DeviceKey{stepcast::DeviceType::CPU, 0, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+    REQUIRE(!cpu_handle.ok());
+  }
 }
 
 // E2: Non-existent model
@@ -49,8 +66,12 @@ TEST_CASE("E2: Non-existent model", "[checkpoint_store][edge][e2]") {
   auto store = make_test_store(fixture.root());
 
   // Try to load non-existent model
-  auto handle = store->prepare("non_existent_model", make_gpu_key(0));
-  REQUIRE(!handle.ok());
+  {
+    stepcast::store::LoadingHints hints;
+    hints.disk_path = "non_existent_model";
+    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(!handle.ok());
+  }
 
   // Operations on non-existent instance
   auto fake_key = make_instance_key("fake_model", 0);
@@ -88,7 +109,9 @@ TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
   size_t idx = 0;
   absl::Status first_status = absl::InternalError("uninitialized");
   {
-    auto h_or = store->prepare(model_ids[idx], make_gpu_key(0));
+    stepcast::store::LoadingHints hints;
+    hints.disk_path = model_ids[idx];
+    auto h_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     if (h_or.ok()) {
       first_status = h_or.value().wait_ready(std::chrono::milliseconds(10000));
     }
@@ -102,7 +125,9 @@ TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
   // Load remaining models
   int additional_successes = 0;
   for (idx = 1; idx < model_ids.size(); ++idx) {
-    auto handle_or = store->prepare(model_ids[idx], make_gpu_key(0));
+    stepcast::store::LoadingHints hints;
+    hints.disk_path = model_ids[idx];
+    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(10000));
@@ -139,7 +164,10 @@ TEST_CASE("E4: Concurrent clear_mem() during prepare()", "[checkpoint_store][edg
 
   // Thread 1: Start prepare operation
   std::thread prepare_thread([&]() {
-    auto handle_or = store->prepare(model_id, make_gpu_key(0));
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     prepare_started.store(true);
 
     if (handle_or.ok()) {
@@ -200,9 +228,14 @@ TEST_CASE("E5: Double enable/disable remote access", "[checkpoint_store][edge][e
   auto store = std::make_unique<CheckpointStore>(opts);
 
   // Load model
-  auto handle = store->prepare(model_id, make_gpu_key(0));
-  REQUIRE(handle.ok());
-  REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(handle.ok());
+    REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+  }
 
   auto instance_key = make_instance_key(model_id, 0);
 
@@ -245,18 +278,24 @@ TEST_CASE("E6: Prepare with invalid hints", "[checkpoint_store][edge][e6]") {
 
   // Negative batch size
   // Invalid hints - implementation may ignore these
-  auto handle1 = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::AUTO, hints);
+
+  hints.disk_path = model_id;
+  auto handle1 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
   // Should either ignore invalid hint or fail gracefully
 
   // Zero prefetch size
   hints = LoadingHints{};
   // hints.prefetch_size = 0; // Field may not exist
-  auto handle2 = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::AUTO, hints);
+
+  hints.disk_path = model_id;
+  auto handle2 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
 
   // Extremely large buffer count
   hints = LoadingHints{};
   // hints.num_buffers = std::numeric_limits<int>::max(); // Field may not exist
-  auto handle3 = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::AUTO, hints);
+
+  hints.disk_path = model_id;
+  auto handle3 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
 
   // At least one should succeed with defaults
   REQUIRE((handle1.ok() || handle2.ok() || handle3.ok()));
@@ -276,7 +315,10 @@ TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
 
   // Prime SPB allocation and record baseline availability after initialization
   {
-    auto handle_or = store->prepare(model_id, make_gpu_key(0));
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto st = handle_or.value().wait_ready(std::chrono::milliseconds(30000));
       (void)st; // Ignore result; the goal is to trigger SPB allocation
@@ -292,9 +334,13 @@ TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
 
   for (int i = 0; i < num_cycles; ++i) {
     // Prepare
-    auto handle_or = store->prepare(model_id, make_gpu_key(0));
-    if (!handle_or.ok())
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    if (!handle_or.ok()) {
       continue;
+    }
 
     auto handle = std::move(handle_or).value();
 
@@ -332,8 +378,13 @@ TEST_CASE("E8: Empty model directory", "[checkpoint_store][edge][e8]") {
   auto store = make_test_store(fixture.root());
 
   // Try to load empty model
-  auto handle = store->prepare(model_id, make_gpu_key(0));
-  REQUIRE(!handle.ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(!handle.ok());
+  }
 }
 
 // E9: Corrupted model file
@@ -355,11 +406,16 @@ TEST_CASE("E9: Corrupted model file", "[checkpoint_store][edge][e9]") {
   auto store = make_test_store(fixture.root());
 
   // Try to load corrupted model
-  auto handle = store->prepare(model_id, make_gpu_key(0));
-  // Implementation may not perform data verification yet; accept either outcome
-  if (handle.ok()) {
-    auto wait_status = handle.value().wait_ready(std::chrono::milliseconds(5000));
-    (void)wait_status;
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    // Implementation may not perform data verification yet; accept either outcome
+    if (handle.ok()) {
+      auto wait_status = handle.value().wait_ready(std::chrono::milliseconds(5000));
+      (void)wait_status;
+    }
   }
 }
 
@@ -376,22 +432,40 @@ TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
   auto store = make_test_store(fixture.root());
 
   // COPY_ONLY without existing source
-  auto copy_handle = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::COPY_ONLY);
-  REQUIRE(!copy_handle.ok()); // Should fail - no source to copy from
+  {
+    stepcast::store::LoadingHints hints;
+
+    auto copy_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    REQUIRE(!copy_handle.ok()); // Should fail - no source to copy from
+  }
 
   // LOAD_ONLY should work
-  auto load_handle = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY);
-  REQUIRE(load_handle.ok());
-  REQUIRE(load_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto load_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(load_handle.ok());
+    REQUIRE(load_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+  }
 
   // Now COPY_ONLY should work
-  auto copy_handle2 = store->prepare(model_id, make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY);
-  if (stepcast::tests::is_cuda_available() && copy_handle2.ok()) {
-    // Should succeed if we have multiple GPUs
-    REQUIRE(copy_handle2.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+  {
+    stepcast::store::LoadingHints hints;
+
+    auto copy_handle2 = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    if (stepcast::tests::is_cuda_available() && copy_handle2.ok()) {
+      // Should succeed if we have multiple GPUs
+      REQUIRE(copy_handle2.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+    }
   }
 
   // LOAD_ONLY on already loaded device
-  auto reload_handle = store->prepare(model_id, make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY);
-  REQUIRE(reload_handle.ok()); // Should return existing instance
+  {
+    stepcast::store::LoadingHints hints;
+
+    hints.disk_path = model_id;
+    auto reload_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    REQUIRE(reload_handle.ok()); // Should return existing instance
+  }
 }
