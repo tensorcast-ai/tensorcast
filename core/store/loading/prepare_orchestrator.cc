@@ -5,14 +5,14 @@
 #include <filesystem>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/store/checkpoint_store.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/loading/replica_registration_helper.h"
+#include "core/store/store_engine.h"
 
 namespace stepcast::store {
 
-PrepareOrchestrator::PrepareOrchestrator(CheckpointStore* store, GlobalStoreClient* gs_client)
+PrepareOrchestrator::PrepareOrchestrator(StoreEngine* store, GlobalStoreClient* gs_client)
     : store_(store), gs_client_(gs_client) {}
 
 absl::StatusOr<ModelHandle> PrepareOrchestrator::run(

@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// CheckpointStore concurrency tests (A-series)
+// StoreEngine concurrency tests (A-series)
 // Test concurrent prepare() and unload_instance() operations.
 
 #include <catch2/catch_test_macros.hpp>
@@ -13,7 +13,7 @@
 #include "core/common/logging_init.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::checkpoint_store;
+using namespace stepcast::tests::store_engine;
 using namespace stepcast::store;
 
 namespace {
@@ -27,7 +27,7 @@ const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
 } // namespace
 
 // A1: 32 threads calling prepare() on the same model
-TEST_CASE("A1: Concurrent prepare() same model", "[checkpoint_store][concurrency][a1]") {
+TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1]") {
   skip_if_no_cuda("A1");
 
   const int num_threads = 32;
@@ -55,7 +55,7 @@ TEST_CASE("A1: Concurrent prepare() same model", "[checkpoint_store][concurrency
       LOG(INFO) << "Thread " << thread_id << " preparing model " << model_id;
       stepcast::store::LoadingHints hints;
       hints.disk_path = model_id;
-      auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+      auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
 
       LoadResult result;
       result.model_id = model_id;
@@ -105,7 +105,7 @@ TEST_CASE("A1: Concurrent prepare() same model", "[checkpoint_store][concurrency
 }
 
 // A2: Multiple threads calling prepare() on different models
-TEST_CASE("A2: Concurrent prepare() different models", "[checkpoint_store][concurrency][a2]") {
+TEST_CASE("A2: Concurrent prepare() different models", "[store_engine][concurrency][a2]") {
   skip_if_no_cuda("A2");
 
   const int num_threads = 16;
@@ -139,7 +139,7 @@ TEST_CASE("A2: Concurrent prepare() different models", "[checkpoint_store][concu
       auto load_start = std::chrono::high_resolution_clock::now();
       stepcast::store::LoadingHints hints;
       hints.disk_path = model_id;
-      auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+      auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
 
       LoadResult result;
       result.model_id = model_id;
@@ -188,7 +188,7 @@ TEST_CASE("A2: Concurrent prepare() different models", "[checkpoint_store][concu
 }
 
 // A3: Concurrent prepare() and unload_instance()
-TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[checkpoint_store][concurrency][a3]") {
+TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[store_engine][concurrency][a3]") {
   skip_if_no_cuda("A3");
 
   const int num_loaders = 8;
@@ -205,7 +205,7 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[checkpoint_store][
   {
     stepcast::store::LoadingHints hints;
     hints.disk_path = model_id;
-    auto initial_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto initial_handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(initial_handle.ok());
     REQUIRE(initial_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -226,7 +226,7 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[checkpoint_store][
       while (!stop_flag.load()) {
         stepcast::store::LoadingHints hints;
         hints.disk_path = model_id;
-        auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+        auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
         if (handle_or.ok()) {
           auto handle = std::move(handle_or).value();
           if (handle.wait_ready(std::chrono::milliseconds(1000)).ok()) {
@@ -269,7 +269,7 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[checkpoint_store][
 }
 
 // A4: Concurrent unload of the same instance
-TEST_CASE("A4: Concurrent unload_instance() same model", "[checkpoint_store][concurrency][a4]") {
+TEST_CASE("A4: Concurrent unload_instance() same model", "[store_engine][concurrency][a4]") {
   skip_if_no_cuda("A4");
 
   const int num_threads = 16;
@@ -284,7 +284,7 @@ TEST_CASE("A4: Concurrent unload_instance() same model", "[checkpoint_store][con
   // Load the model
   stepcast::store::LoadingHints hints;
   hints.disk_path = model_id;
-  auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
   REQUIRE(handle.ok());
   REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
 
@@ -326,7 +326,7 @@ TEST_CASE("A4: Concurrent unload_instance() same model", "[checkpoint_store][con
 }
 
 // A5: Concurrent clear_mem() operations
-TEST_CASE("A5: Concurrent clear_mem()", "[checkpoint_store][concurrency][a5]") {
+TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
   skip_if_no_cuda("A5");
 
   const int num_threads = 8;
@@ -343,7 +343,7 @@ TEST_CASE("A5: Concurrent clear_mem()", "[checkpoint_store][concurrency][a5]") {
 
     stepcast::store::LoadingHints hints;
     hints.disk_path = model_id;
-    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());
     REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }

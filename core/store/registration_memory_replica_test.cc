@@ -8,38 +8,38 @@
 #include <thread>
 
 #include "absl/status/status.h"
-#include "core/store/checkpoint_store.h"
-#include "core/store/checkpoint_store_options.h"
 #include "core/store/model/memory_state.h"
+#include "core/store/store_engine.h"
+#include "core/store/store_engine_options.h"
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
 using stepcast::DeviceType;
-using stepcast::store::CheckpointStore;
-using stepcast::store::CheckpointStoreOptions;
 using stepcast::store::DeviceKey;
 using stepcast::store::InstanceKey;
 using stepcast::store::MemoryState;
+using stepcast::store::StoreEngine;
+using stepcast::store::StoreEngineOptions;
 
-static CheckpointStore make_store(
+static StoreEngine make_store(
     const fs::path& storage_root,
     size_t pool_size_bytes = 32ULL * 1024 * 1024,
     size_t chunk_size_bytes = 64ULL * 1024,
     int io_threads = 2) {
-  CheckpointStoreOptions opts;
+  StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_bytes;
   opts.chunk_size = chunk_size_bytes;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
-  return CheckpointStore(opts);
+  return StoreEngine(opts);
 }
 
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
 }
 
-TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
@@ -48,7 +48,7 @@ TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint
   const std::string model_id = "mem_reg_model";
   const uint64_t size_bytes = 1ULL * 1024 * 1024; // 1 MiB
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_reg_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_reg_test";
   fs::create_directories(temp_root);
 
   // Create a minimal on-disk model directory so Model::create(DiskSource) initializes
@@ -56,9 +56,9 @@ TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
-  CheckpointStore::TensorDictRegistration reg;
+  StoreEngine::TensorDictRegistration reg;
   reg.model_id = model_id;
   // RFC-0007: tensor_index_key must be a 32-byte sha256 hex string (64 hex chars)
   reg.tensor_index_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -101,7 +101,7 @@ TEST_CASE("Memory TensorDict registration: begin/commit lifecycle", "[checkpoint
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE("Memory TensorDict registration: abort releases allocation", "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: abort releases allocation", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
@@ -110,7 +110,7 @@ TEST_CASE("Memory TensorDict registration: abort releases allocation", "[checkpo
   const std::string model_id = "mem_reg_abort";
   const uint64_t size_bytes = 2ULL * 1024 * 1024; // 2 MiB
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_abort_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_abort_test";
   fs::create_directories(temp_root);
 
   // Create a minimal on-disk model directory so Model::create(DiskSource) initializes
@@ -118,9 +118,9 @@ TEST_CASE("Memory TensorDict registration: abort releases allocation", "[checkpo
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
-  CheckpointStore::TensorDictRegistration reg;
+  StoreEngine::TensorDictRegistration reg;
   reg.model_id = model_id;
   // Use a valid 64-hex digest placeholder
   reg.tensor_index_key = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -151,7 +151,7 @@ TEST_CASE("Memory TensorDict registration: abort releases allocation", "[checkpo
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
@@ -160,7 +160,7 @@ TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[checkp
   const std::string model_id = "mem_reg_ttl";
   const uint64_t size_bytes = 1ULL * 1024 * 1024; // 1 MiB
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_ttl_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_ttl_test";
   fs::create_directories(temp_root);
 
   // Create a minimal on-disk model directory so Model::create(DiskSource) initializes
@@ -168,9 +168,9 @@ TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[checkp
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
-  CheckpointStore::TensorDictRegistration reg;
+  StoreEngine::TensorDictRegistration reg;
   reg.model_id = model_id;
   // Use a valid 64-hex digest placeholder
   reg.tensor_index_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -199,19 +199,19 @@ TEST_CASE("Memory TensorDict registration: TTL expiry prevents commit", "[checkp
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_invalid_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_invalid_test";
   fs::create_directories(temp_root);
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
   // total_size_bytes == 0
   {
-    CheckpointStore::TensorDictRegistration reg;
+    StoreEngine::TensorDictRegistration reg;
     reg.model_id = "m1";
     reg.tensor_index_key = "a";
     reg.device_id = 0;
@@ -223,7 +223,7 @@ TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[checkp
 
   // missing tensor_index_key
   {
-    CheckpointStore::TensorDictRegistration reg;
+    StoreEngine::TensorDictRegistration reg;
     reg.model_id = "m2";
     reg.tensor_index_key = "";
     reg.device_id = 0;
@@ -235,7 +235,7 @@ TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[checkp
 
   // negative device_id
   {
-    CheckpointStore::TensorDictRegistration reg;
+    StoreEngine::TensorDictRegistration reg;
     reg.model_id = "m3";
     reg.tensor_index_key = "a";
     reg.device_id = -1;
@@ -250,7 +250,7 @@ TEST_CASE("Memory TensorDict registration: invalid arguments rejected", "[checkp
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
@@ -259,7 +259,7 @@ TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[ch
   const std::string model_id = "mem_reg_double_commit";
   const uint64_t size_bytes = 1ULL * 1024 * 1024; // 1 MiB
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_double_commit_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_double_commit_test";
   fs::create_directories(temp_root);
 
   // Create a minimal on-disk model directory so Model::create(DiskSource) initializes
@@ -267,9 +267,9 @@ TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[ch
   fs::create_directories(model_dir);
   REQUIRE(stepcast::tests::create_dummy_file(model_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
-  CheckpointStore::TensorDictRegistration reg;
+  StoreEngine::TensorDictRegistration reg;
   reg.model_id = model_id;
   // Use a valid 64-hex digest placeholder
   reg.tensor_index_key = "0011001100110011001100110011001100110011001100110011001100110011";
@@ -292,17 +292,15 @@ TEST_CASE("Memory TensorDict registration: double commit returns NotFound", "[ch
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE(
-    "Memory TensorDict registration: commit unknown id returns NotFound",
-    "[checkpoint_store][memory-registration]") {
+TEST_CASE("Memory TensorDict registration: commit unknown id returns NotFound", "[store_engine][memory-registration]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_mem_unknown_commit_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_mem_unknown_commit_test";
   fs::create_directories(temp_root);
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
   auto commit_or = store.commit_registered_tensor_dict("non-existent-id");
   REQUIRE_FALSE(commit_or.ok());

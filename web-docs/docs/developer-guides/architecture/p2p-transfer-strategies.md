@@ -189,7 +189,7 @@ This design enables:
 sequenceDiagram
     participant Client
     participant Python as Python ModelLoader
-    participant CS as C++ CheckpointStore
+    participant CS as C++ StoreEngine
     participant PO as C++ PrepareOrchestrator
     participant GSC as C++ GlobalStoreClient
     participant GS as Global Store (Python)
@@ -239,11 +239,11 @@ sequenceDiagram
 
 #### Python Layer
 - **ModelLoader** (`scstore/store_daemon/model_loader.py`)
-  - Simplified to call `checkpoint_store.prepare()` with AUTO mode
+  - Simplified to call `store_engine.prepare()` with AUTO mode
   - No longer handles P2P vs disk decisions
 
 #### C++ Core Components
-- **CheckpointStore** (`core/store/checkpoint_store.h/cc`)
+- **StoreEngine** (`core/store/store_engine.h/cc`)
   - `prepare()`: Entry point that delegates to PrepareOrchestrator for AUTO mode
   - `load_from_p2p_internal()`: Internal method for P2P transfers
   - `load_from_disk_internal()`: Internal method for disk loading

@@ -16,7 +16,7 @@ import time
 from typing import TYPE_CHECKING, Any, Dict, List, Set
 
 # gRPC interactions are now handled exclusively in the C++ core – python layer no longer needs grpc.
-from scstore import _checkpoint_store as _cs
+from scstore import _store_engine as _cs
 from scstore.logger import init_logger
 from scstore.proto import store_daemon_pb2
 
@@ -39,7 +39,7 @@ def _normalize_gpu_stats(raw_stats: Any) -> Dict[int, Dict[str, int]]:
     """Normalize GPU stats from various formats to consistent structure.
 
     Args:
-        raw_stats: Raw GPU stats from checkpoint store, can be:
+        raw_stats: Raw GPU stats from Store Engine, can be:
             - Dict[str, int] with 'total' and 'free' keys (single GPU)
             - List of tuples [(total, free), ...] (multi-GPU)
             - Dict[int, Dict[str, int]] (already normalized)
@@ -101,7 +101,7 @@ class ReplicaManager:
 
     def __init__(self, servicer: "StoreDaemonServicer") -> None:
         self._servicer = servicer
-        self._checkpoint_store = servicer.checkpoint_store
+        self._store_engine = servicer.store_engine
         self._global_store_stub = servicer.global_store_stub
 
         # Reference counting data structures
@@ -427,7 +427,7 @@ class ReplicaManager:
                 else store_daemon_pb2.DEVICE_TYPE_CPU
             )
 
-            # Unload from checkpoint store
+            # Unload from Store Engine
             if self.unload_model(
                 model_path,
                 device_type=device_type,
@@ -458,11 +458,11 @@ class ReplicaManager:
             Dict mapping device_id to memory stats (total, used, free)
         """
         try:
-            assert self._checkpoint_store is not None
-            raw_stats = self._checkpoint_store.get_gpu_memory_stats()
+            assert self._store_engine is not None
+            raw_stats = self._store_engine.get_gpu_memory_stats()
 
             # ------------------------------------------------------------------
-            # The fake Python CheckpointStore used by the interaction test-suite
+            # The fake Python StoreEngine used by the interaction test-suite
             # returns a *mapping* with keys ``total`` / ``used`` / ``free``,
             # whereas the C++ implementation returns a *sequence* of
             # ``(total, free)`` tuples.  Support both shapes here so that the
@@ -534,7 +534,7 @@ class ReplicaManager:
         # DISK replicas are persisted on storage and never occupy CPU/GPU
         # memory managed by the daemon.  Unloading therefore becomes a no-op
         # that should always succeed.  We treat this early to avoid the
-        # generic path which targets the C++ CheckpointStore and expects a
+        # generic path which targets the C++ StoreEngine and expects a
         # valid in-memory instance.
         # ------------------------------------------------------------------
         if device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_DISK:
@@ -602,7 +602,7 @@ class ReplicaManager:
                     model_path,
                 )
 
-        assert self._checkpoint_store is not None
+        assert self._store_engine is not None
         # Disable remote model access via communication engine (if previously enabled)
         if self._servicer.enable_p2p_engine:
             gs_stub = self._servicer.global_store_stub
@@ -610,9 +610,9 @@ class ReplicaManager:
 
             try:
                 cpp_location = self._get_cpp_model_location(device_type)
-                # Gracefully handle absence of the method in checkpoint_store.
+                # Gracefully handle absence of the method in store_engine.
                 inst_key = self._make_instance_key(model_path, device_id)
-                self._checkpoint_store.disable_remote_instance_access(
+                self._store_engine.disable_remote_instance_access(
                     inst_key, cpp_location
                 )
 
@@ -627,7 +627,7 @@ class ReplicaManager:
         success = False
         for _ in range(self.MAX_RETRIES):
             inst_key = self._make_instance_key(model_path, device_id)
-            if self._checkpoint_store.unload_instance(inst_key) == 0:
+            if self._store_engine.unload_instance(inst_key) == 0:
                 logger.info("UnloadModel: success %s", model_path)
                 success = True
                 break

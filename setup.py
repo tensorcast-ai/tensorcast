@@ -449,7 +449,7 @@ else:
 if BUILD_EXTENSION:
     EXTENSIONS = {
         "_C": ["scstore/csrc/checkpoint_py.cc"],
-        "_checkpoint_store": ["scstore/csrc/checkpoint_store_py.cc"],
+        "_store_engine": ["scstore/csrc/store_engine_py.cc"],
     }
 
     for name, sources in EXTENSIONS.items():

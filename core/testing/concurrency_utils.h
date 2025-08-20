@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// Shared utilities for CheckpointStore concurrency tests.
+// Shared utilities for StoreEngine concurrency tests.
 #pragma once
 
 #include <latch>
@@ -11,10 +11,10 @@
 
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
-#include "core/store/checkpoint_store.h"
+#include "core/store/store_engine.h"
 #include "core/testing/common.h"
 
-namespace stepcast::tests::checkpoint_store {
+namespace stepcast::tests::store_engine {
 
 // Test setup utilities
 inline void skip_if_no_cuda(const std::string& test_name) {
@@ -114,7 +114,7 @@ class ConcurrentLoadTracker {
 class TempModelFixture {
  public:
   explicit TempModelFixture(const std::string& test_name)
-      : root_path_(std::filesystem::temp_directory_path() / ("checkpoint_store_" + test_name)) {
+      : root_path_(std::filesystem::temp_directory_path() / ("store_engine_" + test_name)) {
     std::filesystem::create_directories(root_path_);
   }
 
@@ -146,20 +146,20 @@ class TempModelFixture {
   std::filesystem::path root_path_;
 };
 
-// Helper to create a CheckpointStore with sensible test defaults
-inline std::unique_ptr<store::CheckpointStore> make_test_store(
+// Helper to create a StoreEngine with sensible test defaults
+inline std::unique_ptr<store::StoreEngine> make_test_store(
     const std::filesystem::path& storage_root,
     size_t pool_size_mb = 512,
     size_t chunk_size_kb = 64,
     int io_threads = 4) {
-  store::CheckpointStoreOptions opts;
+  store::StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_mb * 1024 * 1024;
   opts.chunk_size = chunk_size_kb * 1024;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(30000);
   // P2P is configured via p2p_port (already has default)
-  return std::make_unique<store::CheckpointStore>(opts);
+  return std::make_unique<store::StoreEngine>(opts);
 }
 
 // Device key helpers
@@ -171,4 +171,4 @@ inline store::InstanceKey make_instance_key(const std::string& model_id, int gpu
   return store::InstanceKey{model_id, make_gpu_key(gpu_ordinal), 0};
 }
 
-} // namespace stepcast::tests::checkpoint_store
+} // namespace stepcast::tests::store_engine

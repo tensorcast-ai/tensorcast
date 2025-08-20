@@ -449,10 +449,8 @@ class GlobalStoreConnectionManager:
         self.global_store_stub.HealthCheck(request, timeout=5.0)
 
     def _register_worker(self) -> None:
-        if not (self.global_store_stub and self._servicer.checkpoint_store):
-            logger.warning(
-                "Checkpoint store unavailable – skipping worker registration"
-            )
+        if not (self.global_store_stub and self._servicer.store_engine):
+            logger.warning("Store Engine unavailable – skipping worker registration")
             return
 
         req = global_store_pb2.RegisterWorkerRequest(
@@ -460,8 +458,8 @@ class GlobalStoreConnectionManager:
             node_address=self._servicer.node_address,
             grpc_port=self._servicer.grpc_port,
             p2p_port=self._servicer.node_port,
-            mem_pool_total_size=self._servicer.checkpoint_store.get_mem_pool_size(),
-            mem_pool_available_size=self._servicer.checkpoint_store.get_available_memory(),
+            mem_pool_total_size=self._servicer.store_engine.get_mem_pool_size(),
+            mem_pool_available_size=self._servicer.store_engine.get_available_memory(),
             is_recovery_registration=bool(self._servicer.worker_id),
             previous_worker_id=self._servicer.worker_id or "",
         )
@@ -541,8 +539,8 @@ class GlobalStoreConnectionManager:
             state_checksum = self._compute_current_state_checksum()
             request = global_store_pb2.WorkerHeartbeatRequest(
                 worker_id=self._servicer.worker_id,
-                mem_pool_available_size=self._servicer.checkpoint_store.get_available_memory()
-                if self._servicer.checkpoint_store
+                mem_pool_available_size=self._servicer.store_engine.get_available_memory()
+                if self._servicer.store_engine
                 else 0,
                 accepting_new_requests=not self._servicer.shutting_down,
                 state_version=self.local_state_version,

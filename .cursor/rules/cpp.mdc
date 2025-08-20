@@ -14,7 +14,7 @@ alwaysApply: false
 - **Variables/Functions**: `snake_case`
 - **Classes/Structs**: `PascalCase`
 - **Constants/Macros**: `ALL_CAPS`
-- **Files**: `snake_case` (e.g., `checkpoint_store.cc`)
+- **Files**: `snake_case` (e.g., `store_engine.cc`)
 
 ## Code Style
 - **Headers**: Use `#pragma once` for header guards

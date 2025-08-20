@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// New test for CheckpointStore using P2PLoader over TCP.
+// New test for StoreEngine using P2PLoader over TCP.
 
 #include "core/common/cuda_api.h"
 
@@ -11,7 +11,7 @@
 
 #define private public
 #define protected public
-#include "core/store/checkpoint_store.h" // must be included with macros to access internal P2P loader
+#include "core/store/store_engine.h" // must be included with macros to access internal P2P loader
 #undef private
 #undef protected
 
@@ -19,9 +19,9 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/communicator/engine/engine.h"
-#include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
+#include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
 namespace fs = std::filesystem;
@@ -29,13 +29,13 @@ using namespace stepcast::store;
 using namespace stepcast::communicator;
 using namespace stepcast::communicator::test;
 
-TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][tcp][gpu]") {
+TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu]") {
   // ---------------------------------------------------------------------------
   // 0. Environment pre-checks.
   // ---------------------------------------------------------------------------
   SKIP_IF_NO_CUDA();
 
-  // RDMA is explicitly disabled via constructor parameter in CommunicateEngine and CheckpointStore.
+  // RDMA is explicitly disabled via constructor parameter in CommunicateEngine and StoreEngine.
 
   const std::size_t model_size = 8 * 1024 * 1024; // 8 MiB
 
@@ -67,7 +67,7 @@ TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][
               .ok());
 
   // ---------------------------------------------------------------------------
-  // 2. Instantiate the target CheckpointStore with communication enabled.
+  // 2. Instantiate the target StoreEngine with communication enabled.
   // ---------------------------------------------------------------------------
   // TransferService creates a per-session StreamingPinnedBuffer (16 chunks).
   // Store no longer pre-allocates a shared buffer, so 16 * chunk_size is sufficient.
@@ -76,7 +76,7 @@ TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][
   const int io_threads = 2;
 
   // storage_path is unused for remote loads; give a temporary directory.
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_p2p_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_p2p_test";
   fs::create_directories(temp_root);
 
   // ---------------------------------------------------------------------------
@@ -88,9 +88,9 @@ TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][
   REQUIRE(comm_manager->initialize("127.0.0.1", /*listen_port=*/comm_port, /*enable_rdma=*/false).ok());
 
   // ---------------------------------------------------------------------------
-  // 2.b Construct CheckpointStore using the new Options struct.
+  // 2.b Construct StoreEngine using the new Options struct.
   // ---------------------------------------------------------------------------
-  stepcast::store::CheckpointStoreOptions opts;
+  stepcast::store::StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = pool_size;
   opts.num_thread = io_threads;
@@ -99,7 +99,7 @@ TEST_CASE("CheckpointStore P2P Loader TCP end-to-end", "[checkpoint_store][p2p][
   opts.p2p_port = comm_port;
   opts.comm_manager = comm_manager;
 
-  CheckpointStore tgt_store(opts);
+  StoreEngine tgt_store(opts);
 
   // ---------------------------------------------------------------------------
   // 3. Build a LoadSpec describing the remote GPU source and local GPU target.

@@ -48,8 +48,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def _handle_readiness_check(self):
         """Readiness check."""
         is_ready = (
-            not self.servicer.shutting_down
-            and self.servicer.checkpoint_store is not None
+            not self.servicer.shutting_down and self.servicer.store_engine is not None
         )
 
         readiness_status = {
@@ -57,8 +56,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             "timestamp": time.time(),
             "details": {
                 "shutting_down": self.servicer.shutting_down,
-                "checkpoint_store_initialized": self.servicer.checkpoint_store
-                is not None,
+                "store_engine_initialized": self.servicer.store_engine is not None,
                 "worker_registered": bool(self.servicer.worker_id)
                 if self.servicer.global_store_enabled
                 else True,
@@ -72,8 +70,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         """Detailed status check."""
         try:
             # Get memory info
-            mem_total = self.servicer.checkpoint_store.get_mem_pool_size()
-            mem_available = self.servicer.checkpoint_store.get_available_memory()
+            mem_total = self.servicer.store_engine.get_mem_pool_size()
+            mem_available = self.servicer.store_engine.get_available_memory()
             mem_used = mem_total - mem_available
 
             status_info = {

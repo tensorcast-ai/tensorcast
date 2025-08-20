@@ -61,7 +61,7 @@ graph TB
 |------|----------|----------------|
 | `core/checkpoint/checkpoint.h/.cc` | C++ | Public API for tensor save/restore operations |
 | `core/checkpoint/streaming_tensor_writer.*` | C++ | Asynchronous GPU→disk streaming pipeline |
-| `core/store/checkpoint_store.cc` | C++ | Bridges checkpoint module with on-disk store |
+| `core/store/store_engine.cc` | C++ | Bridges checkpoint module with on-disk store |
 | `core/communicator/engine/*` | C++ | RDMA/TCP transport engines for inter-node transfer |
 | `scstore/torch_util.py` | Python | High-level PyTorch integration (`save_dict`, `load_dict`) |
 | `scstore/daemon_manager.py` | Python | Daemon process management and health monitoring |

@@ -248,7 +248,7 @@ cc_test(
     deps = [
         "//core/common",
         "//core/communicator",
-        "//core/store:checkpoint_store",
+        "//core/store:store_engine",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -266,7 +266,7 @@ cc_test(
     deps = [
         "//core/common",
         "//core/communicator",
-        "//core/store:checkpoint_store",
+        "//core/store:store_engine",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",

@@ -13,9 +13,9 @@ class MockServicer:
     """Minimal mock servicer object for ReplicaManager tests."""
 
     def __init__(self):
-        self.checkpoint_store = Mock()
+        self.store_engine = Mock()
         # Default: one GPU with 10 GB, 5 GB free
-        self.checkpoint_store.get_gpu_memory_stats.return_value = [
+        self.store_engine.get_gpu_memory_stats.return_value = [
             (10 * 1024**3, 5 * 1024**3)
         ]
         self.global_store_stub = Mock()

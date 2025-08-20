@@ -74,7 +74,8 @@ jobs:
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed \
-            --test_timeout=600
+            --test_timeout=600 \
+            --local_test_jobs=1
 
   python-tests:
     name: Python Tests

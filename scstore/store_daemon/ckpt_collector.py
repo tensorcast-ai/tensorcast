@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, StepCast Team.
 
-"""Custom Prometheus collector that bridges C++ CheckpointStore metrics to the Python
+"""Custom Prometheus collector that bridges C++ StoreEngine metrics to the Python
 Prometheus registry.
 
 Prometheus Python client expects a *collector* instance exposing a ``collect``
@@ -24,7 +24,7 @@ from prometheus_client.core import (
 )
 
 try:
-    import scstore._checkpoint_store as _cs  # noqa: WPS433 (external import)
+    import scstore._store_engine as _cs  # noqa: WPS433 (external import)
 except ModuleNotFoundError:  # pragma: no cover – unit tests may run without C++
     _cs = None  # type: ignore[assignment]
 
@@ -35,7 +35,7 @@ class GlobalMetricsCollector:  # noqa: WPS110 (allow lowercase class name)
     def __init__(self, namespace: str | None = None) -> None:
         if _cs is None:
             raise RuntimeError(
-                "CheckpointStore C++ extension is not available – cannot register collector."
+                "StoreEngine C++ extension is not available – cannot register collector."
             )
         self._namespace_prefix = f"{namespace}_" if namespace else ""
 
@@ -142,13 +142,13 @@ class GlobalMetricsCollector:  # noqa: WPS110 (allow lowercase class name)
 
 
 # Keep the old class name for backward compatibility
-class CheckpointStoreCollector(GlobalMetricsCollector):
+class StoreEngineCollector(GlobalMetricsCollector):
     """Deprecated: Use GlobalMetricsCollector instead."""
 
     def __init__(
         self,
-        checkpoint_store: object | None = None,
+        store_engine: object | None = None,
         namespace: str | None = None,
     ) -> None:
-        # Ignore checkpoint_store parameter, it's no longer needed
+        # Ignore store_engine parameter, it's no longer needed
         super().__init__(namespace)

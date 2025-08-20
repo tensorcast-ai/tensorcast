@@ -12,7 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
 import grpc
 
-from scstore import _checkpoint_store as _cs
+from scstore import _store_engine as _cs
 from scstore.logger import init_logger
 from scstore.proto import (
     global_store_pb2_grpc,
@@ -136,20 +136,20 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         # Initialize network info
         self._initialize_network_info(local_p2p_port, local_grpc_port)
 
-        # Load the checkpoint store C++ extension
+        # Load the Store Engine C++ extension
         try:
-            # torch is required for the checkpoint store C++ extension
+            # torch is required for the Store Engine C++ extension
             import torch  # noqa: F401
 
             ctypes.CDLL(os.path.join(os.path.dirname(__file__), "../lib/libscstore.so"))
-            import scstore._checkpoint_store as _cs
+            import scstore._store_engine as _cs
         except OSError as e:
             logger.error(f"Failed to load C++ extension: {e}")
             raise
 
         self.pinned_memory_timeout_ms = pinned_memory_timeout_ms
 
-        # Initialize checkpoint store
+        # Initialize Store Engine
         logger.info(
             f"StorageServicer: storage_path={storage_path}, "
             f"mem_pool_size={mem_pool_size}, num_thread={num_thread}, "
@@ -162,7 +162,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         assert _cs is not None
         # (Phase-3) Create a single CommunicationManager instance when
-        # communication is enabled, then inject it into CheckpointStore so
+        # communication is enabled, then inject it into StoreEngine so
         # that multiple stores (if any) share the same engine.
 
         comm_manager_obj = None
@@ -194,7 +194,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         if comm_manager_obj is not None:
             cs_cfg["comm_manager"] = comm_manager_obj
 
-        self.checkpoint_store = _cs.create_checkpoint_store(cs_cfg)
+        self.store_engine = _cs.create_store_engine(cs_cfg)
 
         # Initialize global store connection
         self.global_store_stub: global_store_pb2_grpc.GlobalModelStoreStub | None = None
@@ -363,8 +363,8 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         """Initialize Prometheus metrics."""
         try:
             # Set static metrics
-            if self.checkpoint_store:
-                MEMORY_POOL_TOTAL.set(self.checkpoint_store.get_mem_pool_size())
+            if self.store_engine:
+                MEMORY_POOL_TOTAL.set(self.store_engine.get_mem_pool_size())
             WORKER_HEALTHY.set(1)  # Initial state is healthy
             WORKER_REGISTERED.set(0)  # Initial unregistered
 
@@ -407,8 +407,8 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         """Update runtime metrics."""
         try:
             # Update memory usage
-            if self.checkpoint_store:
-                MEMORY_POOL_AVAILABLE.set(self.checkpoint_store.get_available_memory())
+            if self.store_engine:
+                MEMORY_POOL_AVAILABLE.set(self.store_engine.get_available_memory())
 
             # Update active operations
             ACTIVE_OPERATIONS.set(self.active_operations.get())
@@ -723,12 +723,12 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         self, request: store_daemon_pb2.ClearMemRequest, context: grpc.ServicerContext
     ) -> store_daemon_pb2.ClearMemResponse:
         """Clear all memory used by the storage daemon."""
-        if not self.checkpoint_store:
-            logger.error("Checkpoint store not initialized")
+        if not self.store_engine:
+            logger.error("Store Engine not initialized")
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             return store_daemon_pb2.ClearMemResponse()
 
-        ret = self.checkpoint_store.clear_mem()
+        ret = self.store_engine.clear_mem()
         if ret != 0:
             logger.error(f"ClearMem failed with error code {ret}")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -747,15 +747,15 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         context: grpc.ServicerContext,
     ) -> store_daemon_pb2.GetServerConfigResponse:
         """Get server configuration."""
-        if not self.checkpoint_store:
+        if not self.store_engine:
             return store_daemon_pb2.GetServerConfigResponse(
                 mem_pool_size=0,
                 chunk_size=0,
             )
 
         return store_daemon_pb2.GetServerConfigResponse(
-            mem_pool_size=self.checkpoint_store.get_mem_pool_size(),
-            chunk_size=self.checkpoint_store.get_chunk_size(),
+            mem_pool_size=self.store_engine.get_mem_pool_size(),
+            chunk_size=self.store_engine.get_chunk_size(),
         )
 
     def GetWorkerStatus(
@@ -769,9 +769,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
             mem_pool_total_size = 0
             mem_pool_available_size = 0
-            if self.checkpoint_store:
-                mem_pool_total_size = self.checkpoint_store.get_mem_pool_size()
-                mem_pool_available_size = self.checkpoint_store.get_available_memory()
+            if self.store_engine:
+                mem_pool_total_size = self.store_engine.get_mem_pool_size()
+                mem_pool_available_size = self.store_engine.get_available_memory()
 
             return store_daemon_pb2.GetWorkerStatusResponse(
                 is_registered=bool(self.worker_id),
@@ -848,7 +848,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         context: grpc.ServicerContext,
     ) -> store_daemon_pb2.BeginRegisterTensorDictResponse:
         try:
-            reg: _cs.CheckpointStore.TensorDictRegistration = {
+            reg: _cs.StoreEngine.TensorDictRegistration = {
                 "model_id": request.model_id,
                 "tensor_index_key": request.tensor_index_key
                 if request.WhichOneof("index") == "tensor_index_key"
@@ -868,7 +868,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 "ttl_ms": int(request.ttl_ms) if request.HasField("ttl_ms") else 0,
             }
 
-            result = self.checkpoint_store.begin_register_tensor_dict(reg)
+            result = self.store_engine.begin_register_tensor_dict(reg)
 
             resp = store_daemon_pb2.BeginRegisterTensorDictResponse(
                 registration_id=result["registration_id"],
@@ -914,7 +914,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         context: grpc.ServicerContext,
     ) -> store_daemon_pb2.CommitRegisteredTensorDictResponse:
         try:
-            result = self.checkpoint_store.commit_registered_tensor_dict(
+            result = self.store_engine.commit_registered_tensor_dict(
                 request.registration_id
             )
             # Build descriptor from returned dict
@@ -963,7 +963,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         context: grpc.ServicerContext,
     ) -> store_daemon_pb2.AbortRegisteredTensorDictResponse:
         try:
-            self.checkpoint_store.abort_registered_tensor_dict(request.registration_id)
+            self.store_engine.abort_registered_tensor_dict(request.registration_id)
             return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=True)
         except ValueError as e:
             logger.exception(
@@ -997,7 +997,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             # Convert chunk indices to list
             indices = list(request.chunk_indices)
 
-            # Call checkpoint store to lock chunks
+            # Call Store Engine to lock chunks
 
             dev = _cs.DeviceKey()
             dev.type = _cs.DeviceType.NONE
@@ -1008,7 +1008,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             inst_key.device = dev
             inst_key.replica = 0
 
-            status = self.checkpoint_store.lock_chunks(inst_key, indices)
+            status = self.store_engine.lock_chunks(inst_key, indices)
 
             if status != 0:
                 context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
@@ -1057,10 +1057,10 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
             inst_key, indices = lock_info
 
-            # Call checkpoint store to unlock chunks
+            # Call Store Engine to unlock chunks
             # Note: We set copied_gpu=False here as this is called by Global Store
             # The actual GPU copy status will be updated by the target StoreDaemon
-            status = self.checkpoint_store.unlock_chunks(inst_key, indices, False)
+            status = self.store_engine.unlock_chunks(inst_key, indices, False)
 
             if status != 0:
                 logger.warning(
@@ -1309,17 +1309,13 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
             # Memory pool info
             mem_pool_info = store_daemon_pb2.MemoryPoolInfo()
-            if self.checkpoint_store:
-                mem_pool_info.total_size_bytes = (
-                    self.checkpoint_store.get_mem_pool_size()
-                )
-                mem_pool_info.available_bytes = (
-                    self.checkpoint_store.get_available_memory()
-                )
+            if self.store_engine:
+                mem_pool_info.total_size_bytes = self.store_engine.get_mem_pool_size()
+                mem_pool_info.available_bytes = self.store_engine.get_available_memory()
                 mem_pool_info.allocated_bytes = (
                     mem_pool_info.total_size_bytes - mem_pool_info.available_bytes
                 )
-                mem_pool_info.chunk_size_bytes = self.checkpoint_store.get_chunk_size()
+                mem_pool_info.chunk_size_bytes = self.store_engine.get_chunk_size()
                 # TODO: Get allocated_chunks_count from C++ layer when available
 
             # Parse C++ metrics to get detailed model and GPU information
@@ -1332,9 +1328,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             )
 
             # Parse metrics text from C++ layer
-            if self.checkpoint_store:
+            if self.store_engine:
                 try:
-                    import scstore._checkpoint_store as _cs
+                    import scstore._store_engine as _cs
 
                     metrics_text = _cs.get_global_metrics_text().decode()
 

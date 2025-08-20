@@ -1,4 +1,4 @@
-"""Type stubs for scstore._checkpoint_store module"""
+"""Type stubs for scstore._store_engine module"""
 
 from typing import List, Dict, Tuple, Optional, Any, Union, TypedDict
 from enum import Enum
@@ -109,7 +109,7 @@ class ModelHandle:
 # =======================
 
 
-class CheckpointStore:
+class StoreEngine:
     # ---- Unified prepare API ----
     def prepare(
         self,
@@ -235,7 +235,7 @@ class CommunicationManager:
     def is_enabled(self) -> bool: ...
 
 
-def create_checkpoint_store(config: Dict[str, Any]) -> CheckpointStore: ...
+def create_store_engine(config: Dict[str, Any]) -> StoreEngine: ...
 
 
 def get_global_metrics_text() -> bytes: ...

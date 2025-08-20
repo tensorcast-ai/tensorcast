@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-#include "checkpoint_store.h"
+#include "store_engine.h"
 
 #include <unistd.h>
 
@@ -53,8 +53,8 @@ absl::Status try_evict_gpu_memory_impl(
 // Construction and Destruction
 // ═══════════════════════════════════════════════════════════════════════════
 
-// New unified constructor based on CheckpointStoreOptions (Phase-3+)
-CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
+// New unified constructor based on StoreEngineOptions (Phase-3+)
+StoreEngine::StoreEngine(const StoreEngineOptions& opts)
     : options_(opts),
       storage_path_(opts.storage_path),
       memory_pool_size_(opts.memory_pool_size),
@@ -70,7 +70,7 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
       dvmp_(
           gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>(
               std::make_shared<memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
-  VLOG(1) << "Initializing CheckpointStore with unified Options constructor";
+  VLOG(1) << "Initializing StoreEngine with unified Options constructor";
   VLOG(1) << "Storage path: "
           << (storage_path_.empty() ? "<empty - model_identifier will be full path>" : storage_path_.string());
   VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::GB << "GB";
@@ -83,15 +83,15 @@ CheckpointStore::CheckpointStore(const CheckpointStoreOptions& opts)
   metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 }
 
-void CheckpointStore::initialize_components() {
+void StoreEngine::initialize_components() {
   // Initialize core components
   absl::Status status = device_manager_->initialize();
   CHECK(status.ok()) << "Failed to initialize DeviceManager: " << status.message();
 }
 
-void CheckpointStore::initialize_global_store(const CheckpointStoreOptions& opts) {
+void StoreEngine::initialize_global_store(const StoreEngineOptions& opts) {
   // Global Store client (remote coordination).  If a non-empty
-  // global_store_address is provided via CheckpointStoreOptions, attempt to
+  // global_store_address is provided via StoreEngineOptions, attempt to
   // connect immediately so that PrepareOrchestrator can leverage it for remote
   // replica discovery.
   if (!opts.global_store_address.empty()) {
@@ -101,14 +101,14 @@ void CheckpointStore::initialize_global_store(const CheckpointStoreOptions& opts
     global_store_client_ = std::make_unique<GlobalStoreClient>(gs_cfg);
     absl::Status st = global_store_client_->initialize();
     if (!st.ok()) {
-      LOG(WARNING) << "CheckpointStore: GlobalStoreClient init failed: " << st;
+      LOG(WARNING) << "StoreEngine: GlobalStoreClient init failed: " << st;
     } else {
-      LOG(INFO) << "CheckpointStore: connected to Global Store at " << gs_cfg.global_store_address;
+      LOG(INFO) << "StoreEngine: connected to Global Store at " << gs_cfg.global_store_address;
     }
   }
 }
 
-void CheckpointStore::initialize_communication_manager(const CheckpointStoreOptions& opts) {
+void StoreEngine::initialize_communication_manager(const StoreEngineOptions& opts) {
   // Initialize system-wide DVMP instance and CommunicationManager handling
   if (opts.comm_manager) {
     // Use externally supplied manager (already initialised by caller)
@@ -118,8 +118,8 @@ void CheckpointStore::initialize_communication_manager(const CheckpointStoreOpti
   }
 }
 
-CheckpointStore::~CheckpointStore() {
-  LOG(INFO) << "Shutting down CheckpointStore";
+StoreEngine::~StoreEngine() {
+  LOG(INFO) << "Shutting down StoreEngine";
   clear_mem();
 }
 
@@ -127,15 +127,15 @@ CheckpointStore::~CheckpointStore() {
 // Status Queries
 // ═══════════════════════════════════════════════════════════════════════════
 
-size_t CheckpointStore::get_available_memory() const {
+size_t StoreEngine::get_available_memory() const {
   return memory_pool_->get_available_size();
 }
 
-void CheckpointStore::update_memory_pool_metrics() {
+void StoreEngine::update_memory_pool_metrics() {
   metrics_collector_->update_all_metrics(*memory_pool_, *model_registry_, *device_manager_);
 }
 
-std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() const {
+std::vector<StoreEngine::ModelInfo> StoreEngine::get_all_models_info() const {
   std::vector<ModelInfo> result;
 
   // Use LRU list to retrieve all known InstanceKeys. This covers every entry
@@ -208,7 +208,7 @@ std::vector<CheckpointStore::ModelInfo> CheckpointStore::get_all_models_info() c
 // Internal Implementation - using new unified types
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
+absl::StatusOr<ModelHandle> StoreEngine::load_from_disk_internal(
     const std::string& model_identifier,
     const DiskSource& source,
     const ModelTarget& target,
@@ -241,7 +241,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
     }
   }
 
-  // If CheckpointStore was initialised with a non-empty storage_path_ and the
+  // If StoreEngine was initialised with a non-empty storage_path_ and the
   // incoming DiskSource path is *not* absolute, we interpret it as a
   // sub-directory under the configured storage root (the behaviour expected by
   // unit-tests).  This mirrors the semantics of the legacy Python
@@ -561,7 +561,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   return handle;
 }
 
-absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
+absl::StatusOr<ModelHandle> StoreEngine::load_from_p2p_internal(
     const std::string& model_identifier,
     const P2PSource& source,
     const ModelTarget& target,
@@ -663,7 +663,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_p2p_internal(
   return handle;
 }
 
-absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
+absl::StatusOr<ModelHandle> StoreEngine::load_from_buffer_internal(
     const std::string& /*model_identifier*/,
     const InlineBufferSource& /*source*/,
     const ModelTarget& /*target*/,
@@ -673,7 +673,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_buffer_internal(
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
-std::shared_ptr<Model> CheckpointStore::get_or_create_model(
+std::shared_ptr<Model> StoreEngine::get_or_create_model(
     const std::string& model_identifier,
     const ModelConfig& config) {
   // Build InstanceKey for the requested device (CPU when local_device_id < 0)
@@ -718,7 +718,7 @@ std::shared_ptr<Model> CheckpointStore::get_or_create_model(
   return model;
 }
 
-absl::Status CheckpointStore::try_evict_memory_for_model(size_t required_size) {
+absl::Status StoreEngine::try_evict_memory_for_model(size_t required_size) {
   // Prefer the new multi-device LRU ordering.
   auto lru_instances = model_registry_->get_lru_instances();
 
@@ -753,7 +753,7 @@ absl::Status CheckpointStore::try_evict_memory_for_model(size_t required_size) {
   return absl::ResourceExhaustedError("Could not free enough memory");
 }
 
-size_t CheckpointStore::get_num_chunk_from_tensor_size(size_t tensor_size) const {
+size_t StoreEngine::get_num_chunk_from_tensor_size(size_t tensor_size) const {
   return (tensor_size + chunk_size_ - 1) / chunk_size_;
 }
 
@@ -789,7 +789,7 @@ absl::Status ModelHandle::wait_ready(std::chrono::milliseconds timeout) {
 // removed to keep the codebase lean – PrepareOrchestrator now owns almost all
 // decision complexity.
 // ---------------------------------------------------------------------------
-absl::StatusOr<ModelHandle> CheckpointStore::prepare(
+absl::StatusOr<ModelHandle> StoreEngine::prepare(
     const DeviceKey& target_device,
     PrepareMode mode,
     const LoadingHints& hints) {
@@ -966,7 +966,7 @@ absl::StatusOr<ModelHandle> CheckpointStore::prepare(
 // ---------------------------------------------------------------------------
 // Query helpers
 // ---------------------------------------------------------------------------
-std::vector<DeviceKey> CheckpointStore::get_loaded_devices(std::string_view model_id) const {
+std::vector<DeviceKey> StoreEngine::get_loaded_devices(std::string_view model_id) const {
   // Implementation: leverage the modern multi-device registry exclusively. Models loaded via
   // ModelRegistry::emplace are visible to this helper; no backward-compatibility fallbacks remain.
   absl::flat_hash_set<DeviceKey, DeviceKeyHash> unique_devices;
@@ -1007,7 +1007,7 @@ std::vector<DeviceKey> CheckpointStore::get_loaded_devices(std::string_view mode
   return devices;
 }
 
-std::vector<InstanceKey> CheckpointStore::list_device_models(const DeviceKey& device) const {
+std::vector<InstanceKey> StoreEngine::list_device_models(const DeviceKey& device) const {
   // Implementation that relies solely on the new multi-index registry (InstanceKey-based). No
   // legacy fallback remains.
   std::vector<InstanceKey> list;
@@ -1111,7 +1111,7 @@ absl::Status try_evict_gpu_memory_impl(
 // New InstanceKey-centric API wrappers
 // ═══════════════════════════════════════════════════════════════════════════
 
-int CheckpointStore::wait_instance_ready(const InstanceKey& key) {
+int StoreEngine::wait_instance_ready(const InstanceKey& key) {
   auto model_res = model_registry_->find(key);
   if (!model_res.ok()) {
     return 1; // Not found
@@ -1122,7 +1122,7 @@ int CheckpointStore::wait_instance_ready(const InstanceKey& key) {
   return st.ok() ? 0 : 1;
 }
 
-int CheckpointStore::unload_instance(const InstanceKey& key) {
+int StoreEngine::unload_instance(const InstanceKey& key) {
   auto model_res = model_registry_->find(key);
   if (!model_res.ok()) {
     return 1; // Instance not found.
@@ -1146,7 +1146,7 @@ int CheckpointStore::unload_instance(const InstanceKey& key) {
   return st.ok() ? 0 : -1;
 }
 
-MemoryState CheckpointStore::get_instance_state(const InstanceKey& key, DeviceType memory_type) const {
+MemoryState StoreEngine::get_instance_state(const InstanceKey& key, DeviceType memory_type) const {
   auto model_res = model_registry_->find(key);
   if (!model_res.ok()) {
     return MemoryState::UNINITIALIZED;
@@ -1155,7 +1155,7 @@ MemoryState CheckpointStore::get_instance_state(const InstanceKey& key, DeviceTy
   return model_res.value()->get_memory_state(loc);
 }
 
-absl::StatusOr<uint64_t> CheckpointStore::get_instance_gpu_ptr(const InstanceKey& key) {
+absl::StatusOr<uint64_t> StoreEngine::get_instance_gpu_ptr(const InstanceKey& key) {
   if (key.device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("InstanceKey does not reference a GPU device");
   }
@@ -1170,7 +1170,7 @@ absl::StatusOr<uint64_t> CheckpointStore::get_instance_gpu_ptr(const InstanceKey
   return reinterpret_cast<uint64_t>(ptrs[0]);
 }
 
-absl::StatusOr<uint64_t> CheckpointStore::get_instance_size(const InstanceKey& key) {
+absl::StatusOr<uint64_t> StoreEngine::get_instance_size(const InstanceKey& key) {
   auto model_res = model_registry_->find(key);
   if (!model_res.ok()) {
     return absl::NotFoundError("Model instance not found");
@@ -1182,7 +1182,7 @@ absl::StatusOr<uint64_t> CheckpointStore::get_instance_size(const InstanceKey& k
   return *size_or;
 }
 
-absl::StatusOr<CommRegistrationInfo> CheckpointStore::enable_remote_instance_access(
+absl::StatusOr<CommRegistrationInfo> StoreEngine::enable_remote_instance_access(
     const InstanceKey& key,
     ModelLocation location) {
   if (!comm_manager_ || !comm_manager_->is_enabled()) {
@@ -1196,7 +1196,7 @@ absl::StatusOr<CommRegistrationInfo> CheckpointStore::enable_remote_instance_acc
   return model_res.value()->enable_remote_memory_access(location, comm_manager_->get_engine());
 }
 
-absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& key, ModelLocation location) {
+absl::Status StoreEngine::disable_remote_instance_access(const InstanceKey& key, ModelLocation location) {
   if (!comm_manager_ || !comm_manager_->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
@@ -1212,7 +1212,7 @@ absl::Status CheckpointStore::disable_remote_instance_access(const InstanceKey& 
 // Memory cleanup
 // ═══════════════════════════════════════════════════════════════════════════
 
-int CheckpointStore::clear_mem() {
+int StoreEngine::clear_mem() {
   auto models = model_registry_->clear_all();
   std::vector<absl::Status> errors;
 
@@ -1248,8 +1248,8 @@ int CheckpointStore::clear_mem() {
 // Distributed Memory Pool (DVMP) chunk locking API
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::Status CheckpointStore::lock_chunks(const InstanceKey& instance_key, absl::Span<const uint32_t> chunk_indices) {
-  SC_TRACE_SCOPE("CheckpointStore::lock_chunks");
+absl::Status StoreEngine::lock_chunks(const InstanceKey& instance_key, absl::Span<const uint32_t> chunk_indices) {
+  SC_TRACE_SCOPE("StoreEngine::lock_chunks");
 
   // Locate the exact model instance based on InstanceKey (device-specific).
   auto model_res = model_registry_->find(instance_key);
@@ -1266,11 +1266,11 @@ absl::Status CheckpointStore::lock_chunks(const InstanceKey& instance_key, absl:
   return dvmp->lock_chunks(instance_key.model_id, chunk_indices);
 }
 
-absl::Status CheckpointStore::unlock_chunks(
+absl::Status StoreEngine::unlock_chunks(
     const InstanceKey& instance_key,
     absl::Span<const uint32_t> chunk_indices,
     bool copied_gpu) {
-  SC_TRACE_SCOPE("CheckpointStore::unlock_chunks");
+  SC_TRACE_SCOPE("StoreEngine::unlock_chunks");
 
   // Locate the exact model instance.
   auto model_res = model_registry_->find(instance_key);
@@ -1292,7 +1292,7 @@ absl::Status CheckpointStore::unlock_chunks(
 // RFC-0006 – Memory TensorDict Registration (coalesced)
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_register_tensor_dict(
+absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_tensor_dict(
     const TensorDictRegistration& reg) {
   if (reg.total_size_bytes == 0) {
     return absl::InvalidArgumentError("total_size_bytes must be > 0");
@@ -1411,7 +1411,7 @@ absl::StatusOr<CheckpointStore::RegistrationBeginResult> CheckpointStore::begin_
   return out;
 }
 
-absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commit_registered_tensor_dict(
+absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_tensor_dict(
     std::string_view registration_id) {
   PendingRegistrationEntry entry;
   std::shared_ptr<Model> model_to_free;
@@ -1526,7 +1526,7 @@ absl::StatusOr<CheckpointStore::RegistrationCommitResult> CheckpointStore::commi
   return result;
 }
 
-absl::Status CheckpointStore::abort_registered_tensor_dict(std::string_view registration_id) {
+absl::Status StoreEngine::abort_registered_tensor_dict(std::string_view registration_id) {
   std::shared_ptr<Model> model;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);

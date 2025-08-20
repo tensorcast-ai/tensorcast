@@ -77,7 +77,7 @@ LOG(INFO) << "Using device " << key.to_string();
 ## Relation to Other Components
 
 * **Memory Manager** – resolves GPU ordinals from `ModelLocation` to allocate CUDA buffers.
-* **Checkpoint Store** – normalises user-supplied `DeviceKey`s in API calls.
+* **Store Engine** – normalises user-supplied `DeviceKey`s in API calls.
 * **Global Store** – transports include `device_uuid` so that replicas can be relocated unambiguously.
 
 ## Future Extensions

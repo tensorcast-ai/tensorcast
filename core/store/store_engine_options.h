@@ -17,14 +17,14 @@ namespace store {
 class CommunicationManager; // forward declaration
 
 /**
- * @brief Options structure used to configure a CheckpointStore instance.
+ * @brief Options structure used to configure a StoreEngine instance.
  *
  * This replaces the long positional parameter list previously used by the
- * CheckpointStore constructor, making the API safer and future-proof.  All
+ * StoreEngine constructor, making the API safer and future-proof.  All
  * fields have sensible defaults so callers may omit values they do not need
  * to customise.
  */
-struct CheckpointStoreOptions {
+struct StoreEngineOptions {
   // Path were model sub-directories are stored.  Empty string means fully
   // qualified paths will be provided to the loading API.
   std::string storage_path;
@@ -45,13 +45,13 @@ struct CheckpointStoreOptions {
   uint16_t p2p_port{9090};
 
   // Address of the Global Store gRPC service ("host:port").  Empty string means
-  // the CheckpointStore will operate in standalone mode without remote
+  // the StoreEngine will operate in standalone mode without remote
   // coordination and P2P source discovery.
   std::string global_store_address;
 
   // (Phase-3) Optional externally created CommunicationManager so multiple
-  // CheckpointStore instances can share the same underlying CommunicateEngine
-  // and listen socket.  When provided, the CheckpointStore will reuse this
+  // StoreEngine instances can share the same underlying CommunicateEngine
+  // and listen socket.  When provided, the StoreEngine will reuse this
   // manager instead of creating its own internal instance.
   std::shared_ptr<stepcast::store::CommunicationManager> comm_manager{nullptr};
 

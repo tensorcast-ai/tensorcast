@@ -62,8 +62,8 @@ sc_cc_library(
 )
 
 sc_header_only_library(
-    name = "checkpoint_store_options",
-    hdrs = ["checkpoint_store_options.h"],
+    name = "store_engine_options",
+    hdrs = ["store_engine_options.h"],
     visibility = ["//visibility:public"],
 )
 
@@ -153,7 +153,7 @@ sc_cc_library(
 
 # ========== Loading orchestration ==========
 
-# prepare_orchestrator is now part of checkpoint_store target to avoid circular dependency
+# prepare_orchestrator is now part of store_engine target to avoid circular dependency
 
 sc_cc_library(
     name = "chunk_aware_loading_strategy",
@@ -183,21 +183,20 @@ sc_cc_library(
     ],
 )
 
-# ========== Main checkpoint store ==========
+# ========== Main Store Engine ==========
 
 sc_cc_library(
-    name = "checkpoint_store",
+    name = "store_engine",
     srcs = [
-        "checkpoint_store.cc",
         "loading/prepare_orchestrator.cc",
+        "store_engine.cc",
     ],
     hdrs = [
-        "checkpoint_store.h",
         "loading/prepare_orchestrator.h",
+        "store_engine.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":checkpoint_store_options",
         ":communication_manager",
         ":communication_types",
         ":device_manager",
@@ -208,6 +207,7 @@ sc_cc_library(
         ":metrics_collector",
         ":model_registry",
         ":replica_registration_helper",
+        ":store_engine_options",
         "//core/checkpoint:checkpoint_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
@@ -241,17 +241,17 @@ sc_cc_library(
     }),
 )
 
-# Tests for checkpoint_store
+# Tests for store_engine
 cc_test(
-    name = "checkpoint_store_test",
-    srcs = ["checkpoint_store_test.cc"],
+    name = "store_engine_test",
+    srcs = ["store_engine_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
     tags = ["requires_cuda"],
     deps = [
-        ":checkpoint_store",
+        ":store_engine",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",
@@ -260,15 +260,15 @@ cc_test(
 )
 
 cc_test(
-    name = "checkpoint_store_p2p_loader_test",
-    srcs = ["checkpoint_store_p2p_loader_test.cc"],
+    name = "store_engine_p2p_loader_test",
+    srcs = ["store_engine_p2p_loader_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
     tags = ["requires_cuda"],
     deps = [
-        ":checkpoint_store",
+        ":store_engine",
         "//core/common",
         "//core/communicator",
         "//core/testing:catch_main",
@@ -287,7 +287,7 @@ cc_test(
     }),
     tags = ["requires_cuda"],
     deps = [
-        ":checkpoint_store",
+        ":store_engine",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",
@@ -299,12 +299,12 @@ cc_test(
     name = "concurrency_test",
     srcs = ["concurrency_test.cc"],
     tags = [
-        "checkpoint_store",
+        "store_engine",
         "stress",
     ],
     deps = [
-        ":checkpoint_store",
         ":concurrency_utils",
+        ":store_engine",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -313,10 +313,10 @@ cc_test(
 cc_test(
     name = "edge_test",
     srcs = ["edge_test.cc"],
-    tags = ["checkpoint_store"],
+    tags = ["store_engine"],
     deps = [
-        ":checkpoint_store",
         ":concurrency_utils",
+        ":store_engine",
         "//core/testing:catch_main",
         "//core/testing:test_helpers",
         "@catch2//:catch2_main",
@@ -327,13 +327,13 @@ cc_test(
     name = "stress_test",
     srcs = ["stress_test.cc"],
     tags = [
-        "checkpoint_store",
         "manual",
+        "store_engine",
         "stress",
     ],
     deps = [
-        ":checkpoint_store",
         ":concurrency_utils",
+        ":store_engine",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -347,13 +347,13 @@ cc_test(
         "//conditions:default": ["-lcuda"],
     }),
     tags = [
-        "checkpoint_store",
         "multi_gpu",
         "requires_cuda",
+        "store_engine",
     ],
     deps = [
-        ":checkpoint_store",
         ":concurrency_utils",
+        ":store_engine",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -365,8 +365,6 @@ sc_cc_library(
     name = "store",
     visibility = ["//visibility:public"],
     deps = [
-        ":checkpoint_store",
-        ":checkpoint_store_options",
         ":chunk_aware_loading_strategy",
         ":communication_manager",
         ":communication_types",
@@ -380,6 +378,8 @@ sc_cc_library(
         ":metrics_collector",
         ":model_registry",
         ":replica_registration_helper",
+        ":store_engine",
+        ":store_engine_options",
         "//core/store/loader",
         "//core/store/loader:source_hash",
         "//core/store/model",

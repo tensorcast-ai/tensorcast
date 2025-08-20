@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-- Problem: The current `CheckpointStore` depends on on-disk layout (`tensor.data_*` + `tensor_index.json`). P2P is optimized for “remote disk/memory source → local” loading. Many upstream workflows (fine-tuning, distillation, online updates) directly produce a `tensor_dict` on GPU. Flushing to disk and reloading adds avoidable I/O and latency.
+- Problem: The current `StoreEngine` depends on on-disk layout (`tensor.data_*` + `tensor_index.json`). P2P is optimized for “remote disk/memory source → local” loading. Many upstream workflows (fine-tuning, distillation, online updates) directly produce a `tensor_dict` on GPU. Flushing to disk and reloading adds avoidable I/O and latency.
 - Goals:
   - Provide `register_tensor_dict` to register an in-memory `tensor_dict` as a memory replica.
   - Be fully compatible with v2 `tensor_index.json` semantics and alignment; consumable by existing P2P.
@@ -11,13 +11,13 @@
   - Ownership moves to StoreDaemon: it allocates contiguous GPU memory and exports a CUDA IPC handle; the user writes bytes and commits. After commit, memory belongs to the daemon; no user-side staging buffer.
 
 Success criteria:
-- From remote nodes, memory replicas behave like disk replicas: `CheckpointStore::prepare(..., AUTO)` prefers P2P to GPU/CPU and falls back to disk.
+- From remote nodes, memory replicas behave like disk replicas: `StoreEngine::prepare(..., AUTO)` prefers P2P to GPU/CPU and falls back to disk.
 - v2 index fields and 8-byte alignment remain unchanged; validation and metrics continue to work.
 
 ## 2. Architecture Fit
 
-- Entry point `CheckpointStore::prepare()` and the orchestrated path (prepare → orchestrator → loader/source → transfer → sink) remain unchanged for consumers. Memory replicas integrate at:
-  - Control plane: StoreDaemon adds registration RPCs; CheckpointStore/GS clients keep existing flows.
+- Entry point `StoreEngine::prepare()` and the orchestrated path (prepare → orchestrator → loader/source → transfer → sink) remain unchanged for consumers. Memory replicas integrate at:
+  - Control plane: StoreDaemon adds registration RPCs; StoreEngine/GS clients keep existing flows.
   - Data plane: source exposes remote memory keys; consumers use `P2PLoader + RemoteKeySource` to GPU or DVMP (CPU).
 
 v2 format reference:
@@ -62,11 +62,11 @@ Server flow:
 2) Commit: validate pending entry and TTL; seal the buffer; optionally export remote memory keys; register in GS as memory replica with `tensor_index_key` (include `tensor_index_data` only if GS misses the key). Return a summary.
 3) Failure/cleanup: on failure or TTL expiry, free memory and delete the pending entry; Abort is idempotent.
 
-### 3.3 CheckpointStore (C++)
+### 3.3 StoreEngine (C++)
 
 ```cpp
-// core/store/checkpoint_store.h
-class CheckpointStore {
+// core/store/store_engine.h
+class StoreEngine {
 public:
   struct TensorDictRegistration {
     std::string model_id;
@@ -184,7 +184,7 @@ Daemon:
   - `proto/store_daemon.proto`: Begin/Commit/Abort with oneof index and metadata.
   - `proto/global_store.proto`: add `tensor_index_key`, add `GetModelIndex`, remove per-replica index BLOBs.
   - `scstore/store_daemon/servicer.py`: implement registration, TTL cleanup, and error handling.
-  - Optional C++ bridge: `CheckpointStore::register_tensor_dict`.
+  - Optional C++ bridge: `StoreEngine::register_tensor_dict`.
 
 ## 6. Compatibility & Migration
 
@@ -222,7 +222,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant C as Consumer Node
-  participant CS as CheckpointStore
+  participant CS as StoreEngine
   participant PO as PrepareOrchestrator
   participant GS as Global Store
   participant RL as P2PLoader
@@ -246,7 +246,7 @@ sequenceDiagram
 ## 10. Branch Diff with Main (Key Changes)
 
 - Core (C++):
-  - `core/store/checkpoint_store.h/.cc`: add in-memory registration API and pending registration state; integrate begin/commit/abort flows for memory replicas.
+  - `core/store/store_engine.h/.cc`: add in-memory registration API and pending registration state; integrate begin/commit/abort flows for memory replicas.
   - `core/store/model/cuda/cuda_real.cc`: add same-process fallback for CUDA IPC handles in unit tests; implement maps for exporting/freeing/opening/closing IPC handles; log IPC handle string on direct allocations.
   - `core/store/model/memory_manager.cc`: switch to `absl::Substitute`; minor diagnostics updates.
   - Attributes/Enums: add `[[nodiscard]]` to `get_handle()`; specify underlying type for `AllocationType` enum class.
@@ -261,7 +261,7 @@ sequenceDiagram
   - `scstore/proto/*_pb2*.py[i]`: regenerated Python stubs; minor formatting/blank-line updates.
 
 - Python API/Bindings:
-  - `scstore/_checkpoint_store.pyi/.py`: add `begin_register_tensor_dict`, `commit_registered_tensor_dict`, `abort_registered_tensor_dict`; remove `MemCopyChunk` (API cleanup); add `TypedDict` types `TensorDictRegistration`, `RegistrationBeginResult`, `RegistrationCommitResult`.
+  - `scstore/_store_engine.pyi/.py`: add `begin_register_tensor_dict`, `commit_registered_tensor_dict`, `abort_registered_tensor_dict`; remove `MemCopyChunk` (API cleanup); add `TypedDict` types `TensorDictRegistration`, `RegistrationBeginResult`, `RegistrationCommitResult`.
   - `tests/python/test_checkpoint_registration_pybind.py`: new tests covering begin → CUDA IPC map → commit; adds same-process fallback coverage.
 
 - Database & Migrations:

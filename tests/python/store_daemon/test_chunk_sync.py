@@ -21,7 +21,7 @@ class TestChunkSyncWorker:
         """Create mock servicer with necessary attributes."""
         servicer = Mock()
         servicer.worker_id = "test-worker-123"
-        servicer.checkpoint_store = Mock()
+        servicer.store_engine = Mock()
         servicer.replica_manager = Mock()
         servicer.replica_manager.get_loaded_models.return_value = ["model1", "model2"]
         return servicer

@@ -7,7 +7,7 @@ sidebar_position: 9
 # 📊 Adding New Metrics
 
 This guide explains **how to add a new Prometheus metric** to the StepCast Store with minimal effort.
-The workflow is the same for all C++ core modules (e.g. `CheckpointStore`, `PinnedMemoryPool`, future CUDA kernels) and requires **no change on the Python side** once the metric is registered in C++.
+The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMemoryPool`, future CUDA kernels) and requires **no change on the Python side** once the metric is registered in C++.
 
 > The mechanism relies on the lightweight `MetricsRegistry` singleton (`core/common/metrics/metrics_registry.{h,cpp}`) plus the Python `GlobalMetricsCollector` that automatically pulls the C++ snapshot and merges it with the existing Python metrics.
 
@@ -183,7 +183,7 @@ You can safely update metrics from multiple threads without external synchroniza
 graph TD
     subgraph "C++ Core"
         MR[MetricsRegistry<br/>Singleton]
-        CS[CheckpointStore]
+        CS[StoreEngine]
         PM[PinnedMemoryPool]
         CE[CommunicatorEngine]
         MO[metric_objects.h<br/>Helpers]

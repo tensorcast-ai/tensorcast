@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// CheckpointStore multi-GPU tests (B-series)
+// StoreEngine multi-GPU tests (B-series)
 // Test multi-GPU loading, cross-GPU operations, and device-specific eviction.
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,12 +14,12 @@
 #include "core/common/device_types.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::checkpoint_store;
+using namespace stepcast::tests::store_engine;
 using namespace stepcast::store;
 using stepcast::DeviceType;
 
 // B1: Load same model to multiple GPUs
-TEST_CASE("B1: Same model on multiple GPUs", "[checkpoint_store][multi_gpu][b1]") {
+TEST_CASE("B1: Same model on multiple GPUs", "[store_engine][multi_gpu][b1]") {
   skip_if_insufficient_gpus(2, "B1");
 
   const std::string model_id = "multi_gpu_model_b1";
@@ -45,7 +45,7 @@ TEST_CASE("B1: Same model on multiple GPUs", "[checkpoint_store][multi_gpu][b1]"
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle_or = store->prepare(make_gpu_key(gpu), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(gpu), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(handle_or.ok());
     handles.push_back(std::move(handle_or).value());
   }
@@ -120,7 +120,7 @@ TEST_CASE("B1: Same model on multiple GPUs", "[checkpoint_store][multi_gpu][b1]"
 }
 
 // B3: GPU-to-GPU copy
-TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
+TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   skip_if_insufficient_gpus(2, "B3");
 
   const std::string model_id = "gpu_copy_model_b3";
@@ -136,7 +136,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle0_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle0_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(handle0_or.ok());
     auto handle0 = std::move(handle0_or).value();
     REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -152,7 +152,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
   {
     stepcast::store::LoadingHints hints;
 
-    auto handle1_or = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    auto handle1_or = store->prepare(make_gpu_key(1), StoreEngine::PrepareMode::COPY_ONLY, hints);
     REQUIRE(handle1_or.ok());
     auto handle1 = std::move(handle1_or).value();
     REQUIRE(handle1.wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -206,7 +206,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[checkpoint_store][multi_gpu][b3]") {
 }
 
 // B4: Multi-GPU load balancing
-TEST_CASE("B4: Multi-GPU load balancing", "[checkpoint_store][multi_gpu][b4]") {
+TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   skip_if_insufficient_gpus(2, "B4");
 
   const int num_models = 8;
@@ -238,7 +238,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[checkpoint_store][multi_gpu][b4]") {
     int target_gpu = i % gpu_count;
     stepcast::store::LoadingHints hints;
     hints.disk_path = model_ids[i];
-    auto handle_or = store->prepare(make_gpu_key(target_gpu), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(target_gpu), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       REQUIRE(handle_or.value().wait_ready(std::chrono::milliseconds(30000)).ok());
     }
@@ -267,7 +267,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[checkpoint_store][multi_gpu][b4]") {
 }
 
 // B5: Device-specific operations
-TEST_CASE("B5: Device-specific operations", "[checkpoint_store][multi_gpu][b5]") {
+TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   skip_if_insufficient_gpus(2, "B5");
 
   const std::string model_id = "device_ops_model_b5";
@@ -282,8 +282,8 @@ TEST_CASE("B5: Device-specific operations", "[checkpoint_store][multi_gpu][b5]")
   stepcast::store::LoadingHints hints;
 
   hints.disk_path = model_id;
-  auto handle0 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
-  auto handle1 = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle0 = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+  auto handle1 = store->prepare(make_gpu_key(1), StoreEngine::PrepareMode::LOAD_ONLY, hints);
 
   REQUIRE(handle0.ok());
   REQUIRE(handle1.ok());

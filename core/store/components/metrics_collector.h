@@ -17,7 +17,7 @@ class DeviceManager;
 class PinnedMemoryPool;
 
 /**
- * @brief Centralized metrics collection for the checkpoint store.
+ * @brief Centralized metrics collection for the store engine.
  *
  * This component handles:
  * - Memory pool metrics

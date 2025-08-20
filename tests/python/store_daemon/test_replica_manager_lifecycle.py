@@ -13,7 +13,7 @@ import pytest
 from scstore.proto import store_daemon_pb2
 from scstore.store_daemon.replica_ref import ReplicaKey
 from scstore.store_daemon.replica_manager import ReplicaManager
-# NOTE: We intentionally avoid importing the C++ CheckpointStore here because its
+# NOTE: We intentionally avoid importing the C++ StoreEngine here because its
 # attributes are read-only at runtime, which prevents the test-suite from
 # monkey-patching them with ``unittest.mock.Mock``.  To keep the unit tests
 # self-contained we instead rely on a lightweight Python stub that exposes the
@@ -25,7 +25,7 @@ from scstore.store_daemon.replica_manager import ReplicaManager
 # ---------------------------------------------------------------------------
 
 
-class DummyCheckpointStore:
+class DummyStoreEngine:
     """Pure-Python stub that mimics the handful of methods used by
     ``ReplicaManager`` so that the unit tests can run without depending on the
     underlying C++ extension.  Each method is a ``Mock`` instance which makes
@@ -75,7 +75,7 @@ class MockServicer:
         # Use the pure-Python stub instead of the real C++ implementation so
         # that the tests can freely patch return values and inspect
         # ``call_count`` without hitting read-only attribute errors.
-        self.checkpoint_store = DummyCheckpointStore()
+        self.store_engine = DummyStoreEngine()
 
         self.global_store_stub = Mock()
         self.enable_p2p_engine = True
@@ -92,7 +92,7 @@ class MockServicer:
 # ---------------------------------------------------------------------------
 # The remainder of the file contains the actual test-cases.  *Do not* modify
 # behaviourally critical logic unless you have verified that it is redundant
-# with respect to the updated checkpoint store stub.
+# with respect to the updated Store Engine stub.
 # ---------------------------------------------------------------------------
 
 
@@ -250,10 +250,10 @@ class TestReplicaManagerLifecycle:
     def test_maybe_evict(self):
         """Test eviction when memory is needed."""
         servicer = MockServicer()
-        servicer.checkpoint_store.unload_instance.return_value = 0
-        servicer.checkpoint_store.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.disable_remote_instance_access.return_value = True
         # Mock GPU memory stats to return proper format
-        servicer.checkpoint_store.get_gpu_memory_stats.return_value = [
+        servicer.store_engine.get_gpu_memory_stats.return_value = [
             (10 * 1024**3, 2 * 1024**3)  # 10GB total, 2GB free
         ]
         manager = ReplicaManager(servicer)
@@ -269,13 +269,13 @@ class TestReplicaManagerLifecycle:
         evicted = manager.maybe_evict(bytes_needed=1024 * 1024, device_id=0)
 
         assert len(evicted) >= 1
-        assert servicer.checkpoint_store.unload_instance.called
+        assert servicer.store_engine.unload_instance.called
 
     def test_periodic_evict(self):
         """Test periodic eviction."""
         servicer = MockServicer()
-        servicer.checkpoint_store.unload_instance.return_value = 0
-        servicer.checkpoint_store.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.disable_remote_instance_access.return_value = True
         manager = ReplicaManager(servicer)
 
         # Add evictable model
@@ -290,8 +290,8 @@ class TestReplicaManagerLifecycle:
     def test_shutdown_evict_local_replicas(self):
         """Test evicting local replicas during shutdown."""
         servicer = MockServicer()
-        servicer.checkpoint_store.unload_instance.return_value = 0
-        servicer.checkpoint_store.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.disable_remote_instance_access.return_value = True
         manager = ReplicaManager(servicer)
 
         # Add local and global models
@@ -316,8 +316,8 @@ class TestReplicaManagerLifecycle:
     def test_confirm_model_with_pid(self):
         """Test model confirmation with PID tracking."""
         servicer = MockServicer()
-        servicer.checkpoint_store.wait_instance_ready.return_value = 0
-        servicer.checkpoint_store.enable_remote_instance_access.return_value = Mock(
+        servicer.store_engine.wait_instance_ready.return_value = 0
+        servicer.store_engine.enable_remote_instance_access.return_value = Mock(
             model_size=1024, device_id=0, remote_memory_keys=[], buffer_sizes=[]
         )
 
@@ -347,8 +347,8 @@ class TestReplicaManagerLifecycle:
     def test_unload_model_with_ref_count(self):
         """Test unloading model respects reference counting."""
         servicer = MockServicer()
-        servicer.checkpoint_store.unload_instance.return_value = 0
-        servicer.checkpoint_store.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.disable_remote_instance_access.return_value = True
         manager = ReplicaManager(servicer)
 
         # Add model with references
@@ -365,7 +365,7 @@ class TestReplicaManagerLifecycle:
 
         # Should succeed but not actually unload
         assert success is True
-        assert not servicer.checkpoint_store.unload_instance.called
+        assert not servicer.store_engine.unload_instance.called
 
         # Model should still have one reference
         info = manager.get_replica_info("model1", 0)
@@ -383,7 +383,7 @@ class TestReplicaManagerLifecycle:
 
         # Should actually unload now
         assert success is True
-        assert servicer.checkpoint_store.unload_instance.called
+        assert servicer.store_engine.unload_instance.called
 
     def test_concurrent_operations(self):
         """Test thread safety of concurrent operations."""
@@ -434,8 +434,8 @@ class TestReplicaManagerLifecycle:
     def test_metrics_updates(self, mock_evictions, mock_cache_bytes, mock_ref_count):
         """Test that metrics are properly updated."""
         servicer = MockServicer()
-        servicer.checkpoint_store.unload_instance.return_value = 0
-        servicer.checkpoint_store.get_gpu_memory_stats.return_value = [
+        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.get_gpu_memory_stats.return_value = [
             (10 * 1024**3, 5 * 1024**3)
         ]
         manager = ReplicaManager(servicer)

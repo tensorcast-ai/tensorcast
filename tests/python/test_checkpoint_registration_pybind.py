@@ -7,7 +7,7 @@ from typing import TypedDict, Optional
 import pytest
 
 
-import scstore._checkpoint_store as _cs
+import scstore._store_engine as _cs
 import scstore._C as _C
 
 
@@ -44,7 +44,7 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
     _skip_if_no_cuda()
 
     storage_root = tmp_path / "models"
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_root),
         "memory_pool_size": 4 * 1024 * 1024,
         "num_thread": 1,
@@ -103,7 +103,7 @@ def test_pybind_begin_abort_then_commit_fails(tmp_path: Path):
     _skip_if_no_cuda()
 
     storage_root = tmp_path / "models"
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_root),
         "memory_pool_size": 4 * 1024 * 1024,
         "num_thread": 1,
@@ -136,7 +136,7 @@ def test_pybind_ttl_expiry(tmp_path: Path):
     _skip_if_no_cuda()
 
     storage_root = tmp_path / "models"
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_root),
         "memory_pool_size": 4 * 1024 * 1024,
         "num_thread": 1,
@@ -171,7 +171,7 @@ def test_pybind_invalid_args(tmp_path: Path):
     _skip_if_no_cuda()
 
     storage_root = tmp_path / "models"
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_root),
         "memory_pool_size": 4 * 1024 * 1024,
         "num_thread": 1,

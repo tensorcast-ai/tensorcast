@@ -90,7 +90,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 - B: Tree hash and Multihash wrapper; GPU-first, CPU fallback.
 - C: Commit returns `ModelDescriptor`; align Python/Proto.
 - D: GS/DB: key by `model_id`; `model_replicas.model_id` as FK; switch RPCs.
-- E: CheckpointStore: `prepare(..., model_id=...)` routes via GS; light runtime verification; migration tool backfills IDs.
+- E: StoreEngine: `prepare(..., model_id=...)` routes via GS; light runtime verification; migration tool backfills IDs.
 
 ### 7. Current Status (Code Synced 2025-08-20)
 
@@ -218,8 +218,8 @@ store.prepare(device_key, mode="AUTO", model_id=info["model_id"])  # GS routing
     - `DiskLoader::initialize()`:
       - Standard partitions: require `model_descriptor.json` + `tensor_index.(json|cbor)`; missing files return `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)`; otherwise read and cache descriptor.
       - `safetensors`: allow missing `model_descriptor.json` (backfilled later).
-  - File: `core/store/checkpoint_store.cc`
-    - `CheckpointStore::load_from_disk_internal(...)` (constructs `ModelHandle` after `LOADED`):
+  - File: `core/store/store_engine.cc`
+    - `StoreEngine::load_from_disk_internal(...)` (constructs `ModelHandle` after `LOADED`):
       - Obtain GPU base and size; call `model_hash::compute_data_multihash_from_gpu(...)` to get `data_mh`.
       - Standard partitions: read `tensor_index.(json|cbor)`, build canonical bytes, compute `index_mh` via `compute_index_multihash(index_bytes, "")`.
       - `safetensors`:

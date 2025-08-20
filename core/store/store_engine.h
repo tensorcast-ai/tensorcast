@@ -1,21 +1,5 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-//  ServerlessLLM
-//  Copyright (c) ServerlessLLM Team 2024
-//
-//   Licensed under the Apache License, Version 2.0 (the "License");
-//   you may not use this file except in compliance with the License.
-//
-//   You may obtain a copy of the License at
-//
-//                   http://www.apache.org/licenses/LICENSE-2.0
-//
-//   Unless required by applicable law or agreed to in writing, software
-//   distributed under the License is distributed on an "AS IS" BASIS,
-//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//   See the License for the specific language governing permissions and
-//   limitations under the License.
-//  ----------------------------------------------------------------------------
 #pragma once
 
 #include <filesystem>
@@ -30,7 +14,6 @@
 #include "absl/status/statusor.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
-#include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
@@ -39,13 +22,14 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model.h"
+#include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace stepcast::store {
 
 class PrepareOrchestrator; // Forward declaration for friend access
 
-class CheckpointStore {
+class StoreEngine {
   friend class PrepareOrchestrator;
 
  public:
@@ -72,9 +56,9 @@ class CheckpointStore {
   // Construction and Initialization
   // ═══════════════════════════════════════════════════════════════════════════
 
-  explicit CheckpointStore(const CheckpointStoreOptions& opts);
+  explicit StoreEngine(const StoreEngineOptions& opts);
 
-  ~CheckpointStore();
+  ~StoreEngine();
 
   // ═══════════════════════════════════════════════════════════════════════════════════════
   // Public API
@@ -239,7 +223,7 @@ class CheckpointStore {
   // Configuration
   // ═══════════════════════════════════════════════════════════════════════════
 
-  const CheckpointStoreOptions options_;
+  const StoreEngineOptions options_;
   const std::filesystem::path storage_path_;
   const size_t memory_pool_size_;
   const int num_thread_;
@@ -263,8 +247,8 @@ class CheckpointStore {
 
   // Constructor helpers
   void initialize_components();
-  void initialize_global_store(const CheckpointStoreOptions& opts);
-  void initialize_communication_manager(const CheckpointStoreOptions& opts);
+  void initialize_global_store(const StoreEngineOptions& opts);
+  void initialize_communication_manager(const StoreEngineOptions& opts);
 
   // Model loading helpers - using new unified types
   absl::StatusOr<ModelHandle> load_from_disk_internal(

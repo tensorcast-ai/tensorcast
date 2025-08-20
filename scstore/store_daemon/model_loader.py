@@ -18,13 +18,13 @@ from typing import (
 
 import grpc
 
-from scstore import _checkpoint_store as _cs
+from scstore import _store_engine as _cs
 from scstore.logger import init_logger
 from scstore.proto import store_daemon_pb2
 from scstore.store_daemon.utils import resolve_device_id
 
 # Note: ModelLoader now solely interacts with GPUs.  All loading paths
-# go through the unified `checkpoint_store.load_model()` API.  Legacy
+# go through the unified `store_engine.load_model()` API.  Legacy
 # helpers that targeted CPU have been removed for clarity.
 from .metrics import (
     MODEL_LOAD_DURATION,
@@ -90,7 +90,7 @@ class MemoryHandle:
     """
 
     handle_bytes: bytes  # The CUDA IPC handle owned by the daemon
-    gpu_ptr: int  # Base GPU pointer returned by CheckpointStore
+    gpu_ptr: int  # Base GPU pointer returned by StoreEngine
 
 
 TFunc = TypeVar("TFunc", bound=Callable[..., int])
@@ -148,13 +148,13 @@ class ModelLoader:
         ----------
         servicer:
             The owning :class:`StoreDaemonServicer` instance that provides
-            access to shared resources such as the ``checkpoint_store`` and
+            access to shared resources such as the ``store_engine`` and
             gRPC stubs.
         """
 
         # Keep a typed reference to the parent servicer
         self.servicer: "StoreDaemonServicer" = servicer
-        self.checkpoint_store = servicer.checkpoint_store
+        self.store_engine = servicer.store_engine
         self.global_store_stub = servicer.global_store_stub
         # Thread pool for async loading operations
         self._async_executor = ThreadPoolExecutor(
@@ -242,7 +242,7 @@ class ModelLoader:
             future.set_result(False)
             return False, None, future
 
-        # Call the C++ CheckpointStore.prepare() API directly – Python no longer
+        # Call the C++ StoreEngine.prepare() API directly – Python no longer
         # needs the `_load_with_fallback` wrapper now that all source-selection
         # logic has moved into C++.
 
@@ -267,7 +267,7 @@ class ModelLoader:
                 and isinstance(model_id_input, str)
                 and model_id_input.startswith("mi2:")
             ):
-                model_handle = self.checkpoint_store.prepare(
+                model_handle = self.store_engine.prepare(
                     target_device_spec,
                     _cs.PrepareMode.AUTO,
                     pinned_timeout_ms=(
@@ -279,7 +279,7 @@ class ModelLoader:
                 )
             else:
                 # Local-only path: load from disk explicitly.
-                model_handle = self.checkpoint_store.prepare(
+                model_handle = self.store_engine.prepare(
                     target_device_spec,
                     _cs.PrepareMode.LOAD_ONLY,
                     pinned_timeout_ms=(
@@ -311,7 +311,7 @@ class ModelLoader:
             success, wait_fn, source_type = True, _wait_wrapper, "auto"
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "CheckpointStore.prepare failed for %s: %s", request.model_path, exc
+                "StoreEngine.prepare failed for %s: %s", request.model_path, exc
             )
             success, mem_handle, wait_fn, source_type = False, None, None, "error"
 

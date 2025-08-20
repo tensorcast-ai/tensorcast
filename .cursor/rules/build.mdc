@@ -47,7 +47,7 @@ python -m pytest tests/python/test_name
 
 ### Python Extension (`BUILD_EXTENSION=1`)
 - **Location**: `/scstore/csrc/` directory
-- **Output**: `scstore._checkpoint_store`, `scstore._C`
+- **Output**: `scstore._store_engine`, `scstore._C`
 - **Purpose**: Python bindings for C++ core
 
 ### Fake CUDA Backend (`USE_FAKE_CUDA=1`)

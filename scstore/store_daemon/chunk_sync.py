@@ -34,7 +34,7 @@ class ChunkSyncWorker:
         """Initialize the chunk sync worker.
 
         Args:
-            servicer: StoreDaemon servicer instance to access checkpoint store
+            servicer: StoreDaemon servicer instance to access Store Engine
             global_store_address: Address of the Global Store service
             sync_interval_seconds: How often to sync chunk states (default 50ms)
             batch_size: Maximum number of chunk updates per RPC
@@ -116,7 +116,7 @@ class ChunkSyncWorker:
 
     def _perform_sync(self) -> None:
         """Perform one synchronization cycle."""
-        if not self.servicer.checkpoint_store:
+        if not self.servicer.store_engine:
             return
 
         # Get current chunk states from all models
@@ -163,7 +163,7 @@ class ChunkSyncWorker:
         self._last_chunk_states = current_states
 
     def _get_all_chunk_states(self) -> dict[str, dict[int, int]]:
-        """Get chunk states for all models from checkpoint store.
+        """Get chunk states for all models from Store Engine.
 
         Returns:
             Dictionary mapping model_id -> chunk_idx -> state
@@ -178,7 +178,7 @@ class ChunkSyncWorker:
                 model_path = str(model_info.get("model_id", ""))
                 model_id = self._extract_model_id(model_path)
 
-                # TODO: Replace placeholder with actual checkpoint_store snapshot
+                # TODO: Replace placeholder with actual store_engine snapshot
                 result[model_id] = {}
 
         return result

@@ -210,8 +210,8 @@ def test_remote_load_between_two_daemons(global_store_service):
         worker_resp_a = global_store_service.RegisterWorker(worker_req_a, ctx)
         assert worker_resp_a.status == global_store_pb2.Status.OK
 
-        # Export remote memory keys from daemon A's checkpoint store for P2P
-        from scstore import _checkpoint_store as _cs
+        # Export remote memory keys from daemon A's Store Engine for P2P
+        from scstore import _store_engine as _cs
 
         dev = _cs.DeviceKey()
         dev.type = _cs.DeviceType.GPU
@@ -223,7 +223,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         inst_key.device = dev
         inst_key.replica = 0
 
-        comm_info = daemon_a.checkpoint_store.enable_remote_instance_access(
+        comm_info = daemon_a.store_engine.enable_remote_instance_access(
             inst_key, _cs.ModelLocation.GPU
         )
 

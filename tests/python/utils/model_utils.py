@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 __all__ = ["create_dummy_model", "create_dummy_safetensors_model"]
 
@@ -10,7 +11,7 @@ __all__ = ["create_dummy_model", "create_dummy_safetensors_model"]
 def create_dummy_model(storage_root: Path, disk_path: str, size_bytes: int = 1 * 1024 * 1024) -> None:
     """Create a minimal on-disk representation of a model for unit-tests.
 
-    The native C++ ``CheckpointStore`` expects each model to live in its own
+    The native C++ ``StoreEngine`` expects each model to live in its own
     directory containing one or more *tensor.data_* shards.  For Python tests
     we only need a single, tiny shard so that the directory is considered a
     valid model location by the underlying implementation.
@@ -18,7 +19,7 @@ def create_dummy_model(storage_root: Path, disk_path: str, size_bytes: int = 1 *
     Parameters
     ----------
     storage_root:
-        Root directory configured for the local ``CheckpointStore`` instance.
+        Root directory configured for the local ``StoreEngine`` instance.
     disk_path:
         Relative on-disk path used for legacy/disk-based loading (sub-directory name).
     size_bytes:
@@ -30,18 +31,48 @@ def create_dummy_model(storage_root: Path, disk_path: str, size_bytes: int = 1 *
     model_dir.mkdir(parents=True, exist_ok=True)
 
     tensor_file = model_dir / "tensor.data_0"
-    # Keep the fixture idempotent – skip recreation if the file already exists.
-    if tensor_file.exists():
-        return
-
     # Generate deterministic, non-trivial content (repeating alphabet pattern).
-    alphabet = b"abcdefghijklmnopqrstuvwxyz"
-    remaining = size_bytes
-    with tensor_file.open("wb") as fp:
-        while remaining > 0:
-            chunk = alphabet[: min(len(alphabet), remaining)]
-            fp.write(chunk)
-            remaining -= len(chunk)
+    if not tensor_file.exists():
+        alphabet = b"abcdefghijklmnopqrstuvwxyz"
+        remaining = size_bytes
+        with tensor_file.open("wb") as fp:
+            while remaining > 0:
+                chunk = alphabet[: min(len(alphabet), remaining)]
+                fp.write(chunk)
+                remaining -= len(chunk)
+
+    # Write a minimal canonical tensor index required by the C++ DiskLoader
+    index_path = model_dir / "tensor_index.json"
+    if not index_path.exists():
+        index_obj = {
+            "__dummy__": [
+                0,  # offset
+                int(size_bytes),  # size
+                [],  # shape
+                [],  # stride
+                "torch.uint8",  # dtype
+                0,  # storage_offset
+            ]
+        }
+        with index_path.open("w") as fp:
+            json.dump(index_obj, fp)
+
+    # Write a minimal model descriptor with required fields only
+    descriptor_path = model_dir / "model_descriptor.json"
+    if not descriptor_path.exists():
+        # Only required keys are validated by DiskLoader at this stage.
+        # Keep values simple/placeholders to avoid heavy hashing in tests.
+        descriptor = {
+            "model_id": str(disk_path),
+            "index_multihash": "mh:dummy_index",
+            "data_multihash": "mh:dummy_data",
+            # Helpful extras for completeness
+            "schema_version": "1",
+            "encoding": "raw",
+            "total_size": int(size_bytes),
+        }
+        with descriptor_path.open("w") as fp:
+            json.dump(descriptor, fp)
 
 
 def create_dummy_safetensors_model(storage_root: Path, disk_path: str) -> None:

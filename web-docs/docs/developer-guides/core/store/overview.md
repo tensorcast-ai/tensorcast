@@ -25,7 +25,7 @@ The Core Store module is the core storage engine of StepCast Store, responsible 
 ```mermaid
 graph TB
     subgraph "Core Store Module"
-        CS[CheckpointStore]
+        CS[StoreEngine]
         M[Model]
         MM[MemoryManager]
 
@@ -67,7 +67,7 @@ graph TB
 
 ## Module Responsibilities
 
-### CheckpointStore
+### StoreEngine
 - **Responsibility**: Serves as the external interface for the entire storage system
 - **Functions**:
   - Manage multiple model instances

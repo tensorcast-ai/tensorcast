@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// Rewritten tests for CheckpointStore using the new multi-device `prepare()` API.
+// Rewritten tests for StoreEngine using the new multi-device `prepare()` API.
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
@@ -10,16 +10,16 @@
 
 #include "absl/status/status.h"
 #include "absl/time/time.h"
-#include "core/store/checkpoint_store.h"
-#include "core/store/checkpoint_store_options.h"
+#include "core/store/store_engine.h"
+#include "core/store/store_engine_options.h"
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
 using stepcast::DeviceType;
-using stepcast::store::CheckpointStore;
-using stepcast::store::CheckpointStoreOptions;
 using stepcast::store::DeviceKey;
 using stepcast::store::InstanceKey;
+using stepcast::store::StoreEngine;
+using stepcast::store::StoreEngineOptions;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper utilities
@@ -27,18 +27,18 @@ using stepcast::store::InstanceKey;
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
 }
-static CheckpointStore make_store(
+static StoreEngine make_store(
     const fs::path& storage_root,
     size_t pool_size_bytes = 32ULL * 1024 * 1024,
     size_t chunk_size_bytes = 64ULL * 1024,
     int io_threads = 2) {
-  CheckpointStoreOptions opts;
+  StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_bytes;
   opts.chunk_size = chunk_size_bytes;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
-  return CheckpointStore(opts);
+  return StoreEngine(opts);
 }
 static absl::Status wait_ready(stepcast::store::ModelHandle& handle, absl::Duration timeout = absl::Seconds(60)) {
   return handle.wait_ready(std::chrono::milliseconds(absl::ToInt64Milliseconds(timeout)));
@@ -47,12 +47,12 @@ static absl::Status wait_ready(stepcast::store::ModelHandle& handle, absl::Durat
 // ─────────────────────────────────────────────────────────────────────────────
 // Test case 1: Basic CPU → GPU workflow using prepare()
 // ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("CheckpointStore prepare() GPU workflow", "[checkpoint_store][prepare][cpu][gpu]") {
+TEST_CASE("StoreEngine prepare() GPU workflow", "[store_engine][prepare][cpu][gpu]") {
   const std::string model_id = "dummy_model";
   const size_t model_size = 1 * 1024 * 1024; // 1 MiB
 
   // Create temporary directory and dummy model file
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_prepare_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_prepare_test";
   fs::create_directories(temp_root);
   fs::path model_dir = temp_root / model_id;
   fs::create_directories(model_dir);
@@ -61,13 +61,13 @@ TEST_CASE("CheckpointStore prepare() GPU workflow", "[checkpoint_store][prepare]
   // RFC-0007: standard partitions require descriptor and canonical index
   REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_dir).ok());
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
   // Load to GPU (Now only GPU is supported)
   REQUIRE(stepcast::tests::is_cuda_available());
   stepcast::store::LoadingHints hints;
   hints.disk_path = model_id;
-  auto gpu_handle_or = store.prepare(make_gpu_key(0), stepcast::store::CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto gpu_handle_or = store.prepare(make_gpu_key(0), stepcast::store::StoreEngine::PrepareMode::LOAD_ONLY, hints);
   REQUIRE(gpu_handle_or.ok());
   auto gpu_handle = std::move(gpu_handle_or).value();
   REQUIRE(wait_ready(gpu_handle).ok());
@@ -87,7 +87,7 @@ TEST_CASE("CheckpointStore prepare() GPU workflow", "[checkpoint_store][prepare]
 // ─────────────────────────────────────────────────────────────────────────────
 // Test case 2: Query helpers after prepare()
 // ─────────────────────────────────────────────────────────────────────────────
-TEST_CASE("CheckpointStore helper queries after prepare()", "[checkpoint_store][prepare][status]") {
+TEST_CASE("StoreEngine helper queries after prepare()", "[store_engine][prepare][status]") {
   if (!stepcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping status tests with prepare().");
     return;
@@ -96,7 +96,7 @@ TEST_CASE("CheckpointStore helper queries after prepare()", "[checkpoint_store][
   const std::string model_id = "status_model";
   const size_t model_size = 2 * 1024 * 1024; // 2 MiB
 
-  fs::path temp_root = fs::temp_directory_path() / "checkpoint_store_prepare_status_test";
+  fs::path temp_root = fs::temp_directory_path() / "store_engine_prepare_status_test";
   fs::create_directories(temp_root);
   fs::path model_dir = temp_root / model_id;
   fs::create_directories(model_dir);
@@ -105,14 +105,13 @@ TEST_CASE("CheckpointStore helper queries after prepare()", "[checkpoint_store][
   // RFC-0007: standard partitions require descriptor and canonical index
   REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_model_dir(model_dir).ok());
 
-  CheckpointStore store = make_store(temp_root);
+  StoreEngine store = make_store(temp_root);
 
   // Load to GPU.
   {
     stepcast::store::LoadingHints hints2;
     hints2.disk_path = model_id;
-    auto gpu_handle_or =
-        store.prepare(make_gpu_key(0), stepcast::store::CheckpointStore::PrepareMode::LOAD_ONLY, hints2);
+    auto gpu_handle_or = store.prepare(make_gpu_key(0), stepcast::store::StoreEngine::PrepareMode::LOAD_ONLY, hints2);
     REQUIRE(gpu_handle_or.ok());
     auto gpu_handle = std::move(gpu_handle_or).value();
     REQUIRE(wait_ready(gpu_handle).ok());

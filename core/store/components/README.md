@@ -1,13 +1,13 @@
-# CheckpointStore Refactoring
+# StoreEngine Refactoring
 
-This directory contains the modular components that make up the refactored CheckpointStore implementation.
+This directory contains the modular components that make up the refactored StoreEngine implementation.
 
 ## Architecture Overview
 
 The refactored design separates concerns into focused components:
 
 ```
-CheckpointStore (Main API)
+StoreEngine (Main API)
     ├── DeviceManager       - GPU device discovery and management
     ├── ModelRegistry       - Thread-safe model storage and lifecycle
     ├── MetricsCollector    - Centralized metrics collection

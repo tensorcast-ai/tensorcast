@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// CheckpointStore stress tests (C-series)
+// StoreEngine stress tests (C-series)
 // Long-running stress tests with randomized operations.
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,7 +19,7 @@
 #include "core/common/cuda_api.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::checkpoint_store;
+using namespace stepcast::tests::store_engine;
 using namespace stepcast::store;
 using stepcast::DeviceType;
 
@@ -165,7 +165,7 @@ class StressWorker {
  public:
   StressWorker(
       int id,
-      CheckpointStore* store,
+      StoreEngine* store,
       const StressConfig& config,
       const std::vector<std::string>& model_ids,
       std::filesystem::path storage_root,
@@ -219,7 +219,7 @@ class StressWorker {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle_or = store_->prepare(make_gpu_key(gpu_ordinal), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store_->prepare(make_gpu_key(gpu_ordinal), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(5000));
@@ -409,7 +409,7 @@ class StressWorker {
     return dist(rng_);
   }
 
-  CheckpointStore* store_;
+  StoreEngine* store_;
   const StressConfig& config_;
   const std::vector<std::string>& model_ids_;
   const std::filesystem::path storage_root_;
@@ -418,7 +418,7 @@ class StressWorker {
 };
 
 // C1: Basic stress test with mixed operations
-TEST_CASE("C1: Basic stress test", "[checkpoint_store][stress][c1]") {
+TEST_CASE("C1: Basic stress test", "[store_engine][stress][c1]") {
   skip_if_no_cuda("C1");
 
   StressConfig config;
@@ -486,7 +486,7 @@ TEST_CASE("C1: Basic stress test", "[checkpoint_store][stress][c1]") {
 }
 
 // C2: Heavy concurrent load stress test
-TEST_CASE("C2: Heavy concurrent load", "[checkpoint_store][stress][c2]") {
+TEST_CASE("C2: Heavy concurrent load", "[store_engine][stress][c2]") {
   skip_if_no_cuda("C2");
 
   StressConfig config;
@@ -576,7 +576,7 @@ TEST_CASE("C2: Heavy concurrent load", "[checkpoint_store][stress][c2]") {
 }
 
 // C3: Memory pressure stress test
-TEST_CASE("C3: Memory pressure stress", "[checkpoint_store][stress][c3]") {
+TEST_CASE("C3: Memory pressure stress", "[store_engine][stress][c3]") {
   skip_if_no_cuda("C3");
 
   StressConfig config;
@@ -649,7 +649,7 @@ TEST_CASE("C3: Memory pressure stress", "[checkpoint_store][stress][c3]") {
 }
 
 // C4: Multi-GPU stress test
-TEST_CASE("C4: Multi-GPU stress", "[checkpoint_store][stress][c4][multi_gpu]") {
+TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   skip_if_insufficient_gpus(2, "C4");
 
   StressConfig config;

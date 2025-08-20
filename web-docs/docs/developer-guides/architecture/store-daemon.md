@@ -24,7 +24,7 @@ graph TD
     end
 
     subgraph "C++ Core"
-        CppCore[CheckpointStore<br/>checkpoint_store.h]
+        CppCore[StoreEngine<br/>store_engine.h]
         CppCore --> PinnedMemPool[Pinned Memory Pool]
         CppCore --> CommEngine[Communicator Engine]
     end
@@ -45,7 +45,7 @@ graph TD
 | **ConnectionManager** | `connection_manager.py` | Manages registration, heartbeats, and state sync with Global Store (HA) |
 | **HealthCheckServer** | `health_check.py` | HTTP endpoints for health monitoring |
 | **Metrics** | `metrics.py` | Centralised Prometheus counter/gauge/histogram definitions |
-| **CkptCollector** | `ckpt_collector.py` | Bridges C++ CheckpointStore metrics into the Python registry |
+| **CkptCollector** | `ckpt_collector.py` | Bridges C++ StoreEngine metrics into the Python registry |
 
 ## Key Workflows
 
@@ -59,7 +59,7 @@ sequenceDiagram
     participant Servicer
     participant ModelLoader
     participant ReplicaManager
-    participant CppCore as CheckpointStore (C++)
+    participant CppCore as StoreEngine (C++)
 
     Client->>Servicer: 1. LoadModel(model_path, replica_uuid)
     Servicer->>ModelLoader: start_async_load()
@@ -79,7 +79,7 @@ sequenceDiagram
 ```
 
 **Phase 1 - LoadModel**:
-- Non-blocking memory allocation performed inside the C++ `CheckpointStore`
+- Non-blocking memory allocation performed inside the C++ `StoreEngine`
 - Attempts **remote P2P transfer** first (via Global-Store/CommunicationManager) and automatically falls back to local disk if no eligible replicas are available
 - Immediately returns a CUDA IPC handle together with a `Future` that tracks the background data transfer
 
@@ -150,7 +150,7 @@ graph LR
 ## C++ Core Integration
 
 ### Python Bindings
-The C++ core is exposed via pybind11 (`scstore/csrc/checkpoint_store_py.cc`):
+The C++ core is exposed via pybind11 (`scstore/csrc/store_engine_py.cc`):
 
 ```cpp
 // Key exports to Python
@@ -159,19 +159,19 @@ py::enum_<ModelLocation>(m, "ModelLocation")
     .value("GPU", ModelLocation::GPU)
     .value("REMOTE", ModelLocation::REMOTE);
 
-py::class_<CheckpointStore>(m, "CheckpointStore")
-    .def("prepare", &CheckpointStore::prepare)
-    .def("unload_instance", &CheckpointStore::unload_instance)
-    .def("wait_instance_ready", &CheckpointStore::wait_instance_ready);
+py::class_<StoreEngine>(m, "StoreEngine")
+    .def("prepare", &StoreEngine::prepare)
+    .def("unload_instance", &StoreEngine::unload_instance)
+    .def("wait_instance_ready", &StoreEngine::wait_instance_ready);
 ```
 
-### CheckpointStore Architecture
+### StoreEngine Architecture
 
-The C++ `CheckpointStore` manages high-performance operations:
+The C++ `StoreEngine` manages high-performance operations:
 
 ```mermaid
 graph TD
-    CS[CheckpointStore] --> MR[ModelRegistry<br/>Model lifecycle]
+    CS[StoreEngine] --> MR[ModelRegistry<br/>Model lifecycle]
     CS --> DM[DeviceManager<br/>GPU management]
     CS --> CM[CommunicationManager<br/>P2P transfers]
     CS --> MC[MetricsCollector<br/>Performance metrics]
@@ -315,10 +315,10 @@ Key metrics exposed:
 
 ### C++ Extensions
 
-1. **Add to CheckpointStore**:
+1. **Add to StoreEngine**:
    ```cpp
-   // In checkpoint_store.h
-   class CheckpointStore {
+   // In store_engine.h
+   class StoreEngine {
    public:
        Result NewOperation(const Params& params);
    };
@@ -326,13 +326,13 @@ Key metrics exposed:
 
 2. **Expose via pybind11**:
    ```cpp
-   // In checkpoint_store_py.cc
-   .def("new_operation", &CheckpointStore::NewOperation)
+   // In store_engine_py.cc
+   .def("new_operation", &StoreEngine::NewOperation)
    ```
 
 3. **Use from Python**:
    ```python
-   result = self.checkpoint_store.new_operation(params)
+   result = self.store_engine.new_operation(params)
    ```
 
 ## Testing
@@ -342,7 +342,7 @@ Key metrics exposed:
 pytest tests/python/store_daemon/ -v
 
 # C++ tests
-./build/tests/test_checkpoint_store
+./build/tests/test_store_engine
 
 # Integration tests
 pytest tests/integration/test_store_daemon_e2e.py

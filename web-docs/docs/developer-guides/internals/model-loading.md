@@ -17,7 +17,7 @@ This diagram shows the complete model loading workflow in StepCast Store, includ
 
 - **LocalStoreDaemon**: Python + CXX EXT
   - Python entrypoint: `store_daemon.py::StoreDaemonServicer`
-  - CXX: `checkpoint_store_py.cc`
+  - CXX: `store_engine_py.cc`
 
 - **GlobalStore**: Python
   - Entrypoint: `global_store.py::GlobalModelStoreServicer`
@@ -35,7 +35,7 @@ sequenceDiagram
     participant JuiceFS
 
     InferenceInstance->>LocalStoreDaemon: 0. Malloc CUDA Memory
-    Note right of InferenceInstance: Local: checkpoint_store.py::allocate_cuda_memory
+    Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
     InferenceInstance->>LocalStoreDaemon: 1. Request ModelWeight<br/>with CUDA IPC
     Note left of LocalStoreDaemon: RPC: LoadModel

@@ -81,7 +81,7 @@ struct LoadingHints {
 
   // Hint: Prefer loading the model into the Pageable-Chunk CPU Cache (UPC-Cache)
   // instead of the traditional pinned host memory path. When set to true the
-  // CheckpointStore and Loader pipeline should attempt to allocate the model
+  // StoreEngine and Loader pipeline should attempt to allocate the model
   // in PAGEABLE_CPU memory if the underlying components support it.
   bool prefer_pageable_cpu{false};
 

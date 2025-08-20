@@ -25,7 +25,7 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 # Build and run tests
 # Tests are now colocated with their implementation
 # Examples:
-tools/bazel test //core/store:checkpoint_store_test
+tools/bazel test //core/store:store_engine_test
 tools/bazel test //core/communicator/engine:tcp_engine_test
 tools/bazel test //core/store/loader:disk_loader_streaming_buffer_test
 ```
@@ -39,7 +39,7 @@ USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
 # Example for specific component tests:
-tools/bazel test //core/store:checkpoint_store_test --define use_fake_cuda=true
+tools/bazel test //core/store:store_engine_test --define use_fake_cuda=true
 tools/bazel test //core/communicator/engine:gpu_ce_test --define use_fake_cuda=true
 ```
 
@@ -106,7 +106,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 
 ### Key Directories
 - `/core/checkpoint/`: Streaming tensor serialization with GPU-to-disk optimization
-- `/core/store/`: Model lifecycle management and memory optimization. **The checkpoint store used by ModelLoader/StoreDaemon is implemented in C++ at `core/store/checkpoint_store.h` with Python bindings at `scstore/csrc/checkpoint_store_py.cc`**.
+- `/core/store/`: Model lifecycle management and memory optimization. **The Store Engine used by ModelLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `scstore/csrc/store_engine_py.cc`**.
 - `/core/communicator/`: RDMA/TCP communication engines
 - `/scstore/global_store/`: Centralized metadata registry with DuckDB backend
 - `/scstore/store_daemon/`: Local model storage service
@@ -296,7 +296,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 #### Development Environment
 - use `uv run xxx.py` to run python scripts instead of `python xxx.py`
 - use `uv run pytest tests/python/xxxx` to run python tests
-- use `bazel test //core/component:xxx_test` to run cxx tests (e.g., `bazel test //core/store:checkpoint_store_test`)
+- use `bazel test //core/component:xxx_test` to run cxx tests (e.g., `bazel test //core/store:store_engine_test`)
 
 #### Core Principles
 - **Functional programming**: Prefer functional, declarative style over classes where possible

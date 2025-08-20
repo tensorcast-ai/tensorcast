@@ -6,23 +6,23 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 import torch  # noqa: F401
-import scstore._checkpoint_store as _cs
+import scstore._store_engine as _cs
 
 from scstore.store_daemon.ckpt_collector import (
-    CheckpointStoreCollector,
+    StoreEngineCollector,
     GlobalMetricsCollector,
 )
 
 
-@pytest.mark.skipif(_cs is None, reason="C++ CheckpointStore extension not available")
+@pytest.mark.skipif(_cs is None, reason="C++ StoreEngine extension not available")
 def test_global_metrics_export() -> None:  # noqa: D401
     """Ensure global metrics function works correctly."""
 
-    # Create a minimal CheckpointStore to populate some metrics
+    # Create a minimal StoreEngine to populate some metrics
     storage_path = Path("/tmp/test_metrics")
     storage_path.mkdir(exist_ok=True)
 
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_path),
         "memory_pool_size": 1 * 1024 * 1024,
         "num_thread": 1,
@@ -45,17 +45,17 @@ def test_global_metrics_export() -> None:  # noqa: D401
     assert "# TYPE" in text  # Should have type annotations
 
 
-@pytest.mark.skipif(_cs is None, reason="C++ CheckpointStore extension not available")
-def test_checkpoint_store_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
+@pytest.mark.skipif(_cs is None, reason="C++ StoreEngine extension not available")
+def test_store_engine_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
     """Ensure C++ metrics are exported and parsed by the Python collector."""
 
     # ------------------------------------------------------------------
-    # Arrange – create a minimal CheckpointStore (no RDMA, tiny mem pool)
+    # Arrange – create a minimal StoreEngine (no RDMA, tiny mem pool)
     # ------------------------------------------------------------------
     storage_path = tmp_path / "models"
     storage_path.mkdir()
 
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_path),
         "memory_pool_size": 1 * 1024 * 1024,
         "num_thread": 1,
@@ -89,7 +89,7 @@ def test_checkpoint_store_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D40
     for metric in python_metric_objects:
         registry.register(metric)
 
-    # 3. Register the global metrics collector (no longer needs checkpoint_store)
+    # 3. Register the global metrics collector (no longer needs store_engine)
     registry.register(GlobalMetricsCollector())
 
     # 4. Scrape metrics snapshot
@@ -150,14 +150,14 @@ def test_checkpoint_store_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D40
     assert has_labelled_sample, "collector failed to attach labels to sample"
 
 
-@pytest.mark.skipif(_cs is None, reason="C++ CheckpointStore extension not available")
+@pytest.mark.skipif(_cs is None, reason="C++ StoreEngine extension not available")
 def test_backward_compatibility() -> None:  # noqa: D401
-    """Ensure CheckpointStoreCollector still works for backward compatibility."""
+    """Ensure StoreEngineCollector still works for backward compatibility."""
 
     storage_path = Path("/tmp/test_compat")
     storage_path.mkdir(exist_ok=True)
 
-    cs = _cs.create_checkpoint_store({
+    cs = _cs.create_store_engine({
         "storage_path": str(storage_path),
         "memory_pool_size": 1024,
         "num_thread": 1,
@@ -167,8 +167,8 @@ def test_backward_compatibility() -> None:  # noqa: D401
         "pinned_memory_timeout_ms": 0,
     })
 
-    # Old API should still work (checkpoint_store param is ignored)
-    collector = CheckpointStoreCollector(cs)
+    # Old API should still work (store_engine param is ignored)
+    collector = StoreEngineCollector(cs)
 
     # Should be able to collect metrics
     families = list(collector.collect())

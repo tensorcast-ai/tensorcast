@@ -22,9 +22,9 @@ from scstore.store_daemon.config import StoreDaemonConfig, LifecycleConfig, Serv
 from scstore.store_daemon.servicer import StoreDaemonServicer
 
 # -----------------------------------------------------------------------------
-# Use FakeCheckpointStore for all tests instead of scattered MagicMocks
+# Use FakeStoreEngine for all tests instead of scattered MagicMocks
 # -----------------------------------------------------------------------------
-# Note: Real CheckpointStore from `scstore._checkpoint_store` is now used directly.
+# Note: Real StoreEngine from `scstore._store_engine` is now used directly.
 
 
 class TestLifecycleIntegration:
@@ -32,7 +32,7 @@ class TestLifecycleIntegration:
 
     @pytest.fixture
     def servicer_with_mocks(self):
-        """Create a servicer with mocked checkpoint store."""
+        """Create a servicer with mocked Store Engine."""
         config = StoreDaemonConfig(
             lifecycle=LifecycleConfig(
                 proc_check_interval_s=0.1,  # Fast for testing
@@ -57,7 +57,7 @@ class TestLifecycleIntegration:
         for model_id in [f"model{i}" for i in range(5)] + [f"test_model_{i}" for i in range(3)]:
             create_dummy_model(storage_root, model_id)
 
-        # Create the servicer with the real CheckpointStore
+        # Create the servicer with the real StoreEngine
         servicer = StoreDaemonServicer(config=config)
 
         servicer.process_watcher.stop()
@@ -140,7 +140,7 @@ class TestLifecycleIntegration:
         storage_root = config.server.storage_path
         create_dummy_model(storage_root, "model1")
 
-        # Use real CheckpointStore for subprocess lifecycle test
+        # Use real StoreEngine for subprocess lifecycle test
         servicer = StoreDaemonServicer(config=config)
         servicer.process_watcher.stop()
 

@@ -6,7 +6,6 @@
 #include <pybind11/stl_bind.h>
 #include <torch/extension.h>
 #include <cstdint>
-#include <vector>
 #include "scstore/csrc/logging.h"
 #include "scstore/csrc/py_error_utils.h"
 
@@ -14,14 +13,14 @@
 #include "absl/status/statusor.h"
 #include "core/common/logging_init.h"
 #include "core/common/metrics/metrics_export.h"
-#include "core/store/checkpoint_store.h"
-#include "core/store/checkpoint_store_options.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/model/memory_state.h"
 #include "core/store/model/model_location.h"
+#include "core/store/store_engine.h"
+#include "core/store/store_engine_options.h"
 
 namespace py = pybind11;
 
@@ -102,22 +101,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       });
 
   // Bind ModelInfo struct
-  py::class_<CheckpointStore::ModelInfo>(m, "ModelInfo")
+  py::class_<StoreEngine::ModelInfo>(m, "ModelInfo")
       .def(py::init<>())
-      .def_readwrite("model_id", &CheckpointStore::ModelInfo::model_id)
-      .def_readwrite("size_bytes", &CheckpointStore::ModelInfo::size_bytes)
-      .def_readwrite("cpu_state", &CheckpointStore::ModelInfo::cpu_state)
-      .def_readwrite("gpu_state", &CheckpointStore::ModelInfo::gpu_state)
-      .def_readwrite("gpu_device_id", &CheckpointStore::ModelInfo::gpu_device_id)
-      .def_readwrite("gpu_device_uuid", &CheckpointStore::ModelInfo::gpu_device_uuid)
-      .def_readwrite("is_registered_for_comm", &CheckpointStore::ModelInfo::is_registered_for_comm)
+      .def_readwrite("model_id", &StoreEngine::ModelInfo::model_id)
+      .def_readwrite("size_bytes", &StoreEngine::ModelInfo::size_bytes)
+      .def_readwrite("cpu_state", &StoreEngine::ModelInfo::cpu_state)
+      .def_readwrite("gpu_state", &StoreEngine::ModelInfo::gpu_state)
+      .def_readwrite("gpu_device_id", &StoreEngine::ModelInfo::gpu_device_id)
+      .def_readwrite("gpu_device_uuid", &StoreEngine::ModelInfo::gpu_device_uuid)
+      .def_readwrite("is_registered_for_comm", &StoreEngine::ModelInfo::is_registered_for_comm)
       .def_property_readonly(
           "last_access_timestamp",
-          [](const CheckpointStore::ModelInfo& info) { return time_point_to_timestamp(info.last_access_time); })
+          [](const StoreEngine::ModelInfo& info) { return time_point_to_timestamp(info.last_access_time); })
       .def_property_readonly(
-          "load_timestamp",
-          [](const CheckpointStore::ModelInfo& info) { return time_point_to_timestamp(info.load_time); })
-      .def("__repr__", [](const CheckpointStore::ModelInfo& info) {
+          "load_timestamp", [](const StoreEngine::ModelInfo& info) { return time_point_to_timestamp(info.load_time); })
+      .def("__repr__", [](const StoreEngine::ModelInfo& info) {
         std::string repr = "<ModelInfo model_id='" + info.model_id +
             "', size_bytes=" + std::to_string(info.size_bytes) +
             ", cpu_state=" + std::to_string(static_cast<int>(info.cpu_state)) +
@@ -142,10 +140,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .export_values();
 
   // Bind PrepareMode enum
-  py::enum_<CheckpointStore::PrepareMode>(m, "PrepareMode")
-      .value("AUTO", CheckpointStore::PrepareMode::AUTO)
-      .value("COPY_ONLY", CheckpointStore::PrepareMode::COPY_ONLY)
-      .value("LOAD_ONLY", CheckpointStore::PrepareMode::LOAD_ONLY)
+  py::enum_<StoreEngine::PrepareMode>(m, "PrepareMode")
+      .value("AUTO", StoreEngine::PrepareMode::AUTO)
+      .value("COPY_ONLY", StoreEngine::PrepareMode::COPY_ONLY)
+      .value("LOAD_ONLY", StoreEngine::PrepareMode::LOAD_ONLY)
       .export_values();
 
   // Bind DeviceKey struct
@@ -197,13 +195,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             ", replica=" + std::to_string(k.replica) + "}";
       });
 
-  auto ckpt_cls = py::class_<CheckpointStore>(m, "CheckpointStore");
+  auto ckpt_cls = py::class_<StoreEngine>(m, "StoreEngine");
   ckpt_cls
       .def(
           "prepare",
-          [](CheckpointStore& cs,
+          [](StoreEngine& cs,
              const py::object& target_device_obj,
-             CheckpointStore::PrepareMode mode,
+             StoreEngine::PrepareMode mode,
              const py::kwargs& kwargs) {
             // Build DeviceKey from python input
             DeviceKey dev_key;
@@ -257,18 +255,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return h_or.value();
           },
           py::arg("target_device") = std::string("gpu:0"),
-          py::arg("mode") = CheckpointStore::PrepareMode::AUTO,
+          py::arg("mode") = StoreEngine::PrepareMode::AUTO,
           "Prepare a model instance on the specified device and return a ModelHandle.")
-      .def("clear_mem", &CheckpointStore::clear_mem, "Clear all allocated memory.")
-      .def("get_mem_pool_size", &CheckpointStore::get_mem_pool_size, "Get the memory pool size.")
-      .def("get_chunk_size", &CheckpointStore::get_chunk_size, "Get the chunk size.")
+      .def("clear_mem", &StoreEngine::clear_mem, "Clear all allocated memory.")
+      .def("get_mem_pool_size", &StoreEngine::get_mem_pool_size, "Get the memory pool size.")
+      .def("get_chunk_size", &StoreEngine::get_chunk_size, "Get the chunk size.")
       .def(
-          "get_available_memory",
-          &CheckpointStore::get_available_memory,
-          "Get available memory in the pinned memory pool.")
+          "get_available_memory", &StoreEngine::get_available_memory, "Get available memory in the pinned memory pool.")
       .def(
           "get_loaded_devices",
-          [](CheckpointStore& cs, const std::string& model_id) {
+          [](StoreEngine& cs, const std::string& model_id) {
             py::gil_scoped_release release;
             return cs.get_loaded_devices(model_id);
           },
@@ -276,7 +272,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Return a list of DeviceKey where the given model is loaded.")
       .def(
           "list_device_models",
-          [](CheckpointStore& cs, const DeviceKey& device) {
+          [](StoreEngine& cs, const DeviceKey& device) {
             py::gil_scoped_release release;
             return cs.list_device_models(device);
           },
@@ -284,7 +280,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Return a list of InstanceKey for models resident on the given device.")
       .def(
           "wait_instance_ready",
-          [](CheckpointStore& cs, const InstanceKey& key) {
+          [](StoreEngine& cs, const InstanceKey& key) {
             py::gil_scoped_release release;
             return cs.wait_instance_ready(key);
           },
@@ -292,7 +288,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Block until the instance becomes ready. Returns 0 on success.")
       .def(
           "unload_instance",
-          [](CheckpointStore& cs, const InstanceKey& key) {
+          [](StoreEngine& cs, const InstanceKey& key) {
             py::gil_scoped_release release;
             return cs.unload_instance(key);
           },
@@ -300,7 +296,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Unload the specified model instance from memory.")
       .def(
           "get_instance_state",
-          [](CheckpointStore& cs, const InstanceKey& key, DeviceType mem_type) {
+          [](StoreEngine& cs, const InstanceKey& key, DeviceType mem_type) {
             py::gil_scoped_release release;
             return cs.get_instance_state(key, mem_type);
           },
@@ -309,7 +305,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Get the MemoryState of the specified instance and memory type.")
       .def(
           "get_instance_gpu_ptr",
-          [](CheckpointStore& cs, const InstanceKey& key) {
+          [](StoreEngine& cs, const InstanceKey& key) {
             absl::StatusOr<uint64_t> ptr_or;
             {
               py::gil_scoped_release release;
@@ -324,7 +320,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Return the base GPU address for the given instance.")
       .def(
           "enable_remote_instance_access",
-          [](CheckpointStore& cs, const InstanceKey& key, ModelLocation loc) {
+          [](StoreEngine& cs, const InstanceKey& key, ModelLocation loc) {
             absl::StatusOr<CommRegistrationInfo> info_or;
             {
               py::gil_scoped_release release;
@@ -340,7 +336,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Enable remote memory access for the given instance and return registration info.")
       .def(
           "disable_remote_instance_access",
-          [](CheckpointStore& cs, const InstanceKey& key, ModelLocation loc) {
+          [](StoreEngine& cs, const InstanceKey& key, ModelLocation loc) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -356,8 +352,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Disable remote memory access for the given instance.")
       .def(
           "begin_register_tensor_dict",
-          [](CheckpointStore& cs, const py::dict& reg_dict) {
-            CheckpointStore::TensorDictRegistration reg;
+          [](StoreEngine& cs, const py::dict& reg_dict) {
+            StoreEngine::TensorDictRegistration reg;
             auto get_uint32 = [&](const char* key, uint32_t fb) -> uint32_t {
               if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
                 return reg_dict[key].cast<uint32_t>();
@@ -405,7 +401,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             reg.enable_p2p = get_bool("enable_p2p", true);
             reg.ttl_ms = get_uint32("ttl_ms", 0);
 
-            absl::StatusOr<CheckpointStore::RegistrationBeginResult> out_or;
+            absl::StatusOr<StoreEngine::RegistrationBeginResult> out_or;
             {
               py::gil_scoped_release release;
               out_or = cs.begin_register_tensor_dict(reg);
@@ -427,8 +423,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Begin registering an in-memory tensor dict and return CUDA IPC handle bytes.")
       .def(
           "commit_registered_tensor_dict",
-          [](CheckpointStore& cs, const std::string& registration_id) {
-            absl::StatusOr<CheckpointStore::RegistrationCommitResult> ok_or;
+          [](StoreEngine& cs, const std::string& registration_id) {
+            absl::StatusOr<StoreEngine::RegistrationCommitResult> ok_or;
             {
               py::gil_scoped_release release;
               ok_or = cs.commit_registered_tensor_dict(registration_id);
@@ -453,7 +449,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Commit a pending tensor dict registration.")
       .def(
           "abort_registered_tensor_dict",
-          [](CheckpointStore& cs, const std::string& registration_id) {
+          [](StoreEngine& cs, const std::string& registration_id) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -468,7 +464,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Abort a pending tensor dict registration and release memory.")
       .def(
           "lock_chunks",
-          [](CheckpointStore& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices) {
+          [](StoreEngine& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -484,7 +480,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Lock chunks for H2D or P2P transfer to prevent concurrent eviction.")
       .def(
           "unlock_chunks",
-          [](CheckpointStore& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices, bool copied_gpu) {
+          [](StoreEngine& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices, bool copied_gpu) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -499,14 +495,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("chunk_indices"),
           py::arg("copied_gpu"),
           "Unlock chunks after H2D or P2P transfer completion.")
-      .def("__repr__", [](const CheckpointStore& /*cs*/) { return "<CheckpointStore>"; })
+      .def("__repr__", [](const StoreEngine& /*cs*/) { return "<StoreEngine>"; })
       .def(
-          "get_all_models_info",
-          &CheckpointStore::get_all_models_info,
-          "Get detailed information about all loaded models.")
+          "get_all_models_info", &StoreEngine::get_all_models_info, "Get detailed information about all loaded models.")
       .def(
           "get_gpu_memory_stats",
-          [](CheckpointStore& /*cs*/) {
+          [](StoreEngine& /*cs*/) {
             // Query GPU memory stats via Python torch.cuda API.
             // Returns a list where each element is a (total, free) tuple for a device.
             namespace py = pybind11;
@@ -549,13 +543,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // ------------------------------------------------------------------
   // Phase-2: factory function accepting a Python dict and constructing a
-  // CheckpointStore via the new CheckpointStoreOptions structure.  This API
+  // StoreEngine via the new StoreEngineOptions structure.  This API
   // is opt-in so that existing callers continue to work without changes.
   // ------------------------------------------------------------------
   m.def(
-      "create_checkpoint_store",
+      "create_store_engine",
       [](py::dict cfg) {
-        CheckpointStoreOptions opts;
+        StoreEngineOptions opts;
 
         auto get_or = [&cfg](const char* key, auto default_val) {
           if (cfg.contains(key) && !cfg[key].is_none()) {
@@ -586,10 +580,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         }
 
         py::gil_scoped_release release;
-        return std::make_unique<CheckpointStore>(opts);
+        return std::make_unique<StoreEngine>(opts);
       },
       py::arg("config"),
-      R"pbdoc(Create a CheckpointStore from a configuration dict.
+      R"pbdoc(Create a StoreEngine from a configuration dict.
 
 Expected keys (all optional):
     storage_path: str
@@ -604,7 +598,7 @@ Missing keys fall back to sensible defaults.)pbdoc");
 
   // ------------------------------------------------------------------
   // Phase-3: Bind CommunicationManager so that Python can create and pass a
-  // single communication instance to multiple CheckpointStore objects.
+  // single communication instance to multiple StoreEngine objects.
   // ------------------------------------------------------------------
 
   py::class_<stepcast::store::CommunicationManager, std::shared_ptr<stepcast::store::CommunicationManager>>(
@@ -627,7 +621,7 @@ Missing keys fall back to sensible defaults.)pbdoc");
           py::arg("enable_rdma") = false,
           R"pbdoc(Create and initialize a CommunicationManager that wraps a
 shared CommunicateEngine. Use this instance to inject the engine into
-CheckpointStoreOptions so multiple CheckpointStore objects share the same
+StoreEngineOptions so multiple StoreEngine objects share the same
 transport layer.)pbdoc")
       .def(
           "is_enabled",

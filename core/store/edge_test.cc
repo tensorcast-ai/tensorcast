@@ -1,6 +1,6 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
-// CheckpointStore edge case tests (E-series)
+// StoreEngine edge case tests (E-series)
 // Test error conditions, invalid inputs, and boundary cases.
 
 #include <catch2/catch_test_macros.hpp>
@@ -9,17 +9,17 @@
 #include <thread>
 
 #include "absl/status/status.h"
-#include "core/store/checkpoint_store_options.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/concurrency_utils.h"
+#include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
-using namespace stepcast::tests::checkpoint_store;
+using namespace stepcast::tests::store_engine;
 using namespace stepcast::store;
-using stepcast::store::CheckpointStore;
+using stepcast::store::StoreEngine;
 
 // E1: Invalid device ordinal
-TEST_CASE("E1: Invalid device ordinal", "[checkpoint_store][edge][e1]") {
+TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
   const std::string model_id = "edge_model_e1";
   const size_t model_size = 10 * 1024 * 1024; // 10MB
 
@@ -34,7 +34,7 @@ TEST_CASE("E1: Invalid device ordinal", "[checkpoint_store][edge][e1]") {
 
     hints.disk_path = model_id;
     auto neg_handle =
-        store->prepare(DeviceKey{stepcast::DeviceType::GPU, -1, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+        store->prepare(DeviceKey{stepcast::DeviceType::GPU, -1, ""}, StoreEngine::PrepareMode::AUTO, hints);
     REQUIRE(!neg_handle.ok());
     REQUIRE(neg_handle.status().code() == absl::StatusCode::kInvalidArgument);
   }
@@ -45,7 +45,7 @@ TEST_CASE("E1: Invalid device ordinal", "[checkpoint_store][edge][e1]") {
 
     hints.disk_path = model_id;
     auto large_handle =
-        store->prepare(DeviceKey{stepcast::DeviceType::GPU, 999, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+        store->prepare(DeviceKey{stepcast::DeviceType::GPU, 999, ""}, StoreEngine::PrepareMode::AUTO, hints);
     REQUIRE(!large_handle.ok());
     REQUIRE(large_handle.status().code() == absl::StatusCode::kInvalidArgument);
   }
@@ -55,13 +55,13 @@ TEST_CASE("E1: Invalid device ordinal", "[checkpoint_store][edge][e1]") {
     stepcast::store::LoadingHints hints;
 
     auto cpu_handle =
-        store->prepare(DeviceKey{stepcast::DeviceType::CPU, 0, ""}, CheckpointStore::PrepareMode::AUTO, hints);
+        store->prepare(DeviceKey{stepcast::DeviceType::CPU, 0, ""}, StoreEngine::PrepareMode::AUTO, hints);
     REQUIRE(!cpu_handle.ok());
   }
 }
 
 // E2: Non-existent model
-TEST_CASE("E2: Non-existent model", "[checkpoint_store][edge][e2]") {
+TEST_CASE("E2: Non-existent model", "[store_engine][edge][e2]") {
   TempModelFixture fixture("edge_e2");
   auto store = make_test_store(fixture.root());
 
@@ -69,7 +69,7 @@ TEST_CASE("E2: Non-existent model", "[checkpoint_store][edge][e2]") {
   {
     stepcast::store::LoadingHints hints;
     hints.disk_path = "non_existent_model";
-    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(!handle.ok());
   }
 
@@ -87,7 +87,7 @@ TEST_CASE("E2: Non-existent model", "[checkpoint_store][edge][e2]") {
 }
 
 // E3: Memory pool exhaustion
-TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
+TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   skip_if_no_cuda("E3");
 
   const size_t pool_size = 100 * 1024 * 1024; // 100MB pool
@@ -111,7 +111,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
   {
     stepcast::store::LoadingHints hints;
     hints.disk_path = model_ids[idx];
-    auto h_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto h_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (h_or.ok()) {
       first_status = h_or.value().wait_ready(std::chrono::milliseconds(10000));
     }
@@ -127,7 +127,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
   for (idx = 1; idx < model_ids.size(); ++idx) {
     stepcast::store::LoadingHints hints;
     hints.disk_path = model_ids[idx];
-    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(10000));
@@ -147,7 +147,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[checkpoint_store][edge][e3]") {
 }
 
 // E4: Concurrent clear_mem() during prepare()
-TEST_CASE("E4: Concurrent clear_mem() during prepare()", "[checkpoint_store][edge][e4]") {
+TEST_CASE("E4: Concurrent clear_mem() during prepare()", "[store_engine][edge][e4]") {
   skip_if_no_cuda("E4");
 
   const std::string model_id = "edge_model_e4";
@@ -167,7 +167,7 @@ TEST_CASE("E4: Concurrent clear_mem() during prepare()", "[checkpoint_store][edg
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     prepare_started.store(true);
 
     if (handle_or.ok()) {
@@ -201,7 +201,7 @@ TEST_CASE("E4: Concurrent clear_mem() during prepare()", "[checkpoint_store][edg
 }
 
 // E5: Double enable/disable remote access
-TEST_CASE("E5: Double enable/disable remote access", "[checkpoint_store][edge][e5]") {
+TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]") {
   skip_if_no_cuda("E5");
 
   const std::string model_id = "edge_model_e5";
@@ -216,7 +216,7 @@ TEST_CASE("E5: Double enable/disable remote access", "[checkpoint_store][edge][e
   auto comm_manager = std::make_shared<stepcast::store::CommunicationManager>();
   REQUIRE(comm_manager->initialize("127.0.0.1", static_cast<uint16_t>(comm_port), /*enable_rdma=*/false).ok());
 
-  stepcast::store::CheckpointStoreOptions opts;
+  stepcast::store::StoreEngineOptions opts;
   opts.storage_path = fixture.root().string();
   // Keep test-friendly pool sizes similar to make_test_store
   opts.memory_pool_size = 512ULL * 1024 * 1024;
@@ -225,14 +225,14 @@ TEST_CASE("E5: Double enable/disable remote access", "[checkpoint_store][edge][e
   opts.pinned_memory_timeout = std::chrono::milliseconds(30000);
   opts.p2p_port = static_cast<uint16_t>(comm_port);
   opts.comm_manager = comm_manager;
-  auto store = std::make_unique<CheckpointStore>(opts);
+  auto store = std::make_unique<StoreEngine>(opts);
 
   // Load model
   {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());
     REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -262,7 +262,7 @@ TEST_CASE("E5: Double enable/disable remote access", "[checkpoint_store][edge][e
 }
 
 // E6: Prepare with invalid hints
-TEST_CASE("E6: Prepare with invalid hints", "[checkpoint_store][edge][e6]") {
+TEST_CASE("E6: Prepare with invalid hints", "[store_engine][edge][e6]") {
   skip_if_no_cuda("E6");
 
   const std::string model_id = "edge_model_e6";
@@ -280,7 +280,7 @@ TEST_CASE("E6: Prepare with invalid hints", "[checkpoint_store][edge][e6]") {
   // Invalid hints - implementation may ignore these
 
   hints.disk_path = model_id;
-  auto handle1 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle1 = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
   // Should either ignore invalid hint or fail gracefully
 
   // Zero prefetch size
@@ -288,21 +288,21 @@ TEST_CASE("E6: Prepare with invalid hints", "[checkpoint_store][edge][e6]") {
   // hints.prefetch_size = 0; // Field may not exist
 
   hints.disk_path = model_id;
-  auto handle2 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle2 = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
 
   // Extremely large buffer count
   hints = LoadingHints{};
   // hints.num_buffers = std::numeric_limits<int>::max(); // Field may not exist
 
   hints.disk_path = model_id;
-  auto handle3 = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+  auto handle3 = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
 
   // At least one should succeed with defaults
   REQUIRE((handle1.ok() || handle2.ok() || handle3.ok()));
 }
 
 // E7: Rapid prepare/unload cycling
-TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
+TEST_CASE("E7: Rapid prepare/unload cycling", "[store_engine][edge][e7]") {
   skip_if_no_cuda("E7");
 
   const std::string model_id = "edge_model_e7";
@@ -318,7 +318,7 @@ TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto st = handle_or.value().wait_ready(std::chrono::milliseconds(30000));
       (void)st; // Ignore result; the goal is to trigger SPB allocation
@@ -337,7 +337,7 @@ TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle_or = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     if (!handle_or.ok()) {
       continue;
     }
@@ -366,7 +366,7 @@ TEST_CASE("E7: Rapid prepare/unload cycling", "[checkpoint_store][edge][e7]") {
 }
 
 // E8: Empty model directory
-TEST_CASE("E8: Empty model directory", "[checkpoint_store][edge][e8]") {
+TEST_CASE("E8: Empty model directory", "[store_engine][edge][e8]") {
   const std::string model_id = "empty_model_e8";
 
   TempModelFixture fixture("edge_e8");
@@ -382,13 +382,13 @@ TEST_CASE("E8: Empty model directory", "[checkpoint_store][edge][e8]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(!handle.ok());
   }
 }
 
 // E9: Corrupted model file
-TEST_CASE("E9: Corrupted model file", "[checkpoint_store][edge][e9]") {
+TEST_CASE("E9: Corrupted model file", "[store_engine][edge][e9]") {
   const std::string model_id = "corrupt_model_e9";
 
   TempModelFixture fixture("edge_e9");
@@ -410,7 +410,7 @@ TEST_CASE("E9: Corrupted model file", "[checkpoint_store][edge][e9]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     // Implementation may not perform data verification yet; accept either outcome
     if (handle.ok()) {
       auto wait_status = handle.value().wait_ready(std::chrono::milliseconds(5000));
@@ -420,7 +420,7 @@ TEST_CASE("E9: Corrupted model file", "[checkpoint_store][edge][e9]") {
 }
 
 // E10: PrepareMode edge cases
-TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
+TEST_CASE("E10: PrepareMode edge cases", "[store_engine][edge][e10]") {
   skip_if_no_cuda("E10");
 
   const std::string model_id = "edge_model_e10";
@@ -435,7 +435,7 @@ TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
   {
     stepcast::store::LoadingHints hints;
 
-    auto copy_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    auto copy_handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::COPY_ONLY, hints);
     REQUIRE(!copy_handle.ok()); // Should fail - no source to copy from
   }
 
@@ -444,7 +444,7 @@ TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto load_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto load_handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(load_handle.ok());
     REQUIRE(load_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -453,7 +453,7 @@ TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
   {
     stepcast::store::LoadingHints hints;
 
-    auto copy_handle2 = store->prepare(make_gpu_key(1), CheckpointStore::PrepareMode::COPY_ONLY, hints);
+    auto copy_handle2 = store->prepare(make_gpu_key(1), StoreEngine::PrepareMode::COPY_ONLY, hints);
     if (stepcast::tests::is_cuda_available() && copy_handle2.ok()) {
       // Should succeed if we have multiple GPUs
       REQUIRE(copy_handle2.value().wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -465,7 +465,7 @@ TEST_CASE("E10: PrepareMode edge cases", "[checkpoint_store][edge][e10]") {
     stepcast::store::LoadingHints hints;
 
     hints.disk_path = model_id;
-    auto reload_handle = store->prepare(make_gpu_key(0), CheckpointStore::PrepareMode::LOAD_ONLY, hints);
+    auto reload_handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
     REQUIRE(reload_handle.ok()); // Should return existing instance
   }
 }

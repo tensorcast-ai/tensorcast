@@ -18,7 +18,7 @@ The Core Store module adopts a layered architectural design with clear responsib
 ```mermaid
 graph TB
     subgraph "External Interface Layer"
-        CS[CheckpointStore]
+        CS[StoreEngine]
         PO[PrepareOrchestrator]
     end
 
@@ -108,7 +108,7 @@ graph TB
 
 ### 1. External Interface Layer
 
-**CheckpointStore** is the entry point of the entire system, providing:
+**StoreEngine** is the entry point of the entire system, providing:
 
 - Model registration and management via ModelRegistry
 - GPU device management via DeviceManager
@@ -116,7 +116,7 @@ graph TB
 - High-level API encapsulation with prepare() method
 - Metrics collection through MetricsCollector
 
-- Source: `core/store/checkpoint_store.h`, `core/store/checkpoint_store.cc`
+- Source: `core/store/store_engine.h`, `core/store/store_engine.cc`
 
 **PrepareOrchestrator** handles the prepare() API workflow:
 
@@ -128,7 +128,7 @@ graph TB
 - Source: `core/store/loading/prepare_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
 
 ```cpp
-class CheckpointStore {
+class StoreEngine {
 public:
     // Multi-device binding API
     absl::StatusOr<ModelHandle> prepare(
@@ -479,7 +479,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant User
-    participant CS as CheckpointStore
+    participant CS as StoreEngine
     participant PO as PrepareOrchestrator
     participant MR as ModelRegistry
     participant M as Model
@@ -513,7 +513,7 @@ sequenceDiagram
     CS->>User: ModelHandle{instance_key, ready_future}
 ```
 
-- Sources: `core/store/checkpoint_store.{h,cc}`, `core/store/loading/prepare_orchestrator.{h,cc}`, `core/store/model/model.{h,cc}`, `core/store/model/memory_manager.{h,cc}`
+- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/prepare_orchestrator.{h,cc}`, `core/store/model/model.{h,cc}`, `core/store/model/memory_manager.{h,cc}`
 
 ### P2P Loading Flow with CommunicateEngine
 
@@ -522,7 +522,7 @@ P2P transfers leverage the `CommunicateEngine` for remote memory access with `Re
 ```mermaid
 sequenceDiagram
     participant User
-    participant CS as CheckpointStore
+    participant CS as StoreEngine
     participant M as Model
     participant MM as MemoryManager
     participant RL as P2PLoader
@@ -652,5 +652,5 @@ The system is designed with multiple extension points to support future requirem
 
 - **Device Registry**: Learn how GPUs are mapped to logical `DeviceKey`s in the [Device Registry guide](./device-registry.md).
 - **Communicator Internals**: See communication engine details in `../communicator/README.md`.
-- **CheckpointStore API**: High-level usage patterns are documented in `../checkpoint/README.md`.
+- **StoreEngine API**: High-level usage patterns are documented in `../checkpoint/README.md`.
 - **DeviceManager** — runtime GPU enumeration and streams ([Device Manager](./device-manager.md))

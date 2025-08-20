@@ -48,7 +48,7 @@ if not already_patched:
 # Public package interface remains unchanged below.
 # -----------------------------------------------------------------------------
 
-import scstore._checkpoint_store as _checkpoint_store  # noqa: E402
+import scstore._store_engine as _store_engine  # noqa: E402
 from scstore._version import __version__  # noqa: E402
 
 # Import functions from config module
@@ -61,5 +61,5 @@ __all__ = [
     "__version__",
     "init",
     "is_initialized",
-    "_checkpoint_store",
+    "_store_engine",
 ]

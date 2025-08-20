@@ -13,7 +13,7 @@
 namespace stepcast::store {
 
 /**
- * @brief Manages GPU devices and CUDA operations for the checkpoint store.
+ * @brief Manages GPU devices and CUDA operations for the store engine.
  *
  * This component handles:
  * - GPU device discovery and initialization
