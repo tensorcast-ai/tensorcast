@@ -56,38 +56,18 @@ def get_daemon_address() -> str:
 
 ctypes.CDLL(os.path.join(os.path.dirname(__file__), "lib/libscstore.so"))
 from scstore._C import (  # noqa: E402
+    build_canonical_index_from_safetensors,
     get_cuda_memory_ptr,
     get_device_uuid_map,
     inspect_or_generate_descriptor,
     restore_tensors,
+    restore_tensors_from_model_path,
     save_model_to_disk,
 )
 
 
 def _get_uuid():
     return str(uuid.uuid4())
-
-
-def _torch_dtype_from_safetensors(dtype: str) -> str:
-    """Map safetensors dtype to our torch dtype string used in meta index.
-
-    We intentionally return the canonical torch dtype string expected by the C++ bridge.
-    """
-    mapping = {
-        "F16": "torch.float16",
-        "BF16": "torch.bfloat16",
-        "F32": "torch.float32",
-        "F64": "torch.float64",
-        "I8": "torch.int8",
-        "I16": "torch.int16",
-        "I32": "torch.int32",
-        "I64": "torch.int64",
-        "U8": "torch.uint8",
-        "BOOL": "torch.uint8",  # stored as byte
-    }
-    if dtype not in mapping:
-        raise ValueError(f"Unsupported safetensors dtype: {dtype}")
-    return mapping[dtype]
 
 
 def calculate_tensor_device_offsets(
@@ -153,79 +133,29 @@ def build_indices_from_safetensors(
 ) -> tuple[
     dict[str, tuple[list[int], list[int], str, int]], dict[str, tuple[int, int]]
 ]:
-    """Parse all .safetensors files in the directory and build unified indices.
+    """Build unified indices using C++ canonical safetensors index builder.
 
     Returns (tensor_meta_index, tensor_data_index).
     """
     model_dir_path = Path(str(model_dir))
-    safetensors_files: list[Path] = sorted(model_dir_path.glob("*.safetensors"))
-    if not safetensors_files:
-        raise ValueError(f"No .safetensors found in {model_dir_path}")
+    # Use C++ helper to build canonical index bytes (strict canonical JSON)
+    index_bytes = build_canonical_index_from_safetensors(str(model_dir_path))
+    try:
+        index_obj = json.loads(index_bytes)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"Failed to parse canonical index bytes: {e}") from e
 
     tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
     tensor_data_index: dict[str, tuple[int, int]] = {}
-    base_offset = 0
-    for st_path in safetensors_files:
-        with open(st_path, "rb") as fbin:
-            header_len_bytes = fbin.read(8)
-            if len(header_len_bytes) != 8:
-                raise ValueError(f"Invalid safetensors file: {st_path}")
-            header_len = int.from_bytes(
-                header_len_bytes, byteorder="little", signed=False
-            )
-            header_json = fbin.read(header_len)
-            if len(header_json) != header_len:
-                raise ValueError(f"Truncated safetensors header: {st_path}")
-            try:
-                header = json.loads(header_json)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Malformed safetensors header in {st_path}: {e}"
-                ) from e
-
-        # Compute data_start and data_size
-        file_size = st_path.stat().st_size
-        data_start = 8 + header_len
-        if data_start > file_size:
-            raise ValueError(f"Invalid safetensors layout in {st_path}")
-
-        for name, meta in header.items():
-            if name == "__metadata__":
-                continue
-            # Validate tensor name for safety
-            if not name or "/" in name or "\\" in name or name.startswith("."):
-                raise ValueError(f"Invalid tensor name: {name}")
-            if name in tensor_meta_index or name in tensor_data_index:
-                raise ValueError(
-                    f"Duplicate tensor key across safetensors files: {name}"
-                )
-            dtype = meta["dtype"]
-            shape = meta["shape"]
-            begin, end = meta["data_offsets"]
-            if end < begin:
-                raise ValueError(f"Invalid data_offsets for tensor {name} in {st_path}")
-            length = end - begin
-            # Row-major stride
-            stride: list[int] = []
-            if len(shape) == 0:
-                stride = []
-            else:
-                stride = [0] * len(shape)
-                acc = 1
-                for i in range(len(shape) - 1, -1, -1):
-                    stride[i] = acc
-                    acc *= int(shape[i])
-            tensor_meta_index[name] = (
-                list(map(int, shape)),
-                stride,
-                _torch_dtype_from_safetensors(dtype),
-                0,
-            )
-            tensor_data_index[name] = (base_offset + begin, length)
-
-        # Advance base_offset by payload size of this file
-        base_offset += file_size - data_start
-
+    for name, meta in index_obj.items():
+        offset, size, shape, stride, dtype, storage_offset = meta
+        tensor_meta_index[name] = (
+            list(shape),
+            list(stride),
+            str(dtype),
+            int(storage_offset),
+        )
+        tensor_data_index[name] = (int(offset), int(size))
     return tensor_meta_index, tensor_data_index
 
 
@@ -255,6 +185,68 @@ def save_dict(
         tensor_names, tensor_data_index, meta_state_dict, str(model_path), config
     )
     return dict(descriptor)
+
+
+def load_dict_from_disk(
+    model_path: str | os.PathLike,
+    *,
+    device_id: int | torch.device = 0,
+    storage_path: str | os.PathLike | None = None,
+) -> dict[str, torch.Tensor]:
+    """Load a checkpoint directly from disk files, without contacting the daemon.
+
+    - Uses tensor_index.json (or safetensors headers) and partition files under model_dir.
+    - Loads to CUDA device if available; falls back to CPU when CUDA is not available.
+    """
+    # Resolve model directory
+    raw_model_path = Path(str(model_path))
+    if storage_path and str(storage_path) != "":
+        model_dir = Path(str(storage_path)) / raw_model_path
+    else:
+        model_dir = raw_model_path
+
+    index_path = model_dir / "tensor_index.json"
+    safetensors_files: list[Path] = sorted(model_dir.glob("*.safetensors"))
+
+    # If safetensors present and no tensor_index.json, build indices from safetensors headers
+    if safetensors_files and not index_path.exists():
+        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(model_dir)
+    else:
+        with open(index_path, "r") as f:
+            tensor_index = json.load(f)
+
+        tensor_meta_index = {}
+        tensor_data_index = {}
+        for name, meta in tensor_index.items():
+            # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
+            if len(meta) == 5:
+                offset, size, shape, stride, dtype = meta
+                storage_offset = 0
+            else:
+                offset, size, shape, stride, dtype, storage_offset = meta
+
+            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
+            tensor_data_index[name] = (offset, size)
+
+    device_id_int: int = resolve_device(device_id)
+    # Compute coalesced offsets and adapt to the flat mapping API expected by restore_tensors_from_model_path
+    tensor_device_offsets, _ = calculate_tensor_device_offsets(
+        tensor_data_index, device_id_int
+    )
+    per_tensor_offsets: dict[str, int] = dict(
+        tensor_device_offsets.get(device_id_int, {})
+    )
+
+    # Choose device: load to CPU (-1) if CUDA unavailable
+    target_device_for_local = device_id_int if torch.cuda.is_available() else -1
+
+    state_dict = restore_tensors_from_model_path(
+        tensor_meta_index,
+        str(model_dir),
+        per_tensor_offsets,
+        target_device_for_local,
+    )
+    return state_dict
 
 
 def load_dict(

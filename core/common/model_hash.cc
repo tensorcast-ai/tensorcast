@@ -388,9 +388,4 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint6
   return multihash;
 }
 
-absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& /*model_dir*/) {
-  return absl::UnimplementedError(
-      "compute_data_multihash_from_disk_dir moved to core/store/loader; use loader::compute_data_multihash_from_disk_dir");
-}
-
 } // namespace stepcast::store::model_hash

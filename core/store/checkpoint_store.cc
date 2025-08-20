@@ -12,8 +12,6 @@
 #include <random>
 // For reading/writing descriptor and canonical index files
 #include <fstream>
-#include <map>
-#include <set>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
@@ -34,143 +32,14 @@
 #include "core/store/model/model_config.h"
 // RFC-0007 helpers for safetensors canonical index
 #include <nlohmann/json.hpp>
+#include "core/store/loader/canonical_index.h"
 #include "core/store/loader/safetensors_util.h"
+// Unified hashing over SeekableSource for CPU/GPU/P2P
+#include "core/store/loader/source_hash.h"
 // #include "core/store/loading/replica_registration_helper.h"
 
 namespace stepcast::store {
-namespace {
-
-// Map canonical torch dtype string to a stable integer code for grouping.
-// The exact values are only used to impose a deterministic ordering.
-uint32_t map_torch_dtype_to_code(const std::string& dtype) {
-  static const std::map<std::string, uint32_t> kMap = {
-      {"torch.float16", 1},
-      {"torch.bfloat16", 2},
-      {"torch.float32", 3},
-      {"torch.float64", 4},
-      {"torch.int8", 11},
-      {"torch.int16", 12},
-      {"torch.int32", 13},
-      {"torch.int64", 14},
-      {"torch.uint8", 21},
-      {"torch.bool", 22}};
-  auto it = kMap.find(dtype);
-  return (it == kMap.end()) ? 0U : it->second;
-}
-
-// Rebuild canonical index JSON with stable grouping + ordering per RFC-0007.
-// Input is a JSON string mapping tensor_name -> [offset, size, shape, stride, dtype, storage_offset].
-// We preserve the offsets/sizes as-is (they reflect the actual coalesced layout),
-// but reorder keys deterministically by (dtype_code, device_id, H(sorted(names_in_alias_group))).
-absl::StatusOr<std::string> rebuild_stable_canonical_index(const std::string& index_json, int device_id) {
-  using nlohmann::json;
-  json j;
-  try {
-    j = json::parse(index_json, /*cb=*/nullptr, /*allow_exceptions=*/true);
-  } catch (const std::exception& e) {
-    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON: ", e.what()));
-  }
-  if (!j.is_object()) {
-    return absl::InvalidArgumentError("Canonical index must be a JSON object");
-  }
-
-  struct EntryMeta {
-    std::string name;
-    uint64_t offset{0};
-    uint64_t size{0};
-    std::vector<int64_t> shape;
-    std::vector<int64_t> stride;
-    std::string dtype;
-    int64_t storage_offset{0};
-  };
-
-  // Parse entries and group aliases by (offset,size)
-  std::unordered_map<std::pair<uint64_t, uint64_t>, std::vector<EntryMeta>, absl::Hash<std::pair<uint64_t, uint64_t>>>
-      alias_groups;
-  for (auto it = j.begin(); it != j.end(); ++it) {
-    const std::string& name = it.key();
-    const json& arr = it.value();
-    if (!arr.is_array() || arr.size() < 6) {
-      return absl::InvalidArgumentError("Invalid canonical index entry format");
-    }
-    EntryMeta m;
-    m.name = name;
-    m.offset = arr[0].get<uint64_t>();
-    m.size = arr[1].get<uint64_t>();
-    for (const auto& v : arr[2]) {
-      m.shape.push_back(static_cast<int64_t>(v.get<int64_t>()));
-    }
-    for (const auto& v : arr[3]) {
-      m.stride.push_back(static_cast<int64_t>(v.get<int64_t>()));
-    }
-    m.dtype = arr[4].get<std::string>();
-    m.storage_offset = arr[5].get<int64_t>();
-    alias_groups[{m.offset, m.size}].push_back(std::move(m));
-  }
-
-  // Build sortable groups
-  struct Group {
-    uint32_t dtype_code{0};
-    int device{0};
-    std::string group_key; // H(sorted(names)) per RFC (multibase string)
-    std::vector<EntryMeta> entries; // all alias names
-  };
-  std::vector<Group> groups;
-  groups.reserve(alias_groups.size());
-  for (auto& kv : alias_groups) {
-    auto& metas = kv.second;
-    // Compute dtype code using the first entry (all aliases should share dtype)
-    uint32_t code = metas.empty() ? 0U : map_torch_dtype_to_code(metas.front().dtype);
-    // Compute H over sorted names
-    std::vector<std::string> names;
-    names.reserve(metas.size());
-    for (const auto& m : metas) {
-      names.push_back(m.name);
-    }
-    std::sort(names.begin(), names.end());
-    nlohmann::json names_json = names;
-    auto mh_or =
-        model_hash::compute_index_multihash(std::optional<std::string>(names_json.dump()), /*index_key_hex=*/"");
-    if (!mh_or.ok()) {
-      return mh_or.status();
-    }
-    Group g;
-    g.dtype_code = code;
-    g.device = device_id;
-    g.group_key = *mh_or;
-    std::sort(metas.begin(), metas.end(), [](const EntryMeta& a, const EntryMeta& b) { return a.name < b.name; });
-    g.entries = std::move(metas);
-    groups.push_back(std::move(g));
-  }
-
-  std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
-    if (a.dtype_code != b.dtype_code) {
-      return a.dtype_code < b.dtype_code;
-    }
-    if (a.device != b.device) {
-      return a.device < b.device;
-    }
-    return a.group_key < b.group_key;
-  });
-
-  // Emit canonical JSON object in the deterministic order
-  json out = json::object();
-  for (const auto& g : groups) {
-    for (const auto& m : g.entries) {
-      json arr = json::array();
-      arr.push_back(m.offset);
-      arr.push_back(m.size);
-      arr.push_back(m.shape);
-      arr.push_back(m.stride);
-      arr.push_back(m.dtype);
-      arr.push_back(m.storage_offset);
-      out[m.name] = std::move(arr);
-    }
-  }
-  return out.dump();
-}
-
-} // namespace
+namespace {} // namespace
 // (hashing utilities moved to core/common/model_hash.*)
 // Forward declaration for GPU eviction helper defined later in this file.
 absl::Status try_evict_gpu_memory_impl(
@@ -502,24 +371,31 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
   }
 
   // Compute data multihash from GPU memory when requested by hints
-  void* verify_gpu_ptr = nullptr;
   uint64_t verify_size = 0;
   const bool force_full_digest = options_.force_full_digest_on_load;
-  if (target_location == ModelLocation::GPU &&
-      (hints.verify == LoadingHints::Verify::FULL_DIGEST || force_full_digest)) {
+  if (hints.verify == LoadingHints::Verify::FULL_DIGEST || force_full_digest) {
     if (auto sz_or = model->get_model_size(); sz_or.ok()) {
       verify_size = *sz_or;
     }
-    const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
-    if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
-      verify_gpu_ptr = gpu_ptrs[0];
-    }
-    if (verify_gpu_ptr != nullptr && verify_size > 0) {
-      auto data_mh_or = model_hash::compute_data_multihash_from_gpu(verify_gpu_ptr, verify_size, target_device_id);
-      if (data_mh_or.ok()) {
-        computed_data_mh = *data_mh_or;
-      } else {
-        LOG(WARNING) << "Data multihash computation failed: " << data_mh_or.status();
+    if (target_location == ModelLocation::GPU) {
+      const auto gpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::GPU);
+      if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && verify_size > 0) {
+        auto data_mh_or = loader::compute_data_multihash_from_gpu_memory(gpu_ptrs[0], verify_size, target_device_id);
+        if (data_mh_or.ok()) {
+          computed_data_mh = *data_mh_or;
+        } else {
+          LOG(WARNING) << "Data multihash computation (GPU) failed: " << data_mh_or.status();
+        }
+      }
+    } else if (target_location == ModelLocation::PAGEABLE_CPU) {
+      const auto cpu_ptrs = model->get_memory_manager().get_pointer(ModelLocation::PAGEABLE_CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && verify_size > 0) {
+        auto data_mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_ptrs[0], verify_size);
+        if (data_mh_or.ok()) {
+          computed_data_mh = *data_mh_or;
+        } else {
+          LOG(WARNING) << "Data multihash computation (CPU) failed: " << data_mh_or.status();
+        }
       }
     }
   }
@@ -571,8 +447,8 @@ absl::StatusOr<ModelHandle> CheckpointStore::load_from_disk_internal(
         raw_json = j.dump();
       }
       if (!raw_json.empty()) {
-        // Apply stable grouping rebuild
-        auto rebuilt_or = rebuild_stable_canonical_index(raw_json, target_device_id);
+        // Apply stable canonicalization using C++ authority
+        auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
         const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
         auto index_mh_or = model_hash::compute_index_multihash(std::optional<std::string>(canonical_json), "");
         if (index_mh_or.ok()) {

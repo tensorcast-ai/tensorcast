@@ -88,6 +88,8 @@ def close_cuda_memory_handle(
 
 def inspect_or_generate_descriptor(model_path: _PathLike) -> Mapping[str, Union[str, int]]: ...
 
+def build_canonical_index_from_safetensors(model_dir: _PathLike) -> bytes: ...
+
 # -----------------------------------------------------------------------------
 # Verification utilities
 # -----------------------------------------------------------------------------

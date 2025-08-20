@@ -79,6 +79,17 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "canonical_index",
+    srcs = ["canonical_index.cc"],
+    hdrs = ["canonical_index.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
     name = "safetensors_util",
     srcs = ["safetensors_util.cc"],
     hdrs = ["safetensors_util.h"],
@@ -145,6 +156,7 @@ sc_cc_library(
     deps = [
         ":file_partition_source",
         ":source",
+        "//core/common:cuda_api_lib",
         "//core/common:model_hash_lib",
         "@abseil-cpp//absl/types:span",
     ],
@@ -162,6 +174,8 @@ sc_cc_library(
         "//core/common:device_guard_lib",
     ],
 )
+
+## Removed separate in-memory source targets in favor of local classes in source_hash.cc
 
 sc_cc_library(
     name = "dvmp_region_sink",

@@ -24,4 +24,16 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     uint64_t total_size,
     size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
+// Convenience adapters over SeekableSource for common in-memory sources
+absl::StatusOr<std::string> compute_data_multihash_from_cpu_memory(
+    const void* base_ptr,
+    uint64_t total_size,
+    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
+
+absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
+    void* device_ptr,
+    uint64_t total_size,
+    int device_id,
+    size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
+
 } // namespace stepcast::store::loader

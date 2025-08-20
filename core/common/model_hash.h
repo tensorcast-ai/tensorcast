@@ -23,10 +23,6 @@ absl::StatusOr<std::string> compute_index_multihash(
 // in 4MiB leaves and reduces them as a Merkle tree.
 absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint64_t total_size, int device_id);
 
-// DEPRECATED: Use loader::compute_data_multihash_from_disk_dir in
-// core/store/loader when hashing a disk directory via SeekableSource.
-absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& model_dir);
-
 // Lightweight public wrappers to reuse hashing primitives across modules
 // without duplicating implementations. These mirror the internal helpers
 // used by the functions above.

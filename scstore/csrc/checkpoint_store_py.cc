@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 #include "scstore/csrc/logging.h"
+#include "scstore/csrc/py_error_utils.h"
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -180,8 +181,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               st = mh.wait_ready(std::chrono::milliseconds(timeout_ms));
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
           })
       .def_property_readonly(
@@ -223,15 +223,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 }
                 dev_key.ordinal = ordinal;
               } else {
-                PyErr_SetString(PyExc_ValueError, "Unsupported device spec string");
-                throw py::error_already_set();
+                PY_THROW_WITH_LOG(PyExc_ValueError, std::string("Unsupported device spec string"));
               }
             } else if (py::isinstance<py::int_>(target_device_obj)) {
               dev_key.type = DeviceType::GPU;
               dev_key.ordinal = target_device_obj.cast<int>();
             } else {
-              PyErr_SetString(PyExc_TypeError, "target_device must be DeviceKey, str, or int");
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_TypeError, std::string("target_device must be DeviceKey, str, or int"));
             }
 
             LoadingHints hints;
@@ -254,8 +252,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               h_or = cs.prepare(dev_key, mode, hints);
             }
             if (!h_or.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, h_or.status().ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, h_or.status().ToString());
             }
             return h_or.value();
           },
@@ -319,8 +316,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               ptr_or = cs.get_instance_gpu_ptr(key);
             }
             if (!ptr_or.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, ptr_or.status().ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, ptr_or.status().ToString());
             }
             return ptr_or.value();
           },
@@ -335,8 +331,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               info_or = cs.enable_remote_instance_access(key, loc);
             }
             if (!info_or.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, info_or.status().ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, info_or.status().ToString());
             }
             return info_or.value();
           },
@@ -352,8 +347,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               st = cs.disable_remote_instance_access(key, loc);
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return true;
           },
@@ -417,8 +411,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               out_or = cs.begin_register_tensor_dict(reg);
             }
             if (!out_or.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, out_or.status().ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, out_or.status().ToString());
             }
 
             const auto& out = out_or.value();
@@ -441,8 +434,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               ok_or = cs.commit_registered_tensor_dict(registration_id);
             }
             if (!ok_or.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, ok_or.status().ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, ok_or.status().ToString());
             }
             const auto& r = ok_or.value();
             py::dict d;
@@ -468,8 +460,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               st = cs.abort_registered_tensor_dict(registration_id);
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return true;
           },
@@ -484,8 +475,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               st = cs.lock_chunks(key, absl::MakeSpan(chunk_indices));
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return 0; // Return 0 on success
           },
@@ -501,8 +491,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               st = cs.unlock_chunks(key, absl::MakeSpan(chunk_indices), copied_gpu);
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return 0; // Return 0 on success
           },
@@ -592,8 +581,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               opts.comm_manager = mgr;
             }
           } catch (const py::cast_error& /*e*/) {
-            PyErr_SetString(PyExc_TypeError, "comm_manager must be a CommunicationManager instance");
-            throw py::error_already_set();
+            PY_THROW_WITH_LOG(PyExc_TypeError, std::string("comm_manager must be a CommunicationManager instance"));
           }
         }
 
@@ -630,8 +618,7 @@ Missing keys fall back to sensible defaults.)pbdoc");
               st = mgr->initialize(listen_addr, port, enable_rdma);
             }
             if (!st.ok()) {
-              PyErr_SetString(PyExc_RuntimeError, st.ToString().c_str());
-              throw py::error_already_set();
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return mgr;
           }),

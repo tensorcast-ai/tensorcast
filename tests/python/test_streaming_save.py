@@ -10,7 +10,7 @@ import unittest
 
 import torch
 
-from scstore.torch_util import save_dict, load_dict
+from scstore.torch_util import save_dict, load_dict_from_disk
 
 
 class TestStreamingSave(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestStreamingSave(unittest.TestCase):
 
         # Load and verify (pure local path removed; reuse daemon-less path via load_dict with wait=False?)
         # For unit test simplicity, call load_dict in sync mode with a dummy storage path
-        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
+        loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
 
         # Compare tensors
         for name, original_tensor in state_dict.items():
@@ -82,8 +82,8 @@ class TestStreamingSave(unittest.TestCase):
         save_dict(state_dict, streaming_path, use_streaming=True)
 
         # Load both
-        traditional_loaded = load_dict(traditional_path, device_id=0, storage_path="", enable_verification=False)
-        streaming_loaded = load_dict(streaming_path, device_id=0, storage_path="", enable_verification=False)
+        traditional_loaded = load_dict_from_disk(traditional_path, device_id=0, storage_path="")
+        streaming_loaded = load_dict_from_disk(streaming_path, device_id=0, storage_path="")
 
         # Compare all tensors
         for name in state_dict.keys():
@@ -111,7 +111,7 @@ class TestStreamingSave(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(save_path, "tensor_index.json")))
 
         # Load and verify
-        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
+        loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
         self.assertEqual(len(loaded_state_dict), len(state_dict))
 
     def test_empty_model(self):
@@ -140,7 +140,7 @@ class TestStreamingSave(unittest.TestCase):
         save_path = os.path.join(self.test_dir, "mixed_sizes")
         save_dict(state_dict, save_path, use_streaming=True)
 
-        loaded_state_dict = load_dict(save_path, device_id=0, storage_path="", enable_verification=False)
+        loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
 
         for name, original_tensor in state_dict.items():
             loaded_tensor = loaded_state_dict[name]
