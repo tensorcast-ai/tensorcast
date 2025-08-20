@@ -60,12 +60,32 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
   }
   // Use unified SeekableSource hashing pipeline instead of ad-hoc disk dir hashing
   stepcast::store::loader::FilePartitionSource::Options opts;
-  // This helper writes a single file tensor.data_0 of size total_size, so we can construct source directly
-  opts.partition_paths.push_back(dir / "tensor.data_0");
-  opts.partition_sizes.push_back(static_cast<size_t>(std::filesystem::file_size(dir / "tensor.data_0")));
-  opts.total_size = total_size;
+  // Collect all standard partition files (tensor.data, tensor.data_0, tensor.data_1, ...)
+  std::vector<std::filesystem::path> parts;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto& name = entry.path().filename().string();
+    if (name == "tensor.data" || name.starts_with("tensor.data_")) {
+      parts.push_back(entry.path());
+    }
+  }
+  std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+  if (parts.empty()) {
+    // Fallback to the common single-file name
+    parts.push_back(dir / "tensor.data_0");
+  }
+  uint64_t size_sum = 0;
+  for (const auto& p : parts) {
+    const auto sz = static_cast<size_t>(std::filesystem::file_size(p));
+    opts.partition_paths.push_back(p);
+    opts.partition_sizes.push_back(sz);
+    size_sum += sz;
+  }
+  opts.total_size = size_sum;
   stepcast::store::loader::FilePartitionSource src(std::move(opts));
-  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
+  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_seekable_source(src, size_sum);
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
@@ -78,7 +98,7 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
   desc["data_multihash"] = *data_mh_or;
   desc["schema_version"] = "v2";
   desc["encoding"] = "json";
-  desc["total_size"] = total_size;
+  desc["total_size"] = size_sum;
   json hp;
   hp["chunk_size"] = 4 * 1024 * 1024;
   hp["fanout"] = 2;

@@ -4,15 +4,13 @@
 
 #include <algorithm>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <memory>
 #include <string>
 #include <vector>
 
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -49,27 +47,27 @@ std::string base32_lower_encode(const std::vector<uint8_t>& data) {
     // Process 5 bytes at a time to produce 8 base32 characters
     uint64_t buffer = 0;
     size_t bytes_to_process = std::min<size_t>(5, in_len - i);
-    
+
     // Load bytes into buffer (big-endian)
     for (size_t j = 0; j < bytes_to_process; ++j) {
       buffer = (buffer << 8) | data[i + j];
     }
-    
+
     // Pad remaining bits if needed
     buffer <<= (5 - bytes_to_process) * 8;
-    
+
     // Extract 8 5-bit values
     for (int shift = 35; shift >= 0; shift -= 5) {
       result.push_back(kBase32Alphabet[(buffer >> shift) & 0x1F]);
     }
-    
+
     i += bytes_to_process;
   }
 
   // Trim padding characters based on input length
-  size_t output_length = ((in_len * 8 + 4) / 5);  // Actual encoded length without padding
+  size_t output_length = ((in_len * 8 + 4) / 5); // Actual encoded length without padding
   result.resize(output_length);
-  
+
   return result;
 }
 
@@ -81,25 +79,29 @@ class EvpMdCtxWrapper {
       LOG(ERROR) << "Failed to create EVP_MD_CTX";
     }
   }
-  
+
   ~EvpMdCtxWrapper() {
     if (ctx_) {
       EVP_MD_CTX_free(ctx_);
     }
   }
-  
-  EVP_MD_CTX* get() { return ctx_; }
-  bool valid() const { return ctx_ != nullptr; }
-  
+
+  EVP_MD_CTX* get() {
+    return ctx_;
+  }
+  bool valid() const {
+    return ctx_ != nullptr;
+  }
+
   // Disable copy
   EvpMdCtxWrapper(const EvpMdCtxWrapper&) = delete;
   EvpMdCtxWrapper& operator=(const EvpMdCtxWrapper&) = delete;
-  
+
   // Enable move
   EvpMdCtxWrapper(EvpMdCtxWrapper&& other) noexcept : ctx_(other.ctx_) {
     other.ctx_ = nullptr;
   }
-  
+
  private:
   EVP_MD_CTX* ctx_;
 };
@@ -136,14 +138,14 @@ std::vector<uint8_t> hex_to_bytes(std::string_view hex) {
 // Validate multihash format: multibase prefix + multihash function code + length
 bool validate_multihash_format(const std::string& multihash) {
   if (multihash.size() < 3) {
-    return false;  // Too short for valid multihash
+    return false; // Too short for valid multihash
   }
-  
+
   // Check multibase prefix (we use 'b' for base32)
   if (multihash[0] != 'b') {
     return false;
   }
-  
+
   // The rest should be valid base32 characters
   for (size_t i = 1; i < multihash.size(); ++i) {
     char c = multihash[i];
@@ -152,7 +154,7 @@ bool validate_multihash_format(const std::string& multihash) {
       return false;
     }
   }
-  
+
   return true;
 }
 
@@ -161,22 +163,22 @@ std::string to_multibase_multihash_sha256(const std::vector<uint8_t>& digest) {
     LOG(ERROR) << "Invalid digest size for SHA256: " << digest.size();
     return "";
   }
-  
+
   std::vector<uint8_t> mh;
   mh.reserve(2 + digest.size());
-  mh.push_back(0x12);  // SHA256 function code
-  mh.push_back(0x20);  // SHA256 digest length (32 bytes)
+  mh.push_back(0x12); // SHA256 function code
+  mh.push_back(0x20); // SHA256 digest length (32 bytes)
   mh.insert(mh.end(), digest.begin(), digest.end());
-  
+
   std::string b32 = base32_lower_encode(mh);
   std::string result = std::string("b") + b32;
-  
+
   // Validate the generated multihash
   if (!validate_multihash_format(result)) {
     LOG(ERROR) << "Generated invalid multihash format";
     return "";
   }
-  
+
   return result;
 }
 
@@ -184,30 +186,30 @@ absl::StatusOr<std::vector<uint8_t>> sha256_bytes(absl::Span<const uint8_t> byte
   if (bytes.empty()) {
     return absl::InvalidArgumentError("Cannot hash empty data");
   }
-  
+
   EvpMdCtxWrapper ctx;
   if (!ctx.valid()) {
     return absl::InternalError("Failed to create digest context");
   }
-  
+
   if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
     return absl::InternalError("Failed to initialize SHA256");
   }
-  
+
   if (EVP_DigestUpdate(ctx.get(), bytes.data(), bytes.size()) != 1) {
     return absl::InternalError("Failed to update SHA256");
   }
-  
+
   std::vector<uint8_t> out(SHA256_DIGEST_LENGTH);
   unsigned int digest_len = 0;
   if (EVP_DigestFinal_ex(ctx.get(), out.data(), &digest_len) != 1) {
     return absl::InternalError("Failed to finalize SHA256");
   }
-  
+
   if (digest_len != SHA256_DIGEST_LENGTH) {
     return absl::InternalError("Unexpected SHA256 digest length");
   }
-  
+
   return out;
 }
 
@@ -215,7 +217,7 @@ absl::StatusOr<std::vector<uint8_t>> compute_tree_hash_sha256(const std::vector<
   if (leaf_digests.empty()) {
     return std::vector<uint8_t>(SHA256_DIGEST_LENGTH, 0);
   }
-  
+
   // Validate all leaf digests are proper SHA256 digests
   for (const auto& leaf : leaf_digests) {
     if (leaf.size() != SHA256_DIGEST_LENGTH) {
@@ -223,12 +225,12 @@ absl::StatusOr<std::vector<uint8_t>> compute_tree_hash_sha256(const std::vector<
           absl::StrCat("Invalid leaf digest size: ", leaf.size(), " (expected ", SHA256_DIGEST_LENGTH, ")"));
     }
   }
-  
+
   std::vector<std::vector<uint8_t>> level = leaf_digests;
   while (level.size() > 1) {
     std::vector<std::vector<uint8_t>> next;
     next.reserve((level.size() + 1) / 2);
-    
+
     for (size_t i = 0; i < level.size(); i += 2) {
       if (i + 1 < level.size()) {
         // Combine two hashes
@@ -236,7 +238,7 @@ absl::StatusOr<std::vector<uint8_t>> compute_tree_hash_sha256(const std::vector<
         concat.reserve(2 * SHA256_DIGEST_LENGTH);
         concat.insert(concat.end(), level[i].begin(), level[i].end());
         concat.insert(concat.end(), level[i + 1].begin(), level[i + 1].end());
-        
+
         auto hash_result = sha256_bytes(concat);
         if (!hash_result.ok()) {
           return hash_result.status();
@@ -249,7 +251,7 @@ absl::StatusOr<std::vector<uint8_t>> compute_tree_hash_sha256(const std::vector<
     }
     level.swap(next);
   }
-  
+
   return level.front();
 }
 
@@ -282,7 +284,7 @@ absl::StatusOr<std::string> compute_index_multihash(
     const std::optional<std::string>& index_data,
     std::string_view index_key_hex) {
   std::vector<uint8_t> digest;
-  
+
   if (index_data.has_value() && !index_data->empty()) {
     const auto bytes =
         absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(index_data->data()), index_data->size());
@@ -301,12 +303,12 @@ absl::StatusOr<std::string> compute_index_multihash(
   } else {
     return absl::InvalidArgumentError("Missing tensor index data or key for multihash computation");
   }
-  
+
   std::string result = to_multibase_multihash_sha256(digest);
   if (result.empty()) {
     return absl::InternalError("Failed to generate multihash");
   }
-  
+
   return result;
 }
 
@@ -314,78 +316,75 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint6
   if (gpu_ptr == nullptr) {
     return absl::InvalidArgumentError("GPU pointer is null");
   }
-  
+
   if (total_size == 0) {
     return absl::InvalidArgumentError("Cannot hash empty GPU buffer");
   }
-  
-  if (total_size > 1ULL << 40) {  // 1TB limit
-    return absl::InvalidArgumentError(
-        absl::StrCat("GPU buffer too large for hashing: ", total_size, " bytes"));
+
+  if (total_size > 1ULL << 40) { // 1TB limit
+    return absl::InvalidArgumentError(absl::StrCat("GPU buffer too large for hashing: ", total_size, " bytes"));
   }
-  
+
   // Set CUDA device with error checking
   if (auto st = cuda::set_device(device_id); !st.ok()) {
     return absl::InternalError(absl::StrCat("Failed to set CUDA device ", device_id, ": ", st.ToString()));
   }
-  
+
   // Validate chunk size
   const size_t chunk_size_bytes = kDefaultChunkSize;
   if (chunk_size_bytes > kMaxChunkSize) {
     return absl::InvalidArgumentError(
         absl::StrCat("Chunk size too large: ", chunk_size_bytes, " (max: ", kMaxChunkSize, ")"));
   }
-  
+
   std::vector<std::vector<uint8_t>> leaves;
   leaves.reserve(static_cast<size_t>((total_size + chunk_size_bytes - 1) / chunk_size_bytes));
 
   uint8_t* src = static_cast<uint8_t*>(gpu_ptr);
   std::vector<uint8_t> host_buf(chunk_size_bytes);
   uint64_t processed = 0;
-  
+
   while (processed < total_size) {
     size_t to_copy = static_cast<size_t>(std::min<uint64_t>(chunk_size_bytes, total_size - processed));
-    
+
     // Validate copy parameters
     if (to_copy == 0 || to_copy > chunk_size_bytes) {
       return absl::InternalError(absl::StrCat("Invalid copy size: ", to_copy));
     }
-    
+
     // Perform GPU to host memory copy with comprehensive error handling
     auto st = cuda::memcpy(host_buf.data(), src + processed, to_copy, cudaMemcpyDeviceToHost);
     if (!st.ok()) {
-      return absl::InternalError(
-          absl::StrCat("CUDA memcpy failed at offset ", processed, ": ", st.ToString()));
+      return absl::InternalError(absl::StrCat("CUDA memcpy failed at offset ", processed, ": ", st.ToString()));
     }
-    
+
     // Synchronize to ensure copy is complete
     if (auto sync_st = cuda::device_synchronize(); !sync_st.ok()) {
-      return absl::InternalError(
-          absl::StrCat("CUDA synchronize failed after memcpy: ", sync_st.ToString()));
+      return absl::InternalError(absl::StrCat("CUDA synchronize failed after memcpy: ", sync_st.ToString()));
     }
-    
+
     // Hash the chunk
     auto hash_result = sha256_bytes(absl::Span<const uint8_t>(host_buf.data(), to_copy));
     if (!hash_result.ok()) {
       return absl::InternalError(
           absl::StrCat("Failed to hash chunk at offset ", processed, ": ", hash_result.status().ToString()));
     }
-    
+
     leaves.push_back(std::move(hash_result.value()));
     processed += to_copy;
   }
-  
+
   // Compute tree hash from leaves
   auto root_result = compute_tree_hash_sha256(leaves);
   if (!root_result.ok()) {
     return root_result.status();
   }
-  
+
   std::string multihash = to_multibase_multihash_sha256(root_result.value());
   if (multihash.empty()) {
     return absl::InternalError("Failed to generate multihash");
   }
-  
+
   return multihash;
 }
 

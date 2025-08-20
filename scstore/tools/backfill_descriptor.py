@@ -65,9 +65,7 @@ def detect_model_dirs(root: Path) -> list[Path]:
     for p in root.rglob("*"):
         if not p.is_dir():
             continue
-        has_partitions = any(
-            (p / "tensor.data").exists() or list(p.glob("tensor.data_*"))
-        )
+        has_partitions = (p / "tensor.data").exists() or any(p.glob("tensor.data_*"))
         has_safetensors = any(p.glob("*.safetensors"))
         if has_partitions or has_safetensors:
             candidates.append(p)

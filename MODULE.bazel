@@ -21,7 +21,7 @@ bazel_dep(name = "rules_proto_grpc_cpp", version = "5.5.0")
 bazel_dep(name = "toolchains_protoc", version = "0.4.3")
 bazel_dep(name = "protobuf", version = "31.1")
 bazel_dep(name = "gsl", version = "4.0.0")
-bazel_dep(name = "boringssl", version = "0.20250103.0")
+bazel_dep(name = "boringssl", version = "0.20250818.0")
 
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
 protoc.toolchain(
