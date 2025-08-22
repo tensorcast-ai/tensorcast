@@ -830,7 +830,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     config.server_port = 50064;
-    config.artifact_id = "p2p_small_model_test";
+    config.artifact_id = "p2p_small_artifact_test";
     config.gpu_id = 0;
     config.artifact_size_mb = 1; // 1MB replica
     config.register_location = "gpu";
@@ -855,7 +855,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     config.server_port = 50065;
-    config.artifact_id = "p2p_large_model_test";
+    config.artifact_id = "p2p_large_artifact_test";
     config.gpu_id = 0;
     config.artifact_size_mb = 64; // 64MB replica
     config.register_location = "gpu";

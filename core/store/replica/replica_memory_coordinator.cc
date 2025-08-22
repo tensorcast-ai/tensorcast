@@ -223,7 +223,7 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
     mapping.last_access_ns = now;
 
     // Record Prometheus counter for this transition (one per chunk event).
-    static const stepcast::metrics::Counter kTransitionsCounter("artifact");
+    static const stepcast::metrics::Counter kTransitionsCounter("store_daemon_chunk_state_transitions_total");
     kTransitionsCounter
         .with_labels(
             {{"location", (location == MemoryLocation::GPU ? "GPU" : "CPU")},

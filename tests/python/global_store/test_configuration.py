@@ -132,7 +132,7 @@ class TestConfiguration:
         """Test that configuration is immutable after creation."""
         config = GlobalStoreConfig(port=50051)
 
-        # The pydantic artifact is frozen, so attempting to modify attributes should raise ValidationError
+        # The pydantic model is frozen, so attempting to modify attributes should raise ValidationError
         with pytest.raises((ValidationError)):
             config.port = 50052
 
