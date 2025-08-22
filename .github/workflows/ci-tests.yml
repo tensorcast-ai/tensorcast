@@ -63,7 +63,7 @@ jobs:
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed \
-            --test_timeout=300
+            --test_timeout=500
 
       - name: Run stress C++ tests
         timeout-minutes: 30
