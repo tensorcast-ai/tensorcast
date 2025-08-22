@@ -4,46 +4,46 @@
 
 from prometheus_client import Counter, Gauge, Histogram, Info
 
-# Model operation metrics
-MODELS_LOADED_TOTAL = Counter(
-    "store_daemon_models_loaded_total",
-    "Total number of models loaded",
+# Artifact operation metrics
+ARTIFACTS_MATERIALIZED_TOTAL = Counter(
+    "store_daemon_artifacts_materialized_total",
+    "Total number of artifacts materialized",
     ["device_type", "source_type"],  # source_type: remote, disk
 )
 
-MODELS_LOAD_FAILURES_TOTAL = Counter(
-    "store_daemon_models_load_failures_total",
-    "Total number of model load failures",
+ARTIFACTS_MATERIALIZE_FAILURES_TOTAL = Counter(
+    "store_daemon_artifacts_materialize_failures_total",
+    "Total number of artifact materialization failures",
     ["device_type", "error_type"],
 )
 
-MODEL_LOAD_DURATION = Histogram(
-    "store_daemon_model_load_duration_seconds",
-    "Time spent loading models",
+ARTIFACT_MATERIALIZE_DURATION = Histogram(
+    "store_daemon_artifact_materialize_duration_seconds",
+    "Time spent materializing artifacts",
     ["device_type", "source_type"],
 )
 
-MODELS_UNLOADED_TOTAL = Counter(
-    "store_daemon_models_unloaded_total",
-    "Total number of models unloaded",
+ARTIFACTS_UNLOADED_TOTAL = Counter(
+    "store_daemon_artifacts_unloaded_total",
+    "Total number of artifacts unloaded",
     ["device_type"],
 )
 
-# Async loading metrics
-MODELS_ALLOCATED_TOTAL = Counter(
-    "store_daemon_models_allocated_total",
-    "Total number of models with memory allocated (async)",
+# Async materialization metrics
+ARTIFACTS_ALLOCATED_TOTAL = Counter(
+    "store_daemon_artifacts_allocated_total",
+    "Total number of artifacts with memory allocated (async)",
     ["device_type"],
 )
 
-PENDING_LOADS = Gauge(
-    "store_daemon_pending_loads",
-    "Number of models currently being loaded asynchronously",
+PENDING_MATERIALIZATIONS = Gauge(
+    "store_daemon_pending_materializations",
+    "Number of artifacts currently being materialized asynchronously",
 )
 
-ASYNC_LOAD_WAIT_DURATION = Histogram(
-    "store_daemon_async_load_wait_duration_seconds",
-    "Time spent waiting for async model loading in ConfirmModel",
+MATERIALIZE_WAIT_DURATION = Histogram(
+    "store_daemon_materialize_wait_duration_seconds",
+    "Time spent waiting for async artifact materialization in ConfirmReplica",
     ["device_type"],
 )
 
@@ -85,33 +85,33 @@ WORKER_UPTIME_SECONDS = Gauge(
 WORKER_INFO = Info("store_daemon_worker_info", "Worker information")
 
 # Verification metrics
-MODEL_VERIFICATION_TOTAL = Counter(
-    "store_daemon_model_verification_total",
-    "Total number of model integrity verification results",
+ARTIFACT_VERIFICATION_TOTAL = Counter(
+    "store_daemon_artifact_verification_total",
+    "Total number of artifact integrity verification results",
     ["status"],  # passed, failed
 )
 
-MODEL_VERIFICATION_LATENCY = Histogram(
-    "store_daemon_model_verification_latency_seconds",
-    "Latency of model integrity verification",
+ARTIFACT_VERIFICATION_LATENCY = Histogram(
+    "store_daemon_artifact_verification_latency_seconds",
+    "Latency of artifact integrity verification",
 )
 
 # Lifecycle management metrics
-MODEL_REF_COUNT = Gauge(
-    "store_daemon_model_ref_count",
-    "Current reference count for loaded models",
-    ["model", "device_id"],
+ARTIFACT_REF_COUNT = Gauge(
+    "store_daemon_artifact_ref_count",
+    "Current reference count for loaded artifacts",
+    ["artifact", "device_id"],
 )
 
 GPU_CACHE_BYTES = Gauge(
     "store_daemon_gpu_cache_bytes",
-    "GPU memory used for model caching",
+    "GPU memory used for replica caching",
     ["type"],  # local, global
 )
 
 EVICTIONS_TOTAL = Counter(
     "store_daemon_evictions_total",
-    "Total number of model evictions",
+    "Total number of replica evictions",
     ["reason"],  # memory, shutdown
 )
 
@@ -131,9 +131,9 @@ HA_STATE_VERSION = Gauge(
     "Current local state version for HA synchronization",
 )
 
-HA_REGISTERED_MODELS = Gauge(
-    "store_daemon_ha_registered_models",
-    "Number of models registered with Global Store",
+HA_REGISTERED_ARTIFACTS = Gauge(
+    "store_daemon_ha_registered_artifacts",
+    "Number of artifacts registered with Global Store",
 )
 
 HA_HEARTBEAT_TOTAL = Counter(

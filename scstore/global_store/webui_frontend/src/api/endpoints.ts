@@ -1,4 +1,4 @@
-import { apiClient, ApiResponse, GlobalMetrics, WorkerOut, ReplicaOut, ModelSummary, NodeSummary, TransportOut } from './client'
+import { apiClient, ApiResponse, GlobalMetrics, WorkerOut, ReplicaOut, ArtifactSummary, NodeSummary, TransportOut } from './client'
 
 export const api = {
   // Summary
@@ -13,24 +13,24 @@ export const api = {
     apiClient.get<ApiResponse<WorkerOut>>(`/workers/${workerId}`),
 
   // Replicas
-  getReplicas: (params: { model_id?: string; node_id?: string; memory_type?: string; worker_id?: string; page?: number; page_size?: number }) =>
+  getReplicas: (params: { artifact_id?: string; node_id?: string; memory_type?: string; worker_id?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiResponse<ReplicaOut[]>>('/replicas', { params }),
 
   getReplica: (replicaId: string) =>
     apiClient.get<ApiResponse<ReplicaOut>>(`/replicas/${replicaId}`),
 
-  // Models
-  getModels: () =>
-    apiClient.get<ApiResponse<ModelSummary[]>>('/models'),
+  // Artifacts
+  getArtifacts: () =>
+    apiClient.get<ApiResponse<ArtifactSummary[]>>('/artifacts'),
 
-  getModel: (modelId: string) =>
-    apiClient.get<ApiResponse<ModelSummary>>(`/models/${modelId}`),
+  getArtifact: (artifactId: string) =>
+    apiClient.get<ApiResponse<ArtifactSummary>>(`/artifacts/${artifactId}`),
 
   // Nodes
   getNodes: () =>
     apiClient.get<ApiResponse<NodeSummary[]>>('/nodes'),
 
   // Transports
-  getTransports: (params: { status?: string; model_id?: string; page?: number; page_size?: number }) =>
+  getTransports: (params: { status?: string; artifact_id?: string; page?: number; page_size?: number }) =>
     apiClient.get<ApiResponse<TransportOut[]>>('/transports', { params }),
 }

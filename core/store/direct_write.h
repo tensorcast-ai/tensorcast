@@ -8,7 +8,7 @@
 
 namespace stepcast::store {
 
-// Byte range expressed in destination VA space (offset within model) and length.
+// Byte range expressed in destination VA space (offset within replica) and length.
 struct VaRange {
   uint64_t offset;
   uint64_t length;
@@ -19,7 +19,7 @@ struct VaRange {
 // keepalive is an opaque handle that keeps underlying pin leases/registrations alive.
 struct DirectWriteToken {
   struct Segment {
-    uint64_t va_offset; // VA offset within the model
+    uint64_t va_offset; // VA offset within the replica
     uint64_t local_addr; // Resolved local CPU address for the start of the segment
     uint64_t length; // Segment length in bytes
   };

@@ -6,13 +6,13 @@
 #include <string>
 #include <unordered_map>
 
+#include "core/common/memory/memory_location.h"
 #include "core/common/metrics/metric_objects.h"
-#include "core/store/model/model_location.h"
 
 namespace stepcast::store {
 
 // Forward declarations
-class ModelRegistry;
+class ReplicaRegistry;
 class DeviceManager;
 class PinnedMemoryPool;
 
@@ -21,7 +21,7 @@ class PinnedMemoryPool;
  *
  * This component handles:
  * - Memory pool metrics
- * - Model count and size metrics
+ * - Replica count and size metrics
  * - Operation metrics (counters and histograms)
  * - GPU metrics
  * - P2P/RDMA transfer metrics
@@ -44,10 +44,10 @@ class MetricsCollector {
   void update_memory_pool_metrics(const PinnedMemoryPool& memory_pool);
 
   /**
-   * @brief Update model-related metrics.
-   * @param model_registry Model registry to query
+   * @brief Update replica-related metrics.
+   * @param replica_registry Replica registry to query
    */
-  void update_model_metrics(const ModelRegistry& model_registry);
+  void update_replica_metrics(const ReplicaRegistry& replica_registry);
 
   /**
    * @brief Update GPU metrics.
@@ -80,7 +80,7 @@ class MetricsCollector {
    */
   void update_all_metrics(
       const PinnedMemoryPool& memory_pool,
-      const ModelRegistry& model_registry,
+      const ReplicaRegistry& replica_registry,
       DeviceManager& device_manager);
 
  private:
@@ -89,10 +89,10 @@ class MetricsCollector {
   stepcast::metrics::Gauge memory_pool_available_gauge_;
   stepcast::metrics::Gauge memory_pool_allocated_chunks_gauge_;
 
-  // Model Metrics
-  stepcast::metrics::Gauge models_in_memory_cpu_gauge_;
-  stepcast::metrics::Gauge models_in_memory_gpu_gauge_;
-  stepcast::metrics::Gauge total_model_size_bytes_gauge_;
+  // Replica Metrics
+  stepcast::metrics::Gauge replicas_in_memory_cpu_gauge_;
+  stepcast::metrics::Gauge replicas_in_memory_gpu_gauge_;
+  stepcast::metrics::Gauge total_replica_size_bytes_gauge_;
 
   // Operation Metrics
   stepcast::metrics::Counter operations_total_counter_;

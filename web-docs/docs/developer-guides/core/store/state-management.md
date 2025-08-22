@@ -8,7 +8,7 @@ sidebar_position: 5
 
 ## Overview
 
-State management in the Core Store module is the core of system reliability, ensuring correct memory lifecycle management through precise state transitions. The system involves two main state dimensions: **Memory State (MemoryState)** and **Model Location (ModelLocation)**.
+State management in the Core Store module is the core of system reliability, ensuring correct memory lifecycle management through precise state transitions. The system involves two main state dimensions: **Memory State (MemoryState)** and **Replica Location (MemoryLocation)**.
 
 ## Memory State (MemoryState)
 
@@ -65,12 +65,12 @@ stateDiagram-v2
 | LOADED | ✅ | ✅ | Access data, transfer data, release memory |
 | FAILED | ⚠️ | ❌ | Cleanup resources |
 
-## Model Location (ModelLocation)
+## Replica Location (MemoryLocation)
 
 ### Location Definition
 
 ```cpp
-enum class ModelLocation : uint8_t {
+enum class MemoryLocation : uint8_t {
     NONE = 0,    // Invalid location
     DISK,        // Disk storage
     CPU,         // CPU memory
@@ -259,10 +259,10 @@ graph TB
 
 ### Mandatory CPU Memory Release (RFC 0001)
 
-As of RFC 0001 §4.3, CPU memory release after GPU copy is **mandatory**. When a model is successfully copied from CPU to GPU:
+As of RFC 0001 §4.3, CPU memory release after GPU copy is **mandatory**. When a replica is successfully copied from CPU to GPU:
 
 1. **DVMP Integration**: The system automatically marks chunks as `COPIED_GPU` via `unlock_chunks()`
-2. **Memory Eviction**: Physical pages are reclaimed through `evict_tail_bytes()`  
+2. **Memory Eviction**: Physical pages are reclaimed through `evict_tail_bytes()`
 3. **State Transition**: CPU memory state transitions to `UNALLOCATED` (virtual address space retained)
 
-This ensures optimal memory utilization and prevents RSS bloat in multi-model scenarios.
+This ensures optimal memory utilization and prevents RSS bloat in multi-replica scenarios.

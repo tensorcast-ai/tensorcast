@@ -26,7 +26,7 @@ enum class DeviceType : uint8_t {
   GPU = 1,
   REMOTE = 2,
 
-  // Additional locations that were previously covered by `ModelLocation`.
+  // Additional locations that were previously covered by `MemoryLocation`.
   DISK = 3,
   NONE = 4,
 };

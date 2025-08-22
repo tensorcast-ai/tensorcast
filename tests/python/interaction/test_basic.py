@@ -20,7 +20,7 @@ from scstore.store_daemon.config import (
 from scstore.store_daemon.servicer import StoreDaemonServicer
 
 from .utils import get_free_port_pair, FakeContext as _MockContext
-from tests.python.utils.model_utils import create_dummy_model
+from tests.python.utils.artifact_utils import create_dummy_artifact
 
 
 # -----------------------------------------------------------------------------
@@ -81,18 +81,27 @@ def _make_servicer(
     # ------------------------------------------------------------------
     # In tests, StoreDaemonServicer spawns the HA connection manager thread
     # asynchronously.  We block briefly here to ensure the stub is ready
-    # before returning, avoiding race conditions in ConfirmModel.
+    # before returning, avoiding race conditions in ConfirmReplica.
     # ------------------------------------------------------------------
 
     if enable_global:
         import time as _time
 
-        timeout_s = 1.0
+        timeout_s = 5.0
         start = _time.time()
-        while srv.global_store_stub is None and _time.time() - start < timeout_s:
+        ready = False
+        while _time.time() - start < timeout_s:
+            # Accept either direct servicer stub or the connection-manager stub
+            if srv.global_store_stub is not None:
+                ready = True
+                break
+            cm = getattr(srv, "connection_manager", None)
+            if cm is not None and getattr(cm, "global_store_stub", None) is not None:
+                ready = True
+                break
             _time.sleep(0.01)
 
-        if srv.global_store_stub is None:
+        if not ready:
             raise RuntimeError(
                 "Global Store stub not initialised within timeout during test setup"
             )
@@ -110,33 +119,33 @@ def test_single_daemon_disk_load():
     servicer = _make_servicer(enable_global=False)
     try:
         # --------------------
-        # Ensure on-disk dummy model exists for the requested path
-        create_dummy_model(servicer.config.server.storage_path, "alpaca-7b.ckpt")
+        # Ensure on-disk dummy artifact exists for the requested path
+        create_dummy_artifact(servicer.config.server.storage_path, "alpaca-7b.ckpt")
 
         ctx = _MockContext()
 
-        request = store_daemon_pb2.LoadModelRequest(
-            model_path="alpaca-7b.ckpt",
+        request = store_daemon_pb2.MaterializeReplicaRequest(
+            disk_path="alpaca-7b.ckpt",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             device_uuid=str(uuid.uuid4()),
         )
-        response = servicer.LoadModel(request, ctx)
+        response = servicer.MaterializeReplica(request, ctx)
 
         # Allocation succeeded (asynchronous load).  The status should be ALLOCATED
         assert (
             response.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         )
         assert response.mem_handle.cuda_ipc_handle != b""
         assert ctx.code is None
 
-        # Confirm the model to simulate client Acknowledgement
-        confirm_req = store_daemon_pb2.ConfirmModelRequest(
-            model_path="alpaca-7b.ckpt",
+        # Confirm the artifact to simulate client Acknowledgement
+        confirm_req = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path="alpaca-7b.ckpt",
             replica_uuid=request.replica_uuid or str(uuid.uuid4()),
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
-        conf_resp = servicer.ConfirmModel(confirm_req, ctx)
+        conf_resp = servicer.ConfirmReplica(confirm_req, ctx)
         assert conf_resp.code == 0
     finally:
         # Clean up daemon
@@ -156,7 +165,7 @@ def test_remote_load_between_two_daemons(global_store_service):
     daemons_to_cleanup = []
     try:
         # ------------------------------------------------------------------
-        # Step 1.  Spin up Daemon A and load a model to GPU (disk source)
+        # Step 1.  Spin up Daemon A and load a artifact to GPU (disk source)
         # ------------------------------------------------------------------
         daemon_a = _make_servicer(
             enable_global=True, gs_addr=global_store_service._address
@@ -164,37 +173,37 @@ def test_remote_load_between_two_daemons(global_store_service):
         daemons_to_cleanup.append(daemon_a)
         ctx = _MockContext()
 
-        content_model_id = "mi2:test-index:test-data"  # Simulated content-addressed ID
+        content_artifact_id = "mi2:test-index:test-data"  # Simulated content-addressed ID
         disk_path = "mistral-7b.ckpt"
 
-        # Create dummy model file on daemon A's local storage so that disk load succeeds
+        # Create dummy artifact file on daemon A's local storage so that disk load succeeds
         # Use 4 MiB to match the registered buffer size for P2P fallback consistency
-        create_dummy_model(daemon_a.config.server.storage_path, disk_path, size_bytes=4 * 1024 * 1024)
+        create_dummy_artifact(daemon_a.config.server.storage_path, disk_path, size_bytes=4 * 1024 * 1024)
 
         device_uuid_a = str(uuid.uuid4())
         replica_uuid_a = str(uuid.uuid4())
 
-        load_req_a = store_daemon_pb2.LoadModelRequest(
-            model_path=disk_path,
+        load_req_a = store_daemon_pb2.MaterializeReplicaRequest(
+            disk_path=disk_path,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             device_uuid=device_uuid_a,
             replica_uuid=replica_uuid_a,
             keep_for_global=True,
             size_bytes=4 * 1024 * 1024,  # 4 MB (arbitrary)
         )
-        resp_a = daemon_a.LoadModel(load_req_a, ctx)
+        resp_a = daemon_a.MaterializeReplica(load_req_a, ctx)
         assert (
             resp_a.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         )
 
         # Confirm to finish lifecycle and trigger registration path in connection manager
-        confirm_req_a = store_daemon_pb2.ConfirmModelRequest(
-            model_path=disk_path,
+        confirm_req_a = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path=disk_path,
             replica_uuid=replica_uuid_a,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
-        daemon_a.ConfirmModel(confirm_req_a, ctx)
+        daemon_a.ConfirmReplica(confirm_req_a, ctx)
 
         # Register a worker and then the replica with the Global Store, reflecting what
         # the connection-manager would usually do.
@@ -218,13 +227,13 @@ def test_remote_load_between_two_daemons(global_store_service):
         dev.ordinal = 0
         dev.uuid = ""
 
-        inst_key = _cs.InstanceKey()
-        inst_key.model_id = disk_path  # Instance is keyed by disk path for local load
+        inst_key = _cs.ReplicaKey()
+        inst_key.artifact_id = disk_path  # Instance is keyed by disk path for local load
         inst_key.device = dev
         inst_key.replica = 0
 
-        comm_info = daemon_a.store_engine.enable_remote_instance_access(
-            inst_key, _cs.ModelLocation.GPU
+        comm_info = daemon_a.store_engine.enable_remote_replica_access(
+            inst_key, _cs.MemoryLocation.GPU
         )
 
         mem_info = global_store_pb2.MemoryInfo(
@@ -233,20 +242,20 @@ def test_remote_load_between_two_daemons(global_store_service):
             node_port=daemon_a._p2p_port,
             remote_memory_keys=list(comm_info.remote_memory_keys),
             buffer_sizes=list(comm_info.buffer_sizes),
-            memory_size=comm_info.model_size,
+            memory_size=comm_info.artifact_size,
             memory_type=global_store_pb2.MemoryType.GPU,
             device_id=dev.ordinal,
         )
-        reg_req = global_store_pb2.RegisterModelReplicaRequest(
-            model_id=content_model_id,
+        reg_req = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=content_artifact_id,
             mem_info=mem_info,
             max_concurrency=2,
             worker_id=worker_resp_a.worker_id,
         )
-        global_store_service.RegisterModelReplica(reg_req, ctx)
+        global_store_service.RegisterReplica(reg_req, ctx)
 
         # ------------------------------------------------------------------
-        # Step 2.  Daemon B attempts remote load of the same model
+        # Step 2.  Daemon B attempts remote load of the same artifact
         # ------------------------------------------------------------------
         daemon_b = _make_servicer(
             enable_global=True, gs_addr=global_store_service._address
@@ -255,40 +264,40 @@ def test_remote_load_between_two_daemons(global_store_service):
         device_uuid_b = str(uuid.uuid4())
         replica_uuid_b = str(uuid.uuid4())
 
-        load_req_b = store_daemon_pb2.LoadModelRequest(
-            model_id=content_model_id,
+        load_req_b = store_daemon_pb2.MaterializeReplicaRequest(
+            artifact_id=content_artifact_id,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             device_uuid=device_uuid_b,
             replica_uuid=replica_uuid_b,
             size_bytes=4 * 1024 * 1024,
         )
-        resp_b = daemon_b.LoadModel(load_req_b, ctx)
+        resp_b = daemon_b.MaterializeReplica(load_req_b, ctx)
 
         # Should allocate quickly using remote source
         assert (
             resp_b.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         )
         assert resp_b.mem_handle.cuda_ipc_handle != b""
 
         # Ensure there are no lingering in-progress records at this point
         assert global_store_service.transport_repository.count_with_filters("in_progress") == 0
 
-        # Confirming should call CompleteModelReplicaTransport underneath.  We don't
+        # Confirming should call CompleteReplicaTransport underneath.  We don't
         # test that directly but ensure confirmation passes.
-        confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-            model_path=disk_path,
+        confirm_req_b = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path=disk_path,
             replica_uuid=replica_uuid_b,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
-        conf_resp_b = daemon_b.ConfirmModel(confirm_req_b, ctx)
+        conf_resp_b = daemon_b.ConfirmReplica(confirm_req_b, ctx)
         assert conf_resp_b.code == 0
 
         # ------------------------------------------------------------------
         # Finally, ensure Global Store transport counter is decremented (<= max)
         # ------------------------------------------------------------------
-        model_info = global_store_service.GetModelInfoById(
-            global_store_pb2.GetModelInfoByIdRequest(model_id=content_model_id), ctx
+        artifact_info = global_store_service.GetArtifactInfoById(
+            global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=content_artifact_id), ctx
         )
         # Replica count may include duplicates due to automatic registration from
         # both daemons.  Ensure *at least one* replica reports the expected size
@@ -296,7 +305,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         expected_size = mem_info.memory_size
         assert any(
             rep.memory_size == expected_size
-            for rep in model_info.replicas
+            for rep in artifact_info.replicas
         ), f"Expected replica with {expected_size} bytes memory_size not found"
 
         # All in-flight transports should be completed after confirmation – the
@@ -329,7 +338,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
 
     We register a remote replica in the Global Store with a non-existent
     remote-memory key so that the P2P transfer fails.  Daemon-B has the
-    model on its local disk, so it must fall back to disk-loading and
+    artifact on its local disk, so it must fall back to disk-loading and
     still return ALLOCATED.
     """
 
@@ -342,8 +351,8 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
         daemons_to_cleanup.append(daemon_a)
         ctx = _MockContext()
 
-        model_id = "falcon-7b.ckpt"
-        disk_path = model_id
+        artifact_id = "falcon-7b.ckpt"
+        disk_path = artifact_id
 
         # Register worker A
         worker_req_a = global_store_pb2.RegisterWorkerRequest(
@@ -368,13 +377,13 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
             memory_type=global_store_pb2.MemoryType.GPU,
             device_id=0,
         )
-        reg_req = global_store_pb2.RegisterModelReplicaRequest(
-            model_id=model_id,
+        reg_req = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
             mem_info=mem_info_bad,
             max_concurrency=1,
             worker_id=worker_resp_a.worker_id,
         )
-        rep_resp = global_store_service.RegisterModelReplica(reg_req, ctx)
+        rep_resp = global_store_service.RegisterReplica(reg_req, ctx)
         assert rep_resp.status == global_store_pb2.Status.OK
 
         # Force the Global Store to time out transport requests so the daemon
@@ -387,7 +396,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
 
         try:
             # ------------------------------------------------------------------
-            # Step 2.  Daemon B attempts remote load of the same model
+            # Step 2.  Daemon B attempts remote load of the same artifact
             #          P2P will fail fast (timeout); ensure disk fallback succeeds
             # ------------------------------------------------------------------
             daemon_b = _make_servicer(enable_global=True, gs_addr=global_store_service._address)
@@ -395,21 +404,21 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
             ctx_b = _MockContext()
 
             # Prepare local disk so fallback path can succeed
-            create_dummy_model(daemon_b.config.server.storage_path, disk_path)
+            create_dummy_artifact(daemon_b.config.server.storage_path, disk_path)
 
-            load_req_b = store_daemon_pb2.LoadModelRequest(
-                model_path=disk_path,
+            load_req_b = store_daemon_pb2.MaterializeReplicaRequest(
+                disk_path=disk_path,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 device_uuid=str(uuid.uuid4()),
                 replica_uuid=str(uuid.uuid4()),
                 size_bytes=1 * 1024 * 1024,
             )
-            resp_b = daemon_b.LoadModel(load_req_b, ctx_b)
+            resp_b = daemon_b.MaterializeReplica(load_req_b, ctx_b)
 
             # Allocation should succeed via disk fallback, returning ALLOCATED
             assert (
                 resp_b.status
-                == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+                == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
             )
             assert resp_b.mem_handle.cuda_ipc_handle != b""
 
@@ -417,25 +426,25 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
             assert global_store_service.transport_repository.count_with_filters("in_progress") == 0
             assert global_store_service.transport_repository.count_with_filters("completed") == 0
 
-            # Confirm the model to complete the lifecycle
-            confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-                model_path=disk_path,
+            # Confirm the artifact to complete the lifecycle
+            confirm_req_b = store_daemon_pb2.ConfirmReplicaRequest(
+                disk_path=disk_path,
                 replica_uuid=load_req_b.replica_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
-            conf_resp_b = daemon_b.ConfirmModel(confirm_req_b, ctx_b)
+            conf_resp_b = daemon_b.ConfirmReplica(confirm_req_b, ctx_b)
             assert conf_resp_b.code == 0
         finally:
             # Restore transport service behaviour
             global_store_service.service.transport_service.request_transport = _orig_request_transport
 
-        # Confirm the model to complete the lifecycle
-        confirm_req_b = store_daemon_pb2.ConfirmModelRequest(
-            model_path=disk_path,
+        # Confirm the artifact to complete the lifecycle
+        confirm_req_b = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path=disk_path,
             replica_uuid=load_req_b.replica_uuid,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
-        conf_resp_b = daemon_b.ConfirmModel(confirm_req_b, ctx_b)
+        conf_resp_b = daemon_b.ConfirmReplica(confirm_req_b, ctx_b)
         assert conf_resp_b.code == 0
 
     finally:

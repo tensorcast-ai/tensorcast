@@ -23,7 +23,7 @@ class TestChunkSyncWorker:
         servicer.worker_id = "test-worker-123"
         servicer.store_engine = Mock()
         servicer.replica_manager = Mock()
-        servicer.replica_manager.get_loaded_models.return_value = ["model1", "model2"]
+        servicer.replica_manager.get_loaded_replicas.return_value = ["model1", "model2"]
         return servicer
 
     @pytest.fixture
@@ -54,7 +54,7 @@ class TestChunkSyncWorker:
         assert worker._channel is None
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalModelStoreStub')
+    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_start_stop(self, mock_stub_class, mock_channel, mock_servicer):
         """Test starting and stopping the worker."""
         # Setup mocks
@@ -105,7 +105,7 @@ class TestChunkSyncWorker:
         assert worker._map_chunk_state(99) == global_store_pb2.ChunkState.CHUNK_HOT
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalModelStoreStub')
+    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_with_updates(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test synchronization with chunk updates."""
         # Setup mocks
@@ -139,7 +139,7 @@ class TestChunkSyncWorker:
         assert len(request.updates) == 5  # All chunks should be sent on first sync
 
         # Verify updates contain correct data
-        update_map = {(u.model_id, u.chunk_idx): u.state for u in request.updates}
+        update_map = {(u.artifact_id, u.chunk_idx): u.state for u in request.updates}
         assert update_map[("model1", 0)] == global_store_pb2.ChunkState.CHUNK_HOT
         assert update_map[("model1", 1)] == global_store_pb2.ChunkState.CHUNK_COPIED_GPU
         assert update_map[("model1", 2)] == global_store_pb2.ChunkState.CHUNK_EVICTED
@@ -147,7 +147,7 @@ class TestChunkSyncWorker:
         assert update_map[("model2", 1)] == global_store_pb2.ChunkState.CHUNK_COLD
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalModelStoreStub')
+    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_delta_updates(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test that only changed chunks are synchronized."""
         # Setup mocks
@@ -188,12 +188,12 @@ class TestChunkSyncWorker:
         # Verify only the changed chunk was sent
         request = mock_stub.BatchUpdateChunkStates.call_args[0][0]
         assert len(request.updates) == 1
-        assert request.updates[0].model_id == "model1"
+        assert request.updates[0].artifact_id == "model1"
         assert request.updates[0].chunk_idx == 0
         assert request.updates[0].state == global_store_pb2.ChunkState.CHUNK_COLD
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalModelStoreStub')
+    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_batch_size(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test that updates are sent in batches."""
         # Setup mocks
@@ -230,7 +230,7 @@ class TestChunkSyncWorker:
         assert len(call_args_list[3][0][0].updates) == 1  # Last batch has remainder
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalModelStoreStub')
+    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_rpc_error_handling(self, mock_stub_class, mock_channel, mock_servicer):
         """Test handling of RPC errors."""
         # Setup mocks
@@ -255,15 +255,15 @@ class TestChunkSyncWorker:
         worker._stub = mock_stub_instance
         worker._perform_sync()  # Should log error but not crash
 
-    def test_model_id_extraction(self, mock_servicer):
-        """Test model ID extraction from paths."""
+    def test_artifact_id_extraction(self, mock_servicer):
+        """Test artifact ID extraction from paths."""
         worker = ChunkSyncWorker(
             servicer=mock_servicer,
             global_store_address="localhost:50051",
         )
 
         # Test various path formats
-        assert worker._extract_model_id("/path/to/model1") == "model1"
-        assert worker._extract_model_id("model2") == "model2"
-        assert worker._extract_model_id("/a/b/c/d/model3") == "model3"
-        assert worker._extract_model_id("") == ""
+        assert worker._extract_artifact_id("/path/to/model1") == "model1"
+        assert worker._extract_artifact_id("model2") == "model2"
+        assert worker._extract_artifact_id("/a/b/c/d/model3") == "model3"
+        assert worker._extract_artifact_id("") == ""

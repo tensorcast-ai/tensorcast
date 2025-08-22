@@ -3,13 +3,13 @@
 """Data access repositories for Global Store."""
 
 from .chunk_directory_repository import ChunkDirectoryRepository
-from .model_replica_repository import ModelReplicaRepository
+from .replica_repository import ReplicaRepository
 from .transport_repository import TransportRepository
 from .worker_repository import WorkerRepository
 
 __all__ = [
     "ChunkDirectoryRepository",
-    "ModelReplicaRepository",
+    "ReplicaRepository",
     "TransportRepository",
     "WorkerRepository",
 ]

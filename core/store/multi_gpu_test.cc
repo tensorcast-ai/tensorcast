@@ -18,15 +18,15 @@ using namespace stepcast::tests::store_engine;
 using namespace stepcast::store;
 using stepcast::DeviceType;
 
-// B1: Load same model to multiple GPUs
-TEST_CASE("B1: Same model on multiple GPUs", "[store_engine][multi_gpu][b1]") {
+// B1: Load same replica to multiple GPUs
+TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") {
   skip_if_insufficient_gpus(2, "B1");
 
-  const std::string model_id = "multi_gpu_model_b1";
-  const size_t model_size = 50 * 1024 * 1024; // 50MB
+  const std::string artifact_id = "multi_gpu_model_b1";
+  const size_t artifact_size = 50 * 1024 * 1024; // 50MB
 
-  TempModelFixture fixture("multi_gpu_b1");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("multi_gpu_b1");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
 
@@ -39,13 +39,13 @@ TEST_CASE("B1: Same model on multiple GPUs", "[store_engine][multi_gpu][b1]") {
   gpu_count = std::min(gpu_count, 4); // Test up to 4 GPUs
   REQUIRE(gpu_count >= 1);
 
-  // Load model to each GPU
-  std::vector<ModelHandle> handles;
+  // Load replica to each GPU
+  std::vector<ReplicaHandle> handles;
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    stepcast::store::LoadingHints hints;
+    stepcast::store::MaterializeHints hints;
 
-    hints.disk_path = model_id;
-    auto handle_or = store->prepare(make_gpu_key(gpu), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    hints.disk_path = artifact_id;
+    auto handle_or = store->materialize_replica(make_gpu_key(gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle_or.ok());
     handles.push_back(std::move(handle_or).value());
   }
@@ -57,33 +57,33 @@ TEST_CASE("B1: Same model on multiple GPUs", "[store_engine][multi_gpu][b1]") {
     REQUIRE(handles[gpu].gpu_base_ptr != nullptr);
   }
 
-  // Verify model is loaded on all GPUs
-  auto loaded_devices = store->get_loaded_devices(model_id);
+  // Verify replica is loaded on all GPUs
+  auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == gpu_count);
 
-  // Verify each GPU has the model
-  std::unordered_map<int, bool> gpu_has_model;
+  // Verify each GPU has the replica
+  std::unordered_map<int, bool> gpu_has_replica;
   for (const auto& device : loaded_devices) {
     REQUIRE(device.type == DeviceType::GPU);
-    gpu_has_model[device.ordinal] = true;
+    gpu_has_replica[device.ordinal] = true;
   }
 
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    REQUIRE(gpu_has_model[gpu]);
+    REQUIRE(gpu_has_replica[gpu]);
 
     // Verify instance on each GPU
-    auto instance_key = make_instance_key(model_id, gpu);
-    auto state = store->get_instance_state(instance_key, DeviceType::GPU);
+    auto replica_key = make_replica_key(artifact_id, gpu);
+    auto state = store->get_replica_state(replica_key, DeviceType::GPU);
     REQUIRE(state == MemoryState::LOADED);
 
     // Strengthen: verify GPU memory content matches file pattern for first few KB
     // Read disk sample
-    auto file_path = fixture.root() / model_id / "tensor.data_0";
+    auto file_path = fixture.root() / artifact_id / "tensor.data_0";
     auto host_data = stepcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     // Get GPU pointer and compare prefix
-    auto ptr_or = store->get_instance_gpu_ptr(instance_key);
+    auto ptr_or = store->get_replica_gpu_ptr(replica_key);
     REQUIRE(ptr_or.ok());
     auto gpu_ptr_u64 = ptr_or.value();
     REQUIRE(gpu_ptr_u64 != 0);
@@ -123,36 +123,36 @@ TEST_CASE("B1: Same model on multiple GPUs", "[store_engine][multi_gpu][b1]") {
 TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   skip_if_insufficient_gpus(2, "B3");
 
-  const std::string model_id = "gpu_copy_model_b3";
-  const size_t model_size = 40 * 1024 * 1024; // 40MB
+  const std::string artifact_id = "gpu_copy_model_b3";
+  const size_t artifact_size = 40 * 1024 * 1024; // 40MB
 
-  TempModelFixture fixture("multi_gpu_b3");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("multi_gpu_b3");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // First load to GPU 0
   {
-    stepcast::store::LoadingHints hints;
+    stepcast::store::MaterializeHints hints;
 
-    hints.disk_path = model_id;
-    auto handle0_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    hints.disk_path = artifact_id;
+    auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle0_or.ok());
     auto handle0 = std::move(handle0_or).value();
     REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
   }
 
   // Verify loaded on GPU 0
-  auto loaded_devices = store->get_loaded_devices(model_id);
+  auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == 1);
   REQUIRE(loaded_devices[0].ordinal == 0);
 
   // Now copy to GPU 1 using COPY_ONLY (GPU-to-GPU transfer enforced).
   auto copy_start = std::chrono::high_resolution_clock::now();
   {
-    stepcast::store::LoadingHints hints;
+    stepcast::store::MaterializeHints hints;
 
-    auto handle1_or = store->prepare(make_gpu_key(1), StoreEngine::PrepareMode::COPY_ONLY, hints);
+    auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(handle1_or.ok());
     auto handle1 = std::move(handle1_or).value();
     REQUIRE(handle1.wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -161,22 +161,22 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - copy_start);
 
   // Verify now loaded on both GPUs
-  loaded_devices = store->get_loaded_devices(model_id);
+  loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == 2);
 
   // Both instances should be ready
   for (int gpu = 0; gpu < 2; ++gpu) {
-    auto instance_key = make_instance_key(model_id, gpu);
-    auto state = store->get_instance_state(instance_key, DeviceType::GPU);
+    auto replica_key = make_replica_key(artifact_id, gpu);
+    auto state = store->get_replica_state(replica_key, DeviceType::GPU);
     REQUIRE(state == MemoryState::LOADED);
 
     // Get GPU pointer for each instance
-    auto ptr_or = store->get_instance_gpu_ptr(instance_key);
+    auto ptr_or = store->get_replica_gpu_ptr(replica_key);
     REQUIRE(ptr_or.ok());
     REQUIRE(ptr_or.value() != 0);
 
     // Validate content prefix
-    auto file_path = fixture.root() / model_id / "tensor.data_0";
+    auto file_path = fixture.root() / artifact_id / "tensor.data_0";
     auto host_data = stepcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
     size_t verify_bytes = std::min<size_t>(4096, host_data.size());
@@ -209,17 +209,17 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
 TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   skip_if_insufficient_gpus(2, "B4");
 
-  const int num_models = 8;
-  const size_t model_size = 25 * 1024 * 1024; // 25MB each
+  const int num_artifacts = 8;
+  const size_t artifact_size = 25 * 1024 * 1024; // 25MB each
 
-  TempModelFixture fixture("multi_gpu_b4");
+  TempArtifactFixture fixture("multi_gpu_b4");
 
-  // Create models
-  std::vector<std::string> model_ids;
-  for (int i = 0; i < num_models; ++i) {
-    auto model_id = generate_model_name("balance_model_b4", i);
-    model_ids.push_back(model_id);
-    fixture.create_model(model_id, model_size);
+  // Create artifacts
+  std::vector<std::string> artifact_ids;
+  for (int i = 0; i < num_artifacts; ++i) {
+    auto artifact_id = generate_artifact_id("balance_model_b4", i);
+    artifact_ids.push_back(artifact_id);
+    fixture.create_artifact(artifact_id, artifact_size);
   }
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
@@ -233,35 +233,36 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   gpu_count = std::min(gpu_count, 4);
   REQUIRE(gpu_count > 0);
 
-  // Load models with round-robin distribution
-  for (size_t i = 0; i < model_ids.size(); ++i) {
+  // Load replicas with round-robin distribution
+  for (size_t i = 0; i < artifact_ids.size(); ++i) {
     int target_gpu = i % gpu_count;
-    stepcast::store::LoadingHints hints;
-    hints.disk_path = model_ids[i];
-    auto handle_or = store->prepare(make_gpu_key(target_gpu), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    stepcast::store::MaterializeHints hints;
+    hints.disk_path = artifact_ids[i];
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(target_gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       REQUIRE(handle_or.value().wait_ready(std::chrono::milliseconds(30000)).ok());
     }
   }
 
   // Check distribution across GPUs
-  std::vector<int> models_per_gpu(gpu_count, 0);
+  std::vector<int> replicas_per_gpu(gpu_count, 0);
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    auto models = store->list_device_models(make_gpu_key(gpu));
-    models_per_gpu[gpu] = models.size();
+    auto replicas = store->list_device_replicas(make_gpu_key(gpu));
+    replicas_per_gpu[gpu] = replicas.size();
   }
 
   // Verify relatively even distribution
-  int min_models = *std::min_element(models_per_gpu.begin(), models_per_gpu.end());
-  int max_models = *std::max_element(models_per_gpu.begin(), models_per_gpu.end());
+  int min_models = *std::min_element(replicas_per_gpu.begin(), replicas_per_gpu.end());
+  int max_models = *std::max_element(replicas_per_gpu.begin(), replicas_per_gpu.end());
 
   // Distribution should be reasonably balanced
   REQUIRE(max_models - min_models <= 2);
 
-  // All GPUs should have at least one model (if enough models)
-  if (num_models >= gpu_count) {
+  // All GPUs should have at least one replica (if enough models)
+  if (num_artifacts >= gpu_count) {
     for (int gpu = 0; gpu < gpu_count; ++gpu) {
-      REQUIRE(models_per_gpu[gpu] > 0);
+      REQUIRE(replicas_per_gpu[gpu] > 0);
     }
   }
 }
@@ -270,20 +271,20 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
 TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   skip_if_insufficient_gpus(2, "B5");
 
-  const std::string model_id = "device_ops_model_b5";
-  const size_t model_size = 30 * 1024 * 1024; // 30MB
+  const std::string artifact_id = "device_ops_model_b5";
+  const size_t artifact_size = 30 * 1024 * 1024; // 30MB
 
-  TempModelFixture fixture("multi_gpu_b5");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("multi_gpu_b5");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // Load to both GPU 0 and GPU 1
-  stepcast::store::LoadingHints hints;
+  stepcast::store::MaterializeHints hints;
 
-  hints.disk_path = model_id;
-  auto handle0 = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
-  auto handle1 = store->prepare(make_gpu_key(1), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+  hints.disk_path = artifact_id;
+  auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle1 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
   REQUIRE(handle0.ok());
   REQUIRE(handle1.ok());
@@ -293,13 +294,13 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
 
   // Verify full content on both GPUs to ensure data correctness before unload
   {
-    auto file_path = fixture.root() / model_id / "tensor.data_0";
+    auto file_path = fixture.root() / artifact_id / "tensor.data_0";
     auto host_data = stepcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     for (int gpu = 0; gpu < 2; ++gpu) {
-      auto instance_key = make_instance_key(model_id, gpu);
-      auto ptr_or = store->get_instance_gpu_ptr(instance_key);
+      auto replica_key = make_replica_key(artifact_id, gpu);
+      auto ptr_or = store->get_replica_gpu_ptr(replica_key);
       REQUIRE(ptr_or.ok());
 
       std::vector<char> gpu_full(host_data.size());
@@ -311,37 +312,37 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   }
 
   // Test device-specific unload
-  auto instance0 = make_instance_key(model_id, 0);
-  auto instance1 = make_instance_key(model_id, 1);
+  auto instance0 = make_replica_key(artifact_id, 0);
+  auto instance1 = make_replica_key(artifact_id, 1);
 
   // Unload from GPU 0 only
-  REQUIRE(store->unload_instance(instance0) == 0);
+  REQUIRE(store->unload_replica(instance0) == 0);
 
-  // Verify GPU 0 no longer has the model
-  auto gpu0_models = store->list_device_models(make_gpu_key(0));
-  REQUIRE(gpu0_models.empty());
+  // Verify GPU 0 no longer has the replica
+  auto gpu0_replicas = store->list_device_replicas(make_gpu_key(0));
+  REQUIRE(gpu0_replicas.empty());
 
-  // Verify GPU 1 still has the model
-  auto gpu1_models = store->list_device_models(make_gpu_key(1));
-  REQUIRE(gpu1_models.size() == 1);
-  REQUIRE(gpu1_models[0].model_id == model_id);
+  // Verify GPU 1 still has the replica
+  auto gpu1_replicas = store->list_device_replicas(make_gpu_key(1));
+  REQUIRE(gpu1_replicas.size() == 1);
+  REQUIRE(gpu1_replicas[0].artifact_id == artifact_id);
 
-  // Verify get_loaded_devices reflects the change
-  auto loaded_devices = store->get_loaded_devices(model_id);
+  // Verify get_resident_devices reflects the change
+  auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == 1);
   REQUIRE(loaded_devices[0].ordinal == 1);
 
   // Test remote access registration per device
-  auto reg_info = store->enable_remote_instance_access(instance1, ModelLocation::GPU);
+  auto reg_info = store->enable_remote_replica_access(instance1, MemoryLocation::GPU);
   if (!reg_info.ok()) {
     WARN("Remote access not available; skipping remote access checks.");
   } else {
     REQUIRE(reg_info.ok());
     // Try to enable on already unloaded instance
-    auto reg_fail = store->enable_remote_instance_access(instance0, ModelLocation::GPU);
+    auto reg_fail = store->enable_remote_replica_access(instance0, MemoryLocation::GPU);
     REQUIRE(!reg_fail.ok());
     // Disable remote access
-    auto disable_status = store->disable_remote_instance_access(instance1, ModelLocation::GPU);
+    auto disable_status = store->disable_remote_replica_access(instance1, MemoryLocation::GPU);
     REQUIRE(disable_status.ok());
   }
 }

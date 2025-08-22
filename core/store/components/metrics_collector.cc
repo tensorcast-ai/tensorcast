@@ -4,7 +4,7 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/components/device_manager.h"
-#include "core/store/components/model_registry.h"
+#include "core/store/components/replica_registry.h"
 #include "core/store/memory_types.h"
 
 namespace stepcast::store {
@@ -14,10 +14,10 @@ MetricsCollector::MetricsCollector()
       memory_pool_total_gauge_("store_daemon_memory_pool_total_bytes"),
       memory_pool_available_gauge_("store_daemon_memory_pool_available_bytes"),
       memory_pool_allocated_chunks_gauge_("store_daemon_memory_pool_allocated_chunks"),
-      // Model Metrics
-      models_in_memory_cpu_gauge_("store_daemon_models_in_memory", {{"location", "cpu"}}),
-      models_in_memory_gpu_gauge_("store_daemon_models_in_memory", {{"location", "gpu"}}),
-      total_model_size_bytes_gauge_("store_daemon_total_model_size_bytes"),
+      // Replica Metrics
+      replicas_in_memory_cpu_gauge_("store_daemon_replicas_in_memory", {{"location", "cpu"}}),
+      replicas_in_memory_gpu_gauge_("store_daemon_replicas_in_memory", {{"location", "gpu"}}),
+      total_replica_size_bytes_gauge_("store_daemon_total_replica_size_bytes"),
       // Operation Metrics
       operations_total_counter_("store_daemon_cpp_operations_total"),
       operation_latency_histogram_("store_daemon_cpp_operation_latency_seconds"),
@@ -30,9 +30,9 @@ MetricsCollector::MetricsCollector()
   memory_pool_total_gauge_.set(0.0);
   memory_pool_available_gauge_.set(0.0);
   memory_pool_allocated_chunks_gauge_.set(0.0);
-  models_in_memory_cpu_gauge_.set(0.0);
-  models_in_memory_gpu_gauge_.set(0.0);
-  total_model_size_bytes_gauge_.set(0.0);
+  replicas_in_memory_cpu_gauge_.set(0.0);
+  replicas_in_memory_gpu_gauge_.set(0.0);
+  total_replica_size_bytes_gauge_.set(0.0);
   operations_total_counter_.inc(0.0);
   operation_latency_histogram_.observe(0.0);
   p2p_transfers_total_.inc(0.0);
@@ -50,14 +50,14 @@ void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool& memory
   memory_pool_available_gauge_.set(static_cast<double>(available_size));
 }
 
-void MetricsCollector::update_model_metrics(const ModelRegistry& model_registry) {
-  size_t cpu_models = model_registry.get_model_count_by_location(ModelLocation::PAGEABLE_CPU);
-  size_t gpu_models = model_registry.get_model_count_by_location(ModelLocation::GPU);
-  uint64_t total_size = model_registry.get_total_model_size();
+void MetricsCollector::update_replica_metrics(const ReplicaRegistry& replica_registry) {
+  size_t cpu_models = replica_registry.get_replica_count_by_location(MemoryLocation::PAGEABLE_CPU);
+  size_t gpu_models = replica_registry.get_replica_count_by_location(MemoryLocation::GPU);
+  uint64_t total_size = replica_registry.get_total_replica_size();
 
-  models_in_memory_cpu_gauge_.set(static_cast<double>(cpu_models));
-  models_in_memory_gpu_gauge_.set(static_cast<double>(gpu_models));
-  total_model_size_bytes_gauge_.set(static_cast<double>(total_size));
+  replicas_in_memory_cpu_gauge_.set(static_cast<double>(cpu_models));
+  replicas_in_memory_gpu_gauge_.set(static_cast<double>(gpu_models));
+  total_replica_size_bytes_gauge_.set(static_cast<double>(total_size));
 }
 
 void MetricsCollector::update_gpu_metrics(DeviceManager& device_manager) {
@@ -85,10 +85,10 @@ void MetricsCollector::record_memory_eviction() {
 
 void MetricsCollector::update_all_metrics(
     const PinnedMemoryPool& memory_pool,
-    const ModelRegistry& model_registry,
+    const ReplicaRegistry& replica_registry,
     DeviceManager& device_manager) {
   update_memory_pool_metrics(memory_pool);
-  update_model_metrics(model_registry);
+  update_replica_metrics(replica_registry);
   update_gpu_metrics(device_manager);
 }
 

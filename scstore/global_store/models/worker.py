@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, StepCast Team.
 
-"""Worker domain model."""
+"""Worker domain artifact."""
 
 from dataclasses import dataclass
 from datetime import datetime

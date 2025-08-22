@@ -2,28 +2,25 @@
 
 #pragma once
 
-#include <future>
 #include <memory>
-#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/store/model/model_location.h"
 
 // Forward declare SeekableSource in the loader namespace to avoid heavy includes here
 namespace stepcast::store::loader {
 class SeekableSource;
-}
+} // namespace stepcast::store::loader
 
 namespace stepcast::store {
 
 /**
- * @brief Interface for loading model data from a source (Disk, P2P)
+ * @brief Interface for loading replica data from a source (Disk, P2P)
  *        into memory managed by a MemoryManager.
  */
-class IModelLoader {
+class IArtifactLoader {
  public:
-  virtual ~IModelLoader() = default;
+  virtual ~IArtifactLoader() = default;
 
   /**
    * @brief Initialize the loader.
@@ -32,11 +29,11 @@ class IModelLoader {
   virtual absl::Status initialize() = 0;
 
   /**
-   * @brief Get the total size of the model data in bytes.
+   * @brief Get the total size of the replica data in bytes.
    * May require initialization or connection depending on the loader type.
-   * @return absl::StatusOr<uint64_t> Model size or error.
+   * @return absl::StatusOr<uint64_t> Artifact size or error.
    */
-  virtual absl::StatusOr<uint64_t> get_model_size() = 0;
+  virtual absl::StatusOr<uint64_t> get_artifact_size() = 0;
 
   /**
    * @brief NEW: Provide a data source handle for this loader.
@@ -45,13 +42,13 @@ class IModelLoader {
   virtual absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() = 0;
 
   // Disable copy and move semantics
-  IModelLoader(const IModelLoader&) = delete;
-  IModelLoader& operator=(const IModelLoader&) = delete;
-  IModelLoader(IModelLoader&&) = delete;
-  IModelLoader& operator=(IModelLoader&&) = delete;
+  IArtifactLoader(const IArtifactLoader&) = delete;
+  IArtifactLoader& operator=(const IArtifactLoader&) = delete;
+  IArtifactLoader(IArtifactLoader&&) = delete;
+  IArtifactLoader& operator=(IArtifactLoader&&) = delete;
 
  protected:
-  IModelLoader() = default; // Constructor accessible only to derived classes
+  IArtifactLoader() = default; // Constructor accessible only to derived classes
 };
 
 } // namespace stepcast::store

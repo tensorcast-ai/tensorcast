@@ -23,7 +23,7 @@ def test_mixed_fault_stress(global_store_service):
     """Scenario 10 & 11 – run mixed operations, ensure counters return to zero."""
 
     gs = global_store_service
-    model = "orca-mini"
+    artifact = "orca-mini"
 
     # Register two replicas with modest concurrency limits
     capacities = {"S1": 3, "S2": 5}
@@ -52,13 +52,13 @@ def test_mixed_fault_stress(global_store_service):
             memory_type=global_store_pb2.MemoryType.GPU,
             device_id=0,
         )
-        reg = global_store_pb2.RegisterModelReplicaRequest(
-            model_id=model,
+        reg = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact,
             mem_info=mem_info,
             max_concurrency=capacities[node_id],
             worker_id=worker_resp.worker_id,
         )
-        reg_resp = gs.RegisterModelReplica(reg, FakeContext())
+        reg_resp = gs.RegisterReplica(reg, FakeContext())
         assert reg_resp.status == global_store_pb2.Status.OK
 
     active_transport_ids: list[str] = []
@@ -76,11 +76,11 @@ def test_mixed_fault_stress(global_store_service):
 
         # ~5%: attempt request that is expected to time-out (simulate saturation)
         if action_pick < FAULT_RATE + TIMEOUT_RATE:
-            req_to = global_store_pb2.RequestModelReplicaTransportRequest(
-                model_id=model,
+            req_to = global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=artifact,
                 wait_timeout_ms=1,
             )
-            resp = gs.RequestModelReplicaTransport(req_to, FakeContext())
+            resp = gs.RequestReplicaTransport(req_to, FakeContext())
             # Either we time-out (preferred) or succeed if capacity available
             assert resp.status in (
                 global_store_pb2.Status.TIMED_OUT,
@@ -91,23 +91,23 @@ def test_mixed_fault_stress(global_store_service):
             continue
 
         # Otherwise request a normal transport
-        req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
-        resp = gs.RequestModelReplicaTransport(req, FakeContext())
+        req = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact)
+        resp = gs.RequestReplicaTransport(req, FakeContext())
         if resp.status == global_store_pb2.Status.OK:
             active_transport_ids.append(resp.transport_id)
 
         # Occasionally complete a random active transport
         if active_transport_ids and random.random() < 0.3:
             tid = active_transport_ids.pop(random.randrange(len(active_transport_ids)))
-            comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(transport_id=tid)
-            gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+            comp_req = global_store_pb2.CompleteReplicaTransportRequest(transport_id=tid)
+            gs.CompleteReplicaTransport(comp_req, FakeContext())
 
     # After workload, complete all remaining transports including leaked ones
     # ------------------------------------------------------------------
     for tid in list(active_transport_ids) + leaked_ids:
-        comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(transport_id=tid)
-        gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+        comp_req = global_store_pb2.CompleteReplicaTransportRequest(transport_id=tid)
+        gs.CompleteReplicaTransport(comp_req, FakeContext())
 
     # Validate replica counters
-    for replica in gs.model_replica_repository.find_by_model(model):
+    for replica in gs.replica_repository.find_by_artifact(artifact):
         assert replica.current_requests == 0

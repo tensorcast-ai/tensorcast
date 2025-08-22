@@ -44,12 +44,12 @@ class ChunkDirectoryRepository(BaseRepository):
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO chunk_directory (
-                        model_id, chunk_idx, node_id, device_uuid, replica,
+                        artifact_id, chunk_idx, node_id, device_uuid, replica,
                         chunk_state, last_update_time, node_load_ratio
                     ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)
                     """,
                     (
-                        update.model_id,
+                        update.artifact_id,
                         update.chunk_idx,
                         node_id,
                         update.device_uuid,
@@ -70,13 +70,13 @@ class ChunkDirectoryRepository(BaseRepository):
         return updates_applied
 
     def query_chunk_locations(
-        self, model_id: str, chunk_indices: Optional[List[int]] = None
+        self, artifact_id: str, chunk_indices: Optional[List[int]] = None
     ) -> List[Tuple]:
         """
-        Query chunk locations for a model.
+        Query chunk locations for a artifact.
 
         Args:
-            model_id: Model identifier
+            artifact_id: Artifact identifier
             chunk_indices: Optional list of specific chunks to query
 
         Returns:
@@ -94,25 +94,25 @@ class ChunkDirectoryRepository(BaseRepository):
                         chunk_state, node_load_ratio, device_uuid, replica
                     FROM chunk_directory cd
                     JOIN workers w ON cd.node_id = w.node_id
-                    WHERE cd.model_id = ?
+                    WHERE cd.artifact_id = ?
                       AND cd.chunk_idx IN ({placeholders})
                       AND cd.chunk_state != 4  -- Exclude EVICTED chunks
                     ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
                 """
-                params = [model_id] + chunk_indices
+                params = [artifact_id] + chunk_indices
             else:
-                # Query all chunks for the model
+                # Query all chunks for the artifact
                 query = """
                     SELECT DISTINCT
                         chunk_idx, node_id, node_address, p2p_port,
                         chunk_state, node_load_ratio, device_uuid, replica
                     FROM chunk_directory cd
                     JOIN workers w ON cd.node_id = w.node_id
-                    WHERE cd.model_id = ?
+                    WHERE cd.artifact_id = ?
                       AND cd.chunk_state != 4  -- Exclude EVICTED chunks
                     ORDER BY cd.chunk_idx, cd.chunk_state, cd.node_load_ratio
                 """
-                params = [model_id]
+                params = [artifact_id]
 
             return cursor.execute(query, params).fetchall()
 
@@ -151,12 +151,12 @@ class ChunkDirectoryRepository(BaseRepository):
             logger.exception(f"Error cleaning up stale chunks: {e}")
             raise
 
-    def get_chunk_distribution(self, model_id: str) -> dict:
+    def get_chunk_distribution(self, artifact_id: str) -> dict:
         """
-        Get chunk distribution statistics for a model.
+        Get chunk distribution statistics for a artifact.
 
         Args:
-            model_id: Model identifier
+            artifact_id: Artifact identifier
 
         Returns:
             Dictionary with distribution statistics
@@ -169,10 +169,10 @@ class ChunkDirectoryRepository(BaseRepository):
                 """
                 SELECT chunk_state, COUNT(DISTINCT chunk_idx) as count
                 FROM chunk_directory
-                WHERE model_id = ?
+                WHERE artifact_id = ?
                 GROUP BY chunk_state
                 """,
-                (model_id,),
+                (artifact_id,),
             ).fetchall()
 
             # Get chunk count by node
@@ -180,10 +180,10 @@ class ChunkDirectoryRepository(BaseRepository):
                 """
                 SELECT node_id, COUNT(DISTINCT chunk_idx) as count
                 FROM chunk_directory
-                WHERE model_id = ?
+                WHERE artifact_id = ?
                 GROUP BY node_id
                 """,
-                (model_id,),
+                (artifact_id,),
             ).fetchall()
 
             return {

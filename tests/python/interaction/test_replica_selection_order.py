@@ -14,8 +14,8 @@ from tests.python.interaction.utils import FakeContext
 # Helpers – keep self-contained to avoid cross-test dependencies
 # -----------------------------------------------------------------------------
 
-def _register_gpu_replica(gs, *, model_id: str, node_id: str, max_concurrency: int) -> None:
-    """Register a worker + single-GPU replica with *max_concurrency* for *model_id*."""
+def _register_gpu_replica(gs, *, artifact_id: str, node_id: str, max_concurrency: int) -> None:
+    """Register a worker + single-GPU replica with *max_concurrency* for *artifact_id*."""
 
     # 1) Worker registration (must precede replica)
     worker_req = global_store_pb2.RegisterWorkerRequest(
@@ -38,13 +38,13 @@ def _register_gpu_replica(gs, *, model_id: str, node_id: str, max_concurrency: i
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model_id,
+    reg_req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
     )
-    rep_resp = gs.RegisterModelReplica(reg_req, FakeContext())
+    rep_resp = gs.RegisterReplica(reg_req, FakeContext())
     assert rep_resp.status == global_store_pb2.Status.OK
 
 
@@ -64,16 +64,16 @@ def test_replica_selection_order(global_store_service, capacities):
     """
 
     gs = global_store_service
-    model_id = "llama-replica-order"
+    artifact_id = "llama-replica-order"
 
     # Register replicas **largest capacity first** so that the tie-break
     # `updated_at DESC` does not influence the desired deterministic order.
     for node_id, cap in sorted(capacities.items(), key=lambda kv: kv[1], reverse=True):
-        _register_gpu_replica(gs, model_id=model_id, node_id=node_id, max_concurrency=cap)
+        _register_gpu_replica(gs, artifact_id=artifact_id, node_id=node_id, max_concurrency=cap)
 
     def _request():
-        req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model_id)
-        resp = gs.RequestModelReplicaTransport(req, FakeContext())
+        req = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact_id)
+        resp = gs.RequestReplicaTransport(req, FakeContext())
         assert resp.status == global_store_pb2.Status.OK
         return resp.remote_memory_info.node_id
 
@@ -92,7 +92,7 @@ def test_replica_selection_order(global_store_service, capacities):
 
     # House-keeping – complete all transports to keep GS counters balanced
     for transport_id in list(gs.transport_repository.list_with_filters(status="in_progress")):
-        complete_req = global_store_pb2.CompleteModelReplicaTransportRequest(
+        complete_req = global_store_pb2.CompleteReplicaTransportRequest(
             transport_id=str(transport_id.transport_id),
         )
-        gs.CompleteModelReplicaTransport(complete_req, FakeContext())
+        gs.CompleteReplicaTransport(complete_req, FakeContext())

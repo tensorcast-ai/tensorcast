@@ -2,7 +2,7 @@
 
 """Replica management with reference counting and eviction logic.
 
-This module handles the lifecycle of loaded model replicas including:
+This module handles the lifecycle of loaded artifact replicas including:
 - Reference counting based on process PIDs
 - Eviction when memory pressure is high
 - Registration with global store
@@ -21,10 +21,10 @@ from scstore.logger import init_logger
 from scstore.proto import store_daemon_pb2
 
 from .metrics import (
+    ARTIFACT_REF_COUNT,
+    ARTIFACTS_UNLOADED_TOTAL,
     EVICTIONS_TOTAL,
     GPU_CACHE_BYTES,
-    MODEL_REF_COUNT,
-    MODELS_UNLOADED_TOTAL,
     get_device_type_label,
 )
 from .replica_ref import ReplicaKey, ReplicaRefInfo
@@ -85,12 +85,12 @@ def _normalize_gpu_stats(raw_stats: Any) -> Dict[int, Dict[str, int]]:
 
 
 class ReplicaManager:
-    """Manages model replica lifecycle with reference counting and eviction.
+    """Manages replica replica lifecycle with reference counting and eviction.
 
     This class handles:
     - Reference counting based on PIDs
     - Memory pressure-based eviction
-    - Model confirmation and registration
+    - Replica confirmation and registration
     - Graceful unloading
     """
 
@@ -102,14 +102,14 @@ class ReplicaManager:
     def __init__(self, servicer: "StoreDaemonServicer") -> None:
         self._servicer = servicer
         self._store_engine = servicer.store_engine
-        self._global_store_stub = servicer.global_store_stub
+        # Global Store interactions are routed via the connection manager; no direct stub here.
 
         # Reference counting data structures
         self._replicas: Dict[ReplicaKey, ReplicaRefInfo] = {}
         self._lock = threading.RLock()  # Reentrant lock for nested calls
 
-        # Reverse lookup: model_path -> Set[ReplicaKey]
-        self._model_to_keys: Dict[str, Set[ReplicaKey]] = {}
+        # Reverse lookup: artifact_id (disk_path) -> Set[ReplicaKey]
+        self._artifact_to_keys: Dict[str, Set[ReplicaKey]] = {}
 
         # ---------------------------------------------------------------------
         # Reference Counting API
@@ -117,25 +117,25 @@ class ReplicaManager:
 
     def add_ref(
         self,
-        model_path: str,
+        disk_path: str,
         device_id: int,
         pid: int,
         size_bytes: int = 0,
         keep_for_global: bool = False,
     ) -> bool:
-        """Add a reference to a model replica.
+        """Add a reference to a artifact replica.
 
         Args:
-            model_path: Model identifier
+            disk_path: Artifact identifier (disk path or content ID)
             device_id: GPU device ID
             pid: Process ID of the user
-            size_bytes: Size of the model in bytes
+            size_bytes: Size of the replica in bytes
             keep_for_global: Whether to keep for global cache
 
         Returns:
             True if reference was added successfully
         """
-        key = ReplicaKey(model_id=model_path, device_id=device_id)
+        key = ReplicaKey(artifact_id=disk_path, device_id=device_id)
 
         with self._lock:
             if key not in self._replicas:
@@ -147,9 +147,9 @@ class ReplicaManager:
                 )
 
                 # Update reverse lookup
-                if model_path not in self._model_to_keys:
-                    self._model_to_keys[model_path] = set()
-                self._model_to_keys[model_path].add(key)
+                if disk_path not in self._artifact_to_keys:
+                    self._artifact_to_keys[disk_path] = set()
+                self._artifact_to_keys[disk_path].add(key)
 
             replica_info = self._replicas[key]
             added = replica_info.add_pid(pid)
@@ -160,26 +160,26 @@ class ReplicaManager:
                     f"total refs: {replica_info.ref_count}"
                 )
                 # Update metrics
-                MODEL_REF_COUNT.labels(
-                    model=key.model_id, device_id=str(key.device_id)
+                ARTIFACT_REF_COUNT.labels(
+                    artifact=key.artifact_id, device_id=str(key.device_id)
                 ).set(replica_info.ref_count)
             else:
                 logger.debug(f"PID {pid} already has reference to {key}")
 
             return True
 
-    def remove_ref(self, model_path: str, device_id: int, pid: int) -> bool:
-        """Remove a reference from a model replica.
+    def remove_ref(self, disk_path: str, device_id: int, pid: int) -> bool:
+        """Remove a reference from a artifact replica.
 
         Args:
-            model_path: Model identifier
+            disk_path: Replica identifier
             device_id: GPU device ID
             pid: Process ID to remove
 
         Returns:
             True if reference was removed
         """
-        key = ReplicaKey(model_id=model_path, device_id=device_id)
+        key = ReplicaKey(artifact_id=disk_path, device_id=device_id)
 
         with self._lock:
             if key not in self._replicas:
@@ -196,8 +196,8 @@ class ReplicaManager:
                 )
 
                 # Update metrics
-                MODEL_REF_COUNT.labels(
-                    model=key.model_id, device_id=str(key.device_id)
+                ARTIFACT_REF_COUNT.labels(
+                    artifact=key.artifact_id, device_id=str(key.device_id)
                 ).set(replica_info.ref_count)
 
                 # If no more references and not kept for global, mark as evictable
@@ -226,8 +226,8 @@ class ReplicaManager:
                     )
 
                     # Update metrics
-                    MODEL_REF_COUNT.labels(
-                        model=key.model_id, device_id=str(key.device_id)
+                    ARTIFACT_REF_COUNT.labels(
+                        artifact=key.artifact_id, device_id=str(key.device_id)
                     ).set(replica_info.ref_count)
 
                     if replica_info.ref_count == 0:
@@ -235,20 +235,18 @@ class ReplicaManager:
 
         return zero_ref_keys
 
-    def get_replica_info(
-        self, model_path: str, device_id: int
-    ) -> ReplicaRefInfo | None:
+    def get_replica_info(self, disk_path: str, device_id: int) -> ReplicaRefInfo | None:
         """Get replica reference information."""
-        key = ReplicaKey(model_id=model_path, device_id=device_id)
+        key = ReplicaKey(artifact_id=disk_path, device_id=device_id)
         with self._lock:
             return self._replicas.get(key)
 
-    def get_loaded_models(self) -> List[Dict[str, Any]]:
-        """Get information about all loaded models."""
+    def get_loaded_replicas(self) -> List[Dict[str, Any]]:
+        """Get information about all loaded replicas."""
         with self._lock:
             return [
                 {
-                    "model_id": replica_info.key.model_id,
+                    "artifact_id": replica_info.key.artifact_id,
                     "device_id": replica_info.key.device_id,
                     "ref_count": replica_info.ref_count,
                     "pids": list(replica_info.pids),
@@ -269,7 +267,7 @@ class ReplicaManager:
     # ---------------------------------------------------------------------
 
     def maybe_evict(self, bytes_needed: int, device_id: int) -> List[ReplicaKey]:
-        """Try to evict models to free up memory.
+        """Try to evict replicas to free up memory.
 
         Args:
             bytes_needed: Bytes needed to be freed
@@ -415,7 +413,7 @@ class ReplicaManager:
             True if eviction was successful
         """
         key = replica_info.key
-        model_path = key.model_id
+        disk_path = key.artifact_id
 
         logger.info(f"Evicting replica {key}")
 
@@ -428,12 +426,12 @@ class ReplicaManager:
             )
 
             # Unload from Store Engine
-            if self.unload_model(
-                model_path,
+            if self.unload_replica(
+                disk_path,
                 device_type=device_type,
                 device_id=key.device_id,
             ):
-                # unload_model() already removes from tracking and updates metrics
+                # unload_replica() already removes from tracking and updates metrics
                 # Update eviction metric
                 EVICTIONS_TOTAL.labels(reason="memory").inc()
 
@@ -504,18 +502,50 @@ class ReplicaManager:
     # Original Confirmation/Registration API (enhanced)
     # ---------------------------------------------------------------------
 
-    def unload_model(
+    def confirm_replica(
         self,
-        model_path: str,
+        *,
+        disk_path: str,
+        replica_uuid: str,
+        device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DEVICE_TYPE_GPU,
+    ) -> bool:
+        """Confirm a replica has been loaded and is ready for use.
+
+        Registration with Global Store is now handled by the daemon's
+        higher-level flow (verification success path) and/or the C++ core.
+        This method remains as a lightweight acknowledgement hook.
+        """
+
+        try:
+            # Best-effort: touch last access timestamp if we track this replica
+            device_id = 0 if device_type == store_daemon_pb2.DEVICE_TYPE_GPU else -1
+            key = ReplicaKey(artifact_id=disk_path, device_id=device_id)
+            with self._lock:
+                info = self._replicas.get(key)
+                if info is not None:
+                    info.touch_access()
+            logger.info(
+                "Confirmed replica ready: %s (uuid=%s)", disk_path, replica_uuid
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to confirm replica: %s (uuid=%s)", disk_path, replica_uuid
+            )
+            return False
+
+    def unload_replica(
+        self,
+        disk_path: str,
         device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DEVICE_TYPE_GPU,
         *,
         device_id: int | None = None,
         pid: int | None = None,
     ) -> bool:
-        """Unload a model from memory.
+        """Unload a replica from memory.
 
         Args:
-            model_path: Identifier of the model to unload.
+            disk_path: Identifier of the replica to unload.
             device_type: DEVICE_TYPE_CPU / DEVICE_TYPE_GPU where the replica resides.
                 The special DEVICE_TYPE_DISK is treated as a no-op because no memory
                 needs to be released in that case.
@@ -526,7 +556,7 @@ class ReplicaManager:
                 to the unload attempt.
 
         Returns:
-            True when the model replica was unloaded (or skipped because it
+            True when the replica replica was unloaded (or skipped because it
             still has active references); False on hard failures.
         """
 
@@ -539,21 +569,21 @@ class ReplicaManager:
         # ------------------------------------------------------------------
         if device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_DISK:
             logger.debug(
-                "UnloadModel: received DISK replica for %s – no action required",
-                model_path,
+                "UnloadReplica: received DISK replica for %s – no action required",
+                disk_path,
             )
             return True
 
         # Resolve the device ordinal – favour the explicit argument when
         # provided to support multi-GPU setups.
         assert device_id is not None, "device_id must be provided"
-        key = ReplicaKey(model_id=model_path, device_id=device_id)
+        key = ReplicaKey(artifact_id=disk_path, device_id=device_id)
 
         # Remove reference if PID provided
         if pid is not None:
-            self.remove_ref(model_path, device_id, pid)
+            self.remove_ref(disk_path, device_id, pid)
 
-        # Check if model should be unloaded
+        # Check if replica should be unloaded
         with self._lock:
             replica_info = self._replicas.get(key)
             if replica_info and replica_info.ref_count > 0:
@@ -570,16 +600,14 @@ class ReplicaManager:
             info = self._replicas.get(key)
             replica_id = info.replica_id if info else None
 
-        if replica_id and self._servicer.global_store_enabled:
-            # Connection manager and stub are guaranteed to be initialised when
-            # global_store_enabled is True – remove redundant fallbacks.
-            assert self._servicer.connection_manager is not None, (
-                "Connection manager must be initialised when global_store_enabled"
-            )
-
+        if (
+            replica_id
+            and self._servicer.global_store_enabled
+            and self._servicer.connection_manager
+        ):
             try:
-                success = self._servicer.connection_manager.unregister_model_replica(
-                    model_id=model_path,
+                success = self._servicer.connection_manager.unregister_artifact_replica(
+                    artifact_id=disk_path,
                     replica_id=replica_id,
                     device_id=device_id,
                 )
@@ -587,48 +615,41 @@ class ReplicaManager:
                     logger.info(
                         "Unregistered replica %s for %s from Global Store before unload",
                         replica_id,
-                        model_path,
+                        disk_path,
                     )
                 else:
                     logger.warning(
                         "Failed to unregister replica %s for %s (queued for retry)",
                         replica_id,
-                        model_path,
+                        disk_path,
                     )
             except Exception:
                 logger.exception(
                     "Failed to unregister replica %s for %s before unload",
                     replica_id,
-                    model_path,
+                    disk_path,
                 )
 
         assert self._store_engine is not None
-        # Disable remote model access via communication engine (if previously enabled)
+        # Disable remote replica access via communication engine (if previously enabled)
         if self._servicer.enable_p2p_engine:
-            gs_stub = self._servicer.global_store_stub
-            assert gs_stub is not None
-
             try:
-                cpp_location = self._get_cpp_model_location(device_type)
-                # Gracefully handle absence of the method in store_engine.
-                inst_key = self._make_instance_key(model_path, device_id)
-                self._store_engine.disable_remote_instance_access(
-                    inst_key, cpp_location
-                )
-
-                logger.info("Disabled remote model access for %s", model_path)
+                cpp_location = self._get_cpp_MEMORY_LOCATION(device_type)
+                inst_key = self._make_replica_key(disk_path, device_id)
+                self._store_engine.disable_remote_replica_access(inst_key, cpp_location)
+                logger.info("Disabled remote replica access for %s", disk_path)
             except Exception:
                 logger.exception(
-                    "Failed to disable remote model access for %s before unload",
-                    model_path,
+                    "Failed to disable remote replica access for %s before unload",
+                    disk_path,
                 )
 
         # Proceed with unloading
         success = False
         for _ in range(self.MAX_RETRIES):
-            inst_key = self._make_instance_key(model_path, device_id)
-            if self._store_engine.unload_instance(inst_key) == 0:
-                logger.info("UnloadModel: success %s", model_path)
+            inst_key = self._make_replica_key(disk_path, device_id)
+            if self._store_engine.unload_replica(inst_key) == 0:
+                logger.info("UnloadReplica: success %s", disk_path)
                 success = True
                 break
 
@@ -636,8 +657,8 @@ class ReplicaManager:
 
         if not success:
             logger.error(
-                "UnloadModel failed for model %s after %d retries",
-                model_path,
+                "UnloadReplica failed for replica %s after %d retries",
+                disk_path,
                 self.MAX_RETRIES,
             )
             return False
@@ -645,13 +666,13 @@ class ReplicaManager:
         # Remove from tracking
         with self._lock:
             self._replicas.pop(key, None)
-            if model_path in self._model_to_keys:
-                self._model_to_keys[model_path].discard(key)
-                if not self._model_to_keys[model_path]:
-                    del self._model_to_keys[model_path]
+            if disk_path in self._artifact_to_keys:
+                self._artifact_to_keys[disk_path].discard(key)
+                if not self._artifact_to_keys[disk_path]:
+                    del self._artifact_to_keys[disk_path]
 
         # Record successful unload metric
-        MODELS_UNLOADED_TOTAL.labels(
+        ARTIFACTS_UNLOADED_TOTAL.labels(
             device_type=get_device_type_label(device_type)
         ).inc()
 
@@ -690,13 +711,13 @@ class ReplicaManager:
     # ---------------------------------------------------------------------
 
     @staticmethod
-    def _get_cpp_model_location(
+    def _get_cpp_MEMORY_LOCATION(
         device_type: store_daemon_pb2.DeviceType,
-    ) -> _cs.ModelLocation:
+    ) -> _cs.MemoryLocation:
         if device_type == store_daemon_pb2.DEVICE_TYPE_CPU:
-            return _cs.ModelLocation(_cs.ModelLocation.CPU)
+            return _cs.MemoryLocation(_cs.MemoryLocation.CPU)
         if device_type == store_daemon_pb2.DEVICE_TYPE_GPU:
-            return _cs.ModelLocation(_cs.ModelLocation.GPU)
+            return _cs.MemoryLocation(_cs.MemoryLocation.GPU)
         raise ValueError(
             f"Unsupported device type for C++ location mapping: {device_type}"
         )
@@ -705,21 +726,23 @@ class ReplicaManager:
     # Test-helpers (not used by production code)
     # ------------------------------------------------------------------
 
-    def get_replica_ref_count(self, model_path: str) -> int:
-        """Return the cumulative reference count for *model_path* across devices."""
+    def get_replica_ref_count(self, disk_path: str) -> int:
+        """Return the cumulative reference count for *disk_path* across devices."""
         with self._lock:
-            keys = self._model_to_keys.get(model_path, set())
+            keys = self._artifact_to_keys.get(disk_path, set())
             return sum(self._replicas[k].ref_count for k in keys if k in self._replicas)
 
     def get_metrics(self) -> Dict[str, Any]:
         """Return a lightweight metrics snapshot compatible with interaction tests."""
         with self._lock:
-            loaded_models: Set[str] = {
-                k.model_id for k in self._replicas if self._replicas[k].ref_count >= 0
+            loaded_artifacts: Set[str] = {
+                k.artifact_id
+                for k in self._replicas
+                if self._replicas[k].ref_count >= 0
             }
         return {
-            "loaded_models": len(loaded_models),
-            "models": list(loaded_models),
+            "loaded_artifacts": len(loaded_artifacts),
+            "artifacts": list(loaded_artifacts),
         }
 
     def get_device_cache_bytes(self, device_id: int) -> int:
@@ -740,16 +763,16 @@ class ReplicaManager:
             )
 
     @staticmethod
-    def _make_instance_key(model_path: str, device_id: int) -> _cs.InstanceKey:
-        """Construct an InstanceKey for *model_path* on the given *device_id*."""
+    def _make_replica_key(disk_path: str, device_id: int) -> _cs.ReplicaKey:
+        """Construct an ReplicaKey for *disk_path* on the given *device_id*."""
 
         dev_key = _cs.DeviceKey()
         dev_key.type = _cs.DeviceType.GPU if device_id >= 0 else _cs.DeviceType.CPU
         dev_key.ordinal = device_id
         dev_key.uuid = ""
 
-        inst_key = _cs.InstanceKey()
-        inst_key.model_id = model_path
+        inst_key = _cs.ReplicaKey()
+        inst_key.artifact_id = disk_path
         inst_key.device = dev_key
         inst_key.replica = 0
         return inst_key

@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/store/model/chunk_meta.h"
+#include "core/store/replica/chunk_meta.h"
 
 using namespace stepcast::memory;
 using namespace stepcast::store;
@@ -56,7 +56,7 @@ TEST_CASE("DistributedVirtualMemoryPool basic operations", "[dvmp]") {
 
   SECTION("Large allocation") {
     const size_t large_size = get_large_test_size();
-    auto region_or = dvmp.allocate("large_model", large_size);
+    auto region_or = dvmp.allocate("large_artifact", large_size);
 
     if (!region_or.ok()) {
       // Large allocations may fail on resource-constrained environments (including some CI)
@@ -71,7 +71,7 @@ TEST_CASE("DistributedVirtualMemoryPool basic operations", "[dvmp]") {
     REQUIRE(region.bytes == large_size);
 
     // Verify chunk count
-    auto snapshot = dvmp.chunk_snapshot("large_model");
+    auto snapshot = dvmp.chunk_snapshot("large_artifact");
     REQUIRE(
         snapshot.size() ==
         (large_size + DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
@@ -92,7 +92,7 @@ TEST_CASE("DistributedVirtualMemoryPool basic operations", "[dvmp]") {
       REQUIRE(meta.last_touch_s.load() == 0);
     }
 
-    // Non-existent model should return empty span
+    // Non-existent replica should return empty span
     auto empty = dvmp.chunk_snapshot("nonexistent");
     REQUIRE(empty.empty());
   }
@@ -192,7 +192,7 @@ TEST_CASE("DistributedVirtualMemoryPool eviction", "[dvmp]") {
   }
 
   SECTION("Evict more than available") {
-    // Try to evict 2GB from 1GB model
+    // Try to evict 2GB from 1GB replica
     size_t evicted = dvmp.evict_tail_bytes("evict_test", 2ULL * 1024 * 1024 * 1024);
     REQUIRE(evicted == size_1gb); // Should evict all 4 chunks
 
@@ -407,7 +407,7 @@ TEST_CASE("DistributedVirtualMemoryPool state transitions", "[dvmp]") {
 TEST_CASE("DistributedVirtualMemoryPool error handling", "[dvmp]") {
   DistributedVirtualMemoryPool dvmp(DistributedVirtualMemoryPool::kDefaultChunkSize);
 
-  SECTION("Operations on non-existent model") {
+  SECTION("Operations on non-existent replica") {
     auto status = dvmp.lock_chunks("nonexistent", {0});
     REQUIRE(!status.ok());
     REQUIRE(status.code() == absl::StatusCode::kNotFound);

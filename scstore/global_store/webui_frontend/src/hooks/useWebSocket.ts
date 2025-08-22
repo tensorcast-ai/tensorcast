@@ -24,7 +24,7 @@ export const useWebSocket = (onMessage?: (msg: WebSocketMessage) => void) => {
             break
           case 'replica_update':
             queryClient.invalidateQueries({ queryKey: ['replicas'] })
-            queryClient.invalidateQueries({ queryKey: ['models'] })
+            queryClient.invalidateQueries({ queryKey: ['artifacts'] })
             break
           case 'transport':
             queryClient.invalidateQueries({ queryKey: ['transports'] })

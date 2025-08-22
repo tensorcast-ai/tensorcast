@@ -12,8 +12,8 @@
 #include "absl/status/statusor.h"
 #include "core/checkpoint/checkpoint.h"
 #include "core/checkpoint/checkpoint_streaming.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/logging_init.h"
-#include "core/common/model_hash.h"
 
 #include <filesystem>
 #include <fstream>
@@ -23,7 +23,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include "core/common/model_verification.h"
+#include "core/common/artifact_verification.h"
 #include "core/store/loader/canonical_index.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/safetensors_util.h"
@@ -32,12 +32,12 @@
 namespace py = pybind11;
 
 using namespace stepcast::store;
-using stepcast::store::model_hash::compute_index_multihash;
+using stepcast::store::artifact_hash::compute_index_multihash;
 
-// Helper function to convert ModelVerificationInfo to Python dictionary
-py::dict verification_info_to_dict(const ModelVerificationInfo& info) {
+// Helper function to convert ArtifactVerificationInfo to Python dictionary
+py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
   py::dict result;
-  result["model_size"] = info.model_size;
+  result["artifact_size"] = info.artifact_size;
   result["full_hash"] = info.full_hash;
 
   py::list segment_hashes;
@@ -61,12 +61,12 @@ py::dict verification_info_to_dict(const ModelVerificationInfo& info) {
   return result;
 }
 
-// Helper function to convert Python dictionary to ModelVerificationInfo
-ModelVerificationInfo dict_to_verification_info(const py::dict& dict) {
-  ModelVerificationInfo info;
+// Helper function to convert Python dictionary to ArtifactVerificationInfo
+ArtifactVerificationInfo dict_to_verification_info(const py::dict& dict) {
+  ArtifactVerificationInfo info;
 
-  if (dict.contains("model_size")) {
-    info.model_size = dict["model_size"].cast<uint64_t>();
+  if (dict.contains("artifact_size")) {
+    info.artifact_size = dict["artifact_size"].cast<uint64_t>();
   }
   if (dict.contains("full_hash")) {
     info.full_hash = dict["full_hash"].cast<uint64_t>();
@@ -96,14 +96,14 @@ ModelVerificationInfo dict_to_verification_info(const py::dict& dict) {
   return info;
 }
 
-// Wrapper function for generate_model_verification_info_from_disk
-py::dict generate_model_verification_info_wrapper(const std::string& model_path, int verification_level = 1) {
+// Wrapper function for generate_verification_info_from_disk
+py::dict generate_artifact_verification_info_wrapper(const std::string& disk_path, int verification_level = 1) {
   try {
-    ModelVerificationInfo info;
+    ArtifactVerificationInfo info;
     {
       py::gil_scoped_release release;
       auto level = static_cast<VerificationLevel>(verification_level);
-      info = generate_model_verification_info_from_disk(model_path, level);
+      info = generate_verification_info_from_disk(disk_path, level);
     }
     return verification_info_to_dict(info);
   } catch (const std::exception& e) {
@@ -113,14 +113,14 @@ py::dict generate_model_verification_info_wrapper(const std::string& model_path,
 }
 
 // Wrapper function for GPU verification
-bool verify_model_data_from_gpu_wrapper(
+bool verify_artifact_data_from_gpu_wrapper(
     int device_id,
     std::uint64_t cuda_memory_ptr,
     size_t memory_size,
     const py::dict& expected_verification,
     int verification_level) {
   try {
-    ModelVerificationInfo expected_info = dict_to_verification_info(expected_verification);
+    ArtifactVerificationInfo expected_info = dict_to_verification_info(expected_verification);
 
     // Create data pointers and sizes for verification
     std::vector<void*> data_ptrs = {reinterpret_cast<void*>(cuda_memory_ptr)};
@@ -130,7 +130,7 @@ bool verify_model_data_from_gpu_wrapper(
     absl::Status result;
     {
       py::gil_scoped_release release;
-      result = ModelVerifier::verify_model_data(data_ptrs, data_sizes, expected_info, level, device_id);
+      result = ArtifactVerifier::verify_artifact_data(data_ptrs, data_sizes, expected_info, level, device_id);
     }
 
     if (result.ok()) {
@@ -191,7 +191,7 @@ static bool close_cuda_memory_handle_wrapper(int device_id, std::uint64_t cuda_m
 }
 
 // ------------------------------------------------------------------
-// Unified Save: write data partitions, tensor_index.json, model_descriptor.json
+// Unified Save: write data partitions, tensor_index.json, artifact_descriptor.json
 // ------------------------------------------------------------------
 static py::dict save_model_to_disk_wrapper(
     const std::vector<std::string>& tensor_names,
@@ -294,7 +294,7 @@ static py::dict save_model_to_disk_wrapper(
   if (!idx_mh_or.ok()) {
     PY_THROW_WITH_LOG(PyExc_RuntimeError, idx_mh_or.status().ToString());
   }
-  // Compute data multihash via unified SeekableSource pipeline, with empty-model handling
+  // Compute data multihash via unified SeekableSource pipeline, with empty-artifact handling
   auto compute_mh_via_source = [&](const std::string& dir_path) -> absl::StatusOr<std::string> {
     namespace fs = std::filesystem;
     fs::path dir(dir_path);
@@ -311,11 +311,11 @@ static py::dict save_model_to_disk_wrapper(
       total_size = std::max<uint64_t>(total_size, off + sz);
     }
 
-    // Empty model: no bytes to hash → define data_multihash deterministically
+    // Empty artifact: no bytes to hash → define data_multihash deterministically
     if (total_size == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = stepcast::store::model_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return stepcast::store::model_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = stepcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
+      return stepcast::store::artifact_hash::multibase_multihash_sha256(root);
     }
 
     // Collect partition files deterministically
@@ -363,7 +363,7 @@ static py::dict save_model_to_disk_wrapper(
   }
 
   nlohmann::json desc;
-  desc["model_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
+  desc["artifact_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
   desc["index_multihash"] = *idx_mh_or;
   desc["data_multihash"] = *data_mh_or;
   desc["schema_version"] = "v2";
@@ -375,9 +375,9 @@ static py::dict save_model_to_disk_wrapper(
   desc["hash_params"] = hash_params;
 
   {
-    std::ofstream out(dir / "model_descriptor.json");
+    std::ofstream out(dir / "artifact_descriptor.json");
     if (!out.is_open()) {
-      PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to write model_descriptor.json"));
+      PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to write artifact_descriptor.json"));
     }
     out << desc.dump(2);
     out.close();
@@ -385,7 +385,7 @@ static py::dict save_model_to_disk_wrapper(
 
   // Return descriptor to Python
   py::dict result;
-  result["model_id"] = desc["model_id"].get<std::string>();
+  result["artifact_id"] = desc["artifact_id"].get<std::string>();
   result["index_multihash"] = desc["index_multihash"].get<std::string>();
   result["data_multihash"] = desc["data_multihash"].get<std::string>();
   result["schema_version"] = desc["schema_version"].get<std::string>();
@@ -396,18 +396,18 @@ static py::dict save_model_to_disk_wrapper(
 
 static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) {
   const std::filesystem::path dir(path);
-  const auto desc_path = dir / "model_descriptor.json";
+  const auto desc_path = dir / "artifact_descriptor.json";
   if (std::filesystem::exists(desc_path)) {
     std::ifstream in(desc_path);
     if (!in.is_open()) {
-      PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to open model_descriptor.json"));
+      PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to open artifact_descriptor.json"));
     }
     std::stringstream buffer;
     buffer << in.rdbuf();
     in.close();
     nlohmann::json j = nlohmann::json::parse(buffer.str());
     py::dict result;
-    result["model_id"] = j["model_id"].get<std::string>();
+    result["artifact_id"] = j["artifact_id"].get<std::string>();
     result["index_multihash"] = j["index_multihash"].get<std::string>();
     result["data_multihash"] = j["data_multihash"].get<std::string>();
     result["schema_version"] = j["schema_version"].get<std::string>();
@@ -464,11 +464,11 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
       uint64_t sz = arr[1].get<uint64_t>();
       total_size2 = std::max<uint64_t>(total_size2, off + sz);
     }
-    // Empty model: produce deterministic data multihash without requiring partitions
+    // Empty artifact: produce deterministic data multihash without requiring partitions
     if (total_size2 == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = stepcast::store::model_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return stepcast::store::model_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = stepcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
+      return stepcast::store::artifact_hash::multibase_multihash_sha256(root);
     }
     if (parts.empty()) {
       return absl::NotFoundError("No tensor.data partitions found");
@@ -503,7 +503,7 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
   }
 
   nlohmann::json desc;
-  desc["model_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
+  desc["artifact_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
   desc["index_multihash"] = *idx_mh_or;
   desc["data_multihash"] = *data_mh_or;
   desc["schema_version"] = "v2";
@@ -516,13 +516,13 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
 
   std::ofstream out(desc_path);
   if (!out.is_open()) {
-    PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to write model_descriptor.json"));
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("Failed to write artifact_descriptor.json"));
   }
   out << desc.dump(2);
   out.close();
 
   py::dict result;
-  result["model_id"] = desc["model_id"].get<std::string>();
+  result["artifact_id"] = desc["artifact_id"].get<std::string>();
   result["index_multihash"] = desc["index_multihash"].get<std::string>();
   result["data_multihash"] = desc["data_multihash"].get<std::string>();
   result["schema_version"] = desc["schema_version"].get<std::string>();
@@ -538,7 +538,7 @@ static py::bytes build_canonical_index_from_safetensors_wrapper(const std::strin
   namespace fs = std::filesystem;
   fs::path dir(dir_path);
   if (!fs::exists(dir) || !fs::is_directory(dir)) {
-    const auto msg = std::string("Invalid model_dir for safetensors: ") + dir_path;
+    const auto msg = std::string("Invalid artifact directory for safetensors: ") + dir_path;
     PY_THROW_WITH_LOG(PyExc_RuntimeError, msg);
   }
   std::vector<fs::path> st_files;
@@ -592,16 +592,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("meta_state_dict"),
           py::arg("path"),
           py::arg("config") = py::dict(),
-          "Unified save: writes data, tensor_index.json, model_descriptor.json and returns descriptor")
+          "Unified save: writes data, tensor_index.json, artifact_descriptor.json and returns descriptor")
       .def("restore_tensors", &restore_tensors, "Restore a state dict")
       .def(
-          "restore_tensors_from_model_path",
-          &restore_tensors_from_model_path,
+          "restore_tensors_from_disk",
+          &restore_tensors_from_disk,
           py::arg("meta_state_dict"),
-          py::arg("model_path"),
+          py::arg("disk_path"),
           py::arg("tensor_device_offsets"),
           py::arg("device_id") = -1,
-          "Restore a state dict from model path, device_id=-1 means load to CPU, otherwise CUDA device id")
+          "Restore a state dict from artifact path, device_id=-1 means load to CPU, otherwise CUDA device id")
       .def(
           "allocate_cuda_memory",
           &allocate_cuda_memory,
@@ -631,30 +631,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("cuda_memory_ptr"),
           "Close CUDA memory handle (raises Python exception on failure)")
       .def(
-          "generate_model_verification_info",
-          &generate_model_verification_info_wrapper,
-          py::arg("model_path"),
+          "generate_artifact_verification_info",
+          &generate_artifact_verification_info_wrapper,
+          py::arg("disk_path"),
           py::arg("verification_level") = 1,
-          "Generate model verification information from saved model files")
+          "Generate artifact verification information from saved artifact files")
       .def(
-          "verify_model_data_from_gpu",
-          &verify_model_data_from_gpu_wrapper,
+          "verify_artifact_data_from_gpu",
+          &verify_artifact_data_from_gpu_wrapper,
           py::arg("device_id"),
           py::arg("cuda_memory_ptr"),
           py::arg("memory_size"),
           py::arg("expected_verification"),
           py::arg("verification_level"),
-          "Verify model data integrity from GPU memory");
+          "Verify artifact data integrity from GPU memory");
 
   m.def(
       "inspect_or_generate_descriptor",
       &inspect_or_generate_descriptor_wrapper,
-      py::arg("model_path"),
-      "Return model descriptor if present; otherwise compute multihashes and write model_descriptor.json");
+      py::arg("disk_path"),
+      "Return artifact descriptor if present; otherwise compute multihashes and write artifact_descriptor.json");
 
   m.def(
       "build_canonical_index_from_safetensors",
       &build_canonical_index_from_safetensors_wrapper,
-      py::arg("model_dir"),
+      py::arg("artifact_dir"),
       "Build canonical RFC-0007 index JSON bytes from a directory of .safetensors files");
 }

@@ -176,7 +176,7 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
     }
     const auto& s = *it;
     uint64_t within = off - s.base_offset;
-    size_t seg_remaining = static_cast<size_t>(s.data_size - within);
+    auto seg_remaining = static_cast<size_t>(s.data_size - within);
     size_t want = std::min(to_read - total, seg_remaining);
     auto got = pread_fully(s.fd, s.data_start + within, ptr + total, want);
     if (!got.ok()) {

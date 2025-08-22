@@ -3,7 +3,7 @@
 server:
   host: 0.0.0.0
   port: 50052
-  storage_path: /tmp/test_models
+  storage_path: /tmp/test_artifacts
   num_thread: 10
   chunk_size: 134217728  # 128MB
   mem_pool_size: 8589934592  # 8GB

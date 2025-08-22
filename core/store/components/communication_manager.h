@@ -63,7 +63,7 @@ class CommunicationManager {
     return *comm_engine_;
   }
 
-  // Return shared pointer for cases needing shared ownership (e.g., ModelConfig)
+  // Return shared pointer for cases needing shared ownership (e.g., ReplicaConfig)
   [[nodiscard]] std::shared_ptr<stepcast::communicator::CommunicateEngine> get_shared_engine() const {
     return comm_engine_;
   }

@@ -93,7 +93,7 @@ requests_total.Inc(); // increments labelled counter
 Gauge gpu_memory("gpu_memory_bytes", {{"device", std::to_string(device_id)}});
 gpu_memory.Set(bytes);
 
-Histogram inference_latency("inference_latency_seconds", {{"model", model_id}});
+Histogram inference_latency("inference_latency_seconds", {{"artifact", artifact_id}});
 inference_latency.Observe(elapsed_secs);
 ```
 
@@ -124,7 +124,7 @@ Gauge gpu_mem("gpu_memory_bytes");
 gpu_mem.with_labels({{"device", std::to_string(dev_id)}}).set(bytes);
 
 Histogram latency("inference_latency_seconds");
-latency.with_labels({{"model", model_id}}).observe(elapsed);
+latency.with_labels({{"artifact", artifact_id}}).observe(elapsed);
 ```
 
 Implementation-wise the helper is **zero-cost** – it merely returns a

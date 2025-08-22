@@ -27,26 +27,26 @@ DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : 
 
 DistributedVirtualMemoryPool::~DistributedVirtualMemoryPool() {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [id, info_sp] : models_) {
+  for (auto& [id, info_sp] : artifacts_) {
     if (!info_sp) {
       continue;
     }
-    if (info_sp->base != nullptr && info_sp->bytes > 0) {
-      if (munmap(info_sp->base, info_sp->bytes) != 0) {
-        PLOG(WARNING) << "munmap failed for model " << id;
+    if (info_sp->cpu_base != nullptr && info_sp->bytes > 0) {
+      if (munmap(info_sp->cpu_base, info_sp->bytes) != 0) {
+        PLOG(WARNING) << "munmap failed for " << id;
       }
     }
   }
 }
 
 absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMemoryPool::allocate(
-    std::string_view model_id,
+    std::string_view artifact_id,
     size_t bytes,
     int /*numa*/) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const std::string key(model_id);
-  if (models_.find(key) != models_.end()) {
-    return absl::AlreadyExistsError("Model already has an allocated region");
+  const std::string key(artifact_id);
+  if (artifacts_.find(key) != artifacts_.end()) {
+    return absl::AlreadyExistsError("Artifact replica already has an allocated region");
   }
 
   // Reserve virtual address range with read/write permissions so that loaders
@@ -60,7 +60,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
 
   const size_t num_chunks = (bytes + chunk_size_ - 1) / chunk_size_;
   auto info = std::make_shared<DvmpRegionState>();
-  info->base = addr;
+  info->cpu_base = addr;
   info->bytes = bytes;
   info->metadata = std::make_unique<store::ChunkMeta[]>(num_chunks);
   info->chunk_count = num_chunks;
@@ -71,16 +71,22 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
     info->pin_refcnt[i].store(0, std::memory_order_relaxed);
   }
 
-  models_.emplace(key, std::move(info));
+  artifacts_.emplace(key, std::move(info));
 
   VirtualRegion region{addr, nullptr, bytes};
-  VLOG(1) << "DVMP: allocated " << bytes << " bytes for model " << key << " at " << addr;
+  VLOG(1) << "DVMP: allocated " << bytes << " bytes for replica " << key << " at " << addr;
   return region;
 }
 
+absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMemoryPool::allocate(
+    std::string_view artifact_id,
+    size_t bytes) {
+  return allocate(artifact_id, bytes, -1);
+}
+
 absl::Span<const store::ChunkMeta> DistributedVirtualMemoryPool::chunk_snapshot(
-    std::string_view model_id) const noexcept {
-  auto info_sp_or = get_model_info(model_id);
+    std::string_view artifact_id) const noexcept {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return {};
   }
@@ -96,14 +102,14 @@ constexpr int kMadviseFlagsEvict = MADV_PAGEOUT; // Real page-out on modern kern
 constexpr int kMadviseFlagsFree = MADV_FREE; // Hints that pages can be reclaimed lazily
 } // namespace
 
-absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
-  auto info_sp_or = get_model_info(model_id);
+absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
-  const std::string key(model_id);
+  const std::string key(artifact_id);
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
 
   if (idx.empty()) {
     // No-op for empty input per test expectation
@@ -117,13 +123,13 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
   // LOCKED_TX and to emit a warning with contextual information.
   auto rollback_and_log = [&](const absl::Status& status, std::optional<uint32_t> fail_idx) -> absl::Status {
     if (fail_idx.has_value()) {
-      LOG(WARNING) << "lock_chunks rollback for model " << key << ", chunk " << *fail_idx << ": " << status.message();
+      LOG(WARNING) << "lock_chunks rollback for replica " << key << ", chunk " << *fail_idx << ": " << status.message();
     } else {
-      LOG(WARNING) << "lock_chunks rollback for model " << key << ": " << status.message();
+      LOG(WARNING) << "lock_chunks rollback for replica " << key << ": " << status.message();
     }
     for (const auto& [j_idx, prev] : locked) {
       info.metadata[j_idx].state.store(prev, std::memory_order_release);
-      void* j_addr = static_cast<char*>(info.base) + static_cast<size_t>(j_idx) * chunk_size_;
+      void* j_addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(j_idx) * chunk_size_;
       if (::munlock(j_addr, chunk_size_) != 0) {
         PLOG(WARNING) << "munlock failed during rollback for chunk " << j_idx;
       }
@@ -155,7 +161,7 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
     }
 
     // Attempt to lock the corresponding memory pages so they cannot be reclaimed.
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     if (::mlock(addr, chunk_size_) != 0) {
       const int err = errno;
       // If the failure is due to insufficient mlock limit or permissions, degrade
@@ -181,15 +187,15 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view model_id
 }
 
 absl::Status DistributedVirtualMemoryPool::unlock_chunks(
-    std::string_view model_id,
+    std::string_view artifact_id,
     absl::Span<const uint32_t> idx,
     bool copied_gpu) {
-  auto info_sp_or = get_model_info(model_id);
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
 
   // No-op for empty input per test expectation
   if (idx.empty()) {
@@ -216,7 +222,7 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
     meta.state.store(new_state, std::memory_order_release);
 
     // Release the page lock so that it can be evicted/preempted again if necessary.
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     int rc = ::munlock(addr, chunk_size_);
     if (rc != 0) {
       PLOG(WARNING) << "munlock failed for chunk " << i;
@@ -227,13 +233,13 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
   return absl::OkStatus();
 }
 
-size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id, size_t bytes) {
-  auto info_sp_or = get_model_info(model_id);
+size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view artifact_id, size_t bytes) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return 0;
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   size_t freed = 0;
   // Iterate from tail backwards.
   for (ssize_t idx = static_cast<ssize_t>(info.chunk_count) - 1; idx >= 0 && freed < bytes; --idx) {
@@ -253,7 +259,7 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id,
       if (!meta.state.compare_exchange_strong(expected, store::ChunkState::EVICTED, std::memory_order_acq_rel)) {
         continue; // state changed concurrently, skip
       }
-      void* addr = static_cast<char*>(info.base) + static_cast<size_t>(idx) * chunk_size_;
+      void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(idx) * chunk_size_;
       size_t advise_len = chunk_size_;
       // Use MADV_PAGEOUT if available else MADV_DONTNEED
       int madv_flag = kMadviseFlagsEvict;
@@ -270,13 +276,13 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view model_id,
   return freed;
 }
 
-void DistributedVirtualMemoryPool::refresh_chunks(std::string_view model_id, absl::Span<const uint32_t> idx) {
-  auto info_sp_or = get_model_info(model_id);
+void DistributedVirtualMemoryPool::refresh_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return;
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   uint64_t ts = now_s();
   for (uint32_t i : idx) {
     if (i < info.chunk_count) {
@@ -285,13 +291,13 @@ void DistributedVirtualMemoryPool::refresh_chunks(std::string_view model_id, abs
   }
 }
 
-absl::Status DistributedVirtualMemoryPool::ensure_chunk_resident(std::string_view model_id, uint32_t chunk_idx) {
-  auto info_sp_or = get_model_info(model_id);
+absl::Status DistributedVirtualMemoryPool::ensure_chunk_resident(std::string_view artifact_id, uint32_t chunk_idx) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   if (chunk_idx >= info.chunk_count) {
     return absl::OutOfRangeError("Chunk index out of range");
   }
@@ -302,13 +308,15 @@ absl::Status DistributedVirtualMemoryPool::ensure_chunk_resident(std::string_vie
   return absl::OkStatus();
 }
 
-absl::Status DistributedVirtualMemoryPool::mark_preemptible(std::string_view model_id, absl::Span<const uint32_t> idx) {
-  auto info_sp_or = get_model_info(model_id);
+absl::Status DistributedVirtualMemoryPool::mark_preemptible(
+    std::string_view artifact_id,
+    absl::Span<const uint32_t> idx) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   for (uint32_t i : idx) {
     if (i >= info.chunk_count) {
       return absl::OutOfRangeError("Chunk index out of range");
@@ -323,7 +331,7 @@ absl::Status DistributedVirtualMemoryPool::mark_preemptible(std::string_view mod
     if (expected == store::ChunkState::HOT || expected == store::ChunkState::COLD ||
         expected == store::ChunkState::COPIED_GPU) {
       if (meta.state.compare_exchange_strong(expected, store::ChunkState::PREEMPTIBLE, std::memory_order_acq_rel)) {
-        void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+        void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
         int rc = ::madvise(addr, chunk_size_, kMadviseFlagsFree);
         if (rc != 0) {
           // Kernel might not support MADV_FREE (EINVAL). Fallback to MADV_DONTNEED.
@@ -341,26 +349,29 @@ absl::Status DistributedVirtualMemoryPool::mark_preemptible(std::string_view mod
 }
 
 absl::Status DistributedVirtualMemoryPool::write_at(
-    std::string_view model_id,
+    std::string_view artifact_id,
     uint64_t va_offset,
     const void* src,
     size_t bytes) {
-  auto info_sp_or = get_model_info(model_id);
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
 
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   if (va_offset >= info.bytes) {
-    return absl::OutOfRangeError("write_at offset beyond model size");
+    return absl::OutOfRangeError("write_at offset beyond artifact size");
   }
 
   // Check if write would exceed bounds - make this an explicit error
   if (va_offset + bytes > info.bytes) {
     return absl::InvalidArgumentError(
         absl::StrFormat(
-            "Write would exceed model bounds: offset=%lu + bytes=%lu > model_size=%lu", va_offset, bytes, info.bytes));
+            "Write would exceed replica bounds: offset=%lu + bytes=%lu > artifact_size=%lu",
+            va_offset,
+            bytes,
+            info.bytes));
   }
 
   // Ensure destination range is writable; if any part is file-backed read-only,
@@ -370,7 +381,7 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   uint64_t end_off = va_offset + bytes;
   uint64_t page_aligned_end = ((end_off + page - 1) / page) * page;
   size_t aligned_len = static_cast<size_t>(page_aligned_end - page_aligned_off);
-  void* aligned_addr = static_cast<char*>(info.base) + page_aligned_off;
+  void* aligned_addr = static_cast<char*>(info.cpu_base) + page_aligned_off;
   if (::mprotect(aligned_addr, aligned_len, PROT_READ | PROT_WRITE) != 0) {
     void* mapped =
         ::mmap(aligned_addr, aligned_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -379,7 +390,7 @@ absl::Status DistributedVirtualMemoryPool::write_at(
     }
   }
 
-  void* dst = static_cast<char*>(info.base) + va_offset;
+  void* dst = static_cast<char*>(info.cpu_base) + va_offset;
   std::memcpy(dst, src, bytes);
 
   // Update metadata for affected chunks
@@ -395,19 +406,20 @@ absl::Status DistributedVirtualMemoryPool::write_at(
     static const metrics::Counter kWriteBytes("dvmp_write_bytes_total");
     kWriteBytes.inc(static_cast<double>(bytes));
   } catch (...) {
+    VLOG(1) << "metrics counter kWriteBytes unavailable";
   }
   return absl::OkStatus();
 }
 
 absl::Status DistributedVirtualMemoryPool::map_file_segments(
-    std::string_view model_id,
+    std::string_view artifact_id,
     absl::Span<const FileSegment> segs) {
-  auto info_sp_or = get_model_info(model_id);
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
 
   const int64_t page = sysconf(_SC_PAGESIZE);
   for (const auto& s : segs) {
@@ -430,7 +442,7 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
       flags |= MAP_POPULATE;
     }
 #endif
-    void* target = static_cast<char*>(info.base) + s.va_offset;
+    void* target = static_cast<char*>(info.cpu_base) + s.va_offset;
     void* mapped = ::mmap(target, s.length, PROT_READ, flags, fd, static_cast<off_t>(s.file_offset));
     int saved = errno;
     ::close(fd);
@@ -460,19 +472,20 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
     }
     kMapBytes.inc(static_cast<double>(total));
   } catch (...) {
+    VLOG(1) << "metrics counter kMapBytes unavailable";
   }
   return absl::OkStatus();
 }
 
 absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMemoryPool::region_info(
-    std::string_view model_id) const {
+    std::string_view artifact_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = models_.find(std::string(model_id));
-  if (it == models_.end() || !it->second) {
-    return absl::NotFoundError("Model not found in DVMP");
+  auto it = artifacts_.find(std::string(artifact_id));
+  if (it == artifacts_.end() || !it->second) {
+    return absl::NotFoundError("Artifact not found in DVMP");
   }
   const auto& info_sp = it->second;
-  return VirtualRegion{info_sp->base, nullptr, info_sp->bytes};
+  return VirtualRegion{.cpu_base = info_sp->cpu_base, .gpu_base = nullptr, .bytes = info_sp->bytes};
 }
 
 // ChunkResidencyLease impl --------------------------------------------------------------
@@ -483,22 +496,22 @@ DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
 
   // Check if the lease has expired before releasing pins
   if (is_expired()) {
-    LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for model: " << impl_->model_key;
+    LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for replica: " << impl_->artifact_id;
   }
 
   gsl::not_null<DistributedVirtualMemoryPool*> dvmp = impl_->dvmp;
   if (!dvmp) {
     return;
   }
-  auto info_sp_or = dvmp->get_model_info(impl_->model_key);
+  auto info_sp_or = dvmp->get_artifact_info(impl_->artifact_id);
   if (!info_sp_or.ok()) {
     return;
   }
-  auto info_sp = *info_sp_or;
+  const auto& info_sp = *info_sp_or;
   if (!info_sp) {
     return;
   }
-  std::lock_guard<std::mutex> model_lock(info_sp->model_mu);
+  std::lock_guard<std::mutex> artifact(info_sp->artifact_mutex);
   dvmp->release_pins_unlocked(*info_sp, impl_->chunks);
 }
 
@@ -520,7 +533,8 @@ DistributedVirtualMemoryPool::ChunkResidencyLease& DistributedVirtualMemoryPool:
   return *this;
 }
 
-void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks) {
+void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks)
+    const {
   for (uint32_t i : chunks) {
     if (i >= info.chunk_count) {
       continue;
@@ -530,7 +544,7 @@ void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, 
     if (cnt > 0) {
       info.pin_refcnt[i].store(cnt - 1, std::memory_order_release);
     }
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     if (::munlock(addr, chunk_size_) != 0) {
       // Ignore errors; best-effort only
     }
@@ -538,28 +552,28 @@ void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, 
 }
 
 absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVirtualMemoryPool::pin_range(
-    std::string_view model_id,
+    std::string_view artifact_id,
     uint64_t va_offset,
     uint64_t bytes,
     std::string_view reason) {
-  return pin_range(model_id, va_offset, bytes, reason, std::nullopt);
+  return pin_range(artifact_id, va_offset, bytes, reason, std::nullopt);
 }
 
 absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVirtualMemoryPool::pin_range(
-    std::string_view model_id,
+    std::string_view artifact_id,
     uint64_t va_offset,
     uint64_t bytes,
     std::string_view reason,
     std::optional<std::chrono::milliseconds> timeout_ms) {
-  const std::string key(model_id);
-  auto info_sp_or = get_model_info(model_id);
+  const std::string key(artifact_id);
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
   DvmpRegionState& info = **info_sp_or;
-  std::lock_guard<std::mutex> model_lock(info.model_mu);
+  std::lock_guard<std::mutex> artifact(info.artifact_mutex);
   if (va_offset >= info.bytes) {
-    return absl::OutOfRangeError("pin_range offset beyond model size");
+    return absl::OutOfRangeError("pin_range offset beyond artifact size");
   }
   uint64_t to_cover = std::min<uint64_t>(bytes, info.bytes - va_offset);
   if (to_cover == 0) {
@@ -575,7 +589,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
     // Inc refcount and best-effort mlock
     auto prev = info.pin_refcnt[i].load(std::memory_order_acquire);
     info.pin_refcnt[i].store(prev + 1, std::memory_order_release);
-    void* addr = static_cast<char*>(info.base) + static_cast<size_t>(i) * chunk_size_;
+    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     ::mlock(addr, chunk_size_);
   }
   // Calculate expiry time if timeout is specified
@@ -586,22 +600,24 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const metrics::Counter chunk_size_ResidencyLeasesTotal("dvmp_pin_leases_total");
-    chunk_size_ResidencyLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
+    static const metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
+    kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
   } catch (...) {
+    VLOG(1) << "metrics counter kPinLeasesTotal unavailable";
   }
 
   return ChunkResidencyLease(
       ChunkResidencyLease::Impl{
-          .dvmp = this, .model_key = key, .chunks = std::move(chunks), .expiry_time = expiry_time});
+          .dvmp = this, .artifact_id = key, .chunks = std::move(chunks), .expiry_time = expiry_time});
 }
 
-absl::StatusOr<DistributedVirtualMemoryPool::DvmpRegion> DistributedVirtualMemoryPool::open(std::string_view model_id) {
-  auto info_sp_or = get_model_info(model_id);
+absl::StatusOr<DistributedVirtualMemoryPool::DvmpRegion> DistributedVirtualMemoryPool::open(
+    std::string_view artifact_id) {
+  auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
     return info_sp_or.status();
   }
-  return DvmpRegion(this, std::string(model_id));
+  return DvmpRegion(this, std::string(artifact_id));
 }
 
 } // namespace stepcast::memory

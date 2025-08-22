@@ -6,7 +6,7 @@ from typing import Any
 
 
 class FakeP2PNetwork:
-    """Very simple in-process "network" for pushing/pulling model bytes.
+    """Very simple in-process "network" for pushing/pulling artifact bytes.
 
     Daemons register replicas via `register_replica` and peers request the data
     through `request`.  The network delivers a copy of the stored bytes.  This
@@ -15,7 +15,7 @@ class FakeP2PNetwork:
     """
 
     def __init__(self):
-        # maps replica_id -> bytes (model payload)
+        # maps replica_id -> bytes (artifact payload)
         self._storage: dict[str, bytes] = {}
         # simulate network delay/failure via hooks
         self._delays: dict[str, float] = defaultdict(lambda: 0.0)

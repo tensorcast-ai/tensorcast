@@ -1,12 +1,12 @@
 ---
-title: Model Loading Workflow
-description: Complete model loading workflow and component interactions in StepCast Store
+title: Artifact Loading Workflow
+description: Complete artifact loading workflow and component interactions in StepCast Store
 sidebar_position: 1
 ---
 
-# Model Loading Workflow
+# Artifact Loading Workflow
 
-This diagram shows the complete model loading workflow in StepCast Store, including the interaction between different components.
+This diagram shows the complete artifact loading workflow in StepCast Store, including the interaction between different components.
 
 ## System Components
 
@@ -20,11 +20,11 @@ This diagram shows the complete model loading workflow in StepCast Store, includ
   - CXX: `store_engine_py.cc`
 
 - **GlobalStore**: Python
-  - Entrypoint: `global_store.py::GlobalModelStoreServicer`
+  - Entrypoint: `global_store.py::GlobalStoreServicer`
 
 - **RemoteStoreDaemon**: Same as LocalStoreDaemon
 
-## Model Loading Sequence
+## Artifact Loading Sequence
 
 ```mermaid
 sequenceDiagram
@@ -37,45 +37,45 @@ sequenceDiagram
     InferenceInstance->>LocalStoreDaemon: 0. Malloc CUDA Memory
     Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
-    InferenceInstance->>LocalStoreDaemon: 1. Request ModelWeight<br/>with CUDA IPC
-    Note left of LocalStoreDaemon: RPC: LoadModel
+    InferenceInstance->>LocalStoreDaemon: 1. Request Artifact<br/>with CUDA IPC
+    Note left of LocalStoreDaemon: RPC: LoadArtifact
 
-    LocalStoreDaemon->>GlobalStore: 2. Request Model MetaInfo
-    Note left of GlobalStore: RPC: GetModelInfo
+    LocalStoreDaemon->>GlobalStore: 2. Request Artifact MetaInfo
+    Note left of GlobalStore: RPC: GetArtifactInfoById
 
     LocalStoreDaemon->>GlobalStore: 3. If not in local,<br/>request a remote replica
-    Note left of GlobalStore: RPC: RequestModelReplicaTransport
+    Note left of GlobalStore: RPC: RequestReplicaTransport
 
     GlobalStore-->>LocalStoreDaemon: 4. Return A remote replica or NOT
-    Note left of GlobalStore: RPC Resp: RequestModelReplicaTransport Resp
+    Note left of GlobalStore: RPC Resp: RequestReplicaTransport Resp
 
     alt Have remote replica
-        LocalStoreDaemon-->>RemoteStoreDaemon: 5.1 load_model_from_remote (via P2P comm_engine.read_tensor)
+        LocalStoreDaemon-->>RemoteStoreDaemon: 5.1 load_artifact_from_remote (via P2P comm_engine.read_tensor)
     else NOT have remote replica
         LocalStoreDaemon->>JuiceFS:
-        JuiceFS-->>LocalStoreDaemon: 5.2 If not have remote replica,<br/>load_model_from_disk
+        JuiceFS-->>LocalStoreDaemon: 5.2 If not have remote replica,<br/>load_artifact_from_disk
     end
 
     InferenceInstance->>LocalStoreDaemon: 6. Finish loading
-    Note left of LocalStoreDaemon: RPC: ConfirmModel
+    Note left of LocalStoreDaemon: RPC: ConfirmReplica
 
     alt If have Global Store
         LocalStoreDaemon->>GlobalStore: 7. Complete P2P transport and register replica
-        Note left of GlobalStore: RPC: CompleteModelReplicaTransport
+        Note left of GlobalStore: RPC: CompleteReplicaTransport
     end
 
     InferenceInstance->>LocalStoreDaemon: 8. Exit, unregister
-    Note left of LocalStoreDaemon: RPC: UnloadModel
+    Note left of LocalStoreDaemon: RPC: UnloadReplica
 ```
 
 ## Key Steps Explained
 
-1. **Memory Allocation**: InferenceInstance allocates CUDA memory for model storage
-2. **Model Request**: Request model weights using CUDA IPC
-3. **Metadata Lookup**: LocalStoreDaemon queries GlobalStore for model metadata
-4. **Replica Location**: Request remote replica location if model not available locally
-5. **Model Loading**: Load model either via P2P from remote daemon or from disk
-6. **GPU Transfer**: Copy model to GPU memory
-7. **Confirmation**: Confirm model loading completion
+1. **Memory Allocation**: InferenceInstance allocates CUDA memory for artifact storage
+2. **Artifact Request**: Request artifact weights using CUDA IPC
+3. **Metadata Lookup**: LocalStoreDaemon queries GlobalStore for artifact metadata
+4. **Replica Location**: Request remote replica location if artifact not available locally
+5. **Artifact Loading**: Load artifact either via P2P from remote daemon or from disk
+6. **GPU Transfer**: Copy artifact to GPU memory
+7. **Confirmation**: Confirm artifact loading completion
 8. **Registration**: Register replica with GlobalStore (if using distributed setup)
 9. **Cleanup**: Unregister when inference instance exits

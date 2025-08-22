@@ -25,11 +25,11 @@ using stepcast::DeviceType;
 
 // Stress test configuration
 struct StressConfig {
-  int num_models = 30;
+  int num_artifacts = 30;
   int num_workers = 8;
   std::chrono::seconds duration{5};
-  size_t min_model_size_mb = 5;
-  size_t max_model_size_mb = 50;
+  size_t min_artifact_size_mb = 5;
+  size_t max_artifact_size_mb = 50;
   size_t pool_size_mb = 2048; // 2GB
   int max_gpu_ordinal = 3;
 };
@@ -43,7 +43,7 @@ struct StressStats {
   std::atomic<uint64_t> query_attempts{0};
   std::atomic<uint64_t> query_success{0};
   std::atomic<uint64_t> evictions{0};
-  // Validation stats (post-prepare sanity checks)
+  // Validation stats (post-materialize_replica sanity checks)
   std::atomic<uint64_t> validation_attempts{0};
   std::atomic<uint64_t> validation_success{0};
   // Data validation stats (GPU content check against expected pattern)
@@ -66,16 +66,16 @@ struct StressStats {
 };
 
 // Per-instance validation tracker: unload waits until ongoing validation
-// for the same (model_id, gpu_ordinal) finishes.
+// for the same (artifact_id, gpu_ordinal) finishes.
 class ValidationTracker {
  public:
-  void begin(const std::string& model_id, int gpu_ordinal) {
+  void begin(const std::string& artifact_id, int gpu_ordinal) {
     std::unique_lock<std::mutex> lock(mu_);
-    counts_[make_key_(model_id, gpu_ordinal)]++;
+    counts_[make_key_(artifact_id, gpu_ordinal)]++;
   }
-  void end(const std::string& model_id, int gpu_ordinal) {
+  void end(const std::string& artifact_id, int gpu_ordinal) {
     std::unique_lock<std::mutex> lock(mu_);
-    auto k = make_key_(model_id, gpu_ordinal);
+    auto k = make_key_(artifact_id, gpu_ordinal);
     auto it = counts_.find(k);
     if (it != counts_.end()) {
       if (--(it->second) == 0) {
@@ -84,15 +84,15 @@ class ValidationTracker {
       }
     }
   }
-  void wait(const std::string& model_id, int gpu_ordinal) {
+  void wait(const std::string& artifact_id, int gpu_ordinal) {
     std::unique_lock<std::mutex> lock(mu_);
-    auto k = make_key_(model_id, gpu_ordinal);
+    auto k = make_key_(artifact_id, gpu_ordinal);
     cv_.wait(lock, [&] { return counts_.find(k) == counts_.end(); });
   }
 
  private:
-  static std::string make_key_(const std::string& model_id, int gpu_ordinal) {
-    return model_id + "|" + std::to_string(gpu_ordinal);
+  static std::string make_key_(const std::string& artifact_id, int gpu_ordinal) {
+    return artifact_id + "|" + std::to_string(gpu_ordinal);
   }
   std::mutex mu_;
   std::condition_variable cv_;
@@ -101,17 +101,17 @@ class ValidationTracker {
 
 class ValidationScopeKey {
  public:
-  ValidationScopeKey(ValidationTracker& tracker, const std::string& model_id, int gpu_ordinal)
-      : tracker_(tracker), model_id_(model_id), ordinal_(gpu_ordinal) {
-    tracker_.begin(model_id_, ordinal_);
+  ValidationScopeKey(ValidationTracker& tracker, const std::string& artifact_id, int gpu_ordinal)
+      : tracker_(tracker), artifact_id_(artifact_id), ordinal_(gpu_ordinal) {
+    tracker_.begin(artifact_id_, ordinal_);
   }
   ~ValidationScopeKey() {
-    tracker_.end(model_id_, ordinal_);
+    tracker_.end(artifact_id_, ordinal_);
   }
 
  private:
   ValidationTracker& tracker_;
-  std::string model_id_;
+  std::string artifact_id_;
   int ordinal_;
 };
 
@@ -167,12 +167,12 @@ class StressWorker {
       int id,
       StoreEngine* store,
       const StressConfig& config,
-      const std::vector<std::string>& model_ids,
+      const std::vector<std::string>& artifact_ids,
       std::filesystem::path storage_root,
       StressStats* stats)
       : store_(store),
         config_(config),
-        model_ids_(model_ids),
+        artifact_ids_(artifact_ids),
         storage_root_(std::move(storage_root)),
         stats_(stats),
         rng_(std::random_device{}() ^ id) {}
@@ -206,7 +206,7 @@ class StressWorker {
   }
 
   void perform_prepare() {
-    const auto& model_id = model_ids_[uniform_int(0, model_ids_.size() - 1)];
+    const auto& artifact_id = artifact_ids_[uniform_int(0, artifact_ids_.size() - 1)];
     int gpu_ordinal = uniform_int(0, config_.max_gpu_ordinal);
 
     // Skip starting a new PREPARE on this GPU while a validation is active to avoid eviction races
@@ -216,10 +216,11 @@ class StressWorker {
 
     stats_->prepare_attempts.fetch_add(1);
 
-    stepcast::store::LoadingHints hints;
+    stepcast::store::MaterializeHints hints;
 
-    hints.disk_path = model_id;
-    auto handle_or = store_->prepare(make_gpu_key(gpu_ordinal), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    hints.disk_path = artifact_id;
+    auto handle_or =
+        store_->materialize_replica(make_gpu_key(gpu_ordinal), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
       auto wait_status = handle.wait_ready(std::chrono::milliseconds(5000));
@@ -228,24 +229,24 @@ class StressWorker {
         const auto& key = handle.key();
 
         // Begin validation protection as early as possible to avoid races
-        ValidationScopeKey _validation_scope(g_validation_tracker, key.model_id, key.device.ordinal);
+        ValidationScopeKey _validation_scope(g_validation_tracker, key.artifact_id, key.device.ordinal);
         ValidationGpuScope _gpu_scope(g_validation_gpu_gate, key.device.ordinal);
         (void)stepcast::cuda::set_device(key.device.ordinal);
 
-        // Post-prepare validation (best-effort; tolerant to concurrent mutations)
+        // Post-materialize_replica validation (best-effort; tolerant to concurrent mutations)
         stats_->validation_attempts.fetch_add(1);
 
         bool validated = false;
 
         // 1) State should generally be LOADED right after wait_ready()
-        auto gpu_state = store_->get_instance_state(key, DeviceType::GPU);
+        auto gpu_state = store_->get_replica_state(key, DeviceType::GPU);
         if (gpu_state == MemoryState::LOADED) {
           validated = true;
         }
 
-        // 2) Device/model listings should reflect the presence
+        // 2) Device/replica listings should reflect the presence
         if (!validated) {
-          auto devices = store_->get_loaded_devices(model_id);
+          auto devices = store_->get_resident_devices(artifact_id);
           for (const auto& dev : devices) {
             if (dev.type == DeviceType::GPU && dev.ordinal == key.device.ordinal) {
               validated = true;
@@ -254,9 +255,9 @@ class StressWorker {
           }
         }
         if (!validated) {
-          auto models = store_->list_device_models(make_gpu_key(key.device.ordinal));
-          for (const auto& inst : models) {
-            if (inst.model_id == key.model_id && inst.device.ordinal == key.device.ordinal) {
+          auto replicas = store_->list_device_replicas(make_gpu_key(key.device.ordinal));
+          for (const auto& inst : replicas) {
+            if (inst.artifact_id == key.artifact_id && inst.device.ordinal == key.device.ordinal) {
               validated = true;
               break;
             }
@@ -265,7 +266,7 @@ class StressWorker {
 
         // 3) If still not validated but state is LOADED, GPU pointer must be non-zero
         if (!validated && gpu_state == MemoryState::LOADED) {
-          auto ptr_or = store_->get_instance_gpu_ptr(key);
+          auto ptr_or = store_->get_replica_gpu_ptr(key);
           if (ptr_or.ok() && ptr_or.value() != 0) {
             validated = true;
           }
@@ -275,7 +276,7 @@ class StressWorker {
           stats_->validation_success.fetch_add(1);
         }
 
-        // Enforce data validation for every successful prepare
+        // Enforce data validation for every successful materialize_replica
         stats_->data_validation_attempts.fetch_add(1);
         bool data_ok = false;
         // Must be LOADED immediately after wait_ready()
@@ -283,14 +284,14 @@ class StressWorker {
           // Retry up to 2 times to handle transient read issues
           for (int attempt = 0; attempt < 2 && !data_ok; ++attempt) {
             (void)stepcast::cuda::set_device(key.device.ordinal);
-            auto ptr_or = store_->get_instance_gpu_ptr(key);
+            auto ptr_or = store_->get_replica_gpu_ptr(key);
             if (!ptr_or.ok() || ptr_or.value() == 0) {
               break;
             }
             uint64_t gpu_ptr_u64 = ptr_or.value();
-            // Determine model size from filesystem (single shard tensor.data_0)
+            // Determine artifact size from filesystem (single shard tensor.data_0)
             std::error_code ec;
-            auto file_path = storage_root_ / model_id / "tensor.data_0";
+            auto file_path = storage_root_ / artifact_id / "tensor.data_0";
             const uint64_t file_size = std::filesystem::file_size(file_path, ec);
             if (ec || file_size == 0) {
               break;
@@ -346,7 +347,7 @@ class StressWorker {
   void perform_unload() {
     stats_->unload_attempts.fetch_add(1);
 
-    const auto& model_id = model_ids_[uniform_int(0, model_ids_.size() - 1)];
+    const auto& artifact_id = artifact_ids_[uniform_int(0, artifact_ids_.size() - 1)];
     int gpu_ordinal = uniform_int(0, config_.max_gpu_ordinal);
 
     // If this GPU is currently under validation, skip unload to avoid races
@@ -355,10 +356,10 @@ class StressWorker {
     }
 
     // Wait for any ongoing validation of this specific instance to complete
-    g_validation_tracker.wait(model_id, gpu_ordinal);
+    g_validation_tracker.wait(artifact_id, gpu_ordinal);
 
-    auto instance_key = make_instance_key(model_id, gpu_ordinal);
-    int result = store_->unload_instance(instance_key);
+    auto replica_key = make_replica_key(artifact_id, gpu_ordinal);
+    int result = store_->unload_replica(replica_key);
     if (result == 0) {
       stats_->unload_success.fetch_add(1);
     }
@@ -373,22 +374,22 @@ class StressWorker {
     try {
       switch (query_type) {
         case 0: {
-          // Query loaded devices for a model
-          const auto& model_id = model_ids_[uniform_int(0, model_ids_.size() - 1)];
-          auto devices = store_->get_loaded_devices(model_id);
+          // Query loaded devices for a replica
+          const auto& artifact_id = artifact_ids_[uniform_int(0, artifact_ids_.size() - 1)];
+          auto devices = store_->get_resident_devices(artifact_id);
           stats_->query_success.fetch_add(1);
           break;
         }
         case 1: {
-          // List models on a device
+          // List replicas on a device
           int gpu_ordinal = uniform_int(0, config_.max_gpu_ordinal);
-          auto models = store_->list_device_models(make_gpu_key(gpu_ordinal));
+          auto replicas = store_->list_device_replicas(make_gpu_key(gpu_ordinal));
           stats_->query_success.fetch_add(1);
           break;
         }
         case 2: {
-          // Get all models info
-          auto models_info = store_->get_all_models_info();
+          // Get all replicas info
+          auto replicas_info = store_->get_all_replicas_info();
           stats_->query_success.fetch_add(1);
           break;
         }
@@ -411,7 +412,7 @@ class StressWorker {
 
   StoreEngine* store_;
   const StressConfig& config_;
-  const std::vector<std::string>& model_ids_;
+  const std::vector<std::string>& artifact_ids_;
   const std::filesystem::path storage_root_;
   StressStats* stats_;
   std::mt19937 rng_;
@@ -422,19 +423,20 @@ TEST_CASE("C1: Basic stress test", "[store_engine][stress][c1]") {
   skip_if_no_cuda("C1");
 
   StressConfig config;
-  config.num_models = 20;
+  config.num_artifacts = 20;
   config.num_workers = 4;
   config.duration = std::chrono::seconds(3);
   config.pool_size_mb = 1024; // 1GB
 
-  TempModelFixture fixture("stress_c1");
+  TempArtifactFixture fixture("stress_c1");
 
-  // Create models with random sizes
-  std::vector<std::string> model_ids;
-  for (int i = 0; i < config.num_models; ++i) {
-    auto model_id = generate_model_name("stress_model_c1", i);
-    model_ids.push_back(model_id);
-    fixture.create_model(model_id, random_model_size(config.min_model_size_mb, config.max_model_size_mb));
+  // Create artifacts with random sizes
+  std::vector<std::string> artifact_ids;
+  for (int i = 0; i < config.num_artifacts; ++i) {
+    auto artifact_id = generate_artifact_id("stress_model_c1", i);
+    artifact_ids.push_back(artifact_id);
+    fixture.create_artifact(
+        artifact_id, random_artifact_size(config.min_artifact_size_mb, config.max_artifact_size_mb));
   }
 
   auto store = make_test_store(fixture.root(), config.pool_size_mb);
@@ -448,7 +450,7 @@ TEST_CASE("C1: Basic stress test", "[store_engine][stress][c1]") {
 
   for (int i = 0; i < config.num_workers; ++i) {
     workers.emplace_back([&, worker_id = i]() {
-      StressWorker worker(worker_id, store.get(), config, model_ids, fixture.root(), &stats);
+      StressWorker worker(worker_id, store.get(), config, artifact_ids, fixture.root(), &stats);
       worker.run(stop_flag);
     });
   }
@@ -479,7 +481,7 @@ TEST_CASE("C1: Basic stress test", "[store_engine][stress][c1]") {
   REQUIRE(stats.query_success > 0);
   REQUIRE(stats.validation_attempts > 0);
   REQUIRE(stats.validation_success > 0);
-  // Data validation must be attempted for every successful prepare
+  // Data validation must be attempted for every successful materialize_replica
   REQUIRE(stats.data_validation_attempts == stats.prepare_success);
   // Require at least 90% of successful prepares to pass data validation
   REQUIRE(stats.data_validation_success * 100 >= stats.prepare_success * 90);
@@ -490,19 +492,19 @@ TEST_CASE("C2: Heavy concurrent load", "[store_engine][stress][c2]") {
   skip_if_no_cuda("C2");
 
   StressConfig config;
-  config.num_models = 30;
+  config.num_artifacts = 30;
   config.num_workers = 8;
   config.duration = std::chrono::seconds(5);
   config.pool_size_mb = 2048; // 2GB
 
-  TempModelFixture fixture("stress_c2");
+  TempArtifactFixture fixture("stress_c2");
 
-  // Create models
-  std::vector<std::string> model_ids;
-  for (int i = 0; i < config.num_models; ++i) {
-    auto model_id = generate_model_name("heavy_model_c2", i);
-    model_ids.push_back(model_id);
-    fixture.create_model(model_id, random_model_size(10, 100)); // 10-100MB
+  // Create artifacts
+  std::vector<std::string> artifact_ids;
+  for (int i = 0; i < config.num_artifacts; ++i) {
+    auto artifact_id = generate_artifact_id("heavy_model_c2", i);
+    artifact_ids.push_back(artifact_id);
+    fixture.create_artifact(artifact_id, random_artifact_size(10, 100)); // 10-100MB
   }
 
   auto store = make_test_store(fixture.root(), config.pool_size_mb, 128, 8); // More IO threads
@@ -522,15 +524,15 @@ TEST_CASE("C2: Heavy concurrent load", "[store_engine][stress][c2]") {
 
       try {
         // Check that registry is consistent
-        auto all_models = store->get_all_models_info();
+        auto all_models = store->get_all_replicas_info();
 
         for (const auto& info : all_models) {
           // Only validate instances that are actually resident on GPU
-          if (info.gpu_state == ModelLocation::GPU && info.gpu_device_id >= 0) {
+          if (info.gpu_state == MemoryLocation::GPU && info.gpu_device_id >= 0) {
             DeviceKey device_key{DeviceType::GPU, info.gpu_device_id, info.gpu_device_uuid};
-            InstanceKey instance_key{info.model_id, device_key, 0};
+            ReplicaKey replica_key{info.artifact_id, device_key, 0};
 
-            auto state = store->get_instance_state(instance_key, DeviceType::GPU);
+            auto state = store->get_replica_state(replica_key, DeviceType::GPU);
             if (state != MemoryState::LOADED && state != MemoryState::LOADING && state != MemoryState::ALLOCATED) {
               consistency_failures.fetch_add(1);
             }
@@ -547,7 +549,7 @@ TEST_CASE("C2: Heavy concurrent load", "[store_engine][stress][c2]") {
   // Start worker threads
   for (int i = 0; i < config.num_workers; ++i) {
     workers.emplace_back([&, worker_id = i]() {
-      StressWorker worker(worker_id, store.get(), config, model_ids, fixture.root(), &stats);
+      StressWorker worker(worker_id, store.get(), config, artifact_ids, fixture.root(), &stats);
       worker.run(stop_flag);
     });
   }
@@ -580,28 +582,28 @@ TEST_CASE("C3: Memory pressure stress", "[store_engine][stress][c3]") {
   skip_if_no_cuda("C3");
 
   StressConfig config;
-  config.num_models = 15;
+  config.num_artifacts = 15;
   config.num_workers = 6;
   config.duration = std::chrono::seconds(4);
   config.pool_size_mb = 512; // Small pool to force evictions
-  config.min_model_size_mb = 50;
-  config.max_model_size_mb = 150; // Large models relative to pool
+  config.min_artifact_size_mb = 50;
+  config.max_artifact_size_mb = 150; // Large artifacts relative to pool
 
-  TempModelFixture fixture("stress_c3");
+  TempArtifactFixture fixture("stress_c3");
 
-  // Create large models
-  std::vector<std::string> model_ids;
+  // Create large artifacts
+  std::vector<std::string> artifact_ids;
   size_t total_model_size = 0;
 
-  for (int i = 0; i < config.num_models; ++i) {
-    auto model_id = generate_model_name("pressure_model_c3", i);
-    model_ids.push_back(model_id);
-    size_t size = random_model_size(config.min_model_size_mb, config.max_model_size_mb);
-    fixture.create_model(model_id, size);
+  for (int i = 0; i < config.num_artifacts; ++i) {
+    auto artifact_id = generate_artifact_id("pressure_model_c3", i);
+    artifact_ids.push_back(artifact_id);
+    size_t size = random_artifact_size(config.min_artifact_size_mb, config.max_artifact_size_mb);
+    fixture.create_artifact(artifact_id, size);
     total_model_size += size;
   }
 
-  INFO("Total model size: " << total_model_size / (1024 * 1024) << "MB, Pool size: " << config.pool_size_mb << "MB");
+  INFO("Total artifact size: " << total_model_size / (1024 * 1024) << "MB, Pool size: " << config.pool_size_mb << "MB");
 
   auto store = make_test_store(fixture.root(), config.pool_size_mb);
   StressStats stats;
@@ -623,7 +625,7 @@ TEST_CASE("C3: Memory pressure stress", "[store_engine][stress][c3]") {
   // Start worker threads
   for (int i = 0; i < config.num_workers; ++i) {
     workers.emplace_back([&, worker_id = i]() {
-      StressWorker worker(worker_id, store.get(), config, model_ids, fixture.root(), &stats);
+      StressWorker worker(worker_id, store.get(), config, artifact_ids, fixture.root(), &stats);
       worker.run(stop_flag);
     });
   }
@@ -653,7 +655,7 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   skip_if_insufficient_gpus(2, "C4");
 
   StressConfig config;
-  config.num_models = 25;
+  config.num_artifacts = 25;
   config.num_workers = 6;
   config.duration = std::chrono::seconds(4);
   config.pool_size_mb = 1536; // 1.5GB
@@ -666,21 +668,21 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   }
   config.max_gpu_ordinal = std::min(gpu_count - 1, 3);
 
-  TempModelFixture fixture("stress_c4");
+  TempArtifactFixture fixture("stress_c4");
 
-  // Create models
-  std::vector<std::string> model_ids;
-  for (int i = 0; i < config.num_models; ++i) {
-    auto model_id = generate_model_name("multi_gpu_model_c4", i);
-    model_ids.push_back(model_id);
-    fixture.create_model(model_id, random_model_size(20, 80));
+  // Create artifacts
+  std::vector<std::string> artifact_ids;
+  for (int i = 0; i < config.num_artifacts; ++i) {
+    auto artifact_id = generate_artifact_id("multi_gpu_model_c4", i);
+    artifact_ids.push_back(artifact_id);
+    fixture.create_artifact(artifact_id, random_artifact_size(20, 80));
   }
 
   auto store = make_test_store(fixture.root(), config.pool_size_mb);
   StressStats stats;
 
   // Track per-GPU statistics
-  std::vector<std::atomic<int>> models_per_gpu(gpu_count);
+  std::vector<std::atomic<int>> replicas_per_gpu(gpu_count);
 
   std::vector<std::thread> workers;
   std::atomic<bool> stop_flag{false};
@@ -689,8 +691,8 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   workers.emplace_back([&]() {
     while (!stop_flag.load()) {
       for (int gpu = 0; gpu <= config.max_gpu_ordinal; ++gpu) {
-        auto models = store->list_device_models(make_gpu_key(gpu));
-        models_per_gpu[gpu].store(models.size());
+        auto replicas = store->list_device_replicas(make_gpu_key(gpu));
+        replicas_per_gpu[gpu].store(replicas.size());
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
@@ -699,7 +701,7 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   // Start worker threads
   for (int i = 0; i < config.num_workers; ++i) {
     workers.emplace_back([&, worker_id = i]() {
-      StressWorker worker(worker_id, store.get(), config, model_ids, fixture.root(), &stats);
+      StressWorker worker(worker_id, store.get(), config, artifact_ids, fixture.root(), &stats);
       worker.run(stop_flag);
     });
   }
@@ -717,13 +719,13 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
 
   // Print per-GPU stats
   for (int gpu = 0; gpu <= config.max_gpu_ordinal; ++gpu) {
-    INFO("GPU " << gpu << " final model count: " << models_per_gpu[gpu].load());
+    INFO("GPU " << gpu << " final replica count: " << replicas_per_gpu[gpu].load());
   }
 
   // All GPUs should have been used
   int gpus_used = 0;
   for (int gpu = 0; gpu <= config.max_gpu_ordinal; ++gpu) {
-    if (models_per_gpu[gpu].load() > 0) {
+    if (replicas_per_gpu[gpu].load() > 0) {
       gpus_used++;
     }
   }

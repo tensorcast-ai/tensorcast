@@ -7,7 +7,7 @@ This directory contains comprehensive tests for the Web UI's gRPC client that co
 ### 1. `test_grpc_client.py`
 Main test suite with comprehensive unit tests including:
 - Connection management
-- All gRPC operations (list workers, replicas, model info, etc.)
+- All gRPC operations (list workers, replicas, artifact info, etc.)
 - Retry logic and error handling
 - Concurrent request handling
 - Edge cases and error conditions
@@ -67,8 +67,8 @@ python tests/python/global_store/demo_grpc_client_usage.py
 
 2. **All gRPC Operations**
    - `list_active_workers()` - with filtering
-   - `list_model_replicas()` - with various filters
-   - `get_model_info()` - for existing and non-existing models
+   - `list_replicas()` - with various filters
+   - `get_artifact_info()` - for existing and non-existing artifacts
    - `get_summary_stats()` - aggregated statistics
 
 3. **Retry Logic**
@@ -89,8 +89,8 @@ python tests/python/global_store/demo_grpc_client_usage.py
 
 ## Test Infrastructure
 
-The tests use a `TestGlobalModelStoreServicer` that implements the Global Store gRPC service with:
-- Mock data for workers and model replicas
+The tests use a `TestGlobalStoreServicer` that implements the Global Store gRPC service with:
+- Mock data for workers and artifact replicas
 - Configurable failure modes for testing retry logic
 - Call tracking for verification
 - Support for all required RPCs

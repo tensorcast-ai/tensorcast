@@ -14,7 +14,7 @@ from tests.python.interaction.fakes.fake_p2p import FakeP2PNetwork
 # Helper utilities
 # -----------------------------------------------------------------------------
 
-def _register_single_gpu_replica(gs, model_id: str, replica_id: str, *, max_concurrency: int = 1):
+def _register_single_gpu_replica(gs, artifact_id: str, replica_id: str, *, max_concurrency: int = 1):
     """Register a worker and single GPU replica for testing."""
 
     # 1) Register worker first so replica is considered available
@@ -39,13 +39,13 @@ def _register_single_gpu_replica(gs, model_id: str, replica_id: str, *, max_conc
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model_id,
+    req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
     )
-    rep_resp = gs.RegisterModelReplica(req, FakeContext())
+    rep_resp = gs.RegisterReplica(req, FakeContext())
     assert rep_resp.status == global_store_pb2.Status.OK
 
 
@@ -58,22 +58,22 @@ def test_transport_failure_keeps_counter(global_store_service):
     """Scenario 6 – transport fails, counter remains incremented and new request times-out."""
 
     gs = global_store_service
-    model_id = "phi2-1.7b"
+    artifact_id = "phi2-1.7b"
 
     # 1. Register single replica with capacity 1
-    _register_single_gpu_replica(gs, model_id, replica_id="R_FAIL", max_concurrency=1)
+    _register_single_gpu_replica(gs, artifact_id, replica_id="R_FAIL", max_concurrency=1)
 
     # 2. First transport allocation succeeds
-    req_ok = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model_id)
-    resp_ok = gs.RequestModelReplicaTransport(req_ok, FakeContext())
+    req_ok = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact_id)
+    resp_ok = gs.RequestReplicaTransport(req_ok, FakeContext())
     assert resp_ok.status == global_store_pb2.Status.OK
 
     # 3. Immediately request another transport – should time-out because capacity is saturated
-    req_to = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_id=model_id, wait_timeout_ms=5
+    req_to = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact_id, wait_timeout_ms=5
     )
     start = time.perf_counter()
-    resp_to = gs.RequestModelReplicaTransport(req_to, FakeContext())
+    resp_to = gs.RequestReplicaTransport(req_to, FakeContext())
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     assert resp_to.status == global_store_pb2.Status.TIMED_OUT
@@ -81,37 +81,37 @@ def test_transport_failure_keeps_counter(global_store_service):
     assert elapsed_ms >= 4
 
     # Internal counter should still be 1 (because CompleteTransport not called)
-    replica = gs.model_replica_repository.find_by_model(model_id)[0]
+    replica = gs.replica_repository.find_by_artifact(artifact_id)[0]
     assert replica.current_requests == 1
 
     # Clean-up: complete the lingering transport so that other tests are unaffected
-    complete_req = global_store_pb2.CompleteModelReplicaTransportRequest(
+    complete_req = global_store_pb2.CompleteReplicaTransportRequest(
         transport_id=resp_ok.transport_id,
     )
-    gs.CompleteModelReplicaTransport(complete_req, FakeContext())
+    gs.CompleteReplicaTransport(complete_req, FakeContext())
 
 
 def test_complete_transport_with_invalid_id_returns_not_found(global_store_service):
     """Scenario 9 – mismatched transport_id causes NOT_FOUND on completion."""
 
     gs = global_store_service
-    model = "tiny-gpt"
-    _register_single_gpu_replica(gs, model, replica_id="R1", max_concurrency=2)
+    artifact = "tiny-gpt"
+    _register_single_gpu_replica(gs, artifact, replica_id="R1", max_concurrency=2)
 
     # Acquire a real transport first (sanity)
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
-    resp = gs.RequestModelReplicaTransport(req, FakeContext())
+    req = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact)
+    resp = gs.RequestReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 
     # Attempt to complete with an unrelated UUID
     bogus_id = str(uuid.uuid4())
-    comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(transport_id=bogus_id)
-    comp_resp = gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+    comp_req = global_store_pb2.CompleteReplicaTransportRequest(transport_id=bogus_id)
+    comp_resp = gs.CompleteReplicaTransport(comp_req, FakeContext())
     assert comp_resp.status == global_store_pb2.Status.NOT_FOUND
 
     # Clean up the *valid* transport to keep global counters balanced
-    cleanup_req = global_store_pb2.CompleteModelReplicaTransportRequest(transport_id=resp.transport_id)
-    gs.CompleteModelReplicaTransport(cleanup_req, FakeContext())
+    cleanup_req = global_store_pb2.CompleteReplicaTransportRequest(transport_id=resp.transport_id)
+    gs.CompleteReplicaTransport(cleanup_req, FakeContext())
 
 
 @pytest.mark.asyncio

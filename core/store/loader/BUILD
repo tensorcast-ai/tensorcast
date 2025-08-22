@@ -7,8 +7,8 @@ sc_header_only_library(
     hdrs = ["loader.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:memory_location_lib",
         "//core/store:loading_spec",
-        "//core/store/model:model_location",
     ],
 )
 
@@ -156,8 +156,8 @@ sc_cc_library(
     deps = [
         ":file_partition_source",
         ":source",
+        "//core/common:artifact_hash_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:model_hash_lib",
         "@abseil-cpp//absl/types:span",
     ],
 )
@@ -213,10 +213,10 @@ sc_cc_library(
         ":multi_safetensors_source",
         ":safetensors_source",
         ":safetensors_util",
+        "//core/common:artifact_verification_lib",
         "//core/common:error_handling_lib",
-        "//core/common:model_verification_lib",
+        "//core/common:memory_location_lib",
         "//core/store:loading_spec",
-        "//core/store/model:model_location",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/strings",
     ],
@@ -233,11 +233,11 @@ sc_cc_library(
         ":mux_seekable_source",
         ":remote_key_source",
         "//core/common:error_handling_lib",
+        "//core/common:memory_location_lib",
         "//core/common:metric_objects_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         "//core/store:loading_spec",
-        "//core/store/model:model_location",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -255,8 +255,8 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         ":loader",
+        "//core/common:memory_location_lib",
         "//core/store:loading_spec",
-        "//core/store/model:model_location",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/synchronization",
@@ -265,8 +265,8 @@ sc_header_only_library(
 
 # Tests
 cc_test(
-    name = "disk_model_mmap_test",
-    srcs = ["disk_model_mmap_test.cc"],
+    name = "disk_mmap_test",
+    srcs = ["disk_mmap_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -274,8 +274,8 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         "//core/common:pinned_memory_pool_lib",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -283,8 +283,8 @@ cc_test(
 )
 
 cc_test(
-    name = "disk_model_cpu_load_test",
-    srcs = ["disk_model_cpu_load_test.cc"],
+    name = "disk_cpu_load_test",
+    srcs = ["disk_cpu_load_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -294,8 +294,8 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -303,8 +303,8 @@ cc_test(
 )
 
 cc_test(
-    name = "disk_model_cpu_gpu_transfer_test",
-    srcs = ["disk_model_cpu_gpu_transfer_test.cc"],
+    name = "disk_cpu_gpu_transfer_test",
+    srcs = ["disk_cpu_gpu_transfer_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -318,8 +318,8 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -341,7 +341,7 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model:memory_manager",
+        "//core/store/replica:memory_manager",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -349,8 +349,8 @@ cc_test(
 )
 
 cc_test(
-    name = "disk_model_error_test",
-    srcs = ["disk_model_error_test.cc"],
+    name = "disk_error_test",
+    srcs = ["disk_error_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -360,8 +360,8 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -410,8 +410,8 @@ cc_test(
 )
 
 cc_test(
-    name = "model_gpu_auto_release_test",
-    srcs = ["model_gpu_auto_release_test.cc"],
+    name = "artifact_gpu_auto_release_test",
+    srcs = ["artifact_gpu_auto_release_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -424,8 +424,8 @@ cc_test(
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -451,21 +451,21 @@ cc_test(
 )
 
 cc_test(
-    name = "model_verification_test",
-    srcs = ["model_verification_test.cc"],
+    name = "artifact_verification_test",
+    srcs = ["artifact_verification_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
     tags = ["requires_cuda"],
     deps = [
+        "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:model_verification_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -473,18 +473,18 @@ cc_test(
 )
 
 cc_test(
-    name = "model_verifier_direct_test",
-    srcs = ["model_verifier_direct_test.cc"],
+    name = "artifact_verifier_direct_test",
+    srcs = ["artifact_verifier_direct_test.cc"],
     deps = [
-        "//core/common:model_verification_lib",
+        "//core/common:artifact_verification_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )
 
 cc_test(
-    name = "disk_model_multi_gpu_test",
-    srcs = ["disk_model_multi_gpu_test.cc"],
+    name = "disk_multi_gpu_test",
+    srcs = ["disk_multi_gpu_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -498,8 +498,8 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -537,8 +537,8 @@ cc_test(
 )
 
 cc_test(
-    name = "model_streaming_buffer_test",
-    srcs = ["model_streaming_buffer_test.cc"],
+    name = "artifact_streaming_buffer_test",
+    srcs = ["artifact_streaming_buffer_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
@@ -546,13 +546,13 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":streaming_buffer_adapter",
+        "//core/common:artifact_hash_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:model_hash_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/store:loading_spec",
-        "//core/store/model",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:replica_config",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -572,7 +572,7 @@ cc_test(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/communicator:engine_lib",
-        "//core/store/model:memory_manager",
+        "//core/store/replica:memory_manager",
         "//core/testing:catch_main",
         "//core/testing:common",
         "//core/testing:test_helpers",

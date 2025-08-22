@@ -16,7 +16,7 @@ The Store Daemon is composed of specialized Python modules that orchestrate a hi
 graph TD
     subgraph "Python Layer"
         Servicer[StoreDaemonServicer<br/>servicer.py]
-        Servicer --> ModelLoader[ModelLoader<br/>model_loader.py]
+        Servicer --> ArtifactLoader[ArtifactLoader<br/>artifact_loader.py]
         Servicer --> ReplicaManager[ReplicaManager<br/>replica_manager.py]
         Servicer --> ConnectionManager[ConnectionManager<br/>connection_manager.py]
         Servicer --> LifecycleWorker[LifecycleWorker<br/>lifecycle_worker.py]
@@ -29,7 +29,7 @@ graph TD
         CppCore --> CommEngine[Communicator Engine]
     end
 
-    ModelLoader -->|pybind11| CppCore
+    ArtifactLoader -->|pybind11| CppCore
     ReplicaManager -->|pybind11| CppCore
 ```
 
@@ -38,8 +38,8 @@ graph TD
 | Module | File | Responsibility |
 |--------|------|----------------|
 | **Servicer** | `servicer.py` | Main gRPC service implementation, orchestrates all components |
-| **ModelLoader** | `model_loader.py` | Handles asynchronous model loading from disk or remote peers |
-| **ReplicaManager** | `replica_manager.py` | Manages model lifecycle, reference counting, and eviction |
+| **ArtifactLoader** | `artifact_loader.py` | Handles asynchronous artifact loading from disk or remote peers |
+| **ReplicaManager** | `replica_manager.py` | Manages artifact lifecycle, reference counting, and eviction |
 | **LifecycleWorker** | `lifecycle_worker.py` | Background tasks for memory monitoring and eviction |
 | **ProcessWatcher** | `process_watcher.py` | Monitors client PIDs and cleans up on process death |
 | **ConnectionManager** | `connection_manager.py` | Manages registration, heartbeats, and state sync with Global Store (HA) |
@@ -49,7 +49,7 @@ graph TD
 
 ## Key Workflows
 
-### Asynchronous Model Loading
+### Asynchronous Artifact Loading
 
 The Store Daemon implements a **three-phase** asynchronous loading & verification pipeline for optimal performance:
 
@@ -57,33 +57,33 @@ The Store Daemon implements a **three-phase** asynchronous loading & verificatio
 sequenceDiagram
     participant Client
     participant Servicer
-    participant ModelLoader
+    participant ArtifactLoader
     participant ReplicaManager
     participant CppCore as StoreEngine (C++)
 
-    Client->>Servicer: 1. LoadModel(model_path, replica_uuid)
-    Servicer->>ModelLoader: start_async_load()
-    ModelLoader->>CppCore: prepare() -> (handle, ptr, wait_fn)
-    note right of ModelLoader: Allocates memory,<br/>starts background transfer
-    CppCore-->>ModelLoader: IPC Handle, GPU Ptr, Future
-    ModelLoader-->>Servicer: Allocation success, Handle, Future
-    Servicer-->>Client: LoadModelResponse (ALLOCATED, handle)
+    Client->>Servicer: 1. MaterializeReplica(artifact_id, replica_uuid)
+    Servicer->>ArtifactLoader: start_async_load()
+    ArtifactLoader->>CppCore: materialize_replica() -> (handle, ptr, wait_fn)
+    note right of ArtifactLoader: Allocates memory,<br/>starts background transfer
+    CppCore-->>ArtifactLoader: IPC Handle, GPU Ptr, Future
+    ArtifactLoader-->>Servicer: Allocation success, Handle, Future
+    Servicer-->>Client: MaterializeReplicaResponse (ALLOCATED, handle)
 
-    Client->>Servicer: 2. ConfirmModel(model_path, replica_uuid)
-    Servicer->>ReplicaManager: confirm_model()
-    ReplicaManager->>CppCore: wait_instance_ready()
+    Client->>Servicer: 2. ConfirmReplica(artifact_id, replica_uuid)
+    Servicer->>ReplicaManager: confirm_replica()
+    ReplicaManager->>CppCore: wait_replica_ready()
     note right of ReplicaManager: Blocks until transfer complete
     CppCore-->>ReplicaManager: Success
     ReplicaManager-->>Servicer: Confirmed
-    Servicer-->>Client: ConfirmModelResponse (OK)
+    Servicer-->>Client: ConfirmReplicaResponse (OK)
 ```
 
-**Phase 1 - LoadModel**:
+**Phase 1 - MaterializeReplica**:
 - Non-blocking memory allocation performed inside the C++ `StoreEngine`
 - Attempts **remote P2P transfer** first (via Global-Store/CommunicationManager) and automatically falls back to local disk if no eligible replicas are available
 - Immediately returns a CUDA IPC handle together with a `Future` that tracks the background data transfer
 
-**Phase 2 - ConfirmModel**:
+**Phase 2 - ConfirmReplica**:
 - Waits for transfer completion
 - Registers replica with Global Store
 - Finalizes the loading process
@@ -92,22 +92,22 @@ sequenceDiagram
 - Runs in a dedicated verifier thread-pool once the async load finishes
 - Computes a SHA-256 checksum over the GPU buffer and compares it with `verification.json`
 - On success: marks the replica `VERIFICATION_STATUS_PASSED` and automatically registers it with Global Store
-- On failure: unloads the faulty replica and increments `store_daemon_model_verification_total{status="failed"}`
+- On failure: unloads the faulty replica and increments `store_daemon_artifact_verification_total{status="failed"}`
 
 ### Memory Management
 
 #### Reference Counting
-The Store Daemon tracks model usage through PID-based reference counting:
+The Store Daemon tracks artifact usage through PID-based reference counting:
 
 ```python
 # ReplicaManager maintains:
-replica_ref_counts: Dict[str, int]  # model_path -> ref_count
-replica_pids: Dict[str, Set[int]]   # model_path -> {pids}
+replica_ref_counts: Dict[str, int]  # artifact_id -> ref_count
+replica_pids: Dict[str, Set[int]]   # artifact_id -> {pids}
 ```
 
-- Each `LoadModel` call increments the reference count
-- `UnloadModel` or PID death decrements the count
-- Models with ref_count=0 become eviction candidates
+- Each `MaterializeReplica` call increments the reference count
+- `UnloadReplica` or PID death decrements the count
+- Replicas with ref_count=0 become eviction candidates
 
 #### Eviction Strategy
 The `LifecycleWorker` implements a two-tier eviction policy:
@@ -154,15 +154,15 @@ The C++ core is exposed via pybind11 (`scstore/csrc/store_engine_py.cc`):
 
 ```cpp
 // Key exports to Python
-py::enum_<ModelLocation>(m, "ModelLocation")
-    .value("DISK", ModelLocation::DISK)
-    .value("GPU", ModelLocation::GPU)
-    .value("REMOTE", ModelLocation::REMOTE);
+py::enum_<MemoryLocation>(m, "MemoryLocation")
+    .value("DISK", MemoryLocation::DISK)
+    .value("GPU", MemoryLocation::GPU)
+    .value("REMOTE", MemoryLocation::REMOTE);
 
 py::class_<StoreEngine>(m, "StoreEngine")
-    .def("prepare", &StoreEngine::prepare)
-    .def("unload_instance", &StoreEngine::unload_instance)
-    .def("wait_instance_ready", &StoreEngine::wait_instance_ready);
+    .def("materialize_replica", &StoreEngine::materialize_replica)
+    .def("unload_replica", &StoreEngine::unload_replica)
+    .def("wait_replica_ready", &StoreEngine::wait_replica_ready);
 ```
 
 ### StoreEngine Architecture
@@ -171,7 +171,7 @@ The C++ `StoreEngine` manages high-performance operations:
 
 ```mermaid
 graph TD
-    CS[StoreEngine] --> MR[ModelRegistry<br/>Model lifecycle]
+    CS[StoreEngine] --> MR[ReplicaRegistry<br/>Artifact lifecycle]
     CS --> DM[DeviceManager<br/>GPU management]
     CS --> CM[CommunicationManager<br/>P2P transfers]
     CS --> MC[MetricsCollector<br/>Performance metrics]
@@ -246,13 +246,13 @@ Key metrics exposed:
 * `store_daemon_models_loaded_total` / `store_daemon_models_unloaded_total`
 * `store_daemon_models_load_failures_total{error_type}`
 * `store_daemon_model_load_duration_seconds` – histogram
-* `store_daemon_async_load_wait_duration_seconds` – histogram for `ConfirmModel`
+* `store_daemon_async_load_wait_duration_seconds` – histogram for `ConfirmReplica`
 * `store_daemon_pending_loads` – current async loads gauge
 
 ***Memory***
 * `store_daemon_memory_pool_total_bytes` / `store_daemon_memory_pool_available_bytes`
 * `store_daemon_gpu_cache_bytes{type="local|global"}` – GPU cache usage
-* `store_daemon_model_ref_count{model,device_id}`
+* `store_daemon_model_ref_count{artifact,device_id}`
 * `store_daemon_evictions_total{reason}`
 
 ***Worker Health***
@@ -263,7 +263,7 @@ Key metrics exposed:
 ***High Availability (HA)***
 * `store_daemon_ha_connection_state`
 * `store_daemon_ha_state_version`
-* `store_daemon_ha_registered_models`
+* `store_daemon_ha_registered_artifacts`
 * `store_daemon_ha_heartbeat_total{status}`
 * `store_daemon_ha_state_sync_total{type,status}`
 * `store_daemon_ha_state_changes_total{change_type}`
@@ -272,14 +272,14 @@ Key metrics exposed:
 * `store_daemon_ha_pending_changes{type}`
 
 ***Verification***
-* `store_daemon_model_verification_total{status}`
-* `store_daemon_model_verification_latency_seconds`
+* `store_daemon_artifact_verification_total{status}`
+* `store_daemon_artifact_verification_latency_seconds`
 
 **C++ Core** (exported via `GlobalMetricsCollector`):
 * `store_daemon_gpu_memory_bytes{device_id,memory_type="total|free"}`
 * `store_daemon_memory_pool_available_bytes`
 * `store_daemon_p2p_bytes_transferred_total`
-* `store_daemon_models_in_memory{location="cpu|gpu"}`
+* `store_daemon_replicas_in_memory{location="cpu|gpu"}`
 * `store_daemon_cpp_operation_latency_seconds` – histogram of internal C++ calls
 
 ## Development Guidelines

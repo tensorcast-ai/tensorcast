@@ -23,7 +23,7 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         ":device_types",
-        "//core/store/model:model_location",
+        "//core/common:memory_location_lib",
     ],
 )
 
@@ -33,7 +33,7 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:device_types_lib",
-        "//core/store/model:model_location",
+        "//core/common:memory_location_lib",
         "@abseil-cpp//absl/hash",
     ],
 )
@@ -76,7 +76,7 @@ sc_header_only_library(
     deps = [
         ":communication_types",
         ":device_types",
-        "//core/store/model:memory_state",
+        "//core/store/replica:memory_state",
         "@abseil-cpp//absl/hash",
     ],
 )
@@ -90,8 +90,8 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":device_types",
-        "//core/store/model:chunk_meta",
-        "//core/store/model:model_location",
+        "//core/common:memory_location_lib",
+        "//core/store/replica:chunk_meta",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
@@ -121,14 +121,14 @@ sc_cc_library(
 )
 
 sc_cc_library(
-    name = "model_registry",
-    srcs = ["components/model_registry.cc"],
-    hdrs = ["components/model_registry.h"],
+    name = "replica_registry",
+    srcs = ["components/replica_registry.cc"],
+    hdrs = ["components/replica_registry.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":device_types",
         ":memory_types",
-        "//core/store/model",
+        "//core/store/replica",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
     ],
@@ -142,10 +142,10 @@ sc_cc_library(
     deps = [
         ":device_manager",
         ":memory_types",
-        ":model_registry",
+        ":replica_registry",
+        "//core/common:memory_location_lib",
         "//core/common:metric_objects_lib",
         "//core/common:pinned_memory_pool_lib",
-        "//core/store/model:model_location",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
     ],
@@ -153,7 +153,7 @@ sc_cc_library(
 
 # ========== Loading orchestration ==========
 
-# prepare_orchestrator is now part of store_engine target to avoid circular dependency
+# materialize_orchestrator is now part of store_engine target to avoid circular dependency
 
 sc_cc_library(
     name = "chunk_aware_loading_strategy",
@@ -166,9 +166,9 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
-        "//core/store/model:chunk_meta",
-        "//core/store/model:memory_manager",
-        "//core/store/model:model_memory_coordinator",
+        "//core/store/replica:chunk_meta",
+        "//core/store/replica:memory_manager",
+        "//core/store/replica:replica_memory_coordinator",
     ],
 )
 
@@ -188,11 +188,11 @@ sc_cc_library(
 sc_cc_library(
     name = "store_engine",
     srcs = [
-        "loading/prepare_orchestrator.cc",
+        "loading/materialize_orchestrator.cc",
         "store_engine.cc",
     ],
     hdrs = [
-        "loading/prepare_orchestrator.h",
+        "loading/materialize_orchestrator.h",
         "store_engine.h",
     ],
     visibility = ["//visibility:public"],
@@ -205,13 +205,13 @@ sc_cc_library(
         ":global_store_client",
         ":loading_spec",
         ":metrics_collector",
-        ":model_registry",
         ":replica_registration_helper",
+        ":replica_registry",
         ":store_engine_options",
         "//core/checkpoint:checkpoint_lib",
+        "//core/common:artifact_hash_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:model_hash_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
@@ -220,9 +220,9 @@ sc_cc_library(
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
         "//core/store/loader:source_hash",
-        "//core/store/model",
-        "//core/store/model:memory_state",
-        "//core/store/model:model_config",
+        "//core/store/replica",
+        "//core/store/replica:memory_state",
+        "//core/store/replica:replica_config",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/functional:overload",
@@ -270,7 +270,7 @@ cc_test(
     deps = [
         ":store_engine",
         "//core/common",
-        "//core/communicator",
+        "//core/communicator:engine_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
         "//core/testing:test_helpers",
@@ -360,32 +360,7 @@ cc_test(
     ],
 )
 
-# Aggregate target for backward compatibility
-sc_cc_library(
-    name = "store",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":chunk_aware_loading_strategy",
-        ":communication_manager",
-        ":communication_types",
-        ":device_manager",
-        ":device_registry",
-        ":device_types",
-        ":direct_write",
-        ":global_store_client",
-        ":loading_spec",
-        ":memory_types",
-        ":metrics_collector",
-        ":model_registry",
-        ":replica_registration_helper",
-        ":store_engine",
-        ":store_engine_options",
-        "//core/store/loader",
-        "//core/store/loader:source_hash",
-        "//core/store/model",
-    ],
-    alwayslink = True,
-)
+# Aggregate target removed; use fine-grained deps in dependents.
 
 # Concurrency utilities header for tests
 sc_header_only_library(

@@ -37,7 +37,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // RDMA is explicitly disabled via constructor parameter in CommunicateEngine and StoreEngine.
 
-  const std::size_t model_size = 8 * 1024 * 1024; // 8 MiB
+  const std::size_t artifact_size = 8 * 1024 * 1024; // 8 MiB
 
   // ---------------------------------------------------------------------------
   // 1. Spin up a standalone CommunicateEngine that owns the remote tensor.
@@ -50,9 +50,9 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // Allocate GPU memory and fill with a deterministic pattern.
   void* src_gpu_ptr = nullptr;
-  REQUIRE(stepcast::cuda::malloc(&src_gpu_ptr, model_size).ok());
-  std::vector<uint8_t> src_pattern = create_test_pattern(model_size, /*seed=*/42);
-  REQUIRE(stepcast::cuda::memcpy(src_gpu_ptr, src_pattern.data(), model_size, cudaMemcpyHostToDevice).ok());
+  REQUIRE(stepcast::cuda::malloc(&src_gpu_ptr, artifact_size).ok());
+  std::vector<uint8_t> src_pattern = create_test_pattern(artifact_size, /*seed=*/42);
+  REQUIRE(stepcast::cuda::memcpy(src_gpu_ptr, src_pattern.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
   // Register the GPU buffer so that it can be fetched remotely.
   const char* kRemoteKey = "remote_model_weights";
@@ -60,7 +60,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
               ->register_tensor(
                   kRemoteKey,
                   reinterpret_cast<uint64_t>(src_gpu_ptr),
-                  model_size,
+                  artifact_size,
                   COMMUNICATE_ENGINE_DEV_GPU,
                   /*dev_id=*/0,
                   /*async=*/false)
@@ -104,47 +104,48 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   // ---------------------------------------------------------------------------
   // 3. Build a LoadSpec describing the remote GPU source and local GPU target.
   // ---------------------------------------------------------------------------
-  ModelLoadSpec spec;
-  spec.identifier = "remote_model";
+  ReplicaLoadSpec spec;
+  spec.identifier = "remote_artifact";
 
   // Configure P2P source
   P2PSource p2p_src;
-  p2p_src.size_bytes = model_size;
+  p2p_src.size_bytes = artifact_size;
   p2p_src.ip = "127.0.0.1";
   p2p_src.port = static_cast<uint16_t>(src_port);
   p2p_src.memory_keys = {kRemoteKey};
-  p2p_src.buf_sizes = {model_size};
-  p2p_src.location.type = ModelLocation::GPU; // Remote data is on GPU
+  p2p_src.buf_sizes = {artifact_size};
+  p2p_src.location.type = MemoryLocation::GPU; // Remote data is on GPU
   p2p_src.location.device_id = 0;
   p2p_src.enable_checksum = true;
   spec.source = p2p_src;
 
   // Configure target
-  ModelTarget target;
-  target.location.type = ModelLocation::GPU;
+  ReplicaTarget target;
+  target.location.type = MemoryLocation::GPU;
   target.location.device_id = 0;
   spec.target = target;
 
   // ---------------------------------------------------------------------------
   // 4. Issue P2P load via internal helper and wait for completion.
   // ---------------------------------------------------------------------------
-  absl::StatusOr<ModelHandle> handle_or = tgt_store.load_from_p2p_internal("remote_model", p2p_src, target, spec.hints);
+  absl::StatusOr<ReplicaHandle> handle_or =
+      tgt_store.ingest_from_p2p_internal("remote_artifact", p2p_src, target, spec.hints);
   REQUIRE(handle_or.ok());
   auto& handle = handle_or.value();
   REQUIRE(handle.ready_future.valid());
   REQUIRE(handle.ready_future.get().ok());
 
   // ---------------------------------------------------------------------------
-  // 5. Validate that the model resides on GPU and the contents match.
+  // 5. Validate that the replica resides on GPU and the contents match.
   // ---------------------------------------------------------------------------
-  auto gpu_ptr_result = tgt_store.get_instance_gpu_ptr(handle.instance_key);
+  auto gpu_ptr_result = tgt_store.get_replica_gpu_ptr(handle.replica_key);
   REQUIRE(gpu_ptr_result.ok());
   REQUIRE(gpu_ptr_result.value() != 0);
 
   void* tgt_gpu_ptr = reinterpret_cast<void*>(gpu_ptr_result.value());
-  std::vector<uint8_t> verify_buf(model_size);
-  REQUIRE(stepcast::cuda::memcpy(verify_buf.data(), tgt_gpu_ptr, model_size, cudaMemcpyDeviceToHost).ok());
-  REQUIRE(verify_pattern(verify_buf.data(), model_size, /*seed=*/42));
+  std::vector<uint8_t> verify_buf(artifact_size);
+  REQUIRE(stepcast::cuda::memcpy(verify_buf.data(), tgt_gpu_ptr, artifact_size, cudaMemcpyDeviceToHost).ok());
+  REQUIRE(verify_pattern(verify_buf.data(), artifact_size, /*seed=*/42));
 
   // ---------------------------------------------------------------------------
   // 6. Clean-up GPU memory and stores.

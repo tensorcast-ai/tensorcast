@@ -267,7 +267,7 @@ const Workers = () => {
                 rowKey="replica_id"
                 pagination={false}
                 columns={[
-                  { title: 'Model ID', dataIndex: 'model_id', key: 'model' },
+                  { title: 'Artifact ID', dataIndex: 'artifact_id', key: 'artifact' },
                   { title: 'Memory', dataIndex: 'memory_type', key: 'mem' },
                   { title: 'Device', dataIndex: 'device_id', key: 'device', width: 80 },
                   { title: 'Requests', key: 'req', render: (_: any, r: any) => `${r.current_requests}/${r.max_concurrency}` },

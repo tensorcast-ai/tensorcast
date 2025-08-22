@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, StepCast Team.
 
-"""StoreDaemon - A distributed model storage daemon with RDMA/TCP support."""
+"""StoreDaemon - A distributed artifact storage daemon with RDMA/TCP support."""
 
 from .config import StoreDaemonConfig
 from .server import serve

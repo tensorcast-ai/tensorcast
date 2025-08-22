@@ -35,7 +35,21 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     # ------------------------------------------------------------------
     # 1) Spin up daemon and wait until worker_id is assigned
     # ------------------------------------------------------------------
-    daemon = _make_servicer(enable_global=True, gs_addr=global_store_service._address)
+    # Retry to avoid flakiness if the Global Store stub races initialisation in _make_servicer
+    daemon = None
+    last_err = None
+    start_create = time.time()
+    backoff = 0.1
+    while time.time() - start_create < 5.0:  # cap total wait ~5s
+        try:
+            daemon = _make_servicer(enable_global=True, gs_addr=global_store_service._address)
+            break
+        except RuntimeError as e:
+            last_err = e
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 0.5)
+    if daemon is None:
+        assert False, f"Failed to create StoreDaemonServicer: {last_err}"
 
     timeout_s = 2.0
     start = time.time()
@@ -54,7 +68,7 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     # ------------------------------------------------------------------
     # 2) Manually register a replica for *this* worker directly in the GS
     # ------------------------------------------------------------------
-    model_id = "debug-model.ckpt"
+    artifact_id = "debug-artifact.ckpt"
     replica_uuid = str(uuid.uuid4())
 
     mem_info = global_store_pb2.MemoryInfo(
@@ -68,20 +82,20 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
         buffer_sizes=[2 * 1024 * 1024],
     )
 
-    reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model_id,
+    reg_req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact_id,
         mem_info=mem_info,
         max_concurrency=1,
         worker_id=worker_id,
     )
-    reg_resp = global_store_service.RegisterModelReplica(reg_req, FakeContext())
+    reg_resp = global_store_service.RegisterReplica(reg_req, FakeContext())
     assert reg_resp.status == global_store_pb2.Status.OK, "Replica registration failed during test setup"
 
     # ------------------------------------------------------------------
     # 3) Pretend the daemon already knows about this replica locally
     # ------------------------------------------------------------------
-    conn_mgr._add_registered_model(model_id)  # pyright: ignore[reportOptionalMemberAccess]
-    assert model_id in conn_mgr.registered_models # pyright: ignore[reportOptionalMemberAccess]
+    conn_mgr._add_registered_artifact(artifact_id)  # pyright: ignore[reportOptionalMemberAccess]
+    assert artifact_id in conn_mgr.registered_artifacts # pyright: ignore[reportOptionalMemberAccess]
 
     # ------------------------------------------------------------------
     # 4) Trigger a *full* state synchronisation
@@ -91,6 +105,6 @@ def test_state_sync_should_not_remove_existing_local_replica(global_store_servic
     # ------------------------------------------------------------------
     # 5) Replica should still be in the daemon's registered set – but bug removes it
     # ------------------------------------------------------------------
-    assert model_id in conn_mgr.registered_models, (  # pyright: ignore[reportOptionalMemberAccess]
+    assert artifact_id in conn_mgr.registered_artifacts, (  # pyright: ignore[reportOptionalMemberAccess]
         "Replica was erroneously removed after state sync – bug reproduced"
     )

@@ -74,7 +74,7 @@ class StreamingPinnedBuffer {
   /**
    * @brief Mark a chunk as ready with data for consumer.
    * @param slot_id The slot ID returned by get_free_chunk
-   * @param global_chunk_id The global chunk ID in the model
+   * @param global_chunk_id The global chunk ID in the replica
    * @param bytes_in_chunk Actual bytes written to this chunk
    * @return Status indicating success or failure
    */

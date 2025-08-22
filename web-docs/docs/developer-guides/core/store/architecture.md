@@ -8,10 +8,10 @@ sidebar_position: 2
 
 ## System Architecture
 
-The Core Store module adopts a layered architectural design with clear responsibility boundaries from external interfaces to low-level memory management. The architecture has evolved to support multi-device binding, distributed virtual memory pools (DVMP), and unified type systems for model sources and targets.
+The Core Store module adopts a layered architectural design with clear responsibility boundaries from external interfaces to low-level memory management. The architecture has evolved to support multi-device binding, distributed virtual memory pools (DVMP), and unified type systems for replica sources and targets.
 
 > Notes for readers:
-> - In code, the CPU location is named `ModelLocation::PAGEABLE_CPU` (file: `core/store/model/model_location.h`). In this document, we refer to it as "CPU" for readability but always provide the code name on first mention.
+> - In code, the CPU location is named `MemoryLocation::PAGEABLE_CPU` (file: `core/common/memory/memory_location.h`). In this document, we refer to it as "CPU" for readability but always provide the code name on first mention.
 
 ## Overall Architecture Diagram
 
@@ -19,20 +19,20 @@ The Core Store module adopts a layered architectural design with clear responsib
 graph TB
     subgraph "External Interface Layer"
         CS[StoreEngine]
-        PO[PrepareOrchestrator]
+        PO[MaterializeOrchestrator]
     end
 
     subgraph "Core Components"
-        MR[ModelRegistry]
+        MR[ReplicaRegistry]
         DM[DeviceManager]
         GSC[GlobalStoreClient]
         MC[MetricsCollector]
     end
 
-    subgraph "Model Layer"
-        M[Model]
-        MCF[ModelConfig]
-        IK[InstanceKey]
+    subgraph "Replica Layer"
+        M[Replica]
+        MCF[ReplicaConfig]
+        IK[ReplicaKey]
     end
 
     subgraph "Memory Management"
@@ -40,11 +40,11 @@ graph TB
         TS[TransferService]
         CES[ChunkExportService]
         MS[MemoryState]
-        ML[ModelLocation]
+        ML[MemoryLocation]
     end
 
     subgraph "Data Loading Layer"
-        IL[IModelLoader]
+        IL[IArtifactLoader]
         DL[DiskLoader]
         PL[P2PLoader]
         SS[SeekableSource]
@@ -110,60 +110,60 @@ graph TB
 
 **StoreEngine** is the entry point of the entire system, providing:
 
-- Model registration and management via ModelRegistry
+- Replica registration and management via ReplicaRegistry
 - GPU device management via DeviceManager
 - Global resource coordination through GlobalStoreClient
-- High-level API encapsulation with prepare() method
+- High-level API encapsulation with materialize_replica() method
 - Metrics collection through MetricsCollector
 
 - Source: `core/store/store_engine.h`, `core/store/store_engine.cc`
 
-**PrepareOrchestrator** handles the prepare() API workflow:
+**MaterializeOrchestrator** handles the materialize_replica() API workflow:
 
 - Remote replica selection from Global Store
 - P2P transport setup and coordination
 - Disk fallback when P2P unavailable
 - Replica registration after successful loading
 
-- Source: `core/store/loading/prepare_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
+- Source: `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
 
 ```cpp
 class StoreEngine {
 public:
     // Multi-device binding API
-    absl::StatusOr<ModelHandle> prepare(
-        std::string_view model_id,
+    absl::StatusOr<ReplicaHandle> materialize_replica(
+        std::string_view artifact_id,
         const DeviceKey& target_device,
-        PrepareMode mode = PrepareMode::AUTO,
-        const LoadingHints& hints = {});
+        MaterializeMode mode = MaterializeMode::AUTO,
+        const MaterializeHints& hints = {});
 
     // Instance-based management
-    int wait_instance_ready(const InstanceKey& key);
-    int unload_instance(const InstanceKey& key);
+    int wait_replica_ready(const ReplicaKey& key);
+    int unload_replica(const ReplicaKey& key);
 
     // DVMP chunk locking for H2D/P2P transfers
-    absl::Status lock_chunks(const InstanceKey& instance_key,
+    absl::Status lock_chunks(const ReplicaKey& replica_key,
                              absl::Span<const uint32_t> chunk_indices);
-    absl::Status unlock_chunks(const InstanceKey& instance_key,
+    absl::Status unlock_chunks(const ReplicaKey& replica_key,
                                absl::Span<const uint32_t> chunk_indices,
                                bool copied_gpu);
 };
 ```
 
-- Definitions: `InstanceKey`, `ModelHandle`, `LoadingHints` in `core/store/loading/loading_spec.h`
+- Definitions: `ReplicaKey`, `ReplicaHandle`, `MaterializeHints` in `core/store/loading/loading_spec.h`
 - Device key: `DeviceKey` in `core/store/device_types.h`
 
-### 2. Model Management Layer
+### 2. Replica Management Layer
 
-**Model** class encapsulates the complete lifecycle of a single model instance bound to a specific device:
+**Replica** class encapsulates the complete lifecycle of a single replica instance bound to a specific device:
 
-- Source: `core/store/model/model.{h,cc}`
+- Source: `core/store/replica/replica.{h,cc}`
 
 ```mermaid
 graph LR
-    subgraph "Model Internal Architecture"
-        M[Model] --> MM[MemoryManager]
-        M --> IL[IModelLoader]
+    subgraph "Replica Internal Architecture"
+        M[Replica] --> MM[MemoryManager]
+        M --> IL[IArtifactLoader]
         M --> CF[CPU Future]
         M --> GF[GPU Future]
 
@@ -176,11 +176,11 @@ graph LR
 ```
 
 **Design Features**:
-- Factory pattern with `Model::create()` for instance creation
-- Each Model instance is uniquely identified by `InstanceKey` (model_id + device + replica) — `core/store/loading/loading_spec.h`
-- Asynchronous operation management via `std::shared_future` — `Model::ensure_loaded_async()` in `core/store/model/model.{h,cc}`
-- Supports device copies via `Model::copy_from()` and `MemoryManager::copy_from_peer()` — `core/store/model/model.h`, `core/store/model/memory_manager.h`
-- Integrated model verification — `core/common/model_verification.{h,cc}`, used by loaders and `Model`
+- Factory pattern with `Replica::create()` for instance creation
+- Each Replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
+- Asynchronous operation management via `std::shared_future` — `Replica::ensure_loaded_async()` in `core/store/replica/replica.{h,cc}`
+- Supports device copies via `Replica::copy_from()` and `MemoryManager::copy_from_peer()` — `core/store/replica/replica.h`, `core/store/replica/memory_manager.h`
+- Integrated replica verification — `core/common/artifact_verification.{h,cc}`, used by loaders and `Replica`
 
 ### 3. Data Loading Layer
 
@@ -192,10 +192,10 @@ Adopts strategy pattern design with pump-based streaming architecture:
 
 ```mermaid
 classDiagram
-    class IModelLoader {
+    class IArtifactLoader {
         <<interface>>
         +initialize() Status
-        +get_model_size() StatusOr~uint64_t~
+        +get_artifact_size() StatusOr~uint64_t~
         +open_source() StatusOr~SeekableSource~
     }
 
@@ -209,8 +209,8 @@ classDiagram
         +open_source() StatusOr~SeekableSource~
     }
 
-    IModelLoader <|-- DiskLoader
-    IModelLoader <|-- P2PLoader
+    IArtifactLoader <|-- DiskLoader
+    IArtifactLoader <|-- P2PLoader
 ```
 
 **DiskLoader Workflow**:
@@ -229,12 +229,12 @@ classDiagram
 
 ### 4. Memory Management Layer
 
-**MemoryManager** manages memory for a single model instance at both CPU (PAGEABLE_CPU) and GPU locations, integrating with DVMP for pageable CPU memory:
+**MemoryManager** manages memory for a single replica instance at both CPU (PAGEABLE_CPU) and GPU locations, integrating with DVMP for pageable CPU memory:
 
-- Source: `core/store/model/memory_manager.{h,cc}`
-- UMA (Unified Memory): `core/store/model/model_memory_coordinator.{h,cc}`
-- Transfers: `core/store/model/transfer_service.{h,cc}`, `core/store/model/transfer_helpers.{h,cc}`
-- States: `core/store/model/memory_state.h`, Locations: `core/store/model/model_location.h`
+- Source: `core/store/replica/memory_manager.{h,cc}`
+- UMA (Unified Memory): `core/store/replica/replica_memory_coordinator.{h,cc}`
+- Transfers: `core/store/replica/transfer_service.{h,cc}`, `core/store/replica/transfer_helpers.{h,cc}`
+- States: `core/store/replica/memory_state.h`, Locations: `core/common/memory/memory_location.h`
 
 ```mermaid
 stateDiagram-v2
@@ -299,7 +299,7 @@ graph TB
     subgraph "Service Layer"
         TS[TransferService]
         CES[ChunkExportService]
-        MMC[ModelMemoryCoordinator]
+        MMC[ReplicaMemoryCoordinator]
 
         TS -->|Orchestrates| P
         CES -->|Manages| CRI[CommRegistrationInfo]
@@ -309,8 +309,8 @@ graph TB
 
 **GPU Memory Features**:
 - CUDA allocation and stream management — `core/common/memory/cuda_memory.{h,cc}`
-- Cross-process memory sharing via `MemoryManager::get_cuda_ipc_handle()` — `core/store/model/memory_manager.h`
-- Device-bound memory management (via `InstanceKey`) — `core/store/loading/loading_spec.h`
+- Cross-process memory sharing via `MemoryManager::get_cuda_ipc_handle()` — `core/store/replica/memory_manager.h`
+- Device-bound memory management (via `ReplicaKey`) — `core/store/loading/loading_spec.h`
 
 ## Memory Transfer Mechanism
 
@@ -327,7 +327,7 @@ sequenceDiagram
     participant SNK as DVMPRegionSink
 
     DL->>DL: initialize()
-    DL->>DL: get_model_size()
+    DL->>DL: get_artifact_size()
     DL->>DL: open_source()
     DL-->>MM: return SeekableSource (SRC)
 
@@ -470,29 +470,29 @@ stateDiagram-v2
     TransferComplete --> [*]
 ```
 
-- Sources: `core/store/model/memory_manager.{h,cc}` (`set_state`, `finalize_load`, error paths)
+- Sources: `core/store/replica/memory_manager.{h,cc}` (`set_state`, `finalize_load`, error paths)
 
 ## Core Interaction Flows
 
-### New Unified Loading Flow with prepare() API
+### New Unified Loading Flow with materialize_replica() API
 
 ```mermaid
 sequenceDiagram
     participant User
     participant CS as StoreEngine
-    participant PO as PrepareOrchestrator
-    participant MR as ModelRegistry
-    participant M as Model
+    participant PO as MaterializeOrchestrator
+    participant MR as ReplicaRegistry
+    participant M as Replica
     participant MM as MemoryManager
     participant L as Loader
     participant DVMP
 
-    User->>CS: prepare(model_id, target_device)
+    User->>CS: materialize_replica(artifact_id, target_device)
     CS->>PO: orchestrate loading
-    PO->>MR: get_or_create_model(instance_key)
+    PO->>MR: get_or_create_replica(replica_key)
 
-    alt Model not exists
-        MR->>M: Model::create(config)
+    alt Replica not exists
+        MR->>M: Replica::create(config)
         M->>L: create appropriate loader
         M->>MM: initialize with DVMP
         MM->>DVMP: reserve virtual address space
@@ -509,11 +509,11 @@ sequenceDiagram
     MM->>MM: finalize_load_state(LOADED)
 
     M-->>PO: return future
-    PO->>CS: return ModelHandle
-    CS->>User: ModelHandle{instance_key, ready_future}
+    PO->>CS: return ReplicaHandle
+    CS->>User: ReplicaHandle{replica_key, ready_future}
 ```
 
-- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/prepare_orchestrator.{h,cc}`, `core/store/model/model.{h,cc}`, `core/store/model/memory_manager.{h,cc}`
+- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/memory_manager.{h,cc}`
 
 ### P2P Loading Flow with CommunicateEngine
 
@@ -523,7 +523,7 @@ P2P transfers leverage the `CommunicateEngine` for remote memory access with `Re
 sequenceDiagram
     participant User
     participant CS as StoreEngine
-    participant M as Model
+    participant M as Replica
     participant MM as MemoryManager
     participant RL as P2PLoader
     participant CM as CommunicationManager
@@ -549,7 +549,7 @@ sequenceDiagram
     M->>CS: return success/error
 ```
 
-- Sources: `core/store/loader/p2p_loader.{h,cc}`, `core/store/loader/remote_key_source.{h,cc}`, `core/store/model/memory_manager.{h,cc}`
+- Sources: `core/store/loader/p2p_loader.{h,cc}`, `core/store/loader/remote_key_source.{h,cc}`, `core/store/replica/memory_manager.{h,cc}`
 
 ### IPC Memory Sharing Flow
 
@@ -564,7 +564,7 @@ sequenceDiagram
     participant CUDA as CUDA_Runtime
 
     P1->>MM1: allocate_memory(GPU)
-    MM1->>CUDA: cudaMalloc(model_size)
+    MM1->>CUDA: cudaMalloc(artifact_size)
     P1->>MM1: load_model_data()
     MM1->>MM1: state = LOADED
 
@@ -577,7 +577,7 @@ sequenceDiagram
     P2->>P2: Use ipc_handle for CUDA operations
 ```
 
-- Source: `core/store/model/memory_manager.h` (`get_cuda_ipc_handle()`)
+- Source: `core/store/replica/memory_manager.h` (`get_cuda_ipc_handle()`)
 
 ## Performance Optimization
 
@@ -618,18 +618,18 @@ sequenceDiagram
 
 The system is designed with multiple extension points to support future requirements:
 
-1. **New Loader Types**: Implement `IModelLoader` interface and provide `SeekableSource`
-2. **New Source Types**: Add variants to `ModelSource` (e.g., S3Source, AzureBlobSource)
-3. **New Memory Types**: Extend `MemoryManager` and `ModelLocation` enum
+1. **New Loader Types**: Implement `IArtifactLoader` interface and provide `SeekableSource`
+2. **New Source Types**: Add variants to `ArtifactSource` (e.g., S3Source, AzureBlobSource)
+3. **New Memory Types**: Extend `MemoryManager` and `MemoryLocation` enum
 4. **New Transfer Protocols**: Extend `CommunicateEngine` implementations
-5. **New Verification Methods**: Extend `ModelVerificationInfo` framework
+5. **New Verification Methods**: Extend `ArtifactVerificationInfo` framework
 6. **Custom Device Types**: Extend `DeviceKey` and device registry
 
 ## Key Implementation Details
 
 ### Multi-Device Binding
-- Each model instance is uniquely identified by `InstanceKey` (model_id + device + replica) — `core/store/loading/loading_spec.h`
-- Supports multiple replicas of the same model on different devices
+- Each replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
+- Supports multiple replicas of the same replica on different devices
 - Device abstraction via `DeviceKey` for stable device references — `core/store/device_types.h`
 
 ### Distributed Virtual Memory Pool (DVMP)
@@ -638,14 +638,14 @@ The system is designed with multiple extension points to support future requirem
 - Supports chunk locking during H2D/P2P transfers
 - Enables efficient memory sharing across processes
 
-### Unified Type System
-- `ModelSource` / `ModelTarget` / `LoadingHints` — `core/store/loading/loading_spec.h`
-- `ModelHandle`: returned from loading operations with instance info — `core/store/loading/loading_spec.h`
+- ### Unified Type System
+- `ArtifactSource` / `ArtifactTarget` / `MaterializeHints` — `core/store/loading/loading_spec.h`
+- `ReplicaHandle`: returned from loading operations with instance info — `core/store/loading/loading_spec.h`
 
 ### Service Architecture
-- **TransferService**: Manages data transfers between locations — `core/store/model/transfer_service.{h,cc}`
-- **ChunkExportService**: Handles P2P memory registration/export — `core/store/model/chunk_export_service.h`
-- **PrepareOrchestrator**: Coordinates the prepare() API workflow — `core/store/loading/prepare_orchestrator.{h,cc}`
+- **TransferService**: Manages data transfers between locations — `core/store/replica/transfer_service.{h,cc}`
+- **ChunkExportService**: Handles P2P memory registration/export — `core/store/replica/chunk_export_service.h`
+- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/loading/materialize_orchestrator.{h,cc}`
 - **MetricsCollector**: Tracks performance and resource usage — `core/store/components/metrics_collector.{h,cc}`
 
 ## Related Guides

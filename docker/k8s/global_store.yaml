@@ -63,7 +63,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: global-store
-        image: hub.i.basemind.com/stepcast/global-model-store:2025.07.08-61f0f
+        image: hub.i.basemind.com/stepcast/global-store:2025.07.08-61f0f
         imagePullPolicy: IfNotPresent
         command: ["python", "-m", "scstore.global_store"]
         env:
@@ -212,7 +212,7 @@ spec:
             runAsGroup: 1000
           containers:
           - name: backup
-            image: hub.i.basemind.com/stepcast/global-model-store:latest
+            image: hub.i.basemind.com/stepcast/global-store:latest
             command: ["/bin/bash", "/scripts/backup.sh"]
             volumeMounts:
             - name: data

@@ -29,7 +29,7 @@ TraceManager& TraceManager::instance() {
 
 // Thread-local storage for current request id.
 thread_local std::string TraceManager::tls_request_id_;
-thread_local std::string TraceManager::tls_model_id_;
+thread_local std::string TraceManager::tls_artifact_id_;
 
 // ---------------- Request-id helpers ------------------------------------
 
@@ -52,20 +52,20 @@ TraceManager::RequestIdGuard::~RequestIdGuard() {
 
 // ---------------- Internal helpers --------------------------------------
 
-std::string TraceManager::make_key(const std::string& model_id, const std::string& request_id) {
+std::string TraceManager::make_key(const std::string& artifact_id, const std::string& request_id) {
   if (request_id.empty()) {
-    return model_id; // Legacy key w/o request id.
+    return artifact_id; // Legacy key w/o request id.
   }
-  return absl::StrCat(model_id, "|", request_id);
+  return absl::StrCat(artifact_id, "|", request_id);
 }
 
-std::shared_ptr<ModelTrace> TraceManager::get_or_create_model_trace_internal(const std::string& key) {
+std::shared_ptr<ReplicaTrace> TraceManager::get_or_create_trace_internal(const std::string& key) {
   absl::MutexLock lock(&global_mutex_);
   auto it = traces_.find(key);
   if (it != traces_.end()) {
     return it->second;
   }
-  auto ptr = std::make_shared<ModelTrace>();
+  auto ptr = std::make_shared<ReplicaTrace>();
   traces_.emplace(key, ptr);
 
   // Record insertion order for eviction.
@@ -83,28 +83,28 @@ std::shared_ptr<ModelTrace> TraceManager::get_or_create_model_trace_internal(con
 // ---------------- Span management ---------------------------------------
 
 TraceManager::SpanId TraceManager::begin_span(
-    const std::string& model_id,
+    const std::string& artifact_id,
     const std::string& request_id,
     const std::string& stage) {
-  return begin_span(model_id, request_id, stage, nullptr);
+  return begin_span(artifact_id, request_id, stage, nullptr);
 }
 
 TraceManager::SpanId TraceManager::begin_span(
-    const std::string& model_id,
+    const std::string& artifact_id,
     const std::string& request_id,
     const std::string& stage,
     void* cuda_stream) {
-  const std::string key = make_key(model_id, request_id);
-  auto trace = get_or_create_model_trace_internal(key);
+  const std::string key = make_key(artifact_id, request_id);
+  auto trace = get_or_create_trace_internal(key);
   absl::MutexLock lock(&trace->m);
   Span span{stage, absl::Now(), absl::ZeroDuration(), std::this_thread::get_id(), cuda_stream};
   trace->spans.push_back(span);
   return trace->spans.size() - 1;
 }
 
-void TraceManager::end_span(const std::string& model_id, const std::string& request_id, SpanId span_id) {
-  const std::string key = make_key(model_id, request_id);
-  auto trace = get_or_create_model_trace_internal(key);
+void TraceManager::end_span(const std::string& artifact_id, const std::string& request_id, SpanId span_id) {
+  const std::string key = make_key(artifact_id, request_id);
+  auto trace = get_or_create_trace_internal(key);
   absl::MutexLock lock(&trace->m);
   if (span_id >= trace->spans.size()) {
     LOG(WARNING) << "TraceManager::end_span invalid span id " << span_id;
@@ -116,13 +116,13 @@ void TraceManager::end_span(const std::string& model_id, const std::string& requ
   }
 }
 
-void TraceManager::dump_summary(const std::string& model_id, const std::string& request_id, std::ostream& os) {
-  const std::string key = make_key(model_id, request_id);
-  auto trace = get_or_create_model_trace_internal(key);
+void TraceManager::dump_summary(const std::string& artifact_id, const std::string& request_id, std::ostream& os) {
+  const std::string key = make_key(artifact_id, request_id);
+  auto trace = get_or_create_trace_internal(key);
   absl::MutexLock lock(&trace->m);
 
   if (trace->spans.empty()) {
-    os << "No trace data for model: " << model_id << " (request_id=" << request_id << ")\n";
+    os << "No trace data for replica: " << artifact_id << " (request_id=" << request_id << ")\n";
     return;
   }
 
@@ -150,7 +150,7 @@ void TraceManager::dump_summary(const std::string& model_id, const std::string& 
   const int total_w = 12;
   const int avg_w = 11;
 
-  os << "[TRACE] " << model_id << " (req=" << request_id << ") SUMMARY\n";
+  os << "[TRACE] " << artifact_id << " (req=" << request_id << ") SUMMARY\n";
   os << std::left << std::setw(static_cast<int>(stage_w)) << "stage" << std::right << std::setw(calls_w) << "calls"
      << std::setw(total_w) << "total(ms)" << std::setw(avg_w) << "avg(ms)" << "\n";
   os << std::string(stage_w + calls_w + total_w + avg_w, '-') << "\n";
@@ -186,9 +186,9 @@ void TraceManager::dump_summary(const std::string& model_id, const std::string& 
      << std::fixed << std::setprecision(0) << absl::ToDoubleMilliseconds(total_all) << " ms\n";
 }
 
-std::string TraceManager::generate_chrome_trace(const std::string& model_id, const std::string& request_id) {
-  const std::string key = make_key(model_id, request_id);
-  auto trace = get_or_create_model_trace_internal(key);
+std::string TraceManager::generate_chrome_trace(const std::string& artifact_id, const std::string& request_id) {
+  const std::string key = make_key(artifact_id, request_id);
+  auto trace = get_or_create_trace_internal(key);
   absl::MutexLock lock(&trace->m);
 
   if (trace->spans.empty()) {
@@ -236,7 +236,7 @@ std::string TraceManager::generate_chrome_trace(const std::string& model_id, con
 
     nlohmann::json event;
     event["name"] = span.stage;
-    event["cat"] = "model_loading"; // Category
+    event["cat"] = "artifact"; // Category
     event["ph"] = "X"; // Complete event
     event["ts"] = ts_us;
     event["dur"] = dur_us;
@@ -244,7 +244,7 @@ std::string TraceManager::generate_chrome_trace(const std::string& model_id, con
     event["pid"] = 1; // Process ID (fixed)
 
     // Add additional args for context
-    event["args"] = {{"model_id", model_id}, {"request_id", request_id}};
+    event["args"] = {{"artifact_id", artifact_id}, {"request_id", request_id}};
 
     // Add CUDA stream info if available
     if (span.cuda_stream != nullptr) {
@@ -259,8 +259,8 @@ std::string TraceManager::generate_chrome_trace(const std::string& model_id, con
   return events.dump(2); // Pretty print with 2-space indent
 }
 
-void TraceManager::clear_trace(const std::string& model_id, const std::string& request_id) {
-  const std::string key = make_key(model_id, request_id);
+void TraceManager::clear_trace(const std::string& artifact_id, const std::string& request_id) {
+  const std::string key = make_key(artifact_id, request_id);
   absl::MutexLock lock(&global_mutex_);
   traces_.erase(key);
   // Keep insertion_order_ consistent by removing the key if present.

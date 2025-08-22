@@ -15,7 +15,7 @@ from typing import IO
 import grpc
 
 from scstore.global_store.config import GlobalStoreConfig
-from scstore.global_store.grpc_service import GlobalModelStoreServicer
+from scstore.global_store.grpc_service import GlobalStoreServicer
 
 # Prometheus metrics
 from scstore.global_store.metrics import (
@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 def main():
     """Start the Global Store server."""
     parser = argparse.ArgumentParser(
-        description="Global Store Server - Centralized model registry"
+        description="Global Store Server - Centralized artifact registry"
     )
     parser.add_argument(
         "--port",
@@ -96,7 +96,7 @@ def main():
         config = config.model_copy(update=updates)
 
     # Initialize the service
-    servicer = GlobalModelStoreServicer(
+    servicer = GlobalStoreServicer(
         db_file=str(config.db_file) if config.db_file else None
     )
 
@@ -108,7 +108,7 @@ def main():
         futures.ThreadPoolExecutor(max_workers=config.max_workers),
         interceptors=[PrometheusInterceptor()],
     )
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
 
     # Bind to port
     server.add_insecure_port(f"[::]:{config.port}")

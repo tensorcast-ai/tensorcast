@@ -46,14 +46,14 @@ def get_total_parameter_size(module):
     return total_param_size
 
 
-def get_parameter_size(model: nn.Module, param_path: str):
-    param = model.get_parameter(param_path)
+def get_parameter_size(artifact: nn.Module, param_path: str):
+    param = artifact.get_parameter(param_path)
     return param.numel() * dtype_byte_size(param.dtype)
 
 
-def get_no_split_modules(model, no_split_modules_list, parent_name=""):
+def get_no_split_modules(artifact, no_split_modules_list, parent_name=""):
     no_split_modules = {}
-    for name, submodule in model.named_children():
+    for name, submodule in artifact.named_children():
         full_name = f"{parent_name}.{name}" if parent_name else name
         module_class_name = submodule.__class__.__name__
         # If the module is a leaf module or in the no_split_modules_list, we don't split it # noqa: E501

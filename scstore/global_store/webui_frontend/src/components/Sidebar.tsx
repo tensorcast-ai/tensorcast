@@ -33,9 +33,9 @@ const Sidebar = () => {
       label: 'Replicas',
     },
     {
-      key: '/models',
+      key: '/artifacts',
       icon: <AppstoreOutlined />,
-      label: 'Models',
+      label: 'Artifacts',
     },
     {
       key: '/transports',

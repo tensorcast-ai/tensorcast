@@ -16,7 +16,7 @@ from scstore.proto import global_store_pb2
 from tests.python.interaction.utils import FakeContext
 
 
-def _register_single_replica(gs, model: str, node_id: str, *, max_concurrency: int = 1) -> None:
+def _register_single_replica(gs, artifact: str, node_id: str, *, max_concurrency: int = 1) -> None:
     """Helper to register a single GPU replica."""
     worker_req = global_store_pb2.RegisterWorkerRequest(
         node_id=node_id,
@@ -39,13 +39,13 @@ def _register_single_replica(gs, model: str, node_id: str, *, max_concurrency: i
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    reg = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model,
+    reg = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
     )
-    rep_resp = gs.RegisterModelReplica(reg, FakeContext())
+    rep_resp = gs.RegisterReplica(reg, FakeContext())
     assert rep_resp.status == global_store_pb2.Status.OK
 
 
@@ -53,17 +53,17 @@ def test_daemon_crash_releases_counters(global_store_service):
     """Simulate Daemon crash – verify cleanup_expired_transports frees counters."""
 
     gs = global_store_service
-    model = "crash-model"
+    artifact = "crash-artifact"
 
-    _register_single_replica(gs, model, node_id="CRASH", max_concurrency=1)
+    _register_single_replica(gs, artifact, node_id="CRASH", max_concurrency=1)
 
     # Acquire transport (simulate load) – but DO NOT complete it.
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
-    resp = gs.RequestModelReplicaTransport(req, FakeContext())
+    req = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact)
+    resp = gs.RequestReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 
     # Verify counter incremented.
-    replica = gs.model_replica_repository.find_by_model(model)[0]
+    replica = gs.replica_repository.find_by_artifact(artifact)[0]
     assert replica.current_requests == 1
 
     # Wait a short moment so created_at is < now (age > 0) then force cleanup.
@@ -72,5 +72,5 @@ def test_daemon_crash_releases_counters(global_store_service):
     assert cleaned == 1  # Our single leaked transport should be cleaned.
 
     # Replica counter should have been decremented back to zero.
-    replica_after = gs.model_replica_repository.find_by_model(model)[0]
+    replica_after = gs.replica_repository.find_by_artifact(artifact)[0]
     assert replica_after.current_requests == 0

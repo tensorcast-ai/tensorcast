@@ -44,7 +44,7 @@ sequenceDiagram
     participant TW as "StreamingTensorWriter"
     participant FS as "File System"
 
-    U->>PY: call save_dict(state_dict, model_path)
+    U->>PY: call save_dict(state_dict, disk_path)
     PY->>PY: Collect tensor_names & data_ptr/size
     alt use_streaming = True
         PY->>CPP: save_tensors_streaming(...)
@@ -101,11 +101,11 @@ PyTorch tensors can share underlying storage (e.g., views, slices). The checkpoi
 Example:
 ```python
 # Original tensor
-model.weight = torch.randn(1024, 1024)
+artifact.weight = torch.randn(1024, 1024)
 # View of the same storage
-model.weight_T = model.weight.T
+artifact.weight_T = artifact.weight.T
 # Slice sharing the same storage
-model.weight_slice = model.weight[:512, :]
+artifact.weight_slice = artifact.weight[:512, :]
 ```
 
 All three tensors share the same storage but have different shapes/strides/storage_offsets.

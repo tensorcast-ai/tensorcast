@@ -17,11 +17,11 @@ namespace stepcast::store {
  * @brief Minimal loader for InlineBufferSource.
  *
  * This loader exists to support memory-only flows such as RFC-0006
- * registration, where we need a Model instance with a known size but have
+ * registration, where we need a Replica instance with a known size but have
  * no real data source to stream from. It reports the provided size and
  * does not implement open_source().
  */
-class InlineBufferLoader : public IModelLoader {
+class InlineBufferLoader : public IArtifactLoader {
  public:
   explicit InlineBufferLoader(InlineBufferSource source) : source_(std::move(source)) {}
 
@@ -38,7 +38,7 @@ class InlineBufferLoader : public IModelLoader {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<uint64_t> get_model_size() override {
+  absl::StatusOr<uint64_t> get_artifact_size() override {
     absl::MutexLock lock(&mutex_);
     if (!initialized_) {
       return absl::FailedPreconditionError("InlineBufferLoader not initialized");

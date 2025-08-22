@@ -1,7 +1,7 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
 // StoreEngine concurrency tests (A-series)
-// Test concurrent prepare() and unload_instance() operations.
+// Test concurrent materialize_replica() and unload_replica() operations.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -26,16 +26,16 @@ struct LoggingInitializer {
 const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
 } // namespace
 
-// A1: 32 threads calling prepare() on the same model
-TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1]") {
+// A1: 32 threads calling materialize_replica() on the same replica
+TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][concurrency][a1]") {
   skip_if_no_cuda("A1");
 
   const int num_threads = 32;
-  const std::string model_id = "concurrent_model_a1";
-  const size_t model_size = 10 * 1024 * 1024; // 10MB
+  const std::string artifact_id = "concurrent_model_a1";
+  const size_t artifact_size = 10 * 1024 * 1024; // 10MB
 
-  TempModelFixture fixture("concurrency_a1");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("concurrency_a1");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool for 32 threads x 10MB
   ThreadBarrier barrier(num_threads);
@@ -52,13 +52,13 @@ TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1
       barrier.arrive_and_wait(); // Synchronize start
 
       auto load_start = std::chrono::high_resolution_clock::now();
-      LOG(INFO) << "Thread " << thread_id << " preparing model " << model_id;
-      stepcast::store::LoadingHints hints;
-      hints.disk_path = model_id;
-      auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+      LOG(INFO) << "Thread " << thread_id << " preparing replica " << artifact_id;
+      stepcast::store::MaterializeHints hints;
+      hints.disk_path = artifact_id;
+      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
       LoadResult result;
-      result.model_id = model_id;
+      result.artifact_id = artifact_id;
       result.device = make_gpu_key(0);
 
       if (handle_or.ok()) {
@@ -75,8 +75,8 @@ TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1
 
       auto load_end = std::chrono::high_resolution_clock::now();
       result.load_time = std::chrono::duration_cast<std::chrono::milliseconds>(load_end - load_start);
-      LOG(INFO) << "Thread " << thread_id << " prepared model " << model_id << " in " << result.load_time.count()
-                << "ms";
+      LOG(INFO) << "Thread " << thread_id << " materialize_replicad replica " << artifact_id << " in "
+                << result.load_time.count() << "ms";
 
       tracker.record_load(result);
     });
@@ -94,8 +94,8 @@ TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1
   REQUIRE(tracker.successful_loads() == num_threads);
   REQUIRE(tracker.failed_loads() == 0);
 
-  // Verify single allocation - model should be loaded exactly once
-  auto loaded_devices = store->get_loaded_devices(model_id);
+  // Verify single allocation - replica should be loaded exactly once
+  auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == 1);
   REQUIRE(loaded_devices[0].type == stepcast::DeviceType::GPU);
   REQUIRE(loaded_devices[0].ordinal == 0);
@@ -104,21 +104,21 @@ TEST_CASE("A1: Concurrent prepare() same model", "[store_engine][concurrency][a1
   INFO("Total test time: " << total_time.count() << "ms");
 }
 
-// A2: Multiple threads calling prepare() on different models
-TEST_CASE("A2: Concurrent prepare() different models", "[store_engine][concurrency][a2]") {
+// A2: Multiple threads calling materialize_replica() on different artifacts
+TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_engine][concurrency][a2]") {
   skip_if_no_cuda("A2");
 
   const int num_threads = 16;
-  const int num_models = 8;
+  const int num_models = 8; // number of distinct artifacts
 
-  TempModelFixture fixture("concurrency_a2");
+  TempArtifactFixture fixture("concurrency_a2");
 
-  // Create multiple models
-  std::vector<std::string> model_ids;
+  // Create multiple artifacts
+  std::vector<std::string> artifact_ids;
   for (int i = 0; i < num_models; ++i) {
-    auto model_id = generate_model_name("model_a2", i);
-    model_ids.push_back(model_id);
-    fixture.create_model(model_id, random_model_size(5, 20));
+    auto artifact_id = generate_artifact_id("artifact", i);
+    artifact_ids.push_back(artifact_id);
+    fixture.create_artifact(artifact_id, random_artifact_size(5, 20));
   }
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool
@@ -133,16 +133,16 @@ TEST_CASE("A2: Concurrent prepare() different models", "[store_engine][concurren
     threads.emplace_back([&, thread_id = i]() {
       barrier.arrive_and_wait();
 
-      // Each thread loads a random model
-      const auto& model_id = model_ids[thread_id % num_models];
+      // Each thread loads a random replica
+      const auto& artifact_id = artifact_ids[thread_id % num_models];
 
       auto load_start = std::chrono::high_resolution_clock::now();
-      stepcast::store::LoadingHints hints;
-      hints.disk_path = model_id;
-      auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+      stepcast::store::MaterializeHints hints;
+      hints.disk_path = artifact_id;
+      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
       LoadResult result;
-      result.model_id = model_id;
+      result.artifact_id = artifact_id;
       result.device = make_gpu_key(0);
 
       if (handle_or.ok()) {
@@ -172,40 +172,40 @@ TEST_CASE("A2: Concurrent prepare() different models", "[store_engine][concurren
   // Verify results
   REQUIRE(tracker.successful_loads() == num_threads);
 
-  // Verify each model is loaded at most once per device
-  std::unordered_set<std::string> loaded_models;
-  for (const auto& model_id : model_ids) {
-    auto devices = store->get_loaded_devices(model_id);
+  // Verify each artifact has at most one replica per device
+  std::unordered_set<std::string> loaded_artifacts;
+  for (const auto& artifact_id : artifact_ids) {
+    auto devices = store->get_resident_devices(artifact_id);
     if (!devices.empty()) {
       REQUIRE(devices.size() == 1);
-      loaded_models.insert(model_id);
+      loaded_artifacts.insert(artifact_id);
     }
   }
 
-  // At least some models should be loaded
-  REQUIRE(!loaded_models.empty());
-  REQUIRE(loaded_models.size() <= num_models);
+  // At least some artifacts should be loaded
+  REQUIRE(!loaded_artifacts.empty());
+  REQUIRE(loaded_artifacts.size() <= num_models);
 }
 
-// A3: Concurrent prepare() and unload_instance()
-TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[store_engine][concurrency][a3]") {
+// A3: Concurrent materialize_replica() and unload_replica()
+TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_engine][concurrency][a3]") {
   skip_if_no_cuda("A3");
 
   const int num_loaders = 8;
   const int num_unloaders = 8;
-  const std::string model_id = "concurrent_model_a3";
-  const size_t model_size = 20 * 1024 * 1024; // 20MB
+  const std::string artifact_id = "concurrent_model_a3";
+  const size_t artifact_size = 20 * 1024 * 1024; // 20MB
 
-  TempModelFixture fixture("concurrency_a3");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("concurrency_a3");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
-  // First, load the model
+  // First, load the replica
   {
-    stepcast::store::LoadingHints hints;
-    hints.disk_path = model_id;
-    auto initial_handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    stepcast::store::MaterializeHints hints;
+    hints.disk_path = artifact_id;
+    auto initial_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(initial_handle.ok());
     REQUIRE(initial_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -224,9 +224,9 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[store_engine][conc
       barrier.arrive_and_wait();
 
       while (!stop_flag.load()) {
-        stepcast::store::LoadingHints hints;
-        hints.disk_path = model_id;
-        auto handle_or = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+        stepcast::store::MaterializeHints hints;
+        hints.disk_path = artifact_id;
+        auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
         if (handle_or.ok()) {
           auto handle = std::move(handle_or).value();
           if (handle.wait_ready(std::chrono::milliseconds(1000)).ok()) {
@@ -244,8 +244,8 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[store_engine][conc
       barrier.arrive_and_wait();
 
       while (!stop_flag.load()) {
-        auto key = make_instance_key(model_id, 0);
-        int result = store->unload_instance(key);
+        auto key = make_replica_key(artifact_id, 0);
+        int result = store->unload_replica(key);
         if (result == 0) {
           successful_unloads.fetch_add(1);
         }
@@ -269,22 +269,22 @@ TEST_CASE("A3: Concurrent prepare() and unload_instance()", "[store_engine][conc
 }
 
 // A4: Concurrent unload of the same instance
-TEST_CASE("A4: Concurrent unload_instance() same model", "[store_engine][concurrency][a4]") {
+TEST_CASE("A4: Concurrent unload_replica() same replica", "[store_engine][concurrency][a4]") {
   skip_if_no_cuda("A4");
 
   const int num_threads = 16;
-  const std::string model_id = "concurrent_model_a4";
-  const size_t model_size = 15 * 1024 * 1024; // 15MB
+  const std::string artifact_id = "concurrent_model_a4";
+  const size_t artifact_size = 15 * 1024 * 1024; // 15MB
 
-  TempModelFixture fixture("concurrency_a4");
-  fixture.create_model(model_id, model_size);
+  TempArtifactFixture fixture("concurrency_a4");
+  fixture.create_artifact(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
-  // Load the model
-  stepcast::store::LoadingHints hints;
-  hints.disk_path = model_id;
-  auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+  // Load the replica
+  stepcast::store::MaterializeHints hints;
+  hints.disk_path = artifact_id;
+  auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(handle.ok());
   REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
 
@@ -300,8 +300,8 @@ TEST_CASE("A4: Concurrent unload_instance() same model", "[store_engine][concurr
     threads.emplace_back([&]() {
       barrier.arrive_and_wait();
 
-      auto key = make_instance_key(model_id, 0);
-      int result = store->unload_instance(key);
+      auto key = make_replica_key(artifact_id, 0);
+      int result = store->unload_replica(key);
 
       if (result == 0) {
         successful_unloads.fetch_add(1);
@@ -320,8 +320,8 @@ TEST_CASE("A4: Concurrent unload_instance() same model", "[store_engine][concurr
   REQUIRE(successful_unloads.load() == 1);
   REQUIRE(failed_unloads.load() == num_threads - 1);
 
-  // Model should no longer be loaded
-  auto loaded_devices = store->get_loaded_devices(model_id);
+  // Artifact should no longer be loaded
+  auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.empty());
 }
 
@@ -330,26 +330,26 @@ TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
   skip_if_no_cuda("A5");
 
   const int num_threads = 8;
-  const int num_models = 5;
+  const int num_models = 5; // number of artifacts
 
-  TempModelFixture fixture("concurrency_a5");
+  TempArtifactFixture fixture("concurrency_a5");
 
-  // Create and load multiple models
+  // Create and load multiple artifacts
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
 
   for (int i = 0; i < num_models; ++i) {
-    auto model_id = generate_model_name("model_a5", i);
-    fixture.create_model(model_id, 10 * 1024 * 1024); // 10MB each
+    auto artifact_id = generate_artifact_id("artifact", i);
+    fixture.create_artifact(artifact_id, 10 * 1024 * 1024); // 10MB each
 
-    stepcast::store::LoadingHints hints;
-    hints.disk_path = model_id;
-    auto handle = store->prepare(make_gpu_key(0), StoreEngine::PrepareMode::LOAD_ONLY, hints);
+    stepcast::store::MaterializeHints hints;
+    hints.disk_path = artifact_id;
+    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());
     REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
 
-  // Verify models are loaded
-  REQUIRE(store->list_device_models(make_gpu_key(0)).size() == num_models);
+  // Verify artifacts are loaded
+  REQUIRE(store->list_device_replicas(make_gpu_key(0)).size() == num_models);
 
   ThreadBarrier barrier(num_threads);
   std::atomic<int> successful_clears{0};
@@ -377,6 +377,6 @@ TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
   // All threads should succeed (clear_mem is idempotent)
   REQUIRE(successful_clears.load() == num_threads);
 
-  // No models should be loaded
-  REQUIRE(store->list_device_models(make_gpu_key(0)).empty());
+  // No artifacts should be loaded
+  REQUIRE(store->list_device_replicas(make_gpu_key(0)).empty());
 }

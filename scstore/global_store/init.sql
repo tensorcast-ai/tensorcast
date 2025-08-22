@@ -23,9 +23,9 @@ CREATE INDEX idx_workers_accepting_requests ON workers (accepting_new_requests, 
 CREATE INDEX idx_workers_node_id ON workers (node_id);
 CREATE INDEX idx_workers_registered_at ON workers (registered_at);
 
--- Models table for content-addressed model IDs (RFC-0007)
-CREATE TABLE IF NOT EXISTS models (
-    model_id TEXT PRIMARY KEY,             -- "mi2:<index_multihash>:<data_multihash>"
+-- Artifacts table for content-addressed artifact IDs (RFC-0007)
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,             -- "mi2:<index_multihash>:<data_multihash>"
     index_multihash TEXT NOT NULL,         -- Multibase over multihash (sha2-256), base32
     data_multihash TEXT NOT NULL,          -- Multibase over multihash (sha2-256 root), base32
     schema_version TEXT NOT NULL,          -- e.g., "v2"
@@ -34,13 +34,13 @@ CREATE TABLE IF NOT EXISTS models (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_models_index_mh ON models(index_multihash);
-CREATE INDEX IF NOT EXISTS idx_models_data_mh ON models(data_multihash);
-CREATE INDEX IF NOT EXISTS idx_models_created_at ON models(created_at);
+CREATE INDEX IF NOT EXISTS idx_artifacts_index_mh ON artifacts(index_multihash);
+CREATE INDEX IF NOT EXISTS idx_artifacts_data_mh ON artifacts(data_multihash);
+CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at);
 
-CREATE TABLE model_replicas (
+CREATE TABLE IF NOT EXISTS artifact_replicas (
     replica_id UUID PRIMARY KEY,
-    model_id TEXT NOT NULL,                -- Content-addressed ID (FK to models.model_id)
+    artifact_id TEXT NOT NULL,                -- Content-addressed ID (FK to artifacts.artifact_id)
     disk_path TEXT NULL,                   -- Original on-disk path (if applicable)
     node_id TEXT NOT NULL,
     node_address VARCHAR NOT NULL,
@@ -68,26 +68,26 @@ CREATE TABLE IF NOT EXISTS replica_counters (
     current_requests INTEGER NOT NULL DEFAULT 0,
     last_assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     -- Note: DuckDB foreign key constraints can cause issues with updates
-    -- Manual cleanup is required when model_replicas entries are deleted
-    -- Foreign key relationship: replica_id -> model_replicas(replica_id)
+    -- Manual cleanup is required when artifact_replicas entries are deleted
+    -- Foreign key relationship: replica_id -> artifact_replicas(replica_id)
 );
 
 -- 针对负载均衡查询的索引
 CREATE INDEX idx_replica_counters_current_requests ON replica_counters(current_requests);
 CREATE INDEX idx_replica_counters_last_assigned ON replica_counters(last_assigned_at);
 
-CREATE INDEX idx_model_replicas_model_id ON model_replicas(model_id);
+CREATE INDEX idx_artifact_replicas_artifact_id ON artifact_replicas(artifact_id);
 -- Optional lookup by disk path for disk-based flows
-CREATE INDEX idx_model_replicas_disk_path ON model_replicas(disk_path);
-CREATE INDEX idx_model_replicas_updated_at ON model_replicas(updated_at);
-CREATE INDEX idx_model_replicas_node_id ON model_replicas(node_id);
-CREATE INDEX idx_model_replicas_node_address ON model_replicas(node_address);
-CREATE INDEX idx_replicas_worker ON model_replicas(worker_id);
-CREATE INDEX idx_model_replicas_tensor_index_key ON model_replicas(tensor_index_key);
-CREATE INDEX idx_model_replicas_memory_replica ON model_replicas(is_memory_replica, model_id);
+CREATE INDEX idx_artifact_replicas_disk_path ON artifact_replicas(disk_path);
+CREATE INDEX idx_artifact_replicas_updated_at ON artifact_replicas(updated_at);
+CREATE INDEX idx_artifact_replicas_node_id ON artifact_replicas(node_id);
+CREATE INDEX idx_artifact_replicas_node_address ON artifact_replicas(node_address);
+CREATE INDEX idx_replicas_worker ON artifact_replicas(worker_id);
+CREATE INDEX idx_artifact_replicas_tensor_index_key ON artifact_replicas(tensor_index_key);
+CREATE INDEX idx_artifact_replicas_memory_replica ON artifact_replicas(is_memory_replica, artifact_id);
 
 -- Table for storing deduplicated tensor indices
-CREATE TABLE IF NOT EXISTS model_indices (
+CREATE TABLE IF NOT EXISTS artifact_indices (
     index_key TEXT PRIMARY KEY,            -- SHA-256 hash of canonical JSON index
     schema_version TEXT NOT NULL,          -- Schema version (e.g., "v2")
     encoding TEXT NOT NULL,                -- Encoding format (e.g., "json")
@@ -96,15 +96,15 @@ CREATE TABLE IF NOT EXISTS model_indices (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Indexes for model_indices table
-CREATE INDEX idx_model_indices_created_at ON model_indices(created_at);
-CREATE INDEX idx_model_indices_size ON model_indices(size_bytes);
+-- Indexes for artifact_indices table
+CREATE INDEX idx_artifact_indices_created_at ON artifact_indices(created_at);
+CREATE INDEX idx_artifact_indices_size ON artifact_indices(size_bytes);
 
--- Table for tracking model transports
-CREATE TABLE model_transports (
+-- Table for tracking artifact transports
+CREATE TABLE IF NOT EXISTS artifact_transports (
     transport_id UUID PRIMARY KEY,
     replica_id UUID NOT NULL,
-    model_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
     disk_path TEXT NULL,
     source_node_id VARCHAR NOT NULL,
     source_address VARCHAR NOT NULL,
@@ -112,14 +112,14 @@ CREATE TABLE model_transports (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
     status VARCHAR NOT NULL DEFAULT 'in_progress',
-    -- FOREIGN KEY (replica_id) REFERENCES model_replicas(replica_id)
+    -- FOREIGN KEY (replica_id) REFERENCES artifact_replicas(replica_id)
 );
 
-CREATE INDEX idx_model_transports_replica_id ON model_transports(replica_id);
-CREATE INDEX idx_model_transports_source_node_id ON model_transports(source_node_id);
-CREATE INDEX idx_model_transports_status ON model_transports(status);
-CREATE INDEX idx_model_transports_created_at ON model_transports(created_at);
-CREATE INDEX idx_model_transports_completed_at ON model_transports(completed_at);
+CREATE INDEX idx_artifact_transports_replica_id ON artifact_transports(replica_id);
+CREATE INDEX idx_artifact_transports_source_node_id ON artifact_transports(source_node_id);
+CREATE INDEX idx_artifact_transports_status ON artifact_transports(status);
+CREATE INDEX idx_artifact_transports_created_at ON artifact_transports(created_at);
+CREATE INDEX idx_artifact_transports_completed_at ON artifact_transports(completed_at);
 
 -- 添加触发器，当worker被删除时，相关replica标记为不可用
 -- 注意：这个触发器在SQLite中可能需要根据实际使用的数据库进行调整
@@ -127,7 +127,7 @@ CREATE INDEX idx_model_transports_completed_at ON model_transports(completed_at)
 -- AFTER DELETE ON workers
 -- FOR EACH ROW
 -- BEGIN
---     UPDATE model_replicas
+--     UPDATE artifact_replicas
 --     SET is_available = FALSE
 --     WHERE worker_id = OLD.worker_id;
 -- END;
@@ -137,7 +137,7 @@ CREATE INDEX idx_model_transports_completed_at ON model_transports(completed_at)
 
 CREATE TABLE IF NOT EXISTS chunk_directory (
     -- Primary key components
-    model_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
     chunk_idx INTEGER NOT NULL,
     node_id TEXT NOT NULL,
     device_uuid TEXT NOT NULL,
@@ -152,17 +152,17 @@ CREATE TABLE IF NOT EXISTS chunk_directory (
     -- For intelligent source selection
     node_load_ratio FLOAT DEFAULT 0.0,
 
-    -- InstanceKey uniquely identifies a model instance
-    PRIMARY KEY (model_id, device_uuid, replica, chunk_idx, node_id)
+    -- ReplicaKey uniquely identifies a replica instance for an artifact on a device
+    PRIMARY KEY (artifact_id, device_uuid, replica, chunk_idx, node_id)
 );
 
 -- Performance indexes for chunk queries
-CREATE INDEX idx_chunk_directory_model_chunk ON chunk_directory(model_id, chunk_idx);
+CREATE INDEX idx_chunk_directory_artifact_chunk ON chunk_directory(artifact_id, chunk_idx);
 CREATE INDEX idx_chunk_directory_node ON chunk_directory(node_id);
 CREATE INDEX idx_chunk_directory_state ON chunk_directory(chunk_state);
 CREATE INDEX idx_chunk_directory_update_time ON chunk_directory(last_update_time);
 
 -- Composite index for finding best source for a chunk
 CREATE INDEX idx_chunk_directory_source_selection ON chunk_directory(
-    model_id, chunk_idx, chunk_state, node_load_ratio
+    artifact_id, chunk_idx, chunk_state, node_load_ratio
 );

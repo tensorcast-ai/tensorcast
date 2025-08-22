@@ -139,16 +139,3 @@ class GlobalMetricsCollector:  # noqa: WPS110 (allow lowercase class name)
 
         # Yield the MetricFamily objects for the registry to expose.
         return iter(families.values())
-
-
-# Keep the old class name for backward compatibility
-class StoreEngineCollector(GlobalMetricsCollector):
-    """Deprecated: Use GlobalMetricsCollector instead."""
-
-    def __init__(
-        self,
-        store_engine: object | None = None,
-        namespace: str | None = None,
-    ) -> None:
-        # Ignore store_engine parameter, it's no longer needed
-        super().__init__(namespace)

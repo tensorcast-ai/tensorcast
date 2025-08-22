@@ -25,13 +25,13 @@ class ChunkService:
         self.chunk_repository = chunk_repository
 
     def query_chunk_locations(
-        self, model_id: str, chunk_indices: Optional[List[int]] = None
+        self, artifact_id: str, chunk_indices: Optional[List[int]] = None
     ) -> List[global_store_pb2.ChunkLocation]:
         """
-        Query chunk locations for a model.
+        Query chunk locations for a artifact.
 
         Args:
-            model_id: Model identifier
+            artifact_id: Artifact identifier
             chunk_indices: Optional list of specific chunks to query
 
         Returns:
@@ -40,7 +40,7 @@ class ChunkService:
         try:
             # Query from repository
             locations = self.chunk_repository.query_chunk_locations(
-                model_id, chunk_indices
+                artifact_id, chunk_indices
             )
 
             # Convert to protobuf messages
@@ -70,7 +70,7 @@ class ChunkService:
                 chunk_locations.append(location)
 
             logger.debug(
-                f"Found {len(chunk_locations)} chunk locations for model {model_id}"
+                f"Found {len(chunk_locations)} chunk locations for artifact {artifact_id}"
             )
 
             return chunk_locations
@@ -128,18 +128,18 @@ class ChunkService:
             logger.exception(f"Error cleaning up stale chunks: {e}")
             raise
 
-    def get_chunk_distribution(self, model_id: str) -> dict:
+    def get_chunk_distribution(self, artifact_id: str) -> dict:
         """
-        Get chunk distribution statistics for a model.
+        Get chunk distribution statistics for a artifact.
 
         Args:
-            model_id: Model identifier
+            artifact_id: Artifact identifier
 
         Returns:
             Dictionary with distribution statistics
         """
         try:
-            return self.chunk_repository.get_chunk_distribution(model_id)
+            return self.chunk_repository.get_chunk_distribution(artifact_id)
         except Exception as e:
             logger.exception(f"Error getting chunk distribution: {e}")
             raise

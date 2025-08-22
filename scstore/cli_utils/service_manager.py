@@ -28,7 +28,7 @@ from scstore.cli_utils.pid_manager import (
     stop_process,
     write_pid_file,
 )
-from scstore.logger import configure_logging, init_logger
+from scstore.logger import init_logger, setup_logging
 from scstore.proto import store_daemon_pb2
 from scstore.store_daemon.config import StoreDaemonConfig
 
@@ -73,7 +73,7 @@ def start_service(
     # ------------------------------------------------------------------
     # Configure stdio behaviour based on execution mode.
     # ------------------------------------------------------------------
-    configure_logging(
+    setup_logging(
         level="DEBUG" if verbose else "INFO",
         log_file=log_file,
     )
@@ -235,22 +235,22 @@ def _display_detailed_status(
                 click.echo(f"  Used: {_format_bytes(gpu.used_memory_bytes)}")
                 click.echo(f"  Free: {_format_bytes(gpu.free_memory_bytes)}")
 
-            if gpu.loaded_models:
-                click.echo(f"  Models ({len(gpu.loaded_models)} loaded):")
-                for model in gpu.loaded_models:
+            if gpu.loaded_replicas:
+                click.echo(f"  Replicas ({len(gpu.loaded_replicas)} loaded):")
+                for artifact in gpu.loaded_replicas:
                     click.echo(
-                        f"    - {model.model_identifier} ({_format_bytes(model.model_size_bytes)})"
+                        f"    - {artifact.artifact_id} ({_format_bytes(artifact.artifact_size_bytes)})"
                     )
 
-    # CPU models
-    if response.cpu_models:
-        click.echo(f"\nCPU Memory Models ({len(response.cpu_models)} total)")
+    # CPU replicas
+    if response.cpu_replicas:
+        click.echo(f"\nCPU Memory Replicas ({len(response.cpu_replicas)} total)")
         click.echo("=" * 60)
-        for model in response.cpu_models:
+        for artifact in response.cpu_replicas:
             click.echo(
-                f"- {model.model_identifier} ({_format_bytes(model.model_size_bytes)})"
+                f"- {artifact.artifact_id} ({_format_bytes(artifact.artifact_size_bytes)})"
             )
-            if model.is_registered_for_comm:
+            if artifact.is_registered_for_comm:
                 click.echo("  [Registered for RDMA]")
 
     # Communication status
@@ -270,8 +270,10 @@ def _display_detailed_status(
     # Summary
     click.echo("\nSummary")
     click.echo("=" * 60)
-    click.echo(f"Total Models Loaded: {response.total_models_loaded}")
-    click.echo(f"Total Model Size: {_format_bytes(response.total_model_size_bytes)}")
+    click.echo(f"Total Replicas Loaded: {response.total_replicas_loaded}")
+    click.echo(
+        f"Total Artifact Size: {_format_bytes(response.total_artifact_size_bytes)}"
+    )
     click.echo(f"Storage Path: {response.storage_path}")
     if response.num_worker_threads > 0:
         click.echo(f"Worker Threads: {response.num_worker_threads}")

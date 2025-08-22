@@ -80,11 +80,11 @@ sc_cc_library(
     ],
 )
 
-# Model verification utilities
+# Replica verification utilities
 sc_cc_library(
-    name = "model_verification_lib",
-    srcs = ["model_verification.cc"],
-    hdrs = ["model_verification.h"],
+    name = "artifact_verification_lib",
+    srcs = ["artifact_verification.cc"],
+    hdrs = ["artifact_verification.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
@@ -96,9 +96,9 @@ sc_cc_library(
 
 # Content-addressed hashing utilities (RFC-0007)
 sc_cc_library(
-    name = "model_hash_lib",
-    srcs = ["model_hash.cc"],
-    hdrs = ["model_hash.h"],
+    name = "artifact_hash_lib",
+    srcs = ["artifact_hash.cc"],
+    hdrs = ["artifact_hash.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
@@ -149,6 +149,14 @@ sc_cc_library(
     ],
 )
 
+# Memory location enum header
+sc_header_only_library(
+    name = "memory_location_lib",
+    hdrs = ["memory/memory_location.h"],
+    includes = ["memory"],
+    visibility = ["//visibility:public"],
+)
+
 # Memory management - Streaming pinned buffer
 sc_cc_library(
     name = "streaming_pinned_buffer_lib",
@@ -172,7 +180,7 @@ sc_cc_library(
         ":cuda_api_lib",
         ":error_handling_lib",
         ":metric_objects_lib",
-        "//core/store/model:chunk_meta",
+        "//core/store/replica:chunk_meta",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
         "@gsl",
@@ -338,6 +346,8 @@ sc_cc_library(
     name = "common",
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_hash_lib",
+        ":artifact_verification_lib",
         ":cuda_api_lib",
         ":cuda_memory_lib",
         ":device_guard_lib",
@@ -348,8 +358,6 @@ sc_cc_library(
         ":metric_objects_lib",
         ":metrics_export_lib",
         ":metrics_registry_lib",
-        ":model_hash_lib",
-        ":model_verification_lib",
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",

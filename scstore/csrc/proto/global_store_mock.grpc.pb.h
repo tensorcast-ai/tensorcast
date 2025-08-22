@@ -15,151 +15,151 @@
 #include <grpcpp/support/sync_stream.h>
 namespace global_store {
 
-class MockGlobalModelStoreStub : public GlobalModelStore::StubInterface {
+class MockGlobalStoreStub : public GlobalStore::StubInterface {
  public:
   MOCK_METHOD3(
-      RegisterModelReplica,
+      RegisterReplica,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest& request,
-          ::global_store::RegisterModelReplicaResponse* response));
+          const ::global_store::RegisterReplicaRequest& request,
+          ::global_store::RegisterReplicaResponse* response));
   MOCK_METHOD3(
-      AsyncRegisterModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>*(
+      AsyncRegisterReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest& request,
+          const ::global_store::RegisterReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncRegisterModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>*(
+      PrepareAsyncRegisterReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest& request,
+          const ::global_store::RegisterReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      UpdateModelReplica,
+      UpdateReplica,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest& request,
-          ::global_store::UpdateModelReplicaResponse* response));
+          const ::global_store::UpdateReplicaRequest& request,
+          ::global_store::UpdateReplicaResponse* response));
   MOCK_METHOD3(
-      AsyncUpdateModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>*(
+      AsyncUpdateReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest& request,
+          const ::global_store::UpdateReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncUpdateModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>*(
+      PrepareAsyncUpdateReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest& request,
+          const ::global_store::UpdateReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      UnregisterModelReplica,
+      UnregisterReplica,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest& request,
-          ::global_store::UnregisterModelReplicaResponse* response));
+          const ::global_store::UnregisterReplicaRequest& request,
+          ::global_store::UnregisterReplicaResponse* response));
   MOCK_METHOD3(
-      AsyncUnregisterModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>*(
+      AsyncUnregisterReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest& request,
+          const ::global_store::UnregisterReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncUnregisterModelReplicaRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>*(
+      PrepareAsyncUnregisterReplicaRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest& request,
+          const ::global_store::UnregisterReplicaRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      RequestModelReplicaTransport,
+      RequestReplicaTransport,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest& request,
-          ::global_store::RequestModelReplicaTransportResponse* response));
+          const ::global_store::RequestReplicaTransportRequest& request,
+          ::global_store::RequestReplicaTransportResponse* response));
   MOCK_METHOD3(
-      AsyncRequestModelReplicaTransportRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>*(
+      AsyncRequestReplicaTransportRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest& request,
+          const ::global_store::RequestReplicaTransportRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncRequestModelReplicaTransportRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>*(
+      PrepareAsyncRequestReplicaTransportRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest& request,
+          const ::global_store::RequestReplicaTransportRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      CompleteModelReplicaTransport,
+      CompleteReplicaTransport,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest& request,
-          ::global_store::CompleteModelReplicaTransportResponse* response));
+          const ::global_store::CompleteReplicaTransportRequest& request,
+          ::global_store::CompleteReplicaTransportResponse* response));
   MOCK_METHOD3(
-      AsyncCompleteModelReplicaTransportRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>*(
+      AsyncCompleteReplicaTransportRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest& request,
+          const ::global_store::CompleteReplicaTransportRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncCompleteModelReplicaTransportRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>*(
+      PrepareAsyncCompleteReplicaTransportRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest& request,
+          const ::global_store::CompleteReplicaTransportRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      ListModelReplicas,
+      ListReplicas,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest& request,
-          ::global_store::ListModelReplicasResponse* response));
+          const ::global_store::ListReplicasRequest& request,
+          ::global_store::ListReplicasResponse* response));
   MOCK_METHOD3(
-      AsyncListModelReplicasRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>*(
+      AsyncListReplicasRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest& request,
+          const ::global_store::ListReplicasRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncListModelReplicasRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>*(
+      PrepareAsyncListReplicasRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest& request,
+          const ::global_store::ListReplicasRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      GetModelInfoById,
+      GetArtifactInfoById,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest& request,
-          ::global_store::GetModelInfoByIdResponse* response));
+          const ::global_store::GetArtifactInfoByIdRequest& request,
+          ::global_store::GetArtifactInfoByIdResponse* response));
   MOCK_METHOD3(
-      AsyncGetModelInfoByIdRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*(
+      AsyncGetArtifactInfoByIdRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest& request,
+          const ::global_store::GetArtifactInfoByIdRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncGetModelInfoByIdRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*(
+      PrepareAsyncGetArtifactInfoByIdRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest& request,
+          const ::global_store::GetArtifactInfoByIdRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      GetModelIndex,
+      GetArtifactIndex,
       ::grpc::Status(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest& request,
-          ::global_store::GetModelIndexResponse* response));
+          const ::global_store::GetArtifactIndexRequest& request,
+          ::global_store::GetArtifactIndexResponse* response));
   MOCK_METHOD3(
-      AsyncGetModelIndexRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*(
+      AsyncGetArtifactIndexRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest& request,
+          const ::global_store::GetArtifactIndexRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
-      PrepareAsyncGetModelIndexRaw,
-      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*(
+      PrepareAsyncGetArtifactIndexRaw,
+      ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>*(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest& request,
+          const ::global_store::GetArtifactIndexRequest& request,
           ::grpc::CompletionQueue* cq));
   MOCK_METHOD3(
       RegisterWorker,

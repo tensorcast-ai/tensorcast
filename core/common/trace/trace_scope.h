@@ -10,7 +10,7 @@ namespace stepcast::store {
 
 class TraceScope {
  public:
-  TraceScope(const std::string& model, const std::string& stage);
+  TraceScope(const std::string& replica, const std::string& stage);
 
   // Move-only to allow capture into lambdas / async tasks.
   TraceScope(TraceScope&& other) noexcept;
@@ -25,7 +25,7 @@ class TraceScope {
   void Finish();
 
   static constexpr uint64_t kInvalidSpan = static_cast<uint64_t>(-1);
-  std::string model_;
+  std::string artifact_id_;
   std::string request_id_;
   uint64_t id_ = kInvalidSpan;
 };

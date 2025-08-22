@@ -1,16 +1,16 @@
 ---
 title: P2P Transfer Strategies and Load Balancing
-description: Model weight peer-to-peer transfer strategies and load balancing mechanisms in Global Store mode
+description: Artifact weight peer-to-peer transfer strategies and load balancing mechanisms in Global Store mode
 sidebar_position: 5
 ---
 
 # P2P Transfer Strategies and Load Balancing
 
-This document describes the peer-to-peer (P2P) model transfer strategies and load balancing mechanisms used when Store Daemons operate in Global Store mode. The system implements sophisticated routing and balancing algorithms to optimize model distribution across the cluster.
+This document describes the peer-to-peer (P2P) artifact transfer strategies and load balancing mechanisms used when Store Daemons operate in Global Store mode. The system implements sophisticated routing and balancing algorithms to optimize artifact distribution across the cluster.
 
 ## Overview
 
-In Global Store mode, model weights are transferred directly between Store Daemon nodes using RDMA or TCP, while the Global Store coordinates these transfers without handling the actual model data. This architecture provides high-performance model distribution with intelligent load balancing.
+In Global Store mode, artifact weights are transferred directly between Store Daemon nodes using RDMA or TCP, while the Global Store coordinates these transfers without handling the actual artifact data. This architecture provides high-performance artifact distribution with intelligent load balancing.
 
 ```mermaid
 graph TB
@@ -18,19 +18,19 @@ graph TB
         GS[Global Store Service]
         TR[Transport Service]
         LB[Load Balancer]
-        REG[Model Registry]
+        REG[Artifact Registry]
     end
 
     subgraph "Store Daemon Cluster"
-        SD1[Store Daemon 1<br/>GPU Models: A, B<br/>Load: 2/5]
-        SD2[Store Daemon 2<br/>RAM Models: B, C<br/>Load: 1/3]
-        SD3[Store Daemon 3<br/>DISK Models: A, C<br/>Load: 0/4]
+        SD1[Store Daemon 1<br/>GPU Artifacts: A, B<br/>Load: 2/5]
+        SD2[Store Daemon 2<br/>RAM Artifacts: B, C<br/>Load: 1/3]
+        SD3[Store Daemon 3<br/>DISK Artifacts: A, C<br/>Load: 0/4]
     end
 
-    Client[Client Request<br/>Model: A, Target: GPU]
+    Client[Client Request<br/>Artifact: A, Target: GPU]
 
-    Client -->|1. LoadModel| SD1
-    SD1 -->|2. GetModelInfo| GS
+    Client -->|1. MaterializeReplica| SD1
+    SD1 -->|2. GetArtifactInfoById| GS
     GS -->|3. Available replicas| SD1
     SD1 -->|4. RequestTransport| TR
     TR -->|5. Optimal replica| SD1
@@ -75,15 +75,15 @@ ORDER BY updated_at ASC  # older first for deterministic tie-break
 
 ### Load Balancing Implementation
 
-The load balancing logic is implemented in `ModelReplicaRepository.find_available_for_transport()`. This method performs an atomic operation that both selects the best available replica and increments its request counter in a single transaction:
+The load balancing logic is implemented in `ReplicaRepository.find_available_for_transport()`. This method performs an atomic operation that both selects the best available replica and increments its request counter in a single transaction:
 
 ```sql
 WITH candidate AS (
     SELECT r.replica_id
-    FROM model_replicas r
+    FROM replicas r
     LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
     LEFT JOIN workers w ON r.worker_id = w.worker_id
-    WHERE r.model_id = ?
+    WHERE r.artifact_id = ?
       AND COALESCE(rc.current_requests, 0) < r.max_concurrency
       AND r.is_available = TRUE
       AND w.accepting_new_requests = TRUE
@@ -113,7 +113,7 @@ RETURNING replica_id
 
 Key design decisions:
 - **Atomic Selection**: The CTE (Common Table Expression) with UPDATE ensures atomic replica selection and counter increment
-- **Separate Counter Table**: The `replica_counters` table isolates high-frequency counter updates from the main `model_replicas` table, reducing lock contention
+- **Separate Counter Table**: The `replica_counters` table isolates high-frequency counter updates from the main `replicas` table, reducing lock contention
 - **Worker Health Check**: Only considers replicas from workers that are accepting requests and have recent heartbeats
 - **Capacity-Driven Fill**: Smaller `max_concurrency` replicas are saturated first so that limited-capacity GPUs are utilised efficiently before larger ones
 - **Load Ratio Calculation**: The load-ratio expression breaks ties among replicas that share the same capacity, ensuring even distribution
@@ -140,14 +140,14 @@ CREATE TABLE IF NOT EXISTS replica_counters (
 ```
 
 Key benefits of this design:
-- **Reduced Lock Contention**: Isolates frequent counter updates from the main `model_replicas` table
+- **Reduced Lock Contention**: Isolates frequent counter updates from the main `replicas` table
 - **Optimized Indexes**: Dedicated indexes for load balancing queries
 - **Atomic Operations**: Enables lock-free concurrent counter updates
 - **Performance**: Counter updates don't trigger updates to the main replica metadata
 
 The repository ensures counter records exist when creating/updating replicas:
 ```python
-# From ModelReplicaRepository.create()
+# From ReplicaRepository.create()
 cursor.execute("""
     DELETE FROM replica_counters WHERE replica_id = ?
 """, [str(replica.replica_id)])
@@ -165,18 +165,18 @@ cursor.execute("""
 The Store Daemon implements a two-phase asynchronous loading process:
 
 1. **Phase 1 - Memory Allocation (Immediate)**:
-   - Allocates GPU memory for the model
+   - Allocates GPU memory for the artifact
    - Generates CUDA IPC handle
    - Returns immediately to client with `ALLOCATED` status
    - Starts background data transfer
 
 2. **Phase 2 - Data Transfer (Background)**:
-   - Transfers model data via P2P or disk
-   - Client calls `ConfirmModel` to wait for completion
+   - Transfers artifact data via P2P or disk
+   - Client calls `ConfirmReplica` to wait for completion
    - Registers replica with Global Store after successful load
 
 This design enables:
-- **Non-blocking Operations**: Clients can prepare while data transfers
+- **Non-blocking Operations**: Clients can materialize_replica while data transfers
 - **Resource Efficiency**: Memory is allocated before expensive transfers
 - **Failure Handling**: Failed transfers don't leave allocated memory
 
@@ -188,67 +188,67 @@ This design enables:
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Python as Python ModelLoader
+    participant Python as Python ArtifactLoader
     participant CS as C++ StoreEngine
-    participant PO as C++ PrepareOrchestrator
+    participant PO as C++ MaterializeOrchestrator
     participant GSC as C++ GlobalStoreClient
     participant GS as Global Store (Python)
     participant SD_Source as Store Daemon (Source)
 
-    Client->>Python: LoadModel(model_path, device_uuid)
-    Python->>CS: prepare(model_path, "gpu:0", PrepareMode::AUTO)
+    Client->>Python: LoadArtifact(disk_path, device_uuid)
+    Python->>CS: materialize_replica(disk_path, "gpu:0", MaterializeMode::AUTO)
 
     Note over CS: When mode == AUTO
-    CS->>PO: PrepareOrchestrator::run(model_id, device_key, hints)
+    CS->>PO: MaterializeOrchestrator::run(artifact_id, device_key, hints)
 
     %% --- P2P transfer attempt ------------------------------------------------
-    PO->>GSC: request_model_transport(model_id, ..., target_device)
-    GSC->>GS: gRPC RequestModelReplicaTransport
+    PO->>GSC: request_replica_transport(artifact_id, ..., target_device)
+    GSC->>GS: gRPC RequestReplicaTransport
 
     alt Transport granted
         GS-->>GSC: {transport_id, remote_memory_info}
         GSC-->>PO: TransportSession{transport_id, remote_replica}
 
         Note over PO: Build P2PSource from remote_replica
-        PO->>CS: load_from_p2p_internal(model_id, p2p_source, target, hints)
+        PO->>CS: ingest_from_p2p_internal(artifact_id, p2p_source, target, hints)
 
         CS->>SD_Source: P2P data transfer (RDMA/TCP)
-        SD_Source-->>CS: Model data
+        SD_Source-->>CS: Artifact data
 
-        CS-->>PO: ModelHandle
+        CS-->>PO: ReplicaHandle
 
-        PO->>GSC: complete_model_transport(transport_id)
-        GSC->>GS: gRPC CompleteModelReplicaTransport
+        PO->>GSC: complete_replica_transport(transport_id)
+        GSC->>GS: gRPC CompleteReplicaTransport
 
-        PO->>GSC: register_model_replica(model_id, worker_id, ...)
-        GSC->>GS: gRPC RegisterModelReplica
+        PO->>GSC: register_memory_replica(artifact_id, worker_id, ...)
+        GSC->>GS: gRPC RegisterReplica
     else No replica available / transport failed
         Note over PO: Disk fallback
-        PO->>CS: load_from_disk_internal(model_id, disk_source, target, hints)
-        CS-->>PO: ModelHandle
+        PO->>CS: ingest_from_disk_internal(artifact_id, disk_source, target, hints)
+        CS-->>PO: ReplicaHandle
 
-        PO->>GSC: register_model_replica(model_id, worker_id, ...)
+        PO->>GSC: register_memory_replica(artifact_id, worker_id, ...)
     end
 
-    PO-->>CS: ModelHandle
-    CS-->>Python: ModelHandle (with IPC handle)
-    Python-->>Client: LoadModelResponse(status=ALLOCATED, handle_bytes)
+    PO-->>CS: ReplicaHandle
+    CS-->>Python: ReplicaHandle (with IPC handle)
+    Python-->>Client: MaterializeReplicaResponse(status=ALLOCATED, handle_bytes)
 ```
 
 ### Key Components and File Locations
 
 #### Python Layer
-- **ModelLoader** (`scstore/store_daemon/model_loader.py`)
-  - Simplified to call `store_engine.prepare()` with AUTO mode
+- **ArtifactLoader** (`scstore/store_daemon/artifact_loader.py`)
+  - Simplified to call `store_engine.materialize_replica()` with AUTO mode
   - No longer handles P2P vs disk decisions
 
 #### C++ Core Components
 - **StoreEngine** (`core/store/store_engine.h/cc`)
-  - `prepare()`: Entry point that delegates to PrepareOrchestrator for AUTO mode
-  - `load_from_p2p_internal()`: Internal method for P2P transfers
-  - `load_from_disk_internal()`: Internal method for disk loading
+  - `materialize_replica()`: Entry point that delegates to MaterializeOrchestrator for AUTO mode
+  - `ingest_from_p2p_internal()`: Internal method for P2P transfers
+  - `ingest_from_disk_internal()`: Internal method for disk loading
 
-- **PrepareOrchestrator** (`core/store/loading/prepare_orchestrator.h/cc`)
+- **MaterializeOrchestrator** (`core/store/loading/materialize_orchestrator.h/cc`)
   - `run()`: Implements the decision tree (P2P first, disk fallback)
   - Coordinates with GlobalStoreClient for transport management
   - Handles replica registration after successful load
@@ -278,7 +278,7 @@ The system prioritizes RDMA transfers for optimal performance:
 Efficient memory allocation strategies:
 
 - **Pre-allocated Pools**: Pinned memory pools for zero-copy transfers
-- **Chunked Transfers**: Support for models larger than available memory
+- **Chunked Transfers**: Support for artifacts larger than available memory
 - **Memory Type Awareness**: Optimize transfers based on target memory type
 
 ### Connection Pooling
@@ -324,7 +324,7 @@ max_workers: 10                          # Max gRPC worker threads
 
 ```yaml
 # Communication settings
-enable_p2p_access: true                  # Require model registration before load
+enable_p2p_access: true                  # Require artifact registration before load
 enable_p2p_engine: true                  # Enable communication manager
 enable_rdma: false                       # Toggle RDMA support independently
 p2p_port: 9090                          # RDMA/TCP communication port

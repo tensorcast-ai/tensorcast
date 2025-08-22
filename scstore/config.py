@@ -36,13 +36,13 @@ def init(
     3. Just set configuration without starting daemon (if auto_start=False)
 
     Args:
-        storage_path: Path to model storage directory
+        storage_path: Path to artifact storage directory
         daemon_host: Host address for daemon
         daemon_port: Port for daemon
         daemon_mem_pool_size: Memory pool size (e.g., "4GB", "64GB")
         daemon_num_thread: Number of worker threads
         daemon_chunk_size: Chunk size for memory operations (e.g., "32MB")
-        daemon_enable_p2p_access: Whether model registration is required
+        daemon_enable_p2p_access: Whether artifact registration is required
         daemon_comm_enabled: Whether communication engine is enabled
         auto_start: Whether to automatically start daemon if not running
         connect_only: Only connect to existing daemon, don't start new one

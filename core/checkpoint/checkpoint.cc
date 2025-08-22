@@ -48,9 +48,9 @@
 #include "absl/log/log.h"
 #pragma clang diagnostic pop
 
+#include "core/common/artifact_verification.h" // Add verification support
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
-#include "core/common/model_verification.h" // Add verification support
 #include "core/store/loader/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"
@@ -59,11 +59,11 @@
 
 namespace stepcast::store {
 
-uint64_t calculate_actual_model_size(const std::string& model_path) {
-  std::filesystem::path tensor_index_path = std::filesystem::path(model_path) / "tensor_index.json";
+uint64_t calculate_actual_artifact_size(const std::string& disk_path) {
+  std::filesystem::path tensor_index_path = std::filesystem::path(disk_path) / "tensor_index.json";
 
   if (!std::filesystem::exists(tensor_index_path)) {
-    LOG(FATAL) << "tensor_index.json not found in: " << model_path;
+    LOG(FATAL) << "tensor_index.json not found in: " << disk_path;
   }
 
   std::ifstream file(tensor_index_path);
@@ -167,7 +167,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
       //   2. cudaMemcpy() the data into that buffer.
       //   3. Flush the host buffer to disk via TensorWriter.
       //
-      // For typical model checkpoints the backing storage of a tensor is
+      // For typical replica checkpoints the backing storage of a tensor is
       // written exactly once irrespective of the number of aliasing views, so
       // the additional allocation does not cause repeated copies.
       // ------------------------------------------------------------------
@@ -215,18 +215,18 @@ std::unordered_map<std::string, uint64_t> save_tensors(
 }
 
 /**
- * @brief Generate verification information for saved model files.
+ * @brief Generate verification information for saved replica files.
  *
  * This function reads the saved tensor partition files and generates comprehensive
  * verification information including hashes and key checkpoints.
  *
- * @param model_path Path to the directory containing saved model files
- * @return ModelVerificationInfo Generated verification information
+ * @param disk_path Path to the directory containing saved replica files
+ * @return ArtifactVerificationInfo Generated verification information
  */
-ModelVerificationInfo generate_model_verification_info_from_disk(
-    const std::string& model_path,
+ArtifactVerificationInfo generate_verification_info_from_disk(
+    const std::string& disk_path,
     VerificationLevel max_level) {
-  std::filesystem::path model_dir_path(model_path);
+  std::filesystem::path artifact_dir(disk_path);
 
   // Try partitioned files first; if none, use .safetensors payloads
   std::vector<std::filesystem::path> file_paths;
@@ -235,10 +235,10 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
   bool is_safetensors = false;
 
   for (int i = 0;; ++i) {
-    std::filesystem::path p = model_dir_path / ("tensor.data_" + std::to_string(i));
+    std::filesystem::path p = artifact_dir / ("tensor.data_" + std::to_string(i));
     if (!std::filesystem::exists(p)) {
       if (i == 0 && file_paths.empty()) {
-        p = model_dir_path / "tensor.data";
+        p = artifact_dir / "tensor.data";
         if (!std::filesystem::exists(p)) {
           break;
         }
@@ -264,7 +264,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
 
   if (file_paths.empty()) {
     std::vector<std::filesystem::path> st_paths;
-    for (const auto& entry : std::filesystem::directory_iterator(model_dir_path)) {
+    for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
       if (entry.is_regular_file()) {
         const auto name = entry.path().filename().string();
         const std::string ext = ".safetensors";
@@ -274,7 +274,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
       }
     }
     if (st_paths.empty()) {
-      LOG(FATAL) << "No tensor.data partitions or .safetensors files found in: " << model_path;
+      LOG(FATAL) << "No tensor.data partitions or .safetensors files found in: " << disk_path;
     }
     std::sort(
         st_paths.begin(), st_paths.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
@@ -296,20 +296,20 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     is_safetensors = true;
   }
 
-  uint64_t actual_model_size = 0;
+  uint64_t actual_artifact_size = 0;
   if (!is_safetensors) {
-    actual_model_size = calculate_actual_model_size(model_path);
-    if (actual_model_size > declared_total) {
-      LOG(FATAL) << "Actual model size (" << actual_model_size << ") exceeds total file size (" << declared_total
+    actual_artifact_size = calculate_actual_artifact_size(disk_path);
+    if (actual_artifact_size > declared_total) {
+      LOG(FATAL) << "Actual artifact size (" << actual_artifact_size << ") exceeds total file size (" << declared_total
                  << ")";
     }
   } else {
-    actual_model_size = declared_total;
+    actual_artifact_size = declared_total;
   }
 
   LOG(INFO) << "Generating verification info for " << file_paths.size()
             << (is_safetensors ? " safetensors payloads" : " partitions")
-            << ", actual model size: " << actual_model_size << " bytes (total: " << declared_total << ")";
+            << ", actual artifact size: " << actual_artifact_size << " bytes (total: " << declared_total << ")";
 
   // ----------------------------------------------------------------------
   // Map each partition file into memory (read-only, private) instead of
@@ -328,11 +328,11 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
   // Memory-map each partition file just once. This avoids an extra copy and reduces
   // peak RSS because the kernel page cache is shared between all processes.
   // We still respect `actual_model_size` so we do not map bytes beyond the real
-  // model payload (files can be padded for alignment).
+  // replica payload (files can be padded for alignment).
 
   uint64_t bytes_processed = 0;
 
-  for (size_t i = 0; i < file_paths.size() && bytes_processed < actual_model_size; ++i) {
+  for (size_t i = 0; i < file_paths.size() && bytes_processed < actual_artifact_size; ++i) {
     const auto& path = file_paths[i];
     size_t len_or_payload = data_lengths[i];
 
@@ -340,10 +340,10 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
       continue; // Skip empty partitions
     }
 
-    // Only map the portion of this partition that belongs to the actual model.
+    // Only map the portion of this partition that belongs to the actual replica.
     size_t bytes_to_map;
     if (!is_safetensors) {
-      bytes_to_map = std::min(static_cast<uint64_t>(len_or_payload), actual_model_size - bytes_processed);
+      bytes_to_map = std::min(static_cast<uint64_t>(len_or_payload), actual_artifact_size - bytes_processed);
     } else {
       // For safetensors, map the whole file and shift pointer to payload
       std::error_code ec;
@@ -392,7 +392,7 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
 
     // Update partition_sizes to reflect actual bytes mapped
     data_lengths[i] = (!is_safetensors) ? bytes_to_map : len_or_payload; // reflect payload length for safetensors
-    // For safetensors, only count the payload towards bytes_processed to match actual_model_size
+    // For safetensors, only count the payload towards bytes_processed to match actual_artifact_size
     if (!is_safetensors) {
       bytes_processed += bytes_to_map;
     } else {
@@ -404,9 +404,9 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
   data_lengths.resize(data_ptrs.size());
 
   // Generate verification info using CPU processing (device_id = -1)
-  // This will use the actual model size, not file size
-  absl::StatusOr<ModelVerificationInfo> verification_result =
-      ModelVerifier::generate_verification_info(data_ptrs, data_lengths, -1, max_level);
+  // This will use the actual artifact size, not file size
+  absl::StatusOr<ArtifactVerificationInfo> verification_result =
+      ArtifactVerifier::generate_verification_info(data_ptrs, data_lengths, -1, max_level);
 
   if (!verification_result.ok()) {
     // Clean up mappings before throwing
@@ -421,8 +421,8 @@ ModelVerificationInfo generate_model_verification_info_from_disk(
     LOG(FATAL) << "Failed to generate verification info: " << verification_result.status().message();
   }
 
-  LOG(INFO) << "Successfully generated verification info for model at " << model_path
-            << " (actual size: " << actual_model_size << " bytes)";
+  LOG(INFO) << "Successfully generated verification info for replica at " << disk_path
+            << " (actual size: " << actual_artifact_size << " bytes)";
 
   // Unmap and close files now that we are done
   for (const auto& mf : mapped_files) {
@@ -532,37 +532,30 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
 #endif
 }
 
-std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
+std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     const std::unordered_map<
         std::string,
         std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::string, uint64_t>>& meta_state_dict,
-    const std::string& model_path,
+    const std::string& disk_path,
     const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
     int device_id) {
   // USE_FAKE_CUDA: CPU restore path enforced below; GPU path is compiled out.
   std::vector<std::filesystem::path> partition_paths;
   std::vector<uint64_t> partition_sizes;
-  uint64_t total_model_size = 0;
+  uint64_t total_artifact_size = 0;
 
-  std::filesystem::path model_dir_path(model_path);
+  std::filesystem::path artifact_dir(disk_path);
 
   for (int i = 0;; ++i) {
-    std::filesystem::path partition_file_path = model_dir_path / ("tensor.data_" + std::to_string(i));
+    std::filesystem::path partition_file_path = artifact_dir / ("tensor.data_" + std::to_string(i));
     if (!std::filesystem::exists(partition_file_path)) {
-      if (i == 0 &&
-          partition_paths
-              .empty()) { // No tensor.data_0 found, try tensor.data for backward compatibility or single file case
-        partition_file_path = model_dir_path / "tensor.data";
-        if (!std::filesystem::exists(partition_file_path)) {
-          // If neither tensor.data_0 nor tensor.data exists, and we expected tensors, it's an error.
-          if (!meta_state_dict.empty()) {
-            LOG(FATAL) << "No tensor data file found (tried tensor.data_0 and tensor.data) in: " << model_path;
-          }
-          break; // No files, no metadata, so nothing to do.
+      // Strict mode: only multi-part files are supported.
+      if (i == 0) {
+        if (!meta_state_dict.empty()) {
+          LOG(FATAL) << "No tensor data partition found (expected tensor.data_0) in: " << disk_path;
         }
-      } else {
-        break; // No more tensor.data_N files
       }
+      break; // No more tensor.data_N files
     }
 
     if (!std::filesystem::is_regular_file(partition_file_path)) {
@@ -577,17 +570,14 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
 
     partition_paths.push_back(partition_file_path);
     partition_sizes.push_back(file_size);
-    total_model_size += file_size;
+    total_artifact_size += file_size;
 
-    // If we found tensor.data (not tensor.data_0), assume it's the only file.
-    if (partition_file_path.filename() == "tensor.data") {
-      break;
-    }
+    // Continue scanning strictly for sequential partitions.
   }
 
-  if (total_model_size == 0) {
+  if (total_artifact_size == 0) {
     if (!meta_state_dict.empty()) {
-      LOG(FATAL) << "Tensor data files are empty or not found, but metadata expects tensors in: " << model_path;
+      LOG(FATAL) << "Tensor data files are empty or not found, but metadata expects tensors in: " << disk_path;
     }
     return {}; // Return empty map if files are empty/not found and no tensors expected.
   }
@@ -620,8 +610,8 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
       LOG(FATAL) << "Failed to allocate pinned buffers from pool";
     }
 
-    // Allocate contiguous GPU memory to hold the entire model
-    std::uint64_t gpu_base_ptr = allocate_cuda_memory(device_id, static_cast<size_t>(total_model_size));
+    // Allocate contiguous GPU memory to hold the entire replica
+    std::uint64_t gpu_base_ptr = allocate_cuda_memory(device_id, static_cast<size_t>(total_artifact_size));
     if (gpu_base_ptr == 0) {
       LOG(FATAL) << "Failed to allocate GPU memory";
     }
@@ -697,7 +687,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
   // CPU PATH (device_id < 0) - original implementation continues below
   // ------------------------------------------------------------------
 
-  std::shared_ptr<char[]> data_buffer(new char[static_cast<size_t>(total_model_size)]);
+  std::shared_ptr<char[]> data_buffer(new char[static_cast<size_t>(total_artifact_size)]);
   char* current_buffer_ptr = data_buffer.get();
 
   for (size_t i = 0; i < partition_paths.size(); ++i) {
@@ -760,11 +750,11 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
     const uint64_t storage_offset_bytes = storage_offset_elems * element_size_bytes;
     const uint64_t end_pos = offset + storage_offset_bytes + tensor_size_bytes;
 
-    if (end_pos > total_model_size) {
-      if (tensor_size_bytes > 0 || offset > total_model_size) {
+    if (end_pos > total_artifact_size) {
+      if (tensor_size_bytes > 0 || offset > total_artifact_size) {
         LOG(FATAL) << "Tensor " << name << " data (offset " << offset << " + storage_offset " << storage_offset_bytes
-                   << ", calculated size " << tensor_size_bytes << ") exceeds total model size (" << total_model_size
-                   << ").";
+                   << ", calculated size " << tensor_size_bytes << ") exceeds total artifact size ("
+                   << total_artifact_size << ").";
       }
     }
 

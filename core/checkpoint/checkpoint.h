@@ -59,7 +59,7 @@ class Tensor {
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/common/model_verification.h"
+#include "core/common/artifact_verification.h"
 
 namespace stepcast::store {
 
@@ -77,29 +77,29 @@ std::unordered_map<std::string, uint64_t> save_tensors(
     const std::string& path);
 
 /**
- * @brief Calculate actual model size from tensor_index.json, accounting for shared storages.
+ * @brief Calculate actual artifact size from tensor_index.json, accounting for shared storages.
  *
- * Get the actual model size by summing unique tensor storage sizes,
+ * Get the actual artifact size by summing unique tensor storage sizes,
  * avoiding double-counting shared storages.
  *
- * @param model_path Path to the directory containing tensor_index.json
- * @return uint64_t Actual model size in bytes
+ * @param disk_path Path to the directory containing tensor_index.json
+ * @return uint64_t Actual artifact size in bytes
  */
-uint64_t calculate_actual_model_size(const std::string& model_path);
+uint64_t calculate_actual_artifact_size(const std::string& disk_path);
 
 /**
- * @brief Generate verification information for saved model files.
+ * @brief Generate verification information for saved replica files.
  *
  * This function reads the saved tensor partition files and generates comprehensive
  * verification information including hashes and key checkpoints for integrity checking.
- * The model_size in the returned verification info is calculated from tensor_index.json
- * to reflect the actual model size, not the aligned file sizes.
+ * The artifact_size in the returned verification info is calculated from tensor_index.json
+ * to reflect the actual artifact size, not the aligned file sizes.
  *
- * @param model_path Path to the directory containing saved model files.
- * @return ModelVerificationInfo Generated verification information.
+ * @param disk_path Path to the directory containing saved replica files.
+ * @return ArtifactVerificationInfo Generated verification information.
  */
-ModelVerificationInfo generate_model_verification_info_from_disk(
-    const std::string& model_path,
+ArtifactVerificationInfo generate_verification_info_from_disk(
+    const std::string& disk_path,
     stepcast::store::VerificationLevel max_level = stepcast::store::VerificationLevel::FULL_HASH);
 
 /**
@@ -111,13 +111,13 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::string, uint64_t>>& meta_state_dict,
     const std::unordered_map<int, std::uint64_t>& memory_base_address,
     const std::unordered_map<int, std::unordered_map<std::string, uint64_t>>& tensor_device_offsets,
-    const bool from_ipc_shm);
+    bool from_ipc_shm);
 
-std::unordered_map<std::string, torch::Tensor> restore_tensors_from_model_path(
+std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     const std::unordered_map<
         std::string,
         std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::string, uint64_t>>& meta_state_dict,
-    const std::string& model_path,
+    const std::string& disk_path,
     const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
     int device_id = -1);
 

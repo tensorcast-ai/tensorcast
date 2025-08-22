@@ -17,11 +17,11 @@ graph TD
     A[Client Code] --> B[checkpoint.h API]
     B --> C[TensorWriter]
     B --> D[CUDA Memory Management]
-    B --> E[Model Verification]
+    B --> E[Replica Verification]
     C --> F[AlignedBuffer]
     F --> G[File System]
     D --> H[CUDA Runtime]
-    E --> I[Model Verification System]
+    E --> I[Replica Verification System]
 
     B --> J[Progress Reporting]
     J --> K[progress_bar.h]
@@ -40,7 +40,7 @@ graph TD
 The main API layer provides:
 - **Tensor Save/Restore Operations**
 - **CUDA Memory Management**
-- **Model Verification Integration**
+- **Replica Verification Integration**
 - **Cross-platform compatibility**
 
 ```mermaid
@@ -48,10 +48,10 @@ classDiagram
     class CheckpointAPI {
         +save_tensors(names, data, path) unordered_map~string, uint64_t~
         +restore_tensors(...) unordered_map~string, torch::Tensor~
-        +restore_tensors_from_model_path(...) unordered_map~string, torch::Tensor~
+        +restore_tensors_from_disk(...) unordered_map~string, torch::Tensor~
         +allocate_cuda_memory(device_id, size) uint64_t
         +get_cuda_memory_handle(device_id, ptr) string
-        +generate_model_verification_info_from_disk(path) ModelVerificationInfo
+        +generate_verification_info_from_disk(path) ModelVerificationInfo
     }
 
     CheckpointAPI --> TensorWriter
@@ -142,7 +142,7 @@ sequenceDiagram
     participant FS as File System
     participant CUDA as CUDA Runtime
 
-    Client->>API: restore_tensors_from_model_path(...)
+    Client->>API: restore_tensors_from_disk(...)
 
     loop for each partition file
         API->>FS: read tensor.data_N
@@ -287,6 +287,6 @@ Compared to the classic `TensorWriter`, this pipeline overlaps compute, PCIe tra
 * `save_tensors` / `restore_tensors` – Original synchronous APIs.
 * `save_tensors_streaming` – Thin wrapper that forwards a `dict`-based config to `StreamingTensorWriter`.
 * CUDA utilities – `allocate_cuda_memory`, `get_cuda_memory_handle`, `get_cuda_memory_ptr`, and `close_cuda_memory_handle` for zero-copy data exchange across processes.
-* Model verification helpers – `generate_model_verification_info` and `verify_model_data_from_gpu`.
+* Replica verification helpers – `generate_artifact_verification_info` and `verify_artifact_data_from_gpu`.
 
 Because the binding re-exports **pointers and CUDA IPC handles** as Python `bytes` objects, transferring large tensors between Python and C++ can be done without additional copies, aligning with the module's performance goals.

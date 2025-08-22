@@ -67,8 +67,7 @@ TEST_CASE("save / load tensors that share same buffer", "[checkpoint][dedup]") {
     tensor_device_offsets[n] = offsets[n];
   }
 
-  auto state_dict =
-      restore_tensors_from_model_path(meta_state, tmp_dir.string(), tensor_device_offsets, /*device_id*/ -1);
+  auto state_dict = restore_tensors_from_disk(meta_state, tmp_dir.string(), tensor_device_offsets, /*device_id*/ -1);
   REQUIRE(state_dict.size() == 2);
 
   const auto& t0 = state_dict.at("tensorA");

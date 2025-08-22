@@ -62,20 +62,20 @@ absl::Status pump_ranges(
   // Find all partition files
   partition_paths_.clear();
   partition_sizes_.clear();
-  model_size_ = 0;
+  artifact_size_ = 0;
 
-  for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
     if (entry.is_regular_file()) {
       const std::string filename = entry.path().filename().string();
       // Support only the partition naming convention defined in
       // docs/developer-guides/core/checkpoint/data-format.md:
-      //   tensor.data        (single-file model)
-      //   tensor.data_<n>    (multi-partition model, 0-based index)
+      //   tensor.data        (single-file artifact)
+      //   tensor.data_<n>    (multi-partition artifact, 0-based index)
       if (filename.starts_with("tensor.data")) {
         partition_paths_.push_back(entry.path());
         size_t file_size = std::filesystem::file_size(entry.path());
         partition_sizes_.push_back(file_size);
-        model_size_ += file_size;
+        artifact_size_ += file_size;
       }
     }
   }
@@ -84,7 +84,7 @@ absl::Status pump_ranges(
 ```121:125:core/store/loader/disk_loader.cc
   // If no partitions were detected with the supported patterns report an error.
   if (partition_paths_.empty()) {
-    return absl::NotFoundError(absl::StrFormat("No model partition files found in: %s", model_dir.string()));
+    return absl::NotFoundError(absl::StrFormat("No artifact partition files found in: %s", artifact_dir.string()));
   }
 ```
 
@@ -94,17 +94,17 @@ absl::Status pump_ranges(
     absl::MutexLock lock(&mutex_);
     source_opts.partition_paths = partition_paths_;
     source_opts.partition_sizes = partition_sizes_;
-    source_opts.total_size = model_size_;
+    source_opts.total_size = artifact_size_;
     // chunk size is determined by MemoryManager's pinned pool; a default here is fine
     source_opts.chunk_size = 128 * 1024 * 1024;
-    source_opts.use_direct_io = (model_size_ > 5ULL * 1024 * 1024 * 1024);
+    source_opts.use_direct_io = (artifact_size_ > 5ULL * 1024 * 1024 * 1024);
   }
   return std::make_unique<loader::FilePartitionSource>(std::move(source_opts));
 ```
 
 - Transfer service fallback to source-specific size
 
-```219:223:core/store/model/transfer_service.cc
+```219:223:core/store/replica/transfer_service.cc
   // Fallback: use source total size when UMA doesn't know
   if (total_size == 0) {
     if (auto* fps = dynamic_cast<loader::FilePartitionSource*>(source.get())) {
@@ -156,7 +156,7 @@ absl::Status pump_ranges(
 - `initialize()`:
   - If any `tensor.data*` exists → keep current behavior.
   - Else, probe for all `*.safetensors` files in the directory (N ≥ 1). Sort by filename for deterministic order.
-    - For each file, pre-parse header to compute `data_start_i`, `data_size_i`; set `model_size_ = Σ data_size_i`.
+    - For each file, pre-parse header to compute `data_start_i`, `data_size_i`; set `artifact_size_ = Σ data_size_i`.
     - Memoize file paths and their `(data_start_i, data_size_i)` for `open_source()`.
   - If neither partitions nor `.safetensors` exist → keep current error.
 - `open_source()`:
@@ -165,7 +165,7 @@ absl::Status pump_ranges(
   - Otherwise return `FilePartitionSource` as-is.
 
 4) Keep TransferService unchanged, with a minor improvement
-- UMA continues to be the source of truth for model size.
+- UMA continues to be the source of truth for artifact size.
 - Fallback path adds `dynamic_cast` to `SafetensorsSource` and `MultiSafetensorsSource` to read `total_size()` when UMA is missing (optional, low risk).
 
 5) Python: build normalized meta from Safetensors header(s)
@@ -179,12 +179,12 @@ absl::Status pump_ranges(
   - Types smaller than 1 byte (e.g., 4-bit) are not supported; raise a clear error.
 
 6) Verification support
-- For all `.safetensors` files, hash only each data buffer (excluding the header) in filename order; process files in filename order; record the aggregate `model_size = Σ data_size_i` and `partition_count = N` (optional).
+- For all `.safetensors` files, hash only each data buffer (excluding the header) in filename order; process files in filename order; record the aggregate `artifact_size = Σ data_size_i` and `partition_count = N` (optional).
 
 ### Why this design
 - Hides all format differences at the `Source` layer. The loader pipeline sees a uniform, contiguous byte space for both formats.
 - Preserves existing `pump_ranges` and sinks; minimizes change amplification.
-- Keeps index/metadata responsibilities in Python (unchanged mental model for callers). No need to invent a new index schema.
+- Keeps index/metadata responsibilities in Python (unchanged mental artifact for callers). No need to invent a new index schema.
 
 ### Alternatives considered
 - Introduce a new "index adapter" layer that rewrites Safetensors header(s) into a single `tensor_index.json` on disk: rejected to avoid additional I/O and complexity.
@@ -200,7 +200,7 @@ absl::Status pump_ranges(
 
 2) DiskLoader detection
 - Modify `core/store/loader/disk_loader.cc` to probe one or more `.safetensors` when partitions are absent
-- Pre-parse headers of all `.safetensors` to obtain each `data_size_i` and compute `model_size_ = Σ data_size_i`; memoize ordered paths
+- Pre-parse headers of all `.safetensors` to obtain each `data_size_i` and compute `artifact_size_ = Σ data_size_i`; memoize ordered paths
 - `open_source()` returns `SafetensorsSource` (N==1) or `MultiSafetensorsSource` (N>1)
 
 3) TransferService minor fallback
@@ -223,7 +223,7 @@ absl::Status pump_ranges(
 |----|----|----|
 | `core/store/loader/safetensors_source.h/.cc` | Add | New `SeekableSource` for Safetensors |
 | `core/store/loader/disk_loader.cc` | Update | Detect `.safetensors`; compute data_size; return `SafetensorsSource` |
-| `core/store/model/transfer_service.cc` | Update (optional) | Fallback: size from `SafetensorsSource`/`MultiSafetensorsSource` when UMA is empty |
+| `core/store/replica/transfer_service.cc` | Update (optional) | Fallback: size from `SafetensorsSource`/`MultiSafetensorsSource` when UMA is empty |
 | `core/store/loader/multi_safetensors_source.h/.cc` | Add | Concatenate multiple Safetensors data buffers into one logical source |
 | `scstore/torch_util.py` | Update | Parse header; build meta/data indices; identity offsets |
 | `core/checkpoint/*` | Update | Verification: handle `.safetensors` data buffer only |
@@ -269,14 +269,14 @@ absl::Status pump_ranges(
 - Disk partition discovery and error path:
 
 ```100:117:core/store/loader/disk_loader.cc
-  for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
     if (entry.is_regular_file()) {
       const std::string filename = entry.path().filename().string();
       if (filename.starts_with("tensor.data")) {
         partition_paths_.push_back(entry.path());
         size_t file_size = std::filesystem::file_size(entry.path());
         partition_sizes_.push_back(file_size);
-        model_size_ += file_size;
+        artifact_size_ += file_size;
       }
     }
   }
@@ -284,7 +284,7 @@ absl::Status pump_ranges(
 
 ```121:125:core/store/loader/disk_loader.cc
   if (partition_paths_.empty()) {
-    return absl::NotFoundError(absl::StrFormat("No model partition files found in: %s", model_dir.string()));
+    return absl::NotFoundError(absl::StrFormat("No artifact partition files found in: %s", artifact_dir.string()));
   }
 ```
 
@@ -293,15 +293,15 @@ absl::Status pump_ranges(
 ```165:175:core/store/loader/disk_loader.cc
   source_opts.partition_paths = partition_paths_;
   source_opts.partition_sizes = partition_sizes_;
-  source_opts.total_size = model_size_;
+  source_opts.total_size = artifact_size_;
   source_opts.chunk_size = 128 * 1024 * 1024;
-  source_opts.use_direct_io = (model_size_ > 5ULL * 1024 * 1024 * 1024);
+  source_opts.use_direct_io = (artifact_size_ > 5ULL * 1024 * 1024 * 1024);
   return std::make_unique<loader::FilePartitionSource>(std::move(source_opts));
 ```
 
 - TransferService UMA size fallback (we will optionally extend with SafetensorsSource):
 
-```219:223:core/store/model/transfer_service.cc
+```219:223:core/store/replica/transfer_service.cc
   if (total_size == 0) {
     if (auto* fps = dynamic_cast<loader::FilePartitionSource*>(source.get())) {
       total_size = fps->total_size();
@@ -342,7 +342,7 @@ flowchart LR
 ### DiskLoader changes
 - On `initialize()`:
   - Attempt partition discovery first (preserves current behavior and doc contract).
-  - If none found, scan for all `*.safetensors` files (N ≥ 1). For each, pre-parse the header to compute `data_start_i` and `data_size_i`; sort by filename; accumulate `model_size_`.
+  - If none found, scan for all `*.safetensors` files (N ≥ 1). For each, pre-parse the header to compute `data_start_i` and `data_size_i`; sort by filename; accumulate `artifact_size_`.
 - On `open_source()`:
   - If safetensors paths are set and N==1, return `SafetensorsSource(path)`; if N>1, return `MultiSafetensorsSource(paths)`; otherwise build `FilePartitionSource`.
 
@@ -364,7 +364,7 @@ flowchart LR
   - Types smaller than 1 byte (e.g., 4-bit) are not supported; raise a clear error.
 
 ### Verification integration
-- Update verification logic: for each `.safetensors` file, hash only the data buffer (excluding the header) in filename order; record the aggregate `model_size = Σ data_size_i`.
+- Update verification logic: for each `.safetensors` file, hash only the data buffer (excluding the header) in filename order; record the aggregate `artifact_size = Σ data_size_i`.
 
 ## Trade-offs and risks
 - O_DIRECT: disable for Safetensors (single/multi-file) to avoid alignment complexity; rely on page cache performance.
@@ -404,9 +404,9 @@ flowchart LR
 ## Execution Status
 
 - Implemented C++ sources `SafetensorsSource` and `MultiSafetensorsSource` that expose only the data buffers (header hidden) and provide `total_size()`; direct I/O disabled.
-- Extended `DiskLoader::initialize()` to discover `.safetensors` when no `tensor.data*` is present, pre-parse headers to compute `data_size_i`, and aggregate `model_size_`. `open_source()` returns the safetensors sources accordingly.
+- Extended `DiskLoader::initialize()` to discover `.safetensors` when no `tensor.data*` is present, pre-parse headers to compute `data_size_i`, and aggregate `artifact_size_`. `open_source()` returns the safetensors sources accordingly.
 - Updated `TransferService` to fallback to safetensors `total_size()` when UMA is missing.
-- Updated Bazel targets in `core/store/loader/BUILD` and `core/store/model/BUILD` to include the new sources.
+- Updated Bazel targets in `core/store/loader/BUILD` and `core/store/replica/BUILD` to include the new sources.
 - Python path: `scstore/torch_util.py` now parses safetensors headers to produce unified meta/data indices when `tensor_index.json` is absent. Dtype mapping covers F16/BF16/F32/F64 and integer/byte/bool types.
 
 Open tasks:

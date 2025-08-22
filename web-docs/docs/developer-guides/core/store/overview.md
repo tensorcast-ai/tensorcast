@@ -1,6 +1,6 @@
 ---
 title: Overview
-description: Core storage engine for ML model loading, memory management, and data transfer
+description: Core storage engine for ML replica loading, memory management, and data transfer
 sidebar_position: 1
 ---
 
@@ -8,11 +8,11 @@ sidebar_position: 1
 
 ## Introduction
 
-The Core Store module is the core storage engine of StepCast Store, responsible for machine learning model loading, memory management, and data transfer. This module provides a unified interface to handle model movement between disk, CPU memory, and GPU memory, supporting high-performance model inference scenarios.
+The Core Store module is the core storage engine of StepCast Store, responsible for machine learning replica loading, memory management, and data transfer. This module provides a unified interface to handle replica movement between disk, CPU memory, and GPU memory, supporting high-performance replica inference scenarios.
 
 ## Key Features
 
-- **Multi-Source Data Loading**: Support loading model data from disk and remote sources
+- **Multi-Source Data Loading**: Support loading replica data from disk and remote sources
 - **Intelligent Memory Management**: Automatically manage CPU and GPU memory allocation, deallocation, and data transfer
 - **Asynchronous Operations**: Provide asynchronous APIs for non-blocking data loading and transfer
 - **State Tracking**: Complete memory state management and lifecycle tracking
@@ -26,13 +26,13 @@ The Core Store module is the core storage engine of StepCast Store, responsible 
 graph TB
     subgraph "Core Store Module"
         CS[StoreEngine]
-        M[Model]
+        M[Replica]
         MM[MemoryManager]
 
         subgraph "Loaders"
             DL[DiskLoader]
             RL[P2PLoader]
-            IL[IModelLoader Interface]
+            IL[IArtifactLoader Interface]
         end
 
         subgraph "Memory Components"
@@ -42,7 +42,7 @@ graph TB
         end
 
         subgraph "Support"
-            MR[ModelRegistry]
+            MR[ReplicaRegistry]
             DM[DeviceManager]
             CMN[CommunicationManager]
             BU[BinaryUtils]
@@ -70,17 +70,17 @@ graph TB
 ### StoreEngine
 - **Responsibility**: Serves as the external interface for the entire storage system
 - **Functions**:
-  - Manage multiple model instances
-  - Provide unified interface for model loading and unloading
+  - Manage multiple replica instances
+  - Provide unified interface for replica loading and unloading
   - Handle GPU device management
   - Support communication engine registration
 
-### Model
-- **Responsibility**: Single model abstraction and lifecycle management
+### Replica
+- **Responsibility**: Single replica abstraction and lifecycle management
 - **Functions**:
   - Encapsulate loaders and memory managers
   - Provide asynchronous loading interface
-  - Manage model state at different locations
+  - Manage replica state at different locations
   - Support data validation
 
 ### MemoryManager
@@ -92,7 +92,7 @@ graph TB
   - RDMA memory registration
 
 ### Loaders
-- **Responsibility**: Load model data from different data sources
+- **Responsibility**: Load replica data from different data sources
 - **Functions**:
   - DiskLoader: Load from disk partition files
   - P2PLoader: Load from remote P2P sources
@@ -104,12 +104,12 @@ graph TB
   - CudaMemory: GPU memory management
   - PinnedMemoryPool: Memory pool implementation
 
-### ModelRegistry
-- **Responsibility**: Thread-safe registry for multi-device model instances, supports LRU eviction policies
+### ReplicaRegistry
+- **Responsibility**: Thread-safe registry for multi-device replica instances, supports LRU eviction policies
 - **Functions**:
-  - Insert / find / remove `Model` instances by `InstanceKey`
+  - Insert / find / remove `Replica` instances by `ReplicaKey`
   - Provide LRU ordering for memory eviction
-  - Index models by device and model id for fast lookup
+  - Index replicas by device and replica id for fast lookup
 
 ### DeviceManager
 - **Responsibility**: GPU discovery and device-level resource tracking
@@ -127,9 +127,9 @@ graph TB
 
 ## Use Cases
 
-1. **Model Inference Services**: Fast loading and switching between different models
-2. **Distributed Training**: Share model data between nodes through RDMA
-3. **Model Caching**: Intelligent multi-level memory caching strategies
+1. **Replica Inference Services**: Fast loading and switching between different artifacts
+2. **Distributed Training**: Share replica data between nodes through RDMA
+3. **Replica Caching**: Intelligent multi-level memory caching strategies
 4. **GPU Acceleration**: Efficient CPU-GPU data transfer
 
 ## Performance Characteristics

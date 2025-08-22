@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 from scstore.global_store.exceptions import NotFoundError
 from scstore.global_store.metrics import observe_state_sync
-from scstore.global_store.models import ModelReplica, Worker
+from scstore.global_store.models import Replica, Worker
 from scstore.global_store.repositories import (
-    ModelReplicaRepository,
+    ReplicaRepository,
     WorkerRepository,
 )
 from scstore.logger import init_logger
@@ -29,10 +29,10 @@ class RecoveryService:
     def __init__(
         self,
         worker_repository: WorkerRepository,
-        model_replica_repository: ModelReplicaRepository,
+        replica_repository: ReplicaRepository,
     ):
         self.worker_repository = worker_repository
-        self.model_replica_repository = model_replica_repository
+        self.replica_repository = replica_repository
 
         # Recovery state tracking
         self.recovery_in_progress = False
@@ -79,13 +79,13 @@ class RecoveryService:
     def _validate_database_state(self) -> None:
         """Validate database integrity and clean up inconsistent state."""
         # Check for orphaned replicas (replicas without valid workers)
-        orphaned_replicas = self.model_replica_repository.find_orphaned_replicas()
+        orphaned_replicas = self.replica_repository.find_orphaned_replicas()
         if orphaned_replicas:
             logger.warning(
                 f"Found {len(orphaned_replicas)} orphaned replicas, marking as unavailable"
             )
             for replica in orphaned_replicas:
-                self.model_replica_repository.mark_unavailable(replica.replica_id)
+                self.replica_repository.mark_unavailable(replica.replica_id)
 
     def _mark_workers_as_stale(self) -> None:
         """Mark all workers as potentially stale until they re-register or heartbeat."""
@@ -97,11 +97,11 @@ class RecoveryService:
 
     def _mark_replicas_as_stale(self) -> None:
         """Mark all replicas as potentially stale until confirmed by workers."""
-        replicas = self.model_replica_repository.list_all_replicas()
+        replicas = self.replica_repository.list_all_replicas()
         logger.info(f"Marking {len(replicas)} replicas as stale")
 
         for replica in replicas:
-            self.model_replica_repository.mark_as_stale(replica.replica_id)
+            self.replica_repository.mark_as_stale(replica.replica_id)
 
     def handle_worker_recovery_registration(
         self, worker: Worker, previous_worker_id: str | None = None
@@ -159,13 +159,11 @@ class RecoveryService:
             )
 
         # Transfer or mark replicas as unavailable
-        replicas = self.model_replica_repository.get_replicas_by_worker(
-            previous_worker_id
-        )
+        replicas = self.replica_repository.get_replicas_by_worker(previous_worker_id)
         for replica in replicas:
             # Update worker_id to new one if it's the same physical node
             try:
-                self.model_replica_repository.update_worker_id(
+                self.replica_repository.update_worker_id(
                     replica.replica_id, new_worker_id
                 )
                 logger.debug(
@@ -173,7 +171,7 @@ class RecoveryService:
                 )
             except Exception as e:
                 logger.warning(f"Failed to transfer replica {replica.replica_id}: {e}")
-                self.model_replica_repository.mark_unavailable(replica.replica_id)
+                self.replica_repository.mark_unavailable(replica.replica_id)
 
     def synchronize_worker_state(
         self, worker_id: str, local_state: global_store_pb2.WorkerLocalState
@@ -191,9 +189,7 @@ class RecoveryService:
         _start = time.time()
         try:
             # Get current global state for this worker
-            global_replicas = self.model_replica_repository.get_replicas_by_worker(
-                worker_id
-            )
+            global_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
 
             # Compare states and generate changes
             state_changes = self._compute_state_changes(local_state, global_replicas)
@@ -206,9 +202,7 @@ class RecoveryService:
             self.worker_state_versions[worker_id] = new_version
 
             # Compute new state checksum
-            updated_replicas = self.model_replica_repository.get_replicas_by_worker(
-                worker_id
-            )
+            updated_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
             new_checksum = self._compute_state_checksum(updated_replicas)
 
             duration = time.time() - _start
@@ -233,30 +227,31 @@ class RecoveryService:
     def _compute_state_changes(
         self,
         local_state: global_store_pb2.WorkerLocalState,
-        global_replicas: list[ModelReplica],
+        global_replicas: list[Replica],
     ) -> list[global_store_pb2.StateChange]:
         """Compute differences between local and global state."""
         state_changes = []
 
         # Convert to sets for comparison
         local_replica_keys = {
-            (r.model_id, str(r.memory_info.memory_type), r.memory_info.device_id)
+            (r.artifact_id, str(r.memory_info.memory_type), r.memory_info.device_id)
             for r in local_state.local_replicas
         }
 
         global_replica_keys = {
-            (r.model_id, str(r.memory_type.value), r.device_id) for r in global_replicas
+            (r.artifact_id, str(r.memory_type.value), r.device_id)
+            for r in global_replicas
         }
 
         # Find replicas to add (in local but not in global)
         to_add = local_replica_keys - global_replica_keys
-        for model_id, memory_type, device_id in to_add:
+        for artifact_id, memory_type, device_id in to_add:
             # Find the local replica info
             local_replica = next(
                 r
                 for r in local_state.local_replicas
                 if (
-                    r.model_id == model_id
+                    r.artifact_id == artifact_id
                     and str(r.memory_info.memory_type) == memory_type
                     and r.memory_info.device_id == device_id
                 )
@@ -283,13 +278,13 @@ class RecoveryService:
             # No inventory → do **not** remove anything.
             to_remove = set()
 
-        for model_id, memory_type, device_id in to_remove:
+        for artifact_id, memory_type, device_id in to_remove:
             # Find the global replica
             global_replica = next(
                 r
                 for r in global_replicas
                 if (
-                    r.model_id == model_id
+                    r.artifact_id == artifact_id
                     and str(r.memory_type.value) == memory_type
                     and r.device_id == device_id
                 )
@@ -318,31 +313,33 @@ class RecoveryService:
                     replica = self._convert_proto_to_replica(
                         change.replica_info, worker_id
                     )
-                    self.model_replica_repository.create_or_update(replica)
-                    logger.debug(f"Added replica: {replica.model_id}")
+                    self.replica_repository.create_or_update(replica)
+                    logger.debug(f"Added replica: {replica.artifact_id}")
 
                 elif change.type == global_store_pb2.StateChange.REMOVE_REPLICA:
                     # Remove replica
                     if change.replica_info.replica_id:
                         replica_id = UUID(change.replica_info.replica_id)
-                        self.model_replica_repository.delete(replica_id)
-                        logger.debug(f"Removed replica: {change.replica_info.model_id}")
+                        self.replica_repository.delete(replica_id)
+                        logger.debug(
+                            f"Removed replica: {change.replica_info.artifact_id}"
+                        )
 
                 elif change.type == global_store_pb2.StateChange.UPDATE_REPLICA:
                     # Update replica
                     replica = self._convert_proto_to_replica(
                         change.replica_info, worker_id
                     )
-                    self.model_replica_repository.create_or_update(replica)
-                    logger.debug(f"Updated replica: {replica.model_id}")
+                    self.replica_repository.create_or_update(replica)
+                    logger.debug(f"Updated replica: {replica.artifact_id}")
 
             except Exception as e:
                 logger.error(f"Failed to apply state change {change.type}: {e}")
 
     def _convert_replica_to_proto(
-        self, replica: ModelReplica
-    ) -> global_store_pb2.ModelReplicaInfo:
-        """Convert ModelReplica to proto format."""
+        self, replica: Replica
+    ) -> global_store_pb2.ReplicaInfo:
+        """Convert Replica to proto format."""
         memory_info = global_store_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
@@ -354,8 +351,8 @@ class RecoveryService:
             buffer_sizes=replica.buffer_sizes,
         )
 
-        return global_store_pb2.ModelReplicaInfo(
-            model_id=replica.model_id,
+        return global_store_pb2.ReplicaInfo(
+            artifact_id=replica.artifact_id,
             replica_id=str(replica.replica_id),
             memory_info=memory_info,
             max_concurrency=replica.max_concurrency,
@@ -367,16 +364,16 @@ class RecoveryService:
         )
 
     def _convert_proto_to_replica(
-        self, proto_replica: global_store_pb2.ModelReplicaInfo, worker_id: str
-    ) -> ModelReplica:
-        """Convert proto format to ModelReplica."""
+        self, proto_replica: global_store_pb2.ReplicaInfo, worker_id: str
+    ) -> Replica:
+        """Convert proto format to Replica."""
         from scstore.global_store.models import MemoryType
 
-        return ModelReplica(
+        return Replica(
             replica_id=UUID(proto_replica.replica_id)
             if proto_replica.replica_id
             else uuid4(),
-            model_id=proto_replica.model_id,
+            artifact_id=proto_replica.artifact_id,
             node_id=proto_replica.memory_info.node_id,
             node_address=proto_replica.memory_info.node_address,
             node_port=proto_replica.memory_info.node_port,
@@ -393,17 +390,17 @@ class RecoveryService:
             worker_id=worker_id,
         )
 
-    def _compute_state_checksum(self, replicas: list[ModelReplica]) -> str:
+    def _compute_state_checksum(self, replicas: list[Replica]) -> str:
         """Compute checksum of replica state for consistency checking."""
         # Sort replicas by a stable key for consistent checksum
         sorted_replicas = sorted(
-            replicas, key=lambda r: (r.model_id, r.node_id, r.device_id)
+            replicas, key=lambda r: (r.artifact_id, r.node_id, r.device_id)
         )
 
         # Create string representation of state
         state_str = ""
         for replica in sorted_replicas:
-            state_str += f"{replica.model_id}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
+            state_str += f"{replica.artifact_id}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
 
         # Compute MD5 hash
         return hashlib.md5(state_str.encode()).hexdigest()
@@ -414,7 +411,7 @@ class RecoveryService:
 
     def request_full_state_sync(
         self, worker_id: str
-    ) -> tuple[bool, list[global_store_pb2.ModelReplicaInfo], int, str]:
+    ) -> tuple[bool, list[global_store_pb2.ReplicaInfo], int, str]:
         """
         Request full state synchronization for a worker.
 
@@ -424,7 +421,7 @@ class RecoveryService:
         _start = time.time()
         try:
             # Get all replicas for this worker
-            replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
+            replicas = self.replica_repository.get_replicas_by_worker(worker_id)
 
             # Convert to proto format
             proto_replicas = [
@@ -460,25 +457,25 @@ class RecoveryService:
 
     def get_worker_state_checksum(self, worker_id: str) -> str:
         """Get checksum for the given worker's replica state."""
-        replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
+        replicas = self.replica_repository.get_replicas_by_worker(worker_id)
         return self._compute_state_checksum(replicas)
 
-    def get_obsolete_models(
-        self, worker_id: str, registered_model_ids: list[str] | tuple[str, ...]
+    def get_obsolete_artifacts(
+        self, worker_id: str, registered_artifact_ids: list[str] | tuple[str, ...]
     ) -> list[str]:
-        """Determine models that exist on the worker but not in the global state.
+        """Determine artifacts that exist on the worker but not in the global state.
 
         Args:
             worker_id: Worker identifier.
-            registered_model_ids: Model IDs currently reported by the worker.
+            registered_artifact_ids: Artifact IDs currently reported by the worker.
 
         Returns:
-            List of model IDs that should be removed from the worker.
+            List of artifact IDs that should be removed from the worker.
         """
         try:
-            replicas = self.model_replica_repository.get_replicas_by_worker(worker_id)
-            global_models = {replica.model_id for replica in replicas}
-            return [m for m in registered_model_ids if m not in global_models]
+            replicas = self.replica_repository.get_replicas_by_worker(worker_id)
+            global_artifacts = {replica.artifact_id for replica in replicas}
+            return [a for a in registered_artifact_ids if a not in global_artifacts]
         except Exception as e:
-            logger.error(f"Failed to compute obsolete models for {worker_id}: {e}")
+            logger.error(f"Failed to compute obsolete artifacts for {worker_id}: {e}")
             return []

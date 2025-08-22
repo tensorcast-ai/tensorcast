@@ -48,9 +48,9 @@ def restore_tensors(
 ) -> Dict[str, torch.Tensor]: ...
 
 
-def restore_tensors_from_model_path(
+def restore_tensors_from_disk(
     meta_state_dict: Mapping[str, Tuple[Sequence[int], Sequence[int], str, int]],
-    model_path: _PathLike,
+    disk_path: _PathLike,
     tensor_device_offsets: Mapping[str, _Offset],
     device_id: int = -1,
 ) -> Dict[str, torch.Tensor]: ...
@@ -86,21 +86,21 @@ def close_cuda_memory_handle(
 ) -> bool: ...
 
 
-def inspect_or_generate_descriptor(model_path: _PathLike) -> Mapping[str, Union[str, int]]: ...
+def inspect_or_generate_descriptor(disk_path: _PathLike) -> Mapping[str, Union[str, int]]: ...
 
-def build_canonical_index_from_safetensors(model_dir: _PathLike) -> bytes: ...
+def build_canonical_index_from_safetensors(artifact: _PathLike) -> bytes: ...
 
 # -----------------------------------------------------------------------------
 # Verification utilities
 # -----------------------------------------------------------------------------
 
-def generate_model_verification_info(
-    model_path: _PathLike,
+def generate_artifact_verification_info(
+    disk_path: _PathLike,
     verification_level: int = 1,
 ) -> _VerificationInfo: ...
 
 
-def verify_model_data_from_gpu(
+def verify_artifact_data_from_gpu(
     device_id: int,
     cuda_memory_ptr: _Ptr,
     memory_size: int,

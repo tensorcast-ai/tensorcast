@@ -3,13 +3,13 @@
 ## 1. Overview
 
 ### Problem Statement
-`MemoryManager` mixes orchestration (states, planning) with execution (allocations, streams, transfers, P2P export), while `ModelMemoryCoordinator` (UMA) owns chunk mapping and sometimes GPU allocation responsibilities. This blending increases complexity, lock coupling, and change amplification across Loaders, DVMP, and CUDA paths.
+`MemoryManager` mixes orchestration (states, planning) with execution (allocations, streams, transfers, P2P export), while `ReplicaMemoryCoordinator` (UMA) owns chunk mapping and sometimes GPU allocation responsibilities. This blending increases complexity, lock coupling, and change amplification across Loaders, DVMP, and CUDA paths.
 
 ### Goals and Success Criteria
 - Clear separation of responsibilities (orchestration vs. execution; location-level vs. chunk-level)
 - Easier extension (add new transfer paths, memory tiers, devices) with minimal changes
 - Reduced cognitive load and fewer optional/nullable states via explicit lifecycle
-- Maintain compatibility for external API (`Model`) while enabling incremental migration
+- Maintain compatibility for external API (`Artifact`) while enabling incremental migration
 - Measurable improvements:
   - Fewer cross-layer locks and state transitions in hot paths
   - Consolidate ad-hoc transfer logic behind a single set of internal helpers
@@ -18,7 +18,7 @@
 ### High-Level Solution Summary
 Evolve the current design with minimal churn by refining ownership and keeping existing entry points:
 - Keep `MemoryManager` as the orchestration façade (no new service type). It owns location-level states and exposes RFC-aligned APIs already present today.
-- Make `ModelMemoryCoordinator` (UMA) the sole owner of lazy VRAM allocation via `get_or_create_gpu_allocation`. `MemoryManager` must route all GPU allocation through UMA.
+- Make `ReplicaMemoryCoordinator` (UMA) the sole owner of lazy VRAM allocation via `get_or_create_gpu_allocation`. `MemoryManager` must route all GPU allocation through UMA.
 - Implement CPU↔GPU and GPU↔GPU (including P2P) transfers via internal transfer helpers (free functions or a tiny TU), invoked by `MemoryManager` (no new runtime “engine” class required).
 - Keep export/unexport logic inside `MemoryManager`, backed by DVMP pin leases and the communicator.
 - Keep the unified staging pool (`StreamingPinnedBuffer`) as-is; optionally extend it toward `loader::BufferPool` features. The existing `StreamingBufferAdapter` remains acceptable short-term.
@@ -32,25 +32,25 @@ Evolve the current design with minimal churn by refining ownership and keeping e
 ### Existing Components and Pain Points
 - `MemoryManager` holds DVMP, UMA, CUDA stream/memory, streaming buffer, comm registration; it performs transfer state updates directly and mixes chunk-level/position-level responsibilities.
 
-```cpp 665:737:core/store/model/memory_manager.cc
+```cpp 665:737:core/store/replica/memory_manager.cc
 absl::Status MemoryManager::capture_copy_context_(
-    ModelLocation source,
-    ModelLocation destination,
+    MemoryLocation source,
+    MemoryLocation destination,
     CopyLaunchParams* out,
     bool* need_allocate_um) {
   // ... validates, sets destination LOADING, captures DVMP/UMA/streaming_buffer
 }
 ```
 
-```cpp 739:759:core/store/model/memory_manager.cc
-absl::Status MemoryManager::finalize_copy_state_(ModelLocation destination, const absl::Status& copy_status) {
+```cpp 739:759:core/store/replica/memory_manager.cc
+absl::Status MemoryManager::finalize_copy_state_(MemoryLocation destination, const absl::Status& copy_status) {
   // finalize state + evict DVMP tail + release CPU staging on success
 }
 ```
 
-```cpp 1456:1548:core/store/model/memory_manager.cc
+```cpp 1456:1548:core/store/replica/memory_manager.cc
 absl::Status perform_copy_cpu_to_gpu_streaming(
-    const std::string& model_id,
+    const std::string& artifact_id,
     uint32_t device_id,
     const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
@@ -58,35 +58,35 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     cudaStream_t stream,
     void* dvmp_base,
     const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
-    const std::shared_ptr<ModelMemoryCoordinator>& uma,
-    const stepcast::store::InstanceKey& ikey) {
+    const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
+    const stepcast::store::ReplicaKey& ikey) {
   // DVMP chunk iteration + UMA lock + memcpy + UMA update + best-effort DVMP unlock
 }
 ```
 
 - UMA owns per-chunk mapping and per-device GPU states; also lazily creates GPU memory (overlapping with `MemoryManager`).
 
-```82:116:core/store/model/model_memory_coordinator.h
-absl::Status allocate(const InstanceKey& key, size_t bytes);
-absl::StatusOr<std::shared_ptr<CudaMemory>> get_or_create_gpu_allocation(const InstanceKey& key, int device_id);
-absl::Span<const ChunkMapping> get_chunk_mappings(const InstanceKey& key) const;
-std::vector<uint32_t> get_missing_chunks(const InstanceKey& key, ModelLocation target, std::optional<int> device_id) const;
+```82:116:core/store/replica/replica_memory_coordinator.h
+absl::Status allocate(const ReplicaKey& key, size_t bytes);
+absl::StatusOr<std::shared_ptr<CudaMemory>> get_or_create_gpu_allocation(const ReplicaKey& key, int device_id);
+absl::Span<const ChunkMapping> get_chunk_mappings(const ReplicaKey& key) const;
+std::vector<uint32_t> get_missing_chunks(const ReplicaKey& key, MemoryLocation target, std::optional<int> device_id) const;
 ```
 
 - DVMP provides DRAM VA reservation, chunk metadata, pin leases, lock/unlock APIs.
 
 ```43:76:core/common/memory/distributed_virtual_memory_pool.h
 // Reserve VA, open region, query region info
-virtual absl::StatusOr<VirtualRegion> allocate(std::string_view model_id, size_t bytes, int numa = -1);
-virtual absl::StatusOr<DvmpRegion> open(std::string_view model_id);
-virtual absl::StatusOr<VirtualRegion> region_info(std::string_view model_id) const;
+virtual absl::StatusOr<VirtualRegion> allocate(std::string_view artifact_id, size_t bytes, int numa = -1);
+virtual absl::StatusOr<DvmpRegion> open(std::string_view artifact_id);
+virtual absl::StatusOr<VirtualRegion> region_info(std::string_view artifact_id) const;
 // Snapshot & State
-virtual absl::Span<const stepcast::store::ChunkMeta> chunk_snapshot(std::string_view model_id) const noexcept;
-virtual absl::Status lock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx);
-virtual absl::Status unlock_chunks(std::string_view model_id, absl::Span<const uint32_t> idx, bool copied_gpu);
+virtual absl::Span<const stepcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
+virtual absl::Status lock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx);
+virtual absl::Status unlock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx, bool copied_gpu);
 // IO + pin leases
-virtual absl::Status write_at(std::string_view model_id, uint64_t va_offset, const void* src, size_t bytes);
-virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view model_id, uint64_t voff, uint64_t bytes, std::string_view reason);
+virtual absl::Status write_at(std::string_view artifact_id, uint64_t va_offset, const void* src, size_t bytes);
+virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view artifact_id, uint64_t voff, uint64_t bytes, std::string_view reason);
 ```
 
 - Loader currently orchestrates through `MemoryManager` (ensure staging/state changes/finalize), coupling loader with position-level states.
@@ -97,12 +97,12 @@ virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view model_id,
 - Duplicate GPU allocation ownership (UMA vs `MemoryManager`)
 
 ### Files and Modules Affected
-- `core/store/model/memory_manager.{h,cc}`
-- `core/store/model/model_memory_coordinator.{h,cc}`
+- `core/store/replica/memory_manager.{h,cc}`
+- `core/store/replica/replica_memory_coordinator.{h,cc}`
 - `core/common/memory/distributed_virtual_memory_pool.h`
 - `core/common/memory/streaming_pinned_buffer.h`
 - `core/store/loader/*`
-- `core/store/model/model.h`
+- `core/store/replica/replica.h`
 
 ---
 
@@ -112,7 +112,7 @@ virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view model_id,
 - MemoryManager (façade + orchestration)
   - Keeps location-level (CPU/GPU) states and exposes RFC-aligned APIs (`ensure_unified`, `ensure_allocated`, `ensure_staging_pool`, `copy_async`, `export/unexport_chunks`, `finalize_chunks`, etc.).
   - Delegates chunk-level logic to UMA and CPU VA ownership to DVMP.
-- ModelMemoryCoordinator (UMA)
+- ReplicaMemoryCoordinator (UMA)
   - Becomes the sole owner of lazy VRAM allocation via `get_or_create_gpu_allocation`.
   - Continues to own per-chunk residency, per-device GPU state, missing-chunk computation, and lock/update ordering for CPU→GPU.
 - Transfer helpers (internal)
@@ -127,18 +127,18 @@ virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view model_id,
 ### 3.2 GPU Allocation Ownership
 - UMA is the sole authority for VRAM allocation. Remove all direct `cudaMalloc` call paths and logs from `MemoryManager`.
   - In `MemoryManager::allocate_memory(GPU)`: if UMA is not yet initialized, call `allocate_unified()` first.
-  - Then invoke `uma->get_or_create_gpu_allocation(instance_key_, device_id)` and cache the returned `std::shared_ptr<CudaMemory>` in the internal GPU slot (for example, `gpu_.cuda_mem`). `MemoryManager` only holds this `shared_ptr`; lifetime is owned by UMA to support multi-device reuse and observability.
+  - Then invoke `uma->get_or_create_gpu_allocation(replica_key_, device_id)` and cache the returned `std::shared_ptr<CudaMemory>` in the internal GPU slot (for example, `gpu_.cuda_mem`). `MemoryManager` only holds this `shared_ptr`; lifetime is owned by UMA to support multi-device reuse and observability.
   - Keep `get_pointer(GPU)` behavior unchanged by returning the pointer from UMA’s `CudaMemory`.
-  - Do not fallback to any direct allocation on UMA errors; propagate UMA’s status with model/device context.
+  - Do not fallback to any direct allocation on UMA errors; propagate UMA’s status with artifact/device context.
 
 ### 3.3 GPU→CPU Path Correctness (DVMP + UMA sync)
 - D2H must write back into CPU VA via DVMP I/O, never raw `std::memcpy`:
-  - Use `dvmp->write_at(model_id, va_offset, src, bytes)` to preserve DVMP’s authoritative residency/metadata.
+  - Use `dvmp->write_at(artifact_id, va_offset, src, bytes)` to preserve DVMP’s authoritative residency/metadata.
   - Offsets and sizes are derived from the streaming chunking; DVMP updates residency (at least HOT) and `last_touch_s`.
   - For performance, evaluate adding DVMP batch I/O (e.g., `write_span(ranges)`) to reduce per-chunk metadata and lock traffic.
 - UMA CPU view synchronization becomes explicit and public:
-  - Expose `ModelMemoryCoordinator::sync_cpu_chunk_states(const InstanceKey&)` and a range-based overload:
-    - `sync_cpu_chunk_states(const InstanceKey&, absl::Span<const std::pair<uint32_t,uint32_t>> ranges)`
+  - Expose `ReplicaMemoryCoordinator::sync_cpu_chunk_states(const ReplicaKey&)` and a range-based overload:
+    - `sync_cpu_chunk_states(const ReplicaKey&, absl::Span<const std::pair<uint32_t,uint32_t>> ranges)`
   - `MemoryManager::finalize_load(PAGEABLE_CPU, ranges)` calls the range-based UMA sync to update UMA’s CPU mapping for the touched DVMP chunks. Sync-from-DVMP is range-based using DVMP chunk snapshot/dirty intervals, and performs no long-running DVMP/CUDA work under the `MemoryManager` mutex.
 - Policy B (sync-from-DVMP) is the default to keep UMA’s CPU view derived from DVMP consistently.
 
@@ -152,9 +152,9 @@ virtual absl::StatusOr<ChunkResidencyLease> pin_range(std::string_view model_id,
 ### 3.5 Visual
 ```mermaid
 graph TD;
-  A["Model"] --> B["Loader"];
+  A["Artifact"] --> B["Loader"];
   A --> C["MemoryManager (Façade)"];
-  C --> G["UMA (ModelMemoryCoordinator)"];
+  C --> G["UMA (ReplicaMemoryCoordinator)"];
   C --> H["DVMP (Distributed Virtual Memory Pool)"];
   C --> I["VRAM allocation via UMA (CudaMemory)"];
   C --> J["Export/Unexport (in MemoryManager)"];
@@ -172,16 +172,16 @@ graph TD;
   - `export_chunks(loc, chunks, comm)`, `unexport_chunks(loc, chunks, comm)`
 - UMA (clarified ownership and explicit sync):
   - `get_or_create_gpu_allocation()` is the only path for VRAM allocations
-  - NEW (public): `sync_cpu_chunk_states(const InstanceKey&)` and `sync_cpu_chunk_states(const InstanceKey&, absl::Span<const std::pair<uint32_t,uint32_t>> ranges)`
-- Façade API naming/back-compat: keep façade API names (`allocate_memory`, `ensure_*`) consistent; if any internal API renames occur, we will not maintain deprecated aliases. External `Model` API remains unchanged.
+  - NEW (public): `sync_cpu_chunk_states(const ReplicaKey&)` and `sync_cpu_chunk_states(const ReplicaKey&, absl::Span<const std::pair<uint32_t,uint32_t>> ranges)`
+- Façade API naming/back-compat: keep façade API names (`allocate_memory`, `ensure_*`) consistent; if any internal API renames occur, we will not maintain deprecated aliases. External `Artifact` API remains unchanged.
 
-### 3.7 State Model and Locking
+### 3.7 State Artifact and Locking
 - Location-level states (CPU/GPU) are owned by `MemoryManager` and are coarse-grained: UNALLOCATED → ALLOCATED → LOADING → LOADED/FAILED.
 - Chunk-level states are owned by UMA:
   - CPU→GPU transfer ordering: 1) UMA.lock_chunks_for_transfer → 2) staged copy → 3) UMA.update_chunk_states(GPU=COPIED_GPU) which ensures DVMP.unlock
   - GPU→CPU transfer ordering: 1) staged copy to DVMP via `write_at` → 2) UMA sync-from-DVMP or UMA.update CPU states (policy B preferred)
 - No long-running DVMP/CUDA operations under the `MemoryManager` mutex; capture state under lock, copy outside.
-- Single staging pool per model instance, shared by loaders and internal transfer helpers.
+- Single staging pool per artifact instance, shared by loaders and internal transfer helpers.
 - Finalization for CPU targets is invoked outside the mutex by `finalize_copy_state_` which calls `finalize_load(PAGEABLE_CPU, ranges)`; UMA sync performs no long-running DVMP/CUDA work under `MemoryManager` lock.
 - Transfer helpers codify explicit UMA↔DVMP lock ordering; avoid holding UMA and DVMP locks simultaneously. If ordering is required, acquire UMA before DVMP and release promptly.
 
@@ -205,17 +205,17 @@ graph TD;
 
 | Path | Change | Notes |
 |---|---|---|
-| core/store/model/memory_manager.{h,cc} | ✅ Refactor | UMA-owned VRAM allocation; D2H uses DVMP `write_at`; CPU finalize triggers UMA sync-from-DVMP; remove all direct `cudaMalloc` usages; extracted transfer helpers |
-| core/store/model/model_memory_coordinator.{h,cc} | ✅ Minor | Clarify sole VRAM ownership; EXPOSE CPU sync-from-DVMP as public (`sync_cpu_chunk_states` with optional range-based overload) |
+| core/store/replica/memory_manager.{h,cc} | ✅ Refactor | UMA-owned VRAM allocation; D2H uses DVMP `write_at`; CPU finalize triggers UMA sync-from-DVMP; remove all direct `cudaMalloc` usages; extracted transfer helpers |
+| core/store/replica/replica_memory_coordinator.{h,cc} | ✅ Minor | Clarify sole VRAM ownership; EXPOSE CPU sync-from-DVMP as public (`sync_cpu_chunk_states` with optional range-based overload) |
 | core/common/memory/streaming_pinned_buffer.h/.cc | ✅ Optional | Add `try_get_free_chunk()` (prefer `absl::StatusOr<int>` returning `Unavailable` when none; document non-blocking O(1) semantics) + introspection (`capacity()`, `inflight()`, `production_done()`); keep existing adapter |
 | core/common/memory/distributed_virtual_memory_pool.h | ✅ Minor | Document `write_at` semantics: updates CPU metadata visibility, chunk states to HOT |
 | core/store/loader/* | 🔲 Refactor (later) | Remove direct state orchestration gradually [Deferred] |
-| core/store/model/model.h | ✅ Minor | No public API change; continue delegating through MemoryManager |
-| core/store/model/transfer_helpers.h/.cc | ✅ New | Extract existing helper functions; no new singleton/service |
-| core/store/model/BUILD | ✅ Modified | Added transfer_helpers library and dependency |
+| core/store/replica/replica.h | ✅ Minor | No public API change; continue delegating through MemoryManager |
+| core/store/replica/transfer_helpers.h/.cc | ✅ New | Extract existing helper functions; no new singleton/service |
+| core/store/replica/BUILD | ✅ Modified | Added transfer_helpers library and dependency |
 
 ### API Changes (Internal vs External)
-- External (`Model` public API): preserved.
+- External (`Artifact` public API): preserved.
 - Internal:
   - MemoryManager delegates VRAM allocation to UMA exclusively (no direct `cudaMalloc`).
   - GPU→CPU path writes via DVMP and synchronizes UMA’s CPU view from DVMP on completion via `finalize_load(PAGEABLE_CPU, ranges)`.
@@ -228,21 +228,21 @@ graph TD;
 ## 5. Current Code References (for rationale)
 
 - UMA unified memory entry points in `MemoryManager` today (façade already present)
-```312:335:core/store/model/memory_manager.h
-std::shared_ptr<ModelMemoryCoordinator> get_unified_memory() const;
+```312:335:core/store/replica/memory_manager.h
+std::shared_ptr<ReplicaMemoryCoordinator> get_unified_memory() const;
 absl::Status allocate_unified();
 absl::Status mark_cpu_preemptible(float ratio = 1.0F);
-std::vector<uint32_t> get_missing_chunks(ModelLocation target, std::optional<int> device_id = std::nullopt) const;
+std::vector<uint32_t> get_missing_chunks(MemoryLocation target, std::optional<int> device_id = std::nullopt) const;
 ```
 
 - CPU→GPU locks and UMA updates
-```1456:1548:core/store/model/memory_manager.cc
+```1456:1548:core/store/replica/memory_manager.cc
 // UMA.lock → staged copy → UMA.update(GPU=COPIED_GPU) → best-effort DVMP.unlock on error
 ```
 
 - GPU→CPU currently memcpy to DVMP base (to be replaced with `dvmp->write_at`)
-```1554:1616:core/store/model/memory_manager.cc
-// Replace std::memcpy(dst_host, ...) with dvmp->write_at(model_id, va_off, src, bytes) and then UMA sync-from-DVMP
+```1554:1616:core/store/replica/memory_manager.cc
+// Replace std::memcpy(dst_host, ...) with dvmp->write_at(artifact_id, va_off, src, bytes) and then UMA sync-from-DVMP
 ```
 
 ---
@@ -291,28 +291,28 @@ std::vector<uint32_t> get_missing_chunks(ModelLocation target, std::optional<int
 ### Completed Implementation (Phase 1)
 
 #### 9.1 UMA VRAM Ownership (✅ Complete)
-- **File**: `core/store/model/memory_manager.cc:222-280`
+- **File**: `core/store/replica/memory_manager.cc:222-280`
 - Routed all GPU allocations through UMA's `get_or_create_gpu_allocation`
 - Removed direct `cudaMalloc` calls and logs
 - Added automatic UMA initialization if not already present
 - Cached `std::shared_ptr<CudaMemory>` from UMA in `gpu_.cuda_mem`
 
 #### 9.2 D2H Correctness (✅ Complete)
-- **File**: `core/store/model/memory_manager.cc:1625-1631`
+- **File**: `core/store/replica/memory_manager.cc:1625-1631`
 - Replaced `std::memcpy` with `dvmp->write_at` in `perform_copy_gpu_to_cpu_streaming`
 - Ensures DVMP metadata updates (residency state to HOT, last_touch_s)
 - Added proper error handling for write failures
 
 #### 9.3 UMA CPU Sync Methods (✅ Complete)
 - **Files**:
-  - `core/store/model/model_memory_coordinator.h:253-275`
-  - `core/store/model/model_memory_coordinator.cc:433-464`
+  - `core/store/replica/replica_memory_coordinator.h:253-275`
+  - `core/store/replica/replica_memory_coordinator.cc:433-464`
 - Moved `sync_cpu_chunk_states` from private to public
 - Added range-based overload for efficient partial syncing
 - Both full and range-based variants now available as public APIs
 
 #### 9.4 Finalize Load CPU Sync (✅ Complete)
-- **File**: `core/store/model/memory_manager.cc:1292-1320`
+- **File**: `core/store/replica/memory_manager.cc:1292-1320`
 - Updated `finalize_load` to handle `PAGEABLE_CPU` targets
 - Implements intelligent range coalescing for chunk indices
 - Calls appropriate UMA sync variant (full or range-based)
@@ -340,7 +340,7 @@ std::vector<uint32_t> get_missing_chunks(ModelLocation target, std::optional<int
 
 3. **Range Coalescing**: Implemented intelligent range coalescing in `finalize_load` to minimize UMA sync overhead for consecutive chunks
 
-4. **Backward Compatibility**: External `Model` API remains unchanged; all changes are internal
+4. **Backward Compatibility**: External `Artifact` API remains unchanged; all changes are internal
 
 ### Deviations from Original RFC
 
@@ -350,8 +350,8 @@ None - implementation follows RFC specification exactly.
 
 #### 5.1 Transfer Helper Extraction
 - **Files Created**:
-  - `core/store/model/transfer_helpers.h`: Header with function declarations
-  - `core/store/model/transfer_helpers.cc`: Implementation of transfer helpers
+  - `core/store/replica/transfer_helpers.h`: Header with function declarations
+  - `core/store/replica/transfer_helpers.cc`: Implementation of transfer helpers
 - **Functions Extracted**:
   - `perform_copy_cpu_to_gpu_streaming`: Staged CPU→GPU copy with UMA coordination
   - `perform_copy_gpu_to_cpu_streaming`: Staged GPU→CPU copy with DVMP write_at
@@ -381,7 +381,7 @@ All Phase 1 implementations have been verified to be correctly in place:
    - DVMP metadata properly updated (residency state, timestamps)
 
 3. **UMA CPU Sync Methods** ✅
-   - Lines 253-275 in model_memory_coordinator.h: Both sync methods are public
+   - Lines 253-275 in replica_memory_coordinator.h: Both sync methods are public
    - Full and range-based variants available
 
 4. **Finalize Load CPU Sync** ✅
@@ -410,21 +410,21 @@ This section merges the contents of RFC 0003 ("Decouple Loaders from State Orche
 ### 11.1 Overview
 
 - Problem: `DiskLoader`/`P2PLoader` previously orchestrated memory state and resources via `MemoryManager` (allocation, streaming buffer, LOADING/FAILED/LOADED, finalize). This duplicated orchestration, increased lock coupling, and raised change amplification.
-- Goal: Make `MemoryManager` the single façade for orchestration (allocation, state transitions, sink construction, pump, finalization). Loaders become pure source providers. Preserve existing public `Model` API and transfer helpers.
+- Goal: Make `MemoryManager` the single façade for orchestration (allocation, state transitions, sink construction, pump, finalization). Loaders become pure source providers. Preserve existing public `Artifact` API and transfer helpers.
 
 ### 11.2 Scope
 
 - In-scope:
   - `core/store/loader/*` (interfaces + Disk/P2P loaders + sinks/sources + pump)
-  - `core/store/model/{model, memory_manager}`
+  - `core/store/replica/{artifact, memory_manager}`
 - Out-of-scope:
-  - External `Model` public API changes (none)
+  - External `Artifact` public API changes (none)
   - New runtime engine (none)
 
 ### 11.3 Design Summary
 
 - Loaders provide data sources only:
-  - Added `IModelLoader::open_source()` returning a `loader::SeekableSource` (possibly muxed for fallback).
+  - Added `IArtifactLoader::open_source()` returning a `loader::SeekableSource` (possibly muxed for fallback).
   - Callers use `open_source()` + `MemoryManager::load_async_from_source(...)` directly.
 - MemoryManager owns orchestration for DISK/REMOTE → CPU/GPU:
   - New API `load_async_from_source(...)` that:
@@ -437,7 +437,7 @@ This section merges the contents of RFC 0003 ("Decouple Loaders from State Orche
     - On failure: `finalize_load_state(location, Failed)` and return error
 - `DVMPRegionSink` no longer depends on `MemoryManager` directly:
   - Replaced the `memory_manager` pointer in `Options` with a callback `plan_direct_write_fn` to avoid header/dep coupling and cycles.
-- Model dispatch remains stable:
+- Artifact dispatch remains stable:
   - For `DISK`/`REMOTE` sources, call `loader->open_source()` and pass the source to `MemoryManager::load_async_from_source`.
   - CPU↔GPU copy remains via `memory_manager_->copy_data_async(...)`.
 
@@ -446,11 +446,11 @@ This section merges the contents of RFC 0003 ("Decouple Loaders from State Orche
 - `core/store/loader/loader.h`
 
 ```cpp
-class IModelLoader {
+class IArtifactLoader {
  public:
-  virtual ~IModelLoader() = default;
+  virtual ~IArtifactLoader() = default;
   virtual absl::Status initialize() = 0;
-  virtual absl::StatusOr<uint64_t> get_model_size() = 0;
+  virtual absl::StatusOr<uint64_t> get_artifact_size() = 0;
   // NEW: Provide a data source (may be a muxed source for fallback)
   virtual absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() = 0;
 };
@@ -476,7 +476,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
 };
 ```
 
-- `core/store/model/memory_manager.h`
+- `core/store/replica/memory_manager.h`
 
 ```cpp
 class MemoryManager {
@@ -484,26 +484,26 @@ class MemoryManager {
   // NEW: Orchestrate DISK/REMOTE → CPU/GPU using provided source
   std::future<absl::Status> load_async_from_source(
       std::unique_ptr<loader::SeekableSource> source,
-      ModelLocation target_location,
+      MemoryLocation target_location,
       int concurrency,
       std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   // Helpers (private):
-  absl::StatusOr<std::unique_ptr<loader::PositionedSink>> build_sink_(ModelLocation target);
+  absl::StatusOr<std::unique_ptr<loader::PositionedSink>> build_sink_(MemoryLocation target);
   std::vector<std::pair<uint64_t, size_t>> build_ranges_(
       std::optional<absl::Span<const uint32_t>> chunk_indices, size_t chunk_size) const;
 };
 ```
 
-- `core/store/model/model.cc` (dispatch change)
+- `core/store/replica/replica.cc` (dispatch change)
   - For `DISK`/`REMOTE` sources, call `loader->open_source()` then `memory_manager_->load_async_from_source(...)`.
   - CPU↔GPU copy remains via `memory_manager_->copy_data_async(...)`.
 
 ### 11.5 Orchestration Flow (MemoryManager)
 
 - Under `mutex_`:
-  - Validate model size; if `UNALLOCATED`, allocate memory for target
+  - Validate artifact size; if `UNALLOCATED`, allocate memory for target
   - Set destination state to `LOADING`
   - Ensure streaming buffer capacity; capture required handles
 - Outside lock:
@@ -523,13 +523,13 @@ Locking and error handling:
 
 - Step 1: Break dependency cycles
   - Replaced `DVMPRegionSink::Options.memory_manager` with `plan_direct_write_fn` callback; updated all sink construction sites
-- Step 2: Add `IModelLoader::open_source()`
+- Step 2: Add `IArtifactLoader::open_source()`
   - `DiskLoader::open_source()` → `FilePartitionSource`
   - `P2PLoader::open_source()` → `RemoteKeySource` or `MuxSeekableSource` (fallback)
   - Transitional `load_async()`/`load_chunks_async()` wrappers existed during migration
 - Step 3: Implement `MemoryManager::load_async_from_source(...)`
   - Added helper methods `build_sink_`, `build_ranges_`; proper thread-safety with mutex management; UMA integration
-- Step 4: Switch `Model::ensure_loaded_async`
+- Step 4: Switch `Artifact::ensure_loaded_async`
   - Use `open_source()` + `load_async_from_source(...)` for `DISK`/`REMOTE`
   - Preserve CPU↔GPU copy paths via `copy_data_async()`
 - Step 5: Cleanup
@@ -541,7 +541,7 @@ Locking and error handling:
   - `MemoryManager::load_async_from_source`: DISK→GPU/CPU, REMOTE→GPU/CPU; full and partial `chunk_indices`; error rollback; UMA updates
   - `DVMPRegionSink` direct-write callback invoked; error propagation
 - Integration
-  - `Model::ensure_loaded_async` for `DISK`/`REMOTE` targets; chunk-selective loads; UMA/DVMP metadata correctness
+  - `Artifact::ensure_loaded_async` for `DISK`/`REMOTE` targets; chunk-selective loads; UMA/DVMP metadata correctness
 - Regression
   - `copy_data_async` (CPU↔GPU) unchanged and green; no deadlocks; no long operations under `MemoryManager` lock
 
@@ -563,12 +563,12 @@ Locking and error handling:
 
 - Date: 2025-08-10
 - Status: Complete — Steps 1–5 completed; loaders decoupled and cleanup finished
-- Build: `bazel build //core/store/model:model //core/store/loader:all` — OK
+- Build: `bazel build //core/store/replica:artifact //core/store/loader:all` — OK
 - Unit tests: representative suites for sources, pump, sinks — OK
 - Implementation decisions: thread-safety in async paths; BUILD deps cleaned; chunk state management via UMA
 
 ### 11.11 Compatibility Notes
 
-- External `Model` API unchanged
+- External `Artifact` API unchanged
 - Transfer helpers remain the single place for CPU↔GPU copies
 - UMA remains the authority for VRAM allocation and chunk states

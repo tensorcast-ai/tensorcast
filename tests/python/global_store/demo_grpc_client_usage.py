@@ -21,7 +21,7 @@ from scstore.global_store.webui_backend.grpc_client import (
     GlobalStoreClientConfig,
 )
 from scstore.proto import global_store_pb2, global_store_pb2_grpc
-from tests.python.global_store.test_grpc_client import MockGlobalModelStoreServicer
+from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 
 async def demo_basic_usage():
@@ -30,9 +30,9 @@ async def demo_basic_usage():
 
     # 1. Start test server
     print("1. Starting test gRPC server...")
-    servicer = MockGlobalModelStoreServicer()
+    servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
     print(f"   Server started on port {port}\n")
@@ -59,20 +59,20 @@ async def demo_basic_usage():
         status = "Active" if w.accepting_new_requests else "Inactive"
         print(f"      - {w.worker_id}: {status} (Memory: {w.mem_pool_available_size / 1024**3:.1f}GB)")
 
-    # List model replicas
-    print("\n   b) List model replicas:")
-    replicas_by_model = await client.list_model_replicas()
-    for model_id, replica_list in replicas_by_model.items():
-        print(f"      - {model_id}: {len(replica_list)} replicas")
+    # List artifact replicas
+    print("\n   b) List artifact replicas:")
+    replicas_by_model = await client.list_replicas()
+    for artifact_id, replica_list in replicas_by_model.items():
+        print(f"      - {artifact_id}: {len(replica_list)} replicas")
         for r in replica_list:
             mem_type = ["GPU", "RAM", "DISK"][r.memory_type]
             print(f"        • {mem_type} on {r.node_id}")
 
-    # Get model info
-    print("\n   c) Get model info:")
-    model_replicas = await client.get_model_info("model-1")
-    if model_replicas is not None:
-        print(f"      - model-1: {len(model_replicas)} available replicas")
+    # Get artifact info
+    print("\n   c) Get artifact info:")
+    artifact_replicas = await client.get_artifact_info("artifact-1")
+    if artifact_replicas is not None:
+        print(f"      - artifact-1: {len(artifact_replicas)} available replicas")
 
     # Get summary
     print("\n   d) Get summary statistics:")
@@ -93,9 +93,9 @@ async def demo_error_handling():
     print("=== Error Handling Demo ===\n")
 
     # Start server
-    servicer = MockGlobalModelStoreServicer()
+    servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
 
@@ -135,9 +135,9 @@ async def demo_concurrent_usage():
     print("=== Concurrent Usage Demo ===\n")
 
     # Start server
-    servicer = MockGlobalModelStoreServicer()
+    servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=20))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
 
@@ -155,9 +155,9 @@ async def demo_concurrent_usage():
         if i % 4 == 0:
             tasks.append(client.list_active_workers())
         elif i % 4 == 1:
-            tasks.append(client.list_model_replicas())
+            tasks.append(client.list_replicas())
         elif i % 4 == 2:
-            tasks.append(client.get_model_info("model-1"))
+            tasks.append(client.get_artifact_info("artifact-1"))
         else:
             tasks.append(client.get_summary_stats())
 

@@ -16,7 +16,7 @@ namespace detail {
 
 // Internal payload passed to the CUDA host callback.
 struct CudaTracePayload {
-  std::string model_id;
+  std::string artifact_id;
   std::string request_id;
   TraceManager::SpanId span_id;
   std::function<void()> on_complete;
@@ -28,7 +28,7 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
       stream,
       [](void* user_data) {
         auto* p = static_cast<CudaTracePayload*>(user_data);
-        TraceManager::instance().end_span(p->model_id, p->request_id, p->span_id);
+        TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
         if (p->on_complete) {
           p->on_complete();
         }
@@ -40,7 +40,7 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
       stream,
       [](cudaStream_t /*unused*/, cudaError_t /*status*/, void* user_data) {
         auto* p = static_cast<CudaTracePayload*>(user_data);
-        TraceManager::instance().end_span(p->model_id, p->request_id, p->span_id);
+        TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
         if (p->on_complete) {
           p->on_complete();
         }
@@ -51,7 +51,7 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
 #endif
   if (!status.ok()) {
     // Fallback: end span immediately to avoid leaks and execute on_complete.
-    TraceManager::instance().end_span(payload->model_id, payload->request_id, payload->span_id);
+    TraceManager::instance().end_span(payload->artifact_id, payload->request_id, payload->span_id);
     if (payload->on_complete) {
       payload->on_complete();
     }
@@ -81,20 +81,20 @@ inline absl::Status trace_cuda_async(
     cudaStream_t stream,
     Op&& op,
     Done&& on_complete = Done{}) {
-  const std::string& model_id = TraceManager::current_model_id();
+  const std::string& artifact_id = TraceManager::current_artifact_id();
   const std::string& request_id = TraceManager::current_request_id();
   // Pass the CUDA stream to begin_span for better Chrome Trace visualization
-  auto span_id = TraceManager::instance().begin_span(model_id, request_id, stage, static_cast<void*>(stream));
+  auto span_id = TraceManager::instance().begin_span(artifact_id, request_id, stage, static_cast<void*>(stream));
 
   // Execute the user-supplied CUDA operation.
   absl::Status status = std::forward<Op>(op)();
   if (!status.ok()) {
-    TraceManager::instance().end_span(model_id, request_id, span_id);
+    TraceManager::instance().end_span(artifact_id, request_id, span_id);
     return status;
   }
 
   // Schedule host callback to end the span when the stream finishes work.
-  auto* payload = new detail::CudaTracePayload{model_id, request_id, span_id, std::forward<Done>(on_complete)};
+  auto* payload = new detail::CudaTracePayload{artifact_id, request_id, span_id, std::forward<Done>(on_complete)};
   detail::sc_schedule_trace_host_cb(stream, payload);
 
   return absl::OkStatus();

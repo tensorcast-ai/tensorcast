@@ -61,7 +61,7 @@ TEST_CASE("DiskLoader detects single .safetensors", "[safetensors]") {
   auto st = dl.initialize();
   REQUIRE(st.ok());
 
-  auto size_or = dl.get_model_size();
+  auto size_or = dl.get_artifact_size();
   REQUIRE(size_or.ok());
   REQUIRE(*size_or == 64);
 
@@ -93,7 +93,7 @@ TEST_CASE("DiskLoader detects multiple .safetensors", "[safetensors]") {
 
   DiskLoader dl(DiskSource{.path = dir, .expected_size = std::nullopt});
   REQUIRE(dl.initialize().ok());
-  auto size_or = dl.get_model_size();
+  auto size_or = dl.get_artifact_size();
   REQUIRE(size_or.ok());
   REQUIRE(*size_or == 48);
 

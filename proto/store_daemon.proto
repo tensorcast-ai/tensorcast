@@ -3,9 +3,9 @@ syntax = "proto3";
 package store_daemon;
 
 service StoreDaemon {
-  rpc LoadModel(LoadModelRequest) returns (LoadModelResponse) {}
-  rpc ConfirmModel(ConfirmModelRequest) returns (ConfirmModelResponse) {}
-  rpc UnloadModel(UnloadModelRequest) returns (UnloadModelResponse) {}
+  rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
+  rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
+  rpc UnloadReplica(UnloadReplicaRequest) returns (UnloadReplicaResponse) {}
 
   rpc ClearMem(ClearMemRequest) returns (ClearMemResponse) {}
 
@@ -15,33 +15,33 @@ service StoreDaemon {
   rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse) {}
 
   // ------------------------------------------------------------------
-  // Asynchronous model integrity verification support.  Each LoadModel
+  // Asynchronous artifact integrity verification support.  Each MaterializeReplica
   // request triggers a background verification task on the daemon side.
   // Clients can poll/wait for the outcome via this RPC.
   // ------------------------------------------------------------------
 
-  // Wait until the daemon finishes verifying the specified model replica
-  // (identified by the <model_identifier, replica_uuid> tuple) or the
+  // Wait until the daemon finishes verifying the specified artifact replica
+  // (identified by the <artifact_id, replica_uuid> tuple) or the
   // provided timeout elapses.  The call returns the current verification
   // status so that clients can decide whether to retry or abort.
-  rpc WaitModelVerification(VerificationRequest) returns (VerificationResponse) {}
+  rpc WaitReplicaVerification(ReplicaVerificationRequest) returns (ReplicaVerificationResponse) {}
 
-  // 获取详细状态信息
+  // 获取详细状态信息（以 Artifact/Replica 术语为准）
   rpc GetDetailedStatus(GetDetailedStatusRequest) returns (GetDetailedStatusResponse) {}
 
-  // Get reference information for all loaded models
-  rpc GetLoadedModels(GetLoadedModelsRequest) returns (GetLoadedModelsResponse) {}
+  // Get reference information for all loaded replicas
+  rpc GetLoadedReplicas(GetLoadedReplicasRequest) returns (GetLoadedReplicasResponse) {}
 
   // ========== Distributed chunk locking ==========
   // Dual-end locking mechanism for P2P transfers
   rpc LockTransportChunks(LockChunksRequest) returns (LockChunksResponse) {}
   rpc UnlockTransportChunks(UnlockChunksRequest) returns (UnlockChunksResponse) {}
 
-  // ========== Memory TensorDict Registration ==========
-  // Register in-memory tensor dict as memory replica without disk I/O
-  rpc BeginRegisterTensorDict(BeginRegisterTensorDictRequest) returns (BeginRegisterTensorDictResponse) {}
-  rpc CommitRegisteredTensorDict(CommitRegisteredTensorDictRequest) returns (CommitRegisteredTensorDictResponse) {}
-  rpc AbortRegisteredTensorDict(AbortRegisteredTensorDictRequest) returns (AbortRegisteredTensorDictResponse) {}
+  // ========== Memory Artifact Registration ==========
+  // New canonical RPC names
+  rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
+  rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
+  rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -51,13 +51,13 @@ message GetServerConfigResponse {
   int64 chunk_size = 2;
 }
 
-message RegisterModelRequest {
-  string model_path = 1;
+message RegisterRequest {
+  string disk_path = 1;
 }
 
-message RegisterModelResponse {
-  string model_path = 1;
-  int64 model_size = 2;
+message RegisterResponse {
+  string disk_path = 1;
+  int64 artifact_size = 2;
 }
 
 enum DeviceType {
@@ -70,14 +70,13 @@ message MemCopyHandle {
   bytes cuda_ipc_handle = 1;
 }
 
-message LoadModelRequest {
-  // RFC-0007: Use content-addressed model_id when available.
-  // Exactly one of model_id or disk_path (or legacy model_path) should be provided.
-  optional string model_id = 9;    // Content-addressed ID (mi2:...)
+message MaterializeReplicaRequest {
+  // RFC-0007: Use content-addressed artifact_id when available.
+  // Exactly one of artifact_id or disk_path (or legacy disk_path) should be provided.
+  optional string artifact_id = 9;    // Content-addressed ID (mi2:...)
   optional string disk_path = 10;  // On-disk path for legacy/disk loads
 
-  // Legacy field (deprecated): treated as disk_path when model_id is absent.
-  string model_path = 1;
+  // Note: legacy field disk_path = 1 removed in favor of unified disk_path = 10
 
   string replica_uuid = 2;
   string device_uuid = 3;
@@ -85,48 +84,48 @@ message LoadModelRequest {
   int32 pinned_allocation_timeout_ms = 5;
   int32 pid = 6;  // Process ID for reference tracking
   bool keep_for_global = 7;  // Keep in cache for global access
-  int64 size_bytes = 8;  // Model size in bytes (for reference tracking)
+  int64 size_bytes = 8;  // Artifact size in bytes (for reference tracking)
 }
 
-// LoadModel now returns immediately after memory allocation succeeds.
+// MaterializeReplica now returns immediately after memory allocation succeeds.
 // The actual data loading continues in the background.
-enum LoadModelStatus {
-  LOAD_MODEL_STATUS_ALLOCATED = 0;  // Memory allocated, loading in progress
-  LOAD_MODEL_STATUS_FAILED = 1;     // Allocation or initial setup failed
+enum MaterializeReplicaStatus {
+  MATERIALIZE_REPLICA_STATUS_ALLOCATED = 0;  // Memory allocated, loading in progress
+  MATERIALIZE_REPLICA_STATUS_FAILED = 1;     // Allocation or initial setup failed
 }
 
-message LoadModelResponse {
-  string model_path = 1;
+message MaterializeReplicaResponse {
+  string disk_path = 1;
 
   optional MemCopyHandle mem_handle = 2;
 
   // Status of the load operation. ALLOCATED means memory is ready
   // but data transfer is still in progress. Client must call
-  // ConfirmModel to verify completion before using the model.
-  LoadModelStatus status = 3;
+  // ConfirmReplica to verify completion before using the artifact.
+  MaterializeReplicaStatus status = 3;
 }
 
-message ConfirmModelRequest {
-  string model_path = 1;
+message ConfirmReplicaRequest {
+  string disk_path = 1;
   string replica_uuid = 2;
   DeviceType target_device_type = 3;
 }
 
-message ConfirmModelResponse {
-  string model_path = 1;
+message ConfirmReplicaResponse {
+  string disk_path = 1;
   int32 code = 2;
 }
 
-message UnloadModelRequest {
-  string model_path = 1;
+message UnloadReplicaRequest {
+  string disk_path = 1;
   string replica_uuid = 2;
   DeviceType target_device_type = 3;
   optional int32 pid = 4;  // Process ID for reference tracking
-  optional string version = 5;  // Model version
+  optional string version = 5;  // Artifact version
 }
 
-message UnloadModelResponse {
-  string model_path = 1;
+message UnloadReplicaResponse {
+  string disk_path = 1;
   int32 code = 2;
 }
 
@@ -158,33 +157,33 @@ enum VerificationStatus {
   VERIFICATION_STATUS_FAILED = 3;
 }
 
-message VerificationRequest {
-  string model_identifier = 1;
+message ReplicaVerificationRequest {
+  string artifact_id = 1;
   string replica_uuid = 2;
   uint32 timeout_ms = 3;
 }
 
-message VerificationResponse {
+message ReplicaVerificationResponse {
   VerificationStatus status = 1;
   string err_msg = 2;
 }
 
 // ========== 详细状态查询相关定义 ==========
 
-// 模型位置枚举
-enum ModelLocation {
-  MODEL_LOCATION_NONE = 0;
-  MODEL_LOCATION_DISK = 1;
-  MODEL_LOCATION_CPU = 2;
-  MODEL_LOCATION_GPU = 3;
-  MODEL_LOCATION_REMOTE = 4;
+// 驻留位置枚举（保持枚举值兼容）
+enum MemoryLocation {
+  MEMORY_LOCATION_NONE = 0;
+  MEMORY_LOCATION_DISK = 1;
+  MEMORY_LOCATION_PAGEABLE_CPU = 2;
+  MEMORY_LOCATION_GPU = 3;
+  MEMORY_LOCATION_REMOTE = 4;
 }
 
-// 模型信息
-message ModelInfo {
-  string model_identifier = 1;             // 模型标识符
-  int64 model_size_bytes = 2;              // 模型大小（字节）
-  ModelLocation location = 3;              // 当前位置（CPU/GPU）
+// Replica 信息（单台机器视角）
+message ReplicaInfo {
+  string artifact_id = 1;             // Artifact 标识符
+  int64 artifact_size_bytes = 2;              // Artifact 大小（字节）
+  MemoryLocation location = 3;              // 当前位置（CPU/GPU）
   int64 loaded_timestamp = 4;              // 加载时间戳
   int64 last_access_timestamp = 5;         // 最后访问时间戳
   repeated string replica_uuids = 6;       // 关联的副本UUIDs
@@ -198,7 +197,7 @@ message GpuDeviceInfo {
   int64 total_memory_bytes = 3;            // 总显存（字节）
   int64 free_memory_bytes = 4;             // 可用显存（字节）
   int64 used_memory_bytes = 5;             // 已使用显存（字节）
-  repeated ModelInfo loaded_models = 6;     // 该GPU上加载的模型列表
+  repeated ReplicaInfo loaded_replicas = 6;     // 该 GPU 上的 Replica 列表
 }
 
 // 内存池信息
@@ -221,7 +220,7 @@ message CommunicationInfo {
 // 详细状态请求
 message GetDetailedStatusRequest {}
 
-// 详细状态响应
+// 详细状态响应（Artifact/Replica 统一命名）
 message GetDetailedStatusResponse {
   // 基础状态信息（与GetWorkerStatusResponse相同的字段）
   bool is_registered = 1;
@@ -233,49 +232,49 @@ message GetDetailedStatusResponse {
   // 内存池详细信息
   MemoryPoolInfo memory_pool_info = 6;
 
-  // GPU设备列表及其上的模型
+  // GPU 设备列表及其上的 Replica
   repeated GpuDeviceInfo gpu_devices = 7;
 
-  // CPU内存中的模型列表
-  repeated ModelInfo cpu_models = 8;
+  // CPU 内存中的 Replica 列表
+  repeated ReplicaInfo cpu_replicas = 8;
 
   // RDMA/通信信息
   CommunicationInfo communication_info = 9;
 
   // 聚合统计信息
-  int32 total_models_loaded = 10;           // 总加载模型数
-  int64 total_model_size_bytes = 11;        // 所有模型总大小
+  int32 total_replicas_loaded = 10;           // 已加载 Replica 数
+  int64 total_artifact_size_bytes = 11;        // 所有 Artifact 总大小
 
   // 配置信息
   string storage_path = 12;                 // 存储路径
   int32 num_worker_threads = 13;            // 工作线程数
 }
 
-// ========== 模型引用信息查询 ==========
+// ========== Replica 引用信息查询 ==========
 
-// 单个模型的引用信息
-message LoadedModelInfo {
-  string model_id = 1;                      // 模型ID
+// 单个 Artifact 的引用信息
+message LoadedReplicaInfo {
+  string artifact_id = 1;                      // Artifact ID
   string version = 2;                       // 模型版本
   int32 device_id = 3;                      // 设备ID (-1 表示CPU)
   int32 ref_count = 4;                      // 引用计数
   repeated int32 pids = 5;                  // 持有引用的进程ID列表
-  int64 size_bytes = 6;                     // 模型大小（字节）
+  int64 size_bytes = 6;                     // Artifact 大小（字节）
   bool keep_for_global = 7;                 // 是否保留为全局缓存
   int64 last_access_timestamp = 8;          // 最后访问时间戳
 }
 
-// 获取已加载模型请求
-message GetLoadedModelsRequest {
+// 获取已加载 Replica 请求
+message GetLoadedReplicasRequest {
   // 可选过滤条件
-  optional string model_id_filter = 1;      // 按模型ID过滤
+  optional string artifact_id_filter = 1;      // 按 Artifact ID 过滤
   optional int32 device_id_filter = 2;      // 按设备ID过滤
 }
 
-// 获取已加载模型响应
-message GetLoadedModelsResponse {
-  repeated LoadedModelInfo models = 1;      // 已加载模型列表
-  int32 total_models = 2;                   // 总模型数
+// 获取已加载 Replica 响应
+message GetLoadedReplicasResponse {
+  repeated LoadedReplicaInfo replicas = 1;      // 已加载 Replica 列表
+  int32 total_replicas = 2;                   // 总 Replica 数
   int64 total_size_bytes = 3;               // 总大小（字节）
 }
 
@@ -283,7 +282,7 @@ message GetLoadedModelsResponse {
 
 // Lock chunks request
 message LockChunksRequest {
-  string model_id = 1;                     // Model ID
+  string artifact_id = 1;                     // Artifact ID
   repeated uint32 chunk_indices = 2;       // List of chunk indices to lock
 }
 
@@ -302,11 +301,11 @@ message UnlockChunksResponse {
   // Empty response, returns empty message on success
 }
 
-// ========== Memory TensorDict Registration Messages ==========
+// ========== Memory Artifact Registration Messages ==========
 
 // Begin registration request
-message BeginRegisterTensorDictRequest {
-  string model_id = 1;                     // Model identifier
+message BeginRegisterArtifactRequest {
+  string artifact_id = 1;                     // Artifact identifier
   int32 device_id = 2;                     // Target GPU device ID
   uint64 total_size = 3;                   // Total size in bytes (8-byte aligned)
   bool enable_p2p = 4;                     // Enable P2P transfer
@@ -327,7 +326,7 @@ message TensorIndexData {
 }
 
 // Begin registration response
-message BeginRegisterTensorDictResponse {
+message BeginRegisterArtifactResponse {
   string registration_id = 1;              // Registration ID for commit/abort
   bytes daemon_ipc_handle = 2;             // CUDA IPC handle for target memory
   int32 device_id = 3;                     // Confirmed device ID
@@ -335,13 +334,13 @@ message BeginRegisterTensorDictResponse {
 }
 
 // Commit registration request
-message CommitRegisteredTensorDictRequest {
+message CommitRegisteredArtifactRequest {
   string registration_id = 1;              // Registration ID from Begin
 }
 
-// Model descriptor conveying content-addressed identity and related metadata
-message ModelDescriptor {
-  string model_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
+// Artifact descriptor conveying content-addressed identity and related metadata
+message ArtifactDescriptor {
+  string artifact_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
   string index_multihash = 2;    // Multibase over multihash (sha2-256), base32
   string data_multihash = 3;     // Multibase over multihash (sha2-256 root), base32
   string schema_version = 4;     // e.g., "v2"
@@ -350,20 +349,20 @@ message ModelDescriptor {
 }
 
 // Commit registration response
-message CommitRegisteredTensorDictResponse {
+message CommitRegisteredArtifactResponse {
   string registration_id = 1;              // Confirmed registration ID
-  string model_id = 2;                     // Model ID
+  string artifact_id = 2;                     // Artifact ID
   int32 device_id = 3;                     // Device ID
   uint64 size = 4;                         // Total size
-  ModelDescriptor descriptor = 5;          // Content-addressed descriptor (RFC-0007)
+  ArtifactDescriptor descriptor = 5;          // Content-addressed descriptor (RFC-0007)
 }
 
 // Abort registration request
-message AbortRegisteredTensorDictRequest {
+message AbortRegisteredArtifactRequest {
   string registration_id = 1;              // Registration ID to abort
 }
 
 // Abort registration response
-message AbortRegisteredTensorDictResponse {
+message AbortRegisteredArtifactResponse {
   bool ok = 1;                             // Success status
 }

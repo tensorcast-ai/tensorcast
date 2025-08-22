@@ -25,7 +25,7 @@ class CommunicationManager; // forward declaration
  * to customise.
  */
 struct StoreEngineOptions {
-  // Path were model sub-directories are stored.  Empty string means fully
+  // Path were replica sub-directories are stored.  Empty string means fully
   // qualified paths will be provided to the loading API.
   std::string storage_path;
 
@@ -55,20 +55,20 @@ struct StoreEngineOptions {
   // manager instead of creating its own internal instance.
   std::shared_ptr<stepcast::store::CommunicationManager> comm_manager{nullptr};
 
-  // Maximum number of concurrent model transfers that can use the shared
+  // Maximum number of concurrent replica transfers that can use the shared
   // streaming pinned buffer pool. Each transfer receives an isolated buffer
   // instance (lease). Defaults to 1 (fully serialized).
   int streaming_buffer_max_concurrent_sessions{1};
 
   // Chunk size for Distributed Virtual Memory Pool (DVMP) allocations.
-  // This controls the granularity of memory allocations for model chunks.
+  // This controls the granularity of memory allocations for replica chunks.
   // Default: 256 MiB for optimal GPU transfer performance.
   size_t dvmp_chunk_size{256ULL << 20}; // 256 MiB
 
   // RFC-0007: Enable strong verification (FULL_DIGEST) by default on load.
   // When true, the loader will compute the data_multihash from the loaded
   // GPU buffer to strongly validate content-addressed identity without the
-  // caller needing to set LoadingHints::verify = FULL_DIGEST.
+  // caller needing to set MaterializeHints::verify = FULL_DIGEST.
   bool force_full_digest_on_load{false};
 };
 

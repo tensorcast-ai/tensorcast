@@ -2,15 +2,15 @@
 
 """Global Store services."""
 
+from .artifact_service import ArtifactService
 from .chunk_service import ChunkService
-from .model_service import ModelService
 from .recovery_service import RecoveryService
 from .transport_service import TransportService
 from .worker_service import WorkerService
 
 __all__ = [
     "ChunkService",
-    "ModelService",
+    "ArtifactService",
     "TransportService",
     "WorkerService",
     "RecoveryService",

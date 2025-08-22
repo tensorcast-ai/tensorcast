@@ -15,11 +15,11 @@ class VllmModelDownloader:
 
     def download_vllm_model(
         self,
-        model_name: str,
+        artifact_name: str,
         torch_dtype: str,
         tensor_parallel_size: int = 1,
         storage_path: str = "./models",
-        local_model_path: Optional[str] = None,
+        local_path: Optional[str] = None,
     ):
         import gc
         from tempfile import TemporaryDirectory
@@ -28,16 +28,16 @@ class VllmModelDownloader:
         from huggingface_hub import snapshot_download
         from vllm import LLM
 
-        # set the model storage path
+        # set the artifact storage path
         storage_path = os.getenv("STORAGE_PATH", storage_path)
         target_save_path = os.path.join(
-            storage_path, f"{model_name}-tp-{tensor_parallel_size}"
+            storage_path, f"{artifact_name}-tp-{tensor_parallel_size}"
         )
 
-        def _run_writer(input_dir, model_name):
+        def _run_writer(input_dir, artifact_name):
             # load models from the input directory
             llm_writer = LLM(
-                model=input_dir,
+                artifact=input_dir,
                 download_dir=input_dir,
                 dtype=torch_dtype,
                 tensor_parallel_size=tensor_parallel_size,
@@ -69,11 +69,11 @@ class VllmModelDownloader:
 
         try:
             with TemporaryDirectory() as cache_dir:
-                input_dir = local_model_path
+                input_dir = local_path
                 # download from huggingface
-                if local_model_path is None:
+                if local_path is None:
                     input_dir = snapshot_download(
-                        model_name,
+                        artifact_name,
                         cache_dir=cache_dir,
                         allow_patterns=[
                             "*.safetensors",
@@ -82,34 +82,36 @@ class VllmModelDownloader:
                             "*.txt",
                         ],
                     )
-                _run_writer(input_dir, model_name)
+                _run_writer(input_dir, artifact_name)
         except Exception as e:
-            print(f"An error occurred while saving the model: {e}")
+            print(f"An error occurred while saving the artifact: {e}")
             # remove the output dir
             shutil.rmtree(target_save_path)
             raise RuntimeError(
-                f"Failed to save {model_name} for vllm backend: {e}"
+                f"Failed to save {artifact_name} for vllm backend: {e}"
             ) from e
 
 
-parser = argparse.ArgumentParser(description="Save a model from HuggingFace model hub.")
-parser.add_argument(
-    "--model-name",
-    type=str,
-    required=True,
-    help="Model name from HuggingFace model hub.",
+parser = argparse.ArgumentParser(
+    description="Save a artifact from HuggingFace artifact hub."
 )
 parser.add_argument(
-    "--local-model-path",
+    "--artifact-name",
+    type=str,
+    required=True,
+    help="Artifact name from HuggingFace artifact hub.",
+)
+parser.add_argument(
+    "--local-artifact-path",
     type=str,
     required=False,
-    help="Local path to the model snapshot.",
+    help="Local path to the artifact snapshot.",
 )
 parser.add_argument(
     "--storage-path",
     type=str,
     default="./models",
-    help="Local path to save the model.",
+    help="Local path to save the artifact.",
 )
 parser.add_argument(
     "--tensor-parallel-size",
@@ -120,16 +122,16 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-model_name = args.model_name
-local_model_path = args.local_model_path
+artifact_name = args.artifact_name
+local_path = args.local_path
 storage_path = args.storage_path
 tensor_parallel_size = args.tensor_parallel_size
 
 downloader = VllmModelDownloader()
 downloader.download_vllm_model(
-    model_name,
+    artifact_name,
     "auto",
     tensor_parallel_size=tensor_parallel_size,
     storage_path=storage_path,
-    local_model_path=local_model_path,
+    local_path=local_path,
 )

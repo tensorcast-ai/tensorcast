@@ -7,7 +7,7 @@
 #include <string>
 #include "absl/hash/hash.h"
 #include "core/common/device_types.h"
-#include "core/store/model/model_location.h"
+#include "core/common/memory/memory_location.h"
 
 namespace stepcast::store {
 
@@ -54,18 +54,18 @@ struct DeviceKeyHash {
  * @brief Location - Triple describing the medium and device where data resides
  */
 struct Location {
-  ModelLocation type = ModelLocation::NONE;
+  MemoryLocation type = MemoryLocation::NONE;
   int32_t device_id = -1;
   std::string device_uuid;
 
   // Convert to DeviceKey for unified device handling
   [[nodiscard]] DeviceKey to_device_key() const {
     DeviceKey key;
-    if (type == ModelLocation::GPU) {
+    if (type == MemoryLocation::GPU) {
       key.type = ::stepcast::DeviceType::GPU;
       key.ordinal = device_id;
       key.uuid = device_uuid;
-    } else if (type == ModelLocation::PAGEABLE_CPU || type == ModelLocation::DISK) {
+    } else if (type == MemoryLocation::PAGEABLE_CPU || type == MemoryLocation::DISK) {
       key.type = ::stepcast::DeviceType::CPU;
       key.ordinal = -1;
     }

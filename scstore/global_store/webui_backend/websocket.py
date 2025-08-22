@@ -206,7 +206,7 @@ class WebSocketManager:
                 self._last_state["workers"] = current_workers
 
                 # Poll replicas (simplified - in production you'd track more changes)
-                all_replicas = await self.grpc_client.list_model_replicas()
+                all_replicas = await self.grpc_client.list_replicas()
 
                 # For now, just count total replicas
                 total_replicas = sum(
@@ -217,7 +217,7 @@ class WebSocketManager:
                         "replica_update",
                         {
                             "total_replicas": total_replicas,
-                            "models": len(all_replicas),
+                            "artifacts": len(all_replicas),
                         },
                     )
                     self._last_state["total_replicas"] = total_replicas

@@ -7,16 +7,16 @@
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
-#include "core/common/model_hash.h"
 
 namespace stepcast::store::loader {
 
 namespace {
 
-using stepcast::store::model_hash::compute_tree_hash_root_sha256;
-using stepcast::store::model_hash::multibase_multihash_sha256;
-using stepcast::store::model_hash::sha256_digest_bytes;
+using stepcast::store::artifact_hash::compute_tree_hash_root_sha256;
+using stepcast::store::artifact_hash::multibase_multihash_sha256;
+using stepcast::store::artifact_hash::sha256_digest_bytes;
 
 class CpuMemorySourceLocal : public SeekableSource {
  public:

@@ -9,7 +9,7 @@ The refactored design separates concerns into focused components:
 ```
 StoreEngine (Main API)
     ├── DeviceManager       - GPU device discovery and management
-    ├── ModelRegistry       - Thread-safe model storage and lifecycle
+    ├── ReplicaRegistry       - Thread-safe replica storage and lifecycle
     ├── MetricsCollector    - Centralized metrics collection
     ├── CommunicationManager - P2P/RDMA communication handling
     └── PinnedMemoryPool    - Memory allocation (existing component)
@@ -23,15 +23,15 @@ StoreEngine (Main API)
 - Manages CUDA streams per device
 - Tracks GPU memory usage
 
-### ModelRegistry (`model_registry.h/cc`)
-- Thread-safe storage of loaded models
-- Tracks model access times for LRU eviction
-- Provides model queries by location and state
-- Manages model lifecycle
+### ReplicaRegistry (`replica_registry.h/cc`)
+- Thread-safe storage of loaded replicas
+- Tracks replica access times for LRU eviction
+- Provides replica queries by location and state
+- Manages replica lifecycle
 
 ### MetricsCollector (`metrics_collector.h/cc`)
 - Centralizes all metric collection logic
-- Updates memory pool, model, and GPU metrics
+- Updates memory pool, replica, and GPU metrics
 - Records operation latencies and counters
 - Tracks P2P transfers and memory evictions
 

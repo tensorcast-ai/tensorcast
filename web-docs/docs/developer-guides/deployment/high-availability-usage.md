@@ -8,7 +8,7 @@ sidebar_position: 3
 
 ## Overview
 
-The model storage system now includes comprehensive high availability features that ensure system resilience and eventual consistency in the face of failures. This guide explains how to configure and use these features.
+The artifact storage system now includes comprehensive high availability features that ensure system resilience and eventual consistency in the face of failures. This guide explains how to configure and use these features.
 
 ## Features
 
@@ -62,10 +62,10 @@ high_availability:
 ### Starting Global Store with HA
 
 ```python
-from scstore.global_store.grpc_service import GlobalModelStoreServicer
+from scstore.global_store.grpc_service import GlobalStoreServicer
 
 # Start with persistent database for recovery
-global_store = GlobalModelStoreServicer(db_file="/path/to/persistent.db")
+global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 
 # Recovery is automatically initiated on startup
 ```
@@ -149,7 +149,7 @@ local_state = global_store_pb2.WorkerLocalState(
     worker_id="worker_node-1_1640995200",
     state_version=15,
     state_checksum="local_state_checksum",
-    local_replicas=[...],  # List of local model replicas
+    local_replicas=[...],  # List of local artifact replicas
     last_update_timestamp=int(time.time())
 )
 
@@ -182,14 +182,14 @@ for change in response.state_changes:
 ### Store Daemon Crash/Restart
 
 1. **Clean Registration**: Store Daemon registers as new worker (clears previous state)
-2. **Model Rediscovery**: Local storage is scanned for available models
-3. **State Rebuild**: Model replicas are re-registered with Global Store
+2. **Artifact Rediscovery**: Local storage is scanned for available artifacts
+3. **State Rebuild**: Artifact replicas are re-registered with Global Store
 
 ### Network Partition
 
 1. **Connection Monitoring**: Store Daemon detects Global Store unavailability
-2. **Local Operation**: Continues serving cached models locally
-3. **State Queueing**: Model registrations are queued for later sync
+2. **Local Operation**: Continues serving cached artifacts locally
+3. **State Queueing**: Artifact registrations are queued for later sync
 4. **Automatic Reconnection**: Exponential backoff retry until reconnection
 5. **State Synchronization**: Queued changes are synced after reconnection
 
@@ -227,7 +227,7 @@ curl http://store-daemon:8080/status
 
 # Check Global Store via gRPC
 grpcurl -plaintext global-store:50051 \
-  global_store.GlobalModelStore/ListActiveWorkers
+  global_store.GlobalStore/ListActiveWorkers
 ```
 
 ## Best Practices

@@ -14,9 +14,9 @@ from scstore.global_store.metrics import (
     inc_transport_request,
     observe_transport_wait,
 )
-from scstore.global_store.models import ModelReplica, Transport
+from scstore.global_store.models import Replica, Transport
 from scstore.global_store.repositories import (
-    ModelReplicaRepository,
+    ReplicaRepository,
     TransportRepository,
 )
 from scstore.logger import init_logger
@@ -29,7 +29,7 @@ class TransportService:
 
     def __init__(
         self,
-        replica_repository: ModelReplicaRepository,
+        replica_repository: ReplicaRepository,
         transport_repository: TransportRepository,
     ):
         """Initialize service with repositories."""
@@ -39,17 +39,17 @@ class TransportService:
 
     def request_transport(
         self,
-        model_id: str,
+        artifact_id: str,
         source_node_id: str,
         source_address: str,
         source_port: int,
         wait_timeout_ms: int = 0,
-    ) -> Tuple[ModelReplica, UUID]:
+    ) -> Tuple[Replica, UUID]:
         """
-        Request a model transport with load balancing.
+        Request a artifact transport with load balancing.
 
         Args:
-            model_id: Content-addressed model id (mi2:...)
+            artifact_id: Content-addressed artifact id (mi2:...)
             source_node_id: Source node ID
             source_address: Source node address
             source_port: Source node port
@@ -68,7 +68,7 @@ class TransportService:
             try:
                 # Try to find and claim an available replica
                 replica = self.replica_repository.find_available_for_transport(
-                    model_id=model_id,
+                    artifact_id=artifact_id,
                     heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 )
 
@@ -76,7 +76,7 @@ class TransportService:
                     # Create transport record
                     transport = Transport(
                         replica_id=replica.replica_id,
-                        model_id=model_id,
+                        artifact_id=artifact_id,
                         source_node_id=source_node_id,
                         source_address=source_address,
                         source_port=source_port,
@@ -85,13 +85,13 @@ class TransportService:
                     self.transport_repository.create(transport)
 
                     # Metrics
-                    inc_transport_request(model_id, "success")
+                    inc_transport_request(artifact_id, "success")
                     wait_sec = time.time() - start_time
-                    observe_transport_wait(model_id, wait_sec)
+                    observe_transport_wait(artifact_id, wait_sec)
                     inc_active_transports()
 
                     logger.info(
-                        f"Transport requested for {model_id}, "
+                        f"Transport requested for {artifact_id}, "
                         f"replica: {replica.replica_id}, "
                         f"transport: {transport.transport_id}, "
                         f"load: {replica.current_requests}/{replica.max_concurrency}"
@@ -105,11 +105,11 @@ class TransportService:
 
             # Check timeout
             if time.time() >= end_time:
-                inc_transport_request(model_id, "timeout")
+                inc_transport_request(artifact_id, "timeout")
                 wait_sec = time.time() - start_time
-                observe_transport_wait(model_id, wait_sec)
+                observe_transport_wait(artifact_id, wait_sec)
                 raise TimeoutError(
-                    f"No available replica for model {model_id} within timeout"
+                    f"No available replica for artifact {artifact_id} within timeout"
                 )
 
             # Wait before retry
@@ -148,7 +148,7 @@ class TransportService:
         dec_active_transports()
 
         logger.info(
-            f"Completed transport {transport_id} for {transport.model_id}, "
+            f"Completed transport {transport_id} for {transport.artifact_id}, "
             f"replica: {transport.replica_id}, "
             f"new load: {current}/{max_conc}"
         )
@@ -159,7 +159,7 @@ class TransportService:
         """Release transports that have been in *in_progress* state for too long.
 
         This serves as a safety-net for StoreDaemon crashes or network
-        partitions that prevent the normal *CompleteModelReplicaTransport*
+        partitions that prevent the normal *CompleteReplicaTransport*
         call from reaching the Global-Store.  By periodically invoking this
         method, leaked *current_requests* counters on the source replicas are
         automatically decremented, avoiding long-term load-balancing issues.

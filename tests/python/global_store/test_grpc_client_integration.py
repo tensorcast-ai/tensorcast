@@ -22,7 +22,7 @@ from scstore.global_store.webui_backend.grpc_client import (
     GlobalStoreClientConfig,
 )
 from scstore.proto import global_store_pb2, global_store_pb2_grpc
-from tests.python.global_store.test_grpc_client import MockGlobalModelStoreServicer
+from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 console = Console()
 
@@ -48,9 +48,9 @@ async def run_integration_test():
 
     # Start test server
     console.print("[yellow]Starting test gRPC server...[/yellow]")
-    servicer = MockGlobalModelStoreServicer()
+    servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port("[::]:0")
     server.start()
     console.print(f"[green]✓ Server started on port {port}[/green]\n")
@@ -93,9 +93,9 @@ async def run_integration_test():
 
         console.print(table)
 
-        # Test 3: List Model Replicas
-        print_header("Test 3: List Model Replicas")
-        all_replicas = await client.list_model_replicas()
+        # Test 3: List Artifact Replicas
+        print_header("Test 3: List Artifact Replicas")
+        all_replicas = await client.list_replicas()
         print_test(
             "List all replicas",
             len(all_replicas) == 2,
@@ -103,8 +103,8 @@ async def run_integration_test():
         )
 
         # Display replicas
-        for model_id, replicas in all_replicas.items():
-            console.print(f"\n[bold]Model: {model_id}[/bold]")
+        for artifact_id, replicas in all_replicas.items():
+            console.print(f"\n[bold]Artifact: {artifact_id}[/bold]")
             for i, r in enumerate(replicas):
                 mem_type = ["GPU", "RAM", "DISK"][r.memory_type]
                 size_gb = r.memory_size / 1024**3
@@ -115,16 +115,16 @@ async def run_integration_test():
         # Test 4: Filtered Queries
         print_header("Test 4: Filtered Queries")
 
-        # Filter by model id
-        model1_replicas = await client.list_model_replicas(model_id="model-1")
+        # Filter by artifact id
+        model1_replicas = await client.list_replicas(artifact_id="artifact-1")
         print_test(
-            "Filter by model id",
-            "model-1" in model1_replicas,
-            f"Found {len(model1_replicas.get('model-1', []))} replicas for model-1",
+            "Filter by artifact id",
+            "artifact-1" in model1_replicas,
+            f"Found {len(model1_replicas.get('artifact-1', []))} replicas for artifact-1",
         )
 
         # Filter by node
-        node1_replicas = await client.list_model_replicas(node_id="node-1")
+        node1_replicas = await client.list_replicas(node_id="node-1")
         node1_count = sum(
             1
             for replicas in node1_replicas.values()
@@ -136,7 +136,7 @@ async def run_integration_test():
         )
 
         # Filter by memory type
-        gpu_replicas = await client.list_model_replicas(
+        gpu_replicas = await client.list_replicas(
             memory_type=global_store_pb2.MemoryType.GPU
         )
         gpu_count = sum(
@@ -149,21 +149,21 @@ async def run_integration_test():
             "Filter by memory type", gpu_count > 0, f"Found {gpu_count} GPU replicas"
         )
 
-        # Test 5: Model Info
-        print_header("Test 5: Get Model Info")
+        # Test 5: Artifact Info
+        print_header("Test 5: Get Artifact Info")
 
-        # Existing model
-        model_info = await client.get_model_info("model-1")
+        # Existing artifact
+        artifact_info = await client.get_artifact_info("artifact-1")
         print_test(
-            "Get existing model",
-            model_info is not None,
-            f"model-1 has {len(model_info.available_replicas) if model_info else 0} replicas",
+            "Get existing artifact",
+            artifact_info is not None,
+            f"artifact-1 has {len(artifact_info.available_replicas) if artifact_info else 0} replicas",
         )
 
-        # Non-existing model
-        model_info = await client.get_model_info("model-nonexistent")
+        # Non-existing artifact
+        artifact_info = await client.get_artifact_info("artifact-nonexistent")
         print_test(
-            "Get non-existing model", model_info is None, "Correctly returned None"
+            "Get non-existing artifact", artifact_info is None, "Correctly returned None"
         )
 
         # Test 6: Summary Statistics
@@ -177,7 +177,7 @@ async def run_integration_test():
   Active: {stats["active_workers"]}
 
 [bold]Models:[/bold]
-  Total: {stats["total_models"]}
+  Total: {stats["total_artifacts"]}
 
 [bold]Replicas:[/bold]
   Total: {stats["total_replicas"]}
@@ -222,9 +222,9 @@ async def run_integration_test():
         # Run multiple requests concurrently
         tasks = [
             client.list_active_workers(),
-            client.list_model_replicas(),
-            client.get_model_info("model-1"),
-            client.get_model_info("model-2"),
+            client.list_replicas(),
+            client.get_artifact_info("artifact-1"),
+            client.get_artifact_info("artifact-2"),
             client.get_summary_stats(),
         ]
 

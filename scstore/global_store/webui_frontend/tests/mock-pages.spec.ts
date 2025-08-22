@@ -23,7 +23,7 @@ test.describe('Mock Data Display Tests', () => {
     await page.waitForLoadState('networkidle');
 
     // Check page title
-    await expect(page.locator('h1')).toContainText('Model Transports');
+    await expect(page.locator('h1')).toContainText('Artifact Transports');
 
     // Check statistics cards are displayed
     await expect(page.locator('.ant-statistic-title:has-text("In Progress")')).toBeVisible();
@@ -158,7 +158,7 @@ test.describe('Mock Data Display Tests', () => {
     // Navigate to Transports
     await page.locator('.ant-menu-item:has-text("Transports")').click();
     await expect(page).toHaveURL('http://localhost:5173/transports');
-    await expect(page.locator('h1')).toContainText('Model Transports');
+    await expect(page.locator('h1')).toContainText('Artifact Transports');
 
     // Navigate to Nodes
     await page.locator('.ant-menu-item:has-text("Nodes")').click();

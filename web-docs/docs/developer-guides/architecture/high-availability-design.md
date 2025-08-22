@@ -8,7 +8,7 @@ sidebar_position: 4
 
 ## Overview
 
-This document outlines the high availability design for the distributed model storage system, ensuring the system can recover from various failure scenarios while maintaining eventual consistency.
+This document outlines the high availability design for the distributed artifact storage system, ensuring the system can recover from various failure scenarios while maintaining eventual consistency.
 
 ## Goals
 
@@ -16,13 +16,13 @@ This document outlines the high availability design for the distributed model st
 2. **Store Daemon Resilience**: Handle disconnections and maintain service continuity
 3. **Eventual Consistency**: Guarantee system convergence to consistent state after failures
 4. **Minimal Downtime**: Reduce service interruption during failures
-5. **Data Integrity**: Preserve model registry data across failures
+5. **Data Integrity**: Preserve artifact registry data across failures
 
 ## Architecture Components
 
 ### Current State
 - **Global Store**: Centralized coordinator using DuckDB for persistence
-- **Store Daemon**: Distributed workers with local model storage
+- **Store Daemon**: Distributed workers with local artifact storage
 - **Communication**: gRPC with heartbeat mechanism
 - **Persistence**: DuckDB file-based storage in Global Store
 
@@ -44,7 +44,7 @@ This document outlines the high availability design for the distributed model st
 1. **Database Recovery**: Load state from persistent DuckDB file
 2. **Worker Re-discovery**: Accept worker re-registration
 3. **State Synchronization**: Reconcile worker states with database
-4. **Model Registry Rebuild**: Validate and update model replica information
+4. **Artifact Registry Rebuild**: Validate and update artifact replica information
 
 #### Implementation:
 ```python
@@ -99,7 +99,7 @@ class GlobalStoreConnectionManager:
 **Strategy**:
 1. **State Cleanup**: Clear all previous registrations
 2. **Fresh Registration**: Re-register as new worker
-3. **Model Re-discovery**: Scan local storage and re-register models
+3. **Artifact Re-discovery**: Scan local storage and re-register models
 4. **Gradual Service Restoration**: Progressively restore service capacity
 
 #### Implementation:
@@ -108,7 +108,7 @@ class StoreDaemonRecoveryService:
     def cleanup_previous_state(self) -> None:
         """Clean up any previous worker registrations."""
 
-    def rediscover_local_models(self) -> List[ModelInfo]:
+    def rediscover_local_models(self) -> List[ReplicaInfo]:
         """Scan local storage for available models."""
 
     def gradual_service_restoration(self) -> None:
@@ -149,7 +149,7 @@ message EnhancedWorkerHeartbeatResponse {
   // Enhanced fields for HA
   bool state_sync_required = 2;       // Trigger state synchronization
   uint64 expected_state_version = 3;  // Expected state version
-  repeated string obsolete_models = 4; // Models that should be unregistered
+  repeated string obsolete_replicas = 4; // Models that should be unregistered
 }
 
 enum ConnectionStatus {
@@ -171,7 +171,7 @@ enum ConnectionStatus {
 
 ## State Synchronization Protocol
 
-### Consistency Model: Eventual Consistency
+### Consistency Artifact: Eventual Consistency
 
 **Guarantees**:
 1. All nodes will eventually converge to the same state
@@ -191,7 +191,7 @@ When reconciling state **the Store Daemon is always considered the source of tru
 
 Key rules:
 
-1. **Full inventory required** – The daemon **MUST** send the *complete* list of currently resident replicas in `local_replicas` for every state-sync (incremental *or* full).  Relying solely on the `registered_models` string list (checksum optimisation) is insufficient because it does not convey device-level metadata needed to create missing `ModelReplicaInfo` rows on the Global Store side.
+1. **Full inventory required** – The daemon **MUST** send the *complete* list of currently resident replicas in `local_replicas` for every state-sync (incremental *or* full).  Relying solely on the `registered_models` string list (checksum optimisation) is insufficient because it does not convey device-level metadata needed to create missing `ReplicaInfo` rows on the Global Store side.
 2. **Addition over removal** – When the Global Store receives a state sync it first computes
 
    ```text
@@ -206,7 +206,7 @@ Key rules:
 
 This change eliminates the class of bugs where a worker’s valid, locally cached replica is erroneously removed after a Global Store restart (because `local_replicas` was empty and the store inferred `REMOVE_REPLICA`).  Implementation notes:
 
-* `GlobalStoreConnectionManager._perform_state_sync()` must populate `WorkerLocalState.local_replicas` with every `ModelReplicaInfo` it currently serves.
+* `GlobalStoreConnectionManager._perform_state_sync()` must populate `WorkerLocalState.local_replicas` with every `ReplicaInfo` it currently serves.
 * `RecoveryService._compute_state_changes()` is updated to honour rule 2 (prefer addition over removal when inventory is absent).
 
 > **Operational impact** – Replica counts on the Global Store can briefly oscillate upwards until the first full sync completes, but this is safe because the duplicate entries resolve to the same `replica_id`.
@@ -305,7 +305,7 @@ Note: Full HA support in Store Daemon is **now fully integrated**. Enhanced hear
 4. **Split Brain**: Test conflict resolution during recovery
 
 ### Load Testing
-1. **Recovery under Load**: Test recovery with active model requests
+1. **Recovery under Load**: Test recovery with active artifact requests
 2. **Concurrent Failures**: Multiple Store Daemon failures
 3. **State Synchronization Performance**: Large-scale state sync operations
 
@@ -319,7 +319,7 @@ Note: Full HA support in Store Daemon is **now fully integrated**. Enhanced hear
 - State synchronization framework
 - Startup recovery process
 - Enhanced heartbeat state checksum validation
-- **Obsolete model detection (Global Store)**
+- **Obsolete artifact detection (Global Store)**
 - **Store Daemon Connection Manager with retry back-off**
 - **Enhanced heartbeat client in Store Daemon**
 - **Production hardening & operational dashboards**

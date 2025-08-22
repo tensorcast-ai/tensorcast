@@ -2,8 +2,8 @@
 # Entrypoint script for the StepCast Store image.
 #
 # Usage examples:
-#   docker run model-store store-daemon --config /path/to/config.yaml
-#   docker run model-store global-store --port 50051
+#   docker run stepcast-store store-daemon --config /path/to/config.yaml
+#   docker run stepcast-store global-store --port 50051
 #
 # The first positional argument selects which service to start.
 # * store-daemon  -> scstore.cli start

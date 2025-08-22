@@ -85,7 +85,3 @@ def init_logger(name: str) -> logging.Logger:
         setup_logging(level=log_level)
 
     return logging.getLogger(name)
-
-
-# Backward compatibility aliases
-configure_logging = setup_logging  # For easy migration

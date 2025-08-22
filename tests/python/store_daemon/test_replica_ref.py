@@ -13,21 +13,21 @@ class TestReplicaKey:
 
     def test_replica_key_creation(self):
         """Test creating a replica key."""
-        key = ReplicaKey(model_id="model1", device_id=0)
-        assert key.model_id == "model1"
+        key = ReplicaKey(artifact_id="model1", device_id=0)
+        assert key.artifact_id == "model1"
         assert key.device_id == 0
 
     def test_replica_key_immutable(self):
         """Test that replica key is immutable."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         with pytest.raises(AttributeError):
-            key.model_id = "model2"  # pyright: ignore[reportAttributeAccessIssue]
+            key.artifact_id = "model2"  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_replica_key_equality(self):
         """Test replica key equality."""
-        key1 = ReplicaKey(model_id="model1", device_id=0)
-        key2 = ReplicaKey(model_id="model1", device_id=0)
-        key3 = ReplicaKey(model_id="model2", device_id=0)
+        key1 = ReplicaKey(artifact_id="model1", device_id=0)
+        key2 = ReplicaKey(artifact_id="model1", device_id=0)
+        key3 = ReplicaKey(artifact_id="model2", device_id=0)
 
         assert key1 == key2
         assert key1 != key3
@@ -36,7 +36,7 @@ class TestReplicaKey:
 
     def test_replica_key_str(self):
         """Test string representation."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         assert str(key) == "model1@device_0"
 
 
@@ -45,7 +45,7 @@ class TestReplicaRefInfo:
 
     def test_replica_ref_info_creation(self):
         """Test creating replica reference info."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024, keep_for_global=True)
 
         assert info.key == key
@@ -57,7 +57,7 @@ class TestReplicaRefInfo:
 
     def test_add_pid(self):
         """Test adding PID references."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         # Add first PID
@@ -76,7 +76,7 @@ class TestReplicaRefInfo:
 
     def test_remove_pid(self):
         """Test removing PID references."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         # Add PIDs
@@ -101,7 +101,7 @@ class TestReplicaRefInfo:
 
     def test_ref_count_never_negative(self):
         """Test that ref count never goes negative."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         # Remove PID when no PIDs exist
@@ -110,7 +110,7 @@ class TestReplicaRefInfo:
 
     def test_is_evictable(self):
         """Test evictable status."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         # No references - evictable
@@ -126,7 +126,7 @@ class TestReplicaRefInfo:
 
     def test_touch_updates_timestamp(self):
         """Test that touch updates last access timestamp."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         initial_ts = info.last_access_ts
@@ -137,7 +137,7 @@ class TestReplicaRefInfo:
 
     def test_add_pid_updates_timestamp(self):
         """Test that adding PID updates timestamp."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024)
 
         initial_ts = info.last_access_ts
@@ -148,7 +148,7 @@ class TestReplicaRefInfo:
 
     def test_str_representation(self):
         """Test string representation."""
-        key = ReplicaKey(model_id="model1", device_id=0)
+        key = ReplicaKey(artifact_id="model1", device_id=0)
         info = ReplicaRefInfo(key=key, size_bytes=1024, keep_for_global=True)
         info.add_pid(1234)
         info.add_pid(5678)

@@ -12,7 +12,7 @@
 
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/p2p_loader.h"
-#include "core/store/model/memory_manager.h"
+#include "core/store/replica/memory_manager.h"
 #include "core/testing/test_helpers.h"
 
 using namespace stepcast::communicator;
@@ -27,20 +27,20 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", 50061).ok());
 
-    const std::size_t model_size = 16 * 1024 * 1024; // 16MB
+    const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
     void* source_gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, model_size).ok());
+    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, artifact_size).ok());
 
     // Fill with test data
-    auto test_data = create_test_pattern(model_size, 123);
-    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice).ok());
+    auto test_data = create_test_pattern(artifact_size, 123);
+    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
     REQUIRE(source_engine
                 ->register_tensor(
-                    "model_weights",
+                    "artifact_key",
                     reinterpret_cast<uint64_t>(source_gpu_ptr),
-                    model_size,
+                    artifact_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
                     0,
                     false)
@@ -52,12 +52,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Create P2PLoader with GPU source configuration (updated API)
     P2PSource source_config;
-    source_config.size_bytes = model_size;
+    source_config.size_bytes = artifact_size;
     source_config.ip = "127.0.0.1";
     source_config.port = 50061;
-    source_config.memory_keys = {"model_weights"};
-    source_config.buf_sizes = {model_size};
-    source_config.location.type = ModelLocation::GPU;
+    source_config.memory_keys = {"artifact_key"};
+    source_config.buf_sizes = {artifact_size};
+    source_config.location.type = MemoryLocation::GPU;
     source_config.location.device_id = 0;
     source_config.comm_engine = target_engine; // Local communicator used to pull remote tensor
 
@@ -70,33 +70,33 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
-        "test_model", // model_identifier
+        "test_artifact", // artifact_identifier
         0, // local_device_id (GPU device 0)
         pinned_pool, // pinned_pool (needed for streaming buffer)
         dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
-        model_size);
+        artifact_size);
 
     // Load asynchronously
     auto src_or = loader->open_source();
     REQUIRE(src_or.ok());
-    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), ModelLocation::GPU, 1);
+    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
     auto load_status = load_future.get();
     CAPTURE(load_status.message());
     REQUIRE(load_status.ok());
 
     // Verify data
-    auto gpu_ptrs = mem_manager->get_pointer(ModelLocation::GPU);
+    auto gpu_ptrs = mem_manager->get_pointer(MemoryLocation::GPU);
     REQUIRE(gpu_ptrs.size() == 1);
     REQUIRE(gpu_ptrs[0] != nullptr);
 
-    std::vector<uint8_t> verify_data(model_size);
-    REQUIRE(stepcast::cuda::memcpy(verify_data.data(), gpu_ptrs[0], model_size, cudaMemcpyDeviceToHost).ok());
-    REQUIRE(verify_pattern(verify_data.data(), model_size, 123));
+    std::vector<uint8_t> verify_data(artifact_size);
+    REQUIRE(stepcast::cuda::memcpy(verify_data.data(), gpu_ptrs[0], artifact_size, cudaMemcpyDeviceToHost).ok());
+    REQUIRE(verify_pattern(verify_data.data(), artifact_size, 123));
 
     // Cleanup
-    REQUIRE(mem_manager->release_memory(ModelLocation::GPU).ok());
+    REQUIRE(mem_manager->release_memory(MemoryLocation::GPU).ok());
     REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
   }
 
@@ -114,21 +114,22 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
-    const std::size_t model_size = 8 * 1024 * 1024; // 8MB
+    const std::size_t artifact_size = 8 * 1024 * 1024; // 8MB
     void* source_gpu_ptr;
-    auto malloc_status = stepcast::cuda::malloc(&source_gpu_ptr, model_size);
-    CAPTURE(model_size, malloc_status.message());
+    auto malloc_status = stepcast::cuda::malloc(&source_gpu_ptr, artifact_size);
+    CAPTURE(artifact_size, malloc_status.message());
     REQUIRE(malloc_status.ok());
 
-    auto test_data = create_test_pattern(model_size, 99);
-    auto memcpy_status = stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), model_size, cudaMemcpyHostToDevice);
+    auto test_data = create_test_pattern(artifact_size, 99);
+    auto memcpy_status =
+        stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice);
     CAPTURE(memcpy_status.message());
     REQUIRE(memcpy_status.ok());
 
     auto register_status = source_engine->register_tensor(
-        "model_weights_cpu",
+        "artifact_key",
         reinterpret_cast<uint64_t>(source_gpu_ptr),
-        model_size,
+        artifact_size,
         COMMUNICATE_ENGINE_DEV_GPU,
         0,
         false);
@@ -141,12 +142,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_init_status.ok());
 
     P2PSource source_config;
-    source_config.size_bytes = model_size;
+    source_config.size_bytes = artifact_size;
     source_config.ip = "127.0.0.1";
     source_config.port = source_port;
-    source_config.memory_keys = {"model_weights_cpu"};
-    source_config.buf_sizes = {model_size};
-    source_config.location.type = ModelLocation::GPU; // Remote data on GPU
+    source_config.memory_keys = {"artifact_key"};
+    source_config.buf_sizes = {artifact_size};
+    source_config.location.type = MemoryLocation::GPU; // Remote data on GPU
     source_config.location.device_id = 0;
     source_config.comm_engine = target_engine;
 
@@ -161,33 +162,33 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
     auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
-        "test_model", // model_identifier
+        "test_artifact", // artifact_identifier
         -1, // local_device_id (-1 for CPU)
         pinned_pool, // pinned_pool
         dvmp, // distributed virtual memory pool
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
-        model_size);
+        artifact_size);
 
     // Allocate CPU memory before loading
-    REQUIRE(mem_manager->allocate_memory(ModelLocation::PAGEABLE_CPU).ok());
+    REQUIRE(mem_manager->allocate_memory(MemoryLocation::PAGEABLE_CPU).ok());
 
     auto src_or = loader->open_source();
     REQUIRE(src_or.ok());
-    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), ModelLocation::PAGEABLE_CPU, 1);
+    auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::PAGEABLE_CPU, 1);
     auto load_status = load_future.get();
     CAPTURE(load_status.message());
     // Remote GPU -> Local CPU is now supported; expect success.
     REQUIRE(load_status.ok());
 
     // Verify data in PAGEABLE_CPU UMA region
-    auto cpu_ptrs = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
+    auto cpu_ptrs = mem_manager->get_pointer(MemoryLocation::PAGEABLE_CPU);
     REQUIRE(cpu_ptrs.size() == 1);
     REQUIRE(cpu_ptrs[0] != nullptr);
-    REQUIRE(std::memcmp(cpu_ptrs[0], test_data.data(), model_size) == 0);
+    REQUIRE(std::memcmp(cpu_ptrs[0], test_data.data(), artifact_size) == 0);
 
     // Release allocated CPU memory and GPU source
-    REQUIRE(mem_manager->release_memory(ModelLocation::PAGEABLE_CPU).ok());
+    REQUIRE(mem_manager->release_memory(MemoryLocation::PAGEABLE_CPU).ok());
     REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
   }
 }

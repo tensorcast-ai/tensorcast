@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-StepCast Store is a high-performance, distributed model storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
-- **One Global Store**: Centralized coordinator and model registry
+StepCast Store is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
+- **One Global Store**: Centralized coordinator and artifact registry
 - **Many Store Daemons**: Distributed worker nodes across the cluster
 - **C++ Core**: High-performance checkpoint, storage, and P2P communication layer
-- **User Process Worker**: Loads and uses the model in the final application context
+- **User Process Worker**: Loads and uses the artifact in the final application context
 
 ## Development Environment Setup
 
@@ -102,14 +102,14 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 - **C++ Core** (`/core/`): High-performance checkpoint, store, and communicator modules with CUDA/P2P support
 - **Python Services** (`/scstore/`): gRPC-based global store and daemon services with PyTorch integration. **All gRPC service and client implementations are in Python**.
 - **Protocol Buffers** (`/proto/`): Service definitions for distributed communication
-- **User Process Worker**: Responsible for final model loading and utilization
+- **User Process Worker**: Responsible for final artifact loading and utilization
 
 ### Key Directories
 - `/core/checkpoint/`: Streaming tensor serialization with GPU-to-disk optimization
-- `/core/store/`: Model lifecycle management and memory optimization. **The Store Engine used by ModelLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `scstore/csrc/store_engine_py.cc`**.
+- `/core/store/`: Artifact lifecycle management and memory optimization. **The Store Engine used by ArtifactLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `scstore/csrc/store_engine_py.cc`**.
 - `/core/communicator/`: RDMA/TCP communication engines
 - `/scstore/global_store/`: Centralized metadata registry with DuckDB backend
-- `/scstore/store_daemon/`: Local model storage service
+- `/scstore/store_daemon/`: Local artifact storage service
 - `/tests/`: Comprehensive C++ and Python test suites
 
 ### Build Systems
@@ -123,7 +123,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
                           │  Global Store   │
                           │   (Master)      │
                           │                 │
-                          │ - Model Registry│
+                          │ - Artifact Registry│
                           │ - Load Balancer │
                           │ - P2P Coord.    │
                           └────────┬────────┘
@@ -134,7 +134,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
     │   Store Daemon #1     │          │    Store Daemon #N      │
     │     (Worker)          │   ...    │      (Worker)           │
     │                       │          │                         │
-    │ - Local Model Storage │          │ - Local Model Storage   │
+    │ - Local Artifact Storage │          │ - Local Artifact Storage   │
     │ - CPU/GPU Memory      │          │ - CPU/GPU Memory        │
     │ - P2P Server          │          │ - P2P Server            │
     └───────────┬───────────┘          └──────────────┬──────────┘
@@ -142,10 +142,10 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
     ┌───────────▼───────────┐          ┌──────────────▼──────────┐
     │  User Process Worker  │          │  User Process Worker    │
     │                       │          │                         │
-    │ - Model Inference     │          │ - Model Inference       │
+    │ - Artifact Inference     │          │ - Artifact Inference       │
     │ - Training Workloads  │          │ - Training Workloads    │
     │ - PyTorch Integration │          │ - PyTorch Integration   │
-    │ - Model Access via    │          │ - Model Access via      │
+    │ - Artifact Access via    │          │ - Artifact Access via      │
     │   torch_util.py       │          │   torch_util.py         │
     └───────────────────────┘          └─────────────────────────┘
           Node 1                              Node N
@@ -154,44 +154,44 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 ### System Layer Responsibilities
 
 #### Global Store (Control Plane)
-- Centralized model registry and metadata management
+- Centralized artifact registry and metadata management
 - Load balancing across available replicas
 - P2P transport coordination between nodes
 - Worker health monitoring and failover
 
 #### Store Daemon (Storage Layer)
-- Local model storage and memory management
+- Local artifact storage and memory management
 - CPU/GPU memory pool allocation
 - P2P server for peer-to-peer transfers (RDMA or TCP)
-- Model loading from disk or remote nodes
+- Artifact loading from disk or remote nodes
 - Registration of local replicas with Global Store
 
 #### User Process Worker (Application Layer)
-- **Primary Interface**: Uses `scstore.torch_util.py` for model operations
-- **Model Loading**: Calls `load_dict()` to load models from Store Daemon
-- **Model Usage**: Runs inference, training, and other ML workloads
-- **PyTorch Integration**: Direct tensor operations and model manipulation
+- **Primary Interface**: Uses `scstore.torch_util.py` for artifact operations
+- **Artifact Loading**: Calls `load_dict()` to load models from Store Daemon
+- **Artifact Usage**: Runs inference, training, and other ML workloads
+- **PyTorch Integration**: Direct tensor operations and artifact manipulation
 - **Memory Access**: Accesses models in Store Daemon's memory pools
-- **Lifecycle Management**: Triggers model confirmation and cleanup via Store Daemon
+- **Lifecycle Management**: Triggers artifact confirmation and cleanup via Store Daemon
 
-### Model Loading Workflows
+### Artifact Loading Workflows
 
 #### P2P-Enabled Loading (Preferred)
 ```
 Store Daemon                        Global Store
      |                                   |
-     |-------- GetModelInfo- ----------->|
+     |-------- GetArtifactInfoById ----->|
      |<------- Available Replicas -------|
      |                                   |
-     |-- RequestModelReplicaTransport -->|
+     |-- RequestReplicaTransport ------->|
      |<------ Transport Info & ID -------|
      |                                   |
      |   (Load via RDMA/TCP from peer)   |
      |                                   |
-     |-- CompleteModelReplicaTransport ->|
+     |-- CompleteReplicaTransport ------>|
      |<------ Confirmation --------------|
      |                                   |
-     |-- RegisterModelReplica ---------->|
+     |-- RegisterReplica --------------->|
      |<-------- Replica ID --------------|
 ```
 
@@ -201,7 +201,7 @@ Store Daemon                    Global Store
      |                               |
      |   (Load from local disk)      |
      |                               |
-     |-- RegisterModelReplica ------>|
+     |-- RegisterReplica ---------->|
      |<------ Replica ID ------------|
 ```
 
