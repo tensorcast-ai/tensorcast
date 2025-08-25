@@ -9,10 +9,10 @@ actions:
         branches:
           - "*"
     steps:
+      - run: apt-get update && apt-get install -y git libxml2
       - run: |
           CUDA_HOME=/usr/local/cuda \
           bazel test //core/... \
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
             --define use_fake_cuda=true \
-            --config=remote \
-            --host_platform=//:docker_image_platform
+            --config=remote

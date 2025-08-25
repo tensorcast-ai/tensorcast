@@ -70,6 +70,7 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 http_archive(
     name = "cudnn",
     build_file = "@//third_party/cudnn/archive:BUILD",
+    integrity = "sha256-c0caGFZWIys4NpMpRDGILtsUWE7kf0HAq9gVVrku8qw=",
     urls = [
         "https://files.pythonhosted.org/packages/py3/n/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.12.0.46-py3-none-manylinux_2_27_x86_64.whl",
     ],
@@ -78,6 +79,7 @@ http_archive(
 http_archive(
     name = "nccl",
     build_file = "@//third_party/nccl:BUILD",
+    integrity = "sha256-hXkHbTCowkmIg0RF+NYzxpfUI5fpL/w/Y/omdm0l4KA=",
     urls = [
         "https://files.pythonhosted.org/packages/py3/n/nvidia-nccl-cu12/nvidia_nccl_cu12-2.21.5-py3-none-manylinux2014_x86_64.whl",
     ],
@@ -86,6 +88,7 @@ http_archive(
 http_archive(
     name = "libtorch",
     build_file = "@//third_party/libtorch:BUILD",
+    integrity = "sha256-aGDfE9mRGsFY9MRAMWCXAOHroHkW//YuIeb/oKngGWE=",
     urls = [
         "https://files.pythonhosted.org/packages/37/81/aa9ab58ec10264c1abe62c8b73f5086c3c558885d6beecebf699f0dbeaeb/torch-2.6.0-cp310-cp310-manylinux1_x86_64.whl",
     ],
@@ -110,6 +113,7 @@ http_archive(
 http_archive(
     name = "cublas",
     build_file = "@//third_party/cublas:BUILD",
+    integrity = "sha256-L8jaYN9GP976geMj7vLjZInhyUM1tTWLyzg2Ct91rJs=",
     urls = [
         "https://files.pythonhosted.org/packages/ae/71/1c91302526c45ab494c23f61c7a84aa568b8c1f9d196efa5993957faf906/nvidia_cublas_cu12-12.4.5.8-py3-none-manylinux2014_x86_64.whl",
     ],
