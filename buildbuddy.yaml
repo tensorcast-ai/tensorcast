@@ -9,5 +9,4 @@ actions:
         branches:
           - "*"
     steps:
-      - run: sudo apt-get update && sudo apt-get install -y git libxml2
-      - run: bazel test //core/... --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) --config=remote
+      - run: CUDA_HOME=/usr/local/cuda bazel test //core/... --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) --config=remote
