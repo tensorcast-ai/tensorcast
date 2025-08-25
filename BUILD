@@ -1,17 +1,13 @@
-# Temporarily commented out for CI build
-# load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
-
-# refresh_compile_commands(
-#     name = "refresh_compile_commands",
-
-#     # Specify the targets of interest.
-#     # For example, specify a dict of targets and any flags required to build.
-#     targets = {
-#         "//core:libscstore.so": "",
-#     },
-#     # No need to add flags already in .bazelrc. They're automatically picked up.
-#     # If you don't need flags, a list of targets is also okay, as is a single target string.
-#     # Wildcard patterns, like //... for everything, *are* allowed here, just like a build.
-#     # As are additional targets (+) and subtractions (-), like in bazel query https://docs.bazel.build/versions/main/query.html#expressions
-#     # And if you're working on a header-only library, specify a test or binary target that compiles it.
-# )
+platform(
+    name = "docker_image_platform",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+        # "@bazel_tools//tools/cpp:clang",
+    ],
+    exec_properties = {
+        "OSFamily": "Linux",
+        "container-image": "docker://yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04",
+        "dockerNetwork": "off",
+    },
+)

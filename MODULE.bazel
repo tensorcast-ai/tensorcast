@@ -11,7 +11,7 @@ use_repo(llvm, "llvm_toolchain")
 
 register_toolchains("@llvm_toolchain//:all")
 
-bazel_dep(name = "rules_cc", version = "0.1.4")
+bazel_dep(name = "rules_cc", version = "0.2.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.1")
 bazel_dep(name = "abseil-cpp", version = "20250127.1")
 bazel_dep(name = "catch2", version = "3.8.1")

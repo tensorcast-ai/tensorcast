@@ -202,15 +202,47 @@ else:
     __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
 
 
-BAZEL_EXE = os.path.join(dir_path, "tools", "bazel.sh")
-
-if not os.path.exists(BAZEL_EXE):
-    BAZEL_EXE = which("bazelisk") or which("bazel")
-    if BAZEL_EXE is None and BUILD_EXTENSION:
-        sys.exit("Could not find bazel wrapper or bazel in PATH")
+# Resolve bazel from PATH; do not use repo-local tools/bazel wrapper
+BAZEL_EXE = which("bazelisk") or which("bazel")
+if BAZEL_EXE is None:
+    if BUILD_EXTENSION or BUILD_CORE:
+        sys.exit("Could not find 'bazelisk' or 'bazel' in PATH")
+    else:
+        BAZEL_EXE = None
 
 
 # New: ensure proto headers are generated before compiling extensions
+
+
+def ensure_external_symlink() -> None:
+    """Ensure repo-root 'external' symlink points to Bazel output_base/external.
+
+    This mirrors the instruction in README to run:
+      ln -s $(bazel info output_base)/external external
+    """
+    try:
+        root_dir: Path = get_root_dir()
+        link_path: Path = root_dir / "external"
+
+        # Only act if link/dir doesn't exist
+        if link_path.exists():
+            return
+
+        if BAZEL_EXE is None:
+            return
+
+        output_base = (
+            subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
+        )
+        target_path = Path(output_base) / "external"
+
+        os.symlink(str(target_path), str(link_path))
+        print(f"Created symlink: {link_path} -> {target_path}")
+    except Exception as e:
+        # Non-fatal: print guidance and continue
+        print(f"Warning: Failed to create 'external' symlink automatically: {e}")
+        print("You can create it manually with:")
+        print("  ln -s $(bazel info output_base)/external external")
 
 
 def build_libscstore_cxx11_abi(
@@ -254,6 +286,8 @@ def build_libscstore_cxx11_abi(
 
     if status_code != 0:
         sys.exit(status_code)
+    # After a successful core build, ensure 'external' symlink exists
+    ensure_external_symlink()
 
 
 def gen_version_file():

@@ -75,7 +75,7 @@ class TestLifecycleIntegration:
 
         # 1. Load artifact with PID
         load_request = store_daemon_pb2.MaterializeReplicaRequest(
-            disk_path="model1",
+            disk_path="artifact0",
             replica_uuid="uuid1",
             device_uuid="gpu0",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -92,7 +92,7 @@ class TestLifecycleIntegration:
 
         # 2. Confirm artifact
         confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
-            disk_path="model1",
+            disk_path="artifact0",
             replica_uuid="uuid1",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
@@ -115,7 +115,7 @@ class TestLifecycleIntegration:
         assert replicas[0]["ref_count"] == 0
 
         # 6. Artifact should now be evictable
-        info = servicer.replica_manager.get_replica_info("model1", 0)
+        info = servicer.replica_manager.get_replica_info("artifact0", 0)
         assert info is not None
         assert info.is_evictable()
 
