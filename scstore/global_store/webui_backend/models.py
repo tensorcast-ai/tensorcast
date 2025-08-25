@@ -37,7 +37,7 @@ class WorkerStatus(str, Enum):
 
 # API Response Models
 class WorkerOut(BaseModel):
-    """Worker information output model."""
+    """Worker information output artifact."""
 
     worker_id: str
     node_id: str
@@ -54,10 +54,10 @@ class WorkerOut(BaseModel):
 
 
 class ReplicaOut(BaseModel):
-    """Model replica output model."""
+    """Artifact replica output artifact."""
 
     replica_id: str
-    model_id: str
+    artifact_id: str
     node_id: str
     node_address: str
     node_port: int
@@ -73,10 +73,10 @@ class ReplicaOut(BaseModel):
     worker_accepting: bool = True
 
 
-class ModelSummary(BaseModel):
-    """Model summary information."""
+class ArtifactSummary(BaseModel):
+    """Artifact summary information."""
 
-    model_id: str
+    artifact_id: str
     total_replicas: int
     available_replicas: int
     gpu_replicas: int
@@ -103,7 +103,7 @@ class TransportOut(BaseModel):
 
     transport_id: str
     replica_id: str
-    model_id: str
+    artifact_id: str
     source_node_id: str
     source_address: str
     source_port: int
@@ -120,7 +120,7 @@ class GlobalMetrics(BaseModel):
     active_workers: int
     total_replicas: int
     available_replicas: int
-    total_models: int
+    total_artifacts: int
     active_transports: int
     total_memory_bytes: int
     available_memory_bytes: int
@@ -138,7 +138,7 @@ class ListWorkersRequest(BaseModel):
 class ListReplicasRequest(BaseModel):
     """List replicas request parameters."""
 
-    model_id: str | None = None
+    artifact_id: str | None = None
     node_id: str | None = None
     memory_type: MemoryType | None = None
     worker_id: str | None = None
@@ -150,7 +150,7 @@ class ListTransportsRequest(BaseModel):
     """List transports request parameters."""
 
     status: str | None = None
-    model_id: str | None = None
+    artifact_id: str | None = None
     page: int = Field(1, ge=1)
     page_size: int = Field(50, ge=1, le=1000)
 

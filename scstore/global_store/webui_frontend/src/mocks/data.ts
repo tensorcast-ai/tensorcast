@@ -3,7 +3,7 @@ export const summary = {
   active_workers: 3,
   total_replicas: 5,
   available_replicas: 5,
-  total_models: 2,
+  total_artifacts: 2,
   active_transports: 1,
   total_memory_bytes: 64 * 1024 * 1024 * 1024, // 64 GiB
   available_memory_bytes: 32 * 1024 * 1024 * 1024, // 32 GiB
@@ -57,7 +57,7 @@ export const workers = [
 export const replicas = [
   {
     replica_id: 'replica-1',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     node_id: 'node-a',
     node_address: '10.0.0.1',
     node_port: 7000,
@@ -74,7 +74,7 @@ export const replicas = [
   },
   {
     replica_id: 'replica-2',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     node_id: 'node-b',
     node_address: '10.0.0.2',
     node_port: 7001,
@@ -91,7 +91,7 @@ export const replicas = [
   },
   {
     replica_id: 'replica-3',
-    model_id: 'mi2:inx2:data2',
+    artifact_id: 'mi2:inx2:data2',
     node_id: 'node-b',
     node_address: '10.0.0.2',
     node_port: 7002,
@@ -108,7 +108,7 @@ export const replicas = [
   },
   {
     replica_id: 'replica-4',
-    model_id: 'mi2:inx2:data2',
+    artifact_id: 'mi2:inx2:data2',
     node_id: 'node-b',
     node_address: '10.0.0.2',
     node_port: 7003,
@@ -125,7 +125,7 @@ export const replicas = [
   },
   {
     replica_id: 'replica-5',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     node_id: 'node-a',
     node_address: '10.0.0.1',
     node_port: 7004,
@@ -142,9 +142,9 @@ export const replicas = [
   },
 ]
 
-export const models = [
+export const artifacts = [
   {
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     total_replicas: 3,
     available_replicas: 3,
     gpu_replicas: 1,
@@ -154,7 +154,7 @@ export const models = [
     avg_load_ratio: 0.2,
   },
   {
-    model_id: 'mi2:inx2:data2',
+    artifact_id: 'mi2:inx2:data2',
     total_replicas: 2,
     available_replicas: 2,
     gpu_replicas: 1,
@@ -190,7 +190,7 @@ export const transports = [
   {
     transport_id: 'trans-1',
     replica_id: 'replica-2',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     source_node_id: 'node-a',
     source_address: '10.0.0.1',
     source_port: 7000,
@@ -202,7 +202,7 @@ export const transports = [
   {
     transport_id: 'trans-2',
     replica_id: 'replica-3',
-    model_id: 'mi2:inx2:data2',
+    artifact_id: 'mi2:inx2:data2',
     source_node_id: 'node-b',
     source_address: '10.0.0.2',
     source_port: 7001,
@@ -214,7 +214,7 @@ export const transports = [
   {
     transport_id: 'trans-3',
     replica_id: 'replica-1',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     source_node_id: 'node-a',
     source_address: '10.0.0.1',
     source_port: 7000,
@@ -226,7 +226,7 @@ export const transports = [
   {
     transport_id: 'trans-4',
     replica_id: 'replica-4',
-    model_id: 'mi2:inx2:data2',
+    artifact_id: 'mi2:inx2:data2',
     source_node_id: 'node-b',
     source_address: '10.0.0.2',
     source_port: 7002,
@@ -238,7 +238,7 @@ export const transports = [
   {
     transport_id: 'trans-5',
     replica_id: 'replica-5',
-    model_id: 'mi2:inx1:data1',
+    artifact_id: 'mi2:inx1:data1',
     source_node_id: 'node-a',
     source_address: '10.0.0.1',
     source_port: 7003,

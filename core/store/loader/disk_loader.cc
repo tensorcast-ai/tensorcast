@@ -16,7 +16,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
-#include "core/common/model_verification.h"
+#include "core/common/artifact_verification.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/multi_safetensors_source.h"
 #include "core/store/loader/safetensors_source.h"
@@ -40,8 +40,8 @@ std::filesystem::path safe_path_join(const std::filesystem::path& base, const st
 }
 
 // Helper to load verification info from disk if available
-absl::StatusOr<ModelVerificationInfo> load_verification_info_from_disk(const std::filesystem::path& model_dir) {
-  std::filesystem::path verification_path = model_dir / "verification.json";
+absl::StatusOr<ArtifactVerificationInfo> load_verification_info_from_disk(const std::filesystem::path& artifact_dir) {
+  std::filesystem::path verification_path = artifact_dir / "verification.json";
   if (!std::filesystem::exists(verification_path)) {
     return absl::NotFoundError("Verification file not found");
   }
@@ -63,7 +63,7 @@ absl::StatusOr<ModelVerificationInfo> load_verification_info_from_disk(const std
       return absl::InvalidArgumentError("Verification file is empty");
     }
 
-    absl::StatusOr<ModelVerificationInfo> result = ModelVerificationInfo::from_json(json_content);
+    absl::StatusOr<ArtifactVerificationInfo> result = ArtifactVerificationInfo::from_json(json_content);
     if (!result.ok()) {
       return absl::InvalidArgumentError(
           absl::StrFormat(
@@ -71,7 +71,7 @@ absl::StatusOr<ModelVerificationInfo> load_verification_info_from_disk(const std
     }
 
     LOG(INFO) << "Successfully loaded verification info from " << verification_path.string()
-              << " (model_size: " << result->model_size << ", full_hash: 0x" << std::hex << result->full_hash
+              << " (artifact_size: " << result->artifact_size << ", full_hash: 0x" << std::hex << result->full_hash
               << std::dec << ")";
 
     return result.value();
@@ -81,7 +81,7 @@ absl::StatusOr<ModelVerificationInfo> load_verification_info_from_disk(const std
   }
 }
 
-DiskLoader::DiskLoader(DiskSource source) : source_(std::move(source)), model_size_(0), initialized_(false) {}
+DiskLoader::DiskLoader(DiskSource source) : source_(std::move(source)), artifact_size_(0), initialized_(false) {}
 
 absl::Status DiskLoader::initialize() {
   absl::MutexLock lock(&mutex_);
@@ -90,22 +90,22 @@ absl::Status DiskLoader::initialize() {
     return absl::OkStatus();
   }
 
-  // Use the configured path directly as the model directory
-  std::filesystem::path model_dir = source_.path;
+  // Use the configured path directly as the replica directory
+  std::filesystem::path artifact_dir = source_.path;
 
   // Check if the directory exists
-  if (!std::filesystem::exists(model_dir)) {
-    return absl::NotFoundError(absl::StrFormat("Model directory not found: %s", model_dir.string()));
+  if (!std::filesystem::exists(artifact_dir)) {
+    return absl::NotFoundError(absl::StrFormat("Replica directory not found: %s", artifact_dir.string()));
   }
 
-  if (!std::filesystem::is_directory(model_dir)) {
-    return absl::InvalidArgumentError(absl::StrFormat("Path is not a directory: %s", model_dir.string()));
+  if (!std::filesystem::is_directory(artifact_dir)) {
+    return absl::InvalidArgumentError(absl::StrFormat("Path is not a directory: %s", artifact_dir.string()));
   }
 
   // Find all partition files
   partition_paths_.clear();
   partition_sizes_.clear();
-  model_size_ = 0;
+  artifact_size_ = 0;
 
   // First scan and categorize to avoid double-counting when both single-file
   // (tensor.data) and multi-part (tensor.data_*) exist. Prefer multi-part if present.
@@ -113,7 +113,7 @@ absl::Status DiskLoader::initialize() {
   std::filesystem::path single_file_path;
   std::vector<std::filesystem::path> multipart_paths;
 
-  for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
     if (!entry.is_regular_file()) {
       continue;
     }
@@ -132,20 +132,20 @@ absl::Status DiskLoader::initialize() {
       partition_paths_.push_back(p);
       size_t file_size = std::filesystem::file_size(p);
       partition_sizes_.push_back(file_size);
-      model_size_ += file_size;
+      artifact_size_ += file_size;
     }
   } else if (has_single_file) {
     // Fallback to single-file format
     partition_paths_.push_back(single_file_path);
     size_t file_size = std::filesystem::file_size(single_file_path);
     partition_sizes_.push_back(file_size);
-    model_size_ += file_size;
+    artifact_size_ += file_size;
   }
 
   // If no partitions were detected with the supported patterns, probe for .safetensors files
   if (partition_paths_.empty()) {
     std::vector<std::filesystem::path> safetensors_paths;
-    for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+    for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
       if (entry.is_regular_file()) {
         const std::string filename = entry.path().filename().string();
         const std::string ext = ".safetensors";
@@ -156,7 +156,7 @@ absl::Status DiskLoader::initialize() {
     }
     if (safetensors_paths.empty()) {
       return absl::NotFoundError(
-          absl::StrFormat("No model partition files found in: %s (also no .safetensors)", model_dir.string()));
+          absl::StrFormat("No replica partition files found in: %s (also no .safetensors)", artifact_dir.string()));
     }
     std::sort(safetensors_paths.begin(), safetensors_paths.end(), [](const auto& a, const auto& b) {
       return a.filename() < b.filename();
@@ -174,7 +174,7 @@ absl::Status DiskLoader::initialize() {
       }
       partition_paths_.push_back(p);
       partition_sizes_.push_back(static_cast<size_t>(header_info->data_size));
-      model_size_ += header_info->data_size;
+      artifact_size_ += header_info->data_size;
     }
   }
 
@@ -196,49 +196,49 @@ absl::Status DiskLoader::initialize() {
   }
 
   // RFC-0007: For standard partition format, require descriptor and index presence
-  // (model_descriptor.json + tensor_index.(json|cbor)). Safetensors is exempt (may be backfilled later).
+  // (artifact_descriptor.json + tensor_index.(json|cbor)). Safetensors is exempt (may be backfilled later).
   if (!partition_paths_.empty()) {
     const auto first_name = partition_paths_[0].filename().string();
     const std::string st_ext = ".safetensors";
     const bool is_safetensors =
         first_name.size() >= st_ext.size() && first_name.rfind(st_ext) == first_name.size() - st_ext.size();
     if (!is_safetensors) {
-      const auto descriptor_path = model_dir / "model_descriptor.json";
-      const auto index_json_path = model_dir / "tensor_index.json";
-      const auto index_cbor_path = model_dir / "tensor_index.cbor";
+      const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+      const auto index_json_path = artifact_dir / "tensor_index.json";
+      const auto index_cbor_path = artifact_dir / "tensor_index.cbor";
 
       if (!std::filesystem::exists(descriptor_path) ||
           (!std::filesystem::exists(index_json_path) && !std::filesystem::exists(index_cbor_path))) {
         return absl::FailedPreconditionError(
-            "MODEL_DESCRIPTOR_REQUIRED: missing model_descriptor.json or tensor_index.(json|cbor)");
+            "ARTIFACT_DESCRIPTOR_REQUIRED: missing artifact_descriptor.json or tensor_index.(json|cbor)");
       }
 
       // Basic validation of descriptor JSON using nlohmann/json
       try {
         std::ifstream f(descriptor_path);
         if (!f.is_open()) {
-          return absl::FailedPreconditionError("MODEL_DESCRIPTOR_REQUIRED: cannot open model_descriptor.json");
+          return absl::FailedPreconditionError("ARTIFACT_DESCRIPTOR_REQUIRED: cannot open artifact_descriptor.json");
         }
         nlohmann::json j;
         f >> j;
-        if (!j.contains("model_id") || !j.contains("index_multihash") || !j.contains("data_multihash")) {
+        if (!j.contains("artifact_id") || !j.contains("index_multihash") || !j.contains("data_multihash")) {
           return absl::InvalidArgumentError(
-              "Invalid model_descriptor.json: missing required fields (model_id, index_multihash, data_multihash)");
+              "Invalid artifact_descriptor.json: missing required fields (artifact_id, index_multihash, data_multihash)");
         }
       } catch (const std::exception& e) {
-        return absl::InvalidArgumentError(absl::StrFormat("Failed to parse model_descriptor.json: %s", e.what()));
+        return absl::InvalidArgumentError(absl::StrFormat("Failed to parse artifact_descriptor.json: %s", e.what()));
       }
     }
   }
 
   // Try to load verification info
-  auto verification_result = load_verification_info_from_disk(model_dir);
+  auto verification_result = load_verification_info_from_disk(artifact_dir);
   if (verification_result.ok()) {
     // Store verification info if needed
     // verification_info_ = verification_result.value();
   }
 
-  LOG(INFO) << "DiskLoader initialized: " << partition_paths_.size() << " partitions, total size: " << model_size_
+  LOG(INFO) << "DiskLoader initialized: " << partition_paths_.size() << " partitions, total size: " << artifact_size_
             << " bytes";
   initialized_ = true;
 
@@ -272,23 +272,23 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> DiskLoader::open_source(
     absl::MutexLock lock(&mutex_);
     source_opts.partition_paths = partition_paths_;
     source_opts.partition_sizes = partition_sizes_;
-    source_opts.total_size = model_size_;
+    source_opts.total_size = artifact_size_;
     // chunk size is determined by MemoryManager's pinned pool; a default here is fine
     source_opts.chunk_size = 128 * 1024 * 1024;
-    source_opts.use_direct_io = (model_size_ > 5ULL * 1024 * 1024 * 1024);
+    source_opts.use_direct_io = (artifact_size_ > 5ULL * 1024 * 1024 * 1024);
   }
   return std::make_unique<loader::FilePartitionSource>(std::move(source_opts));
 }
 
-absl::StatusOr<uint64_t> DiskLoader::get_model_size() {
+absl::StatusOr<uint64_t> DiskLoader::get_artifact_size() {
   absl::MutexLock lock(&mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("DiskLoader not initialized");
   }
-  return model_size_;
+  return artifact_size_;
 }
 
-absl::StatusOr<ModelVerificationInfo> DiskLoader::get_verification_info() const {
+absl::StatusOr<ArtifactVerificationInfo> DiskLoader::get_verification_info() const {
   absl::MutexLock lock(&mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("DiskLoader not initialized");

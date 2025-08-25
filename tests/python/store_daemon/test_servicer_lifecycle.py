@@ -97,8 +97,8 @@ class TestServicerLifecycle:
         servicer.replica_manager.remove_pid_refs.assert_called_once_with(1234)
         servicer.process_watcher.remove_pid.assert_called_once_with(1234)
 
-    def test_load_model_with_pid(self):
-        """Test LoadModel RPC with PID tracking."""
+    def test_materialize_replica_with_pid(self):
+        """Test MaterializeReplica RPC with PID tracking."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -113,16 +113,16 @@ class TestServicerLifecycle:
 
         # Mock components
         servicer.process_watcher = Mock()
-        servicer.model_loader = Mock()
+        servicer.artifact_loader = Mock()
 
         # Mock async load result
         future = Future()
         future.set_result((True, None))
-        servicer.model_loader.start_async_load.return_value = (True, b"handle", future)
+        servicer.artifact_loader.start_async_load.return_value = (True, b"handle", future)
 
         # Create request with PID
-        request = store_daemon_pb2.LoadModelRequest(
-            model_path="model1",
+        request = store_daemon_pb2.MaterializeReplicaRequest(
+            disk_path="model1",
             replica_uuid="uuid1",
             device_uuid="gpu0",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -131,8 +131,8 @@ class TestServicerLifecycle:
         )
         context = MockContext()
 
-        # Call LoadModel
-        response = servicer.LoadModel(request, context)  # pyright: ignore[reportArgumentType]
+        # Call MaterializeReplica
+        response = servicer.MaterializeReplica(request, context)  # pyright: ignore[reportArgumentType]
 
         # Check PID was tracked
         servicer.process_watcher.add_pid.assert_called_once_with(1234)
@@ -140,12 +140,12 @@ class TestServicerLifecycle:
         # Check response
         assert (
             response.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         )
-        assert response.model_path == "model1"
+        assert response.disk_path == "model1"
 
-    def test_confirm_model_simple(self):
-        """Test ConfirmModel RPC now only waits for async loading."""
+    def test_confirm_replica_simple(self):
+        """Test ConfirmReplica RPC now only waits for async loading."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -159,17 +159,17 @@ class TestServicerLifecycle:
         servicer = StoreDaemonServicer(config)
 
         # Create request
-        request = store_daemon_pb2.ConfirmModelRequest(
-            model_path="model1",
+        request = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path="model1",
             replica_uuid="uuid1",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
         context = MockContext()
 
         # Test case 1: No pending load - should succeed immediately
-        response = servicer.ConfirmModel(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.ConfirmReplica(request, context)  # pyright: ignore[reportArgumentType]
         assert response.code == 0
-        assert response.model_path == "model1"
+        assert response.disk_path == "model1"
 
         # Test case 2: With pending load that succeeds
         future = Future()
@@ -177,9 +177,9 @@ class TestServicerLifecycle:
         with servicer._pending_loads_lock:
             servicer._pending_loads[("model1", "uuid1")] = future
 
-        response = servicer.ConfirmModel(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.ConfirmReplica(request, context)  # pyright: ignore[reportArgumentType]
         assert response.code == 0
-        assert response.model_path == "model1"
+        assert response.disk_path == "model1"
 
         # Test case 3: With pending load that fails
         future_fail = Future()
@@ -187,15 +187,15 @@ class TestServicerLifecycle:
         with servicer._pending_loads_lock:
             servicer._pending_loads[("model2", "uuid2")] = future_fail
 
-        request.model_path = "model2"
+        request.disk_path = "model2"
         request.replica_uuid = "uuid2"
-        response = servicer.ConfirmModel(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.ConfirmReplica(request, context)  # pyright: ignore[reportArgumentType]
         assert response.code == 1
-        assert response.model_path == "model2"
+        assert response.disk_path == "model2"
         assert context.code == grpc.StatusCode.INTERNAL
 
-    def test_unload_model_with_pid(self):
-        """Test UnloadModel RPC with PID tracking."""
+    def test_unload_replica_with_pid(self):
+        """Test UnloadReplica RPC with PID tracking."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -211,36 +211,36 @@ class TestServicerLifecycle:
         # Mock components
         servicer.process_watcher = Mock()
         servicer.replica_manager = Mock()
-        servicer.replica_manager.unload_model.return_value = True
+        servicer.replica_manager.unload_replica.return_value = True
 
         # Create request with PID
-        request = store_daemon_pb2.UnloadModelRequest(
-            model_path="model1",
+        request = store_daemon_pb2.UnloadReplicaRequest(
+            disk_path="model1",
             replica_uuid="uuid1",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             pid=1234,
         )
         context = MockContext()
 
-        # Call UnloadModel
-        response = servicer.UnloadModel(request, context)  # pyright: ignore[reportArgumentType]
+        # Call UnloadReplica
+        response = servicer.UnloadReplica(request, context)  # pyright: ignore[reportArgumentType]
 
-        # Check PID was NOT removed from tracking (intentional design - see comment in UnloadModel)
+        # Check PID was NOT removed from tracking (intentional design - see comment in UnloadReplica)
         servicer.process_watcher.remove_pid.assert_not_called()
 
         # Check replica manager was called
-        servicer.replica_manager.unload_model.assert_called_once_with(
-            model_path="model1",
+        servicer.replica_manager.unload_replica.assert_called_once_with(
+            disk_path="model1",
             device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             pid=1234,
         )
 
         # Check response
         assert response.code == 0
-        assert response.model_path == "model1"
+        assert response.disk_path == "model1"
 
     def test_get_loaded_models(self):
-        """Test GetLoadedModels RPC."""
+        """Test GetLoadedReplicas RPC."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -255,9 +255,9 @@ class TestServicerLifecycle:
 
         # Mock replica manager
         servicer.replica_manager = Mock()
-        servicer.replica_manager.get_loaded_models.return_value = [
+        servicer.replica_manager.get_loaded_replicas.return_value = [
             {
-                "model_id": "model1",
+                "artifact_id": "model1",
                 "device_id": 0,
                 "ref_count": 2,
                 "pids": [1234, 5678],
@@ -266,7 +266,7 @@ class TestServicerLifecycle:
                 "last_access_ts": time.time(),
             },
             {
-                "model_id": "model2",
+                "artifact_id": "model2",
                 "device_id": 1,
                 "ref_count": 1,
                 "pids": [9999],
@@ -277,18 +277,18 @@ class TestServicerLifecycle:
         ]
 
         # Test without filters
-        request = store_daemon_pb2.GetLoadedModelsRequest()
+        request = store_daemon_pb2.GetLoadedReplicasRequest()
         context = MockContext()
 
-        response = servicer.GetLoadedModels(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.GetLoadedReplicas(request, context)  # pyright: ignore[reportArgumentType]
 
-        assert response.total_models == 2
+        assert response.total_replicas == 2
         assert response.total_size_bytes == 3 * 1024 * 1024
-        assert len(response.models) == 2
+        assert len(response.replicas) == 2
 
-        # Check first model
-        model1 = response.models[0]
-        assert model1.model_id == "model1"
+        # Check first artifact
+        model1 = response.replicas[0]
+        assert model1.artifact_id == "model1"
         assert model1.device_id == 0
         assert model1.ref_count == 2
         assert list(model1.pids) == [1234, 5678]
@@ -299,7 +299,7 @@ class TestServicerLifecycle:
             servicer.lifecycle_worker.stop()
 
     def test_get_loaded_models_with_filters(self):
-        """Test GetLoadedModels RPC with filters."""
+        """Test GetLoadedReplicas RPC with filters."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -314,9 +314,9 @@ class TestServicerLifecycle:
 
         # Mock replica manager
         servicer.replica_manager = Mock()
-        servicer.replica_manager.get_loaded_models.return_value = [
+        servicer.replica_manager.get_loaded_replicas.return_value = [
             {
-                "model_id": "model1",
+                "artifact_id": "model1",
                 "device_id": 0,
                 "ref_count": 1,
                 "pids": [1234],
@@ -325,7 +325,7 @@ class TestServicerLifecycle:
                 "last_access_ts": time.time(),
             },
             {
-                "model_id": "model2",
+                "artifact_id": "model2",
                 "device_id": 1,
                 "ref_count": 1,
                 "pids": [5678],
@@ -334,7 +334,7 @@ class TestServicerLifecycle:
                 "last_access_ts": time.time(),
             },
             {
-                "model_id": "other_model",
+                "artifact_id": "other_artifact",
                 "device_id": 0,
                 "ref_count": 1,
                 "pids": [9999],
@@ -344,24 +344,24 @@ class TestServicerLifecycle:
             },
         ]
 
-        # Test with model_id filter - use a more specific filter
-        request = store_daemon_pb2.GetLoadedModelsRequest(model_id_filter="model1")
+        # Test with artifact_id filter - use a more specific filter
+        request = store_daemon_pb2.GetLoadedReplicasRequest(artifact_id_filter="model1")
         context = MockContext()
 
-        response = servicer.GetLoadedModels(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.GetLoadedReplicas(request, context)  # pyright: ignore[reportArgumentType]
 
         # Should match only model1
-        assert response.total_models == 1
-        assert response.models[0].model_id == "model1"
+        assert response.total_replicas == 1
+        assert response.replicas[0].artifact_id == "model1"
 
         # Test with device_id filter
-        request = store_daemon_pb2.GetLoadedModelsRequest(device_id_filter=0)
+        request = store_daemon_pb2.GetLoadedReplicasRequest(device_id_filter=0)
 
-        response = servicer.GetLoadedModels(request, context)  # pyright: ignore[reportArgumentType]
+        response = servicer.GetLoadedReplicas(request, context)  # pyright: ignore[reportArgumentType]
 
-        # Should match models on device 0
-        assert response.total_models == 2
-        assert all(m.device_id == 0 for m in response.models)
+        # Should match replicas on device 0
+        assert response.total_replicas == 2
+        assert all(m.device_id == 0 for m in response.replicas)
 
         # Clean up
         if servicer.lifecycle_worker:
@@ -388,7 +388,7 @@ class TestServicerLifecycle:
         servicer.replica_manager.shutdown_evict_local_replicas.return_value = 3
         servicer.worker_manager = None
         servicer.health_check_server = Mock()
-        servicer.model_loader = Mock()
+        servicer.artifact_loader = Mock()
 
         # Call graceful shutdown
         servicer.graceful_shutdown()
@@ -398,10 +398,10 @@ class TestServicerLifecycle:
         servicer.lifecycle_worker.stop.assert_called_once()
         servicer.replica_manager.shutdown_evict_local_replicas.assert_called_once()
         servicer.health_check_server.stop.assert_called_once()
-        servicer.model_loader.shutdown.assert_called_once()
+        servicer.artifact_loader.shutdown.assert_called_once()
 
-    def test_load_model_during_shutdown(self):
-        """Test LoadModel behavior during shutdown."""
+    def test_load_artifact_during_shutdown(self):
+        """Test MaterializeReplica behavior during shutdown."""
         config = StoreDaemonConfig(
             server=ServerConfig(
                 storage_path=Path("/tmp/models"),
@@ -418,15 +418,15 @@ class TestServicerLifecycle:
         servicer.shutting_down = True
 
         # Create request
-        request = store_daemon_pb2.LoadModelRequest(
-            model_path="model1",
+        request = store_daemon_pb2.MaterializeReplicaRequest(
+            disk_path="model1",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
         context = MockContext()
 
-        # Call LoadModel
-        response = servicer.LoadModel(request, context)  # pyright: ignore[reportArgumentType]
+        # Call MaterializeReplica
+        response = servicer.MaterializeReplica(request, context)  # pyright: ignore[reportArgumentType]
 
         # Should fail
-        assert response.status == store_daemon_pb2.LOAD_MODEL_STATUS_FAILED
+        assert response.status == store_daemon_pb2.MATERIALIZE_REPLICA_STATUS_FAILED
         assert context.code == grpc.StatusCode.UNAVAILABLE

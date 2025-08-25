@@ -89,12 +89,12 @@ describe('Mock API Handlers', () => {
     expect(response.status).toBe(404);
   });
 
-  it('should return single model with data wrapper', async () => {
-    const response = await fetch('/api/models/mi2:inx1:data1');
+  it('should return single artifact with data wrapper', async () => {
+    const response = await fetch('/api/artifacts/mi2:inx1:data1');
     const data = await response.json();
 
     expect(response.ok).toBe(true);
     expect(data).toHaveProperty('data');
-    expect(data.data).toHaveProperty('model_id', 'mi2:inx1:data1');
+    expect(data.data).toHaveProperty('artifact_id', 'mi2:inx1:data1');
   });
 });

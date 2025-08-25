@@ -25,13 +25,13 @@ int main() {
     std::cout << "Chrome traces will be saved to: " << trace_dir << "\n\n";
   }
 
-  // Simulate loading a model
-  const std::string model_id = "llama-7b";
+  // Simulate loading a artifact
+  const std::string artifact_id = "llama-7b";
   const std::string request_id = "demo_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
 
   {
     // This guard will output summary and save Chrome trace on destruction
-    SC_TRACE_INIT_GUARD(request_id, model_id, "load_model_demo");
+    SC_TRACE_INIT_GUARD(request_id, artifact_id, "load_model_demo");
 
     {
       SC_TRACE_SCOPE("allocate_memory");
@@ -49,14 +49,14 @@ int main() {
 
       auto task1 = std::async(std::launch::async, [&] {
         stepcast::store::TraceManager::RequestIdGuard guard(request_id);
-        stepcast::store::TraceManager::ModelIdGuard model_guard(model_id);
+        stepcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
         SC_TRACE_SCOPE("load_partition_1");
         simulate_work(100);
       });
 
       auto task2 = std::async(std::launch::async, [&] {
         stepcast::store::TraceManager::RequestIdGuard guard(request_id);
-        stepcast::store::TraceManager::ModelIdGuard model_guard(model_id);
+        stepcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
         SC_TRACE_SCOPE("load_partition_2");
         simulate_work(150);
       });
@@ -73,7 +73,7 @@ int main() {
 
   std::cout << "\nDemo completed!\n";
   if (trace_dir) {
-    std::cout << "Check " << trace_dir << "/" << model_id << "+" << request_id << ".json\n";
+    std::cout << "Check " << trace_dir << "/" << artifact_id << "+" << request_id << ".json\n";
     std::cout << "Open chrome://tracing and load the JSON file to visualize\n";
   }
 

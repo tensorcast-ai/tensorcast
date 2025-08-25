@@ -32,7 +32,7 @@ def mock_grpc_client():
     ))
     client.list_active_workers.return_value = [worker1]
 
-    # Mock list_model_replicas
+    # Mock list_replicas (artifact -> list of MemoryInfo)
     replica1 = global_store_pb2.MemoryInfo(
         node_id="node-1",
         node_address="192.168.1.1",
@@ -41,7 +41,7 @@ def mock_grpc_client():
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    client.list_model_replicas.return_value = {
+    client.list_replicas.return_value = {
         "model1": [replica1],
     }
 
@@ -49,7 +49,7 @@ def mock_grpc_client():
     client.get_summary_stats.return_value = {
         "total_workers": 1,
         "active_workers": 1,
-        "total_models": 1,
+        "total_artifacts": 1,
         "total_replicas": 1,
         "gpu_replicas": 1,
         "ram_replicas": 0,
@@ -69,7 +69,7 @@ async def test_grpc_client_connection():
     # The implementation relies on the *blocking* (non-aio) API, so patch that
     # instead of ``grpc.aio`` to avoid real network traffic during the unit test.
     with patch("grpc.insecure_channel") as mock_channel, patch(
-        "scstore.global_store.webui_backend.grpc_client.global_store_pb2_grpc.GlobalModelStoreStub"
+        "scstore.global_store.webui_backend.grpc_client.global_store_pb2_grpc.GlobalStoreStub"
     ) as mock_stub:
         # Mock channel instance returned by grpc.insecure_channel
         mock_channel_instance = MagicMock()
@@ -93,15 +93,15 @@ async def test_grpc_client_connection():
 @pytest.mark.asyncio
 async def test_api_endpoints_with_grpc(mock_grpc_client):
     """Test API endpoints using gRPC client."""
-    from scstore.global_store.webui_backend.api import get_summary, list_workers, list_models
+    from scstore.global_store.webui_backend.api import get_summary, list_workers, list_artifacts
 
     # Test summary endpoint
     summary_response = await get_summary(mock_grpc_client)
 
-    # ``data`` is a ``GlobalMetrics`` Pydantic model – assert via attributes.
+    # ``data`` is a ``GlobalMetrics`` Pydantic artifact – assert via attributes.
     assert summary_response.data.total_workers == 1
     assert summary_response.data.active_workers == 1
-    assert summary_response.data.total_models == 1
+    assert summary_response.data.total_artifacts == 1
 
     # Test workers endpoint
     workers_response = await list_workers(mock_grpc_client, False, 1, 50)
@@ -110,11 +110,11 @@ async def test_api_endpoints_with_grpc(mock_grpc_client):
     assert workers_response.meta is not None
     assert workers_response.meta["total_count"] == 1
 
-    # Test models endpoint
-    models_response = await list_models(mock_grpc_client)
-    assert len(models_response.data) == 1
-    assert models_response.data[0]["model_id"] == "model1"
-    assert models_response.data[0]["gpu_replicas"] == 1
+    # Test artifacts endpoint
+    artifacts_response = await list_artifacts(mock_grpc_client)
+    assert len(artifacts_response.data) == 1
+    assert artifacts_response.data[0]["artifact_id"] == "model1"
+    assert artifacts_response.data[0]["gpu_replicas"] == 1
 
 
 @pytest.mark.asyncio

@@ -123,7 +123,7 @@ class ScopedStagedBuffer {
  *
  * This class handles asynchronous GPU->CPU memory copies using pinned buffers,
  * enabling TCP transport to work with GPU tensors without requiring the entire
- * model to be resident in CPU memory.
+ * replica to be resident in CPU memory.
  *
  * Internally uses StreamingPinnedBuffer for buffer management.
  */

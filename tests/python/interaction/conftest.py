@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import grpc
 from scstore.proto import global_store_pb2_grpc
-from scstore.global_store.grpc_service import GlobalModelStoreServicer
+from scstore.global_store.grpc_service import GlobalStoreServicer
 from scstore.store_daemon import health_check as _health_check  # pylint: disable=import-error
 from typing import Iterator
 
@@ -14,13 +14,13 @@ from typing import Iterator
 class InProcessGlobalStore:
     """Wrapper for an in-process Global Store service with its gRPC server."""
 
-    service: GlobalModelStoreServicer
+    service: GlobalStoreServicer
     address: str
     grpc_server: grpc.Server
 
     # ------------------------------------------------------------------
     # Convenience helpers – make the wrapper behave like the underlying
-    # *GlobalModelStoreServicer* so that existing tests can transparently
+    # *GlobalStoreServicer* so that existing tests can transparently
     # call RPC handler methods directly on the fixture without having to
     # drill down into the ``.service`` attribute.  This preserves backwards
     # compatibility with older test-suites which expected the fixture to
@@ -31,8 +31,8 @@ class InProcessGlobalStore:
         """Delegate attribute access to the wrapped *service* instance.
 
         This allows test helpers to call methods like ``RegisterWorker`` or
-        ``RequestModelReplicaTransport`` directly on the fixture object as
-        if it were the *GlobalModelStoreServicer* itself.
+        ``RequestReplicaTransport`` directly on the fixture object as
+        if it were the *GlobalStoreServicer* itself.
         """
         try:
             return getattr(self.service, item)
@@ -54,16 +54,16 @@ class InProcessGlobalStore:
 
 @pytest.fixture(scope="session")
 def global_store_service() -> Iterator[InProcessGlobalStore]:
-    """Start an in-memory GlobalModelStoreServicer behind a real gRPC server.
+    """Start an in-memory GlobalStoreServicer behind a real gRPC server.
 
     Returns:
         InProcessGlobalStore wrapper containing the service, address, and server.
     """
 
     # Instantiate service (in-memory DuckDB) and server
-    service = GlobalModelStoreServicer()
+    service = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(service, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(service, server)
 
     # Bind to a random free port on localhost (port 0 asks the OS to pick)
     port = server.add_insecure_port("127.0.0.1:0")
@@ -78,7 +78,7 @@ def global_store_service() -> Iterator[InProcessGlobalStore]:
     # Prevent port-collision issues when the daemon's internal HealthCheckServer
     # attempts to start – just turn its start() into a no-op so it never binds.
     # ------------------------------------------------------------------
-    _health_check.HealthCheckServer.start = lambda self: None  # type: ignore[method-assign]
+    _health_check.HealthCheckServer.start = lambda self: None
 
     yield wrapper
 

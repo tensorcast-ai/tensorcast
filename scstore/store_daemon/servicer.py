@@ -20,6 +20,7 @@ from scstore.proto import (
     store_daemon_pb2_grpc,
 )
 
+from .artifact_loader import ArtifactLoader, LoadResult
 from .chunk_sync import ChunkSyncWorker
 from .config import StoreDaemonConfig
 from .connection_manager import GlobalStoreConnectionManager
@@ -27,19 +28,18 @@ from .health_check import HealthCheckServer
 from .lifecycle_worker import LifecycleWorker
 from .metrics import (
     ACTIVE_OPERATIONS,
-    ASYNC_LOAD_WAIT_DURATION,
+    ARTIFACT_VERIFICATION_LATENCY,
+    ARTIFACT_VERIFICATION_TOTAL,
+    ARTIFACTS_ALLOCATED_TOTAL,
+    MATERIALIZE_WAIT_DURATION,
     MEMORY_POOL_AVAILABLE,
     MEMORY_POOL_TOTAL,
-    MODEL_VERIFICATION_LATENCY,
-    MODEL_VERIFICATION_TOTAL,
-    MODELS_ALLOCATED_TOTAL,
-    PENDING_LOADS,
+    PENDING_MATERIALIZATIONS,
     WORKER_HEALTHY,
     WORKER_REGISTERED,
     WORKER_UPTIME_SECONDS,
     get_device_type_label,
 )
-from .model_loader import LoadResult, ModelLoader
 from .process_watcher import ProcessWatcher
 from .replica_manager import ReplicaManager
 from .utils import AtomicCounter, read_verification_json, resolve_device_id
@@ -49,10 +49,10 @@ logger = init_logger(__name__)
 
 class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
     """
-    StoreDaemonServicer implements the model storage and loading functionality.
+    StoreDaemonServicer implements the replica storage and loading functionality.
 
-    It handles model registration, loading from different sources (remote, disk),
-    and manages model lifecycle in both CPU and GPU memory.
+    It handles replica registration, loading from different sources (remote, disk),
+    and manages replica lifecycle in both CPU and GPU memory.
     """
 
     def __init__(
@@ -107,25 +107,25 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         # Attributes initialised later in __init__; avoid Optional types when not necessary
         self._load_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=num_thread if num_thread and num_thread > 0 else 4,
-            thread_name_prefix="model-loader",
+            thread_name_prefix="replica-loader",
         )
 
-        # Track pending async loads: key = (model_path, replica_uuid), value = Future
+        # Track pending async loads: key = (disk_path, replica_uuid), value = Future
         self._pending_loads: dict[tuple[str, str], Future] = {}
         self._pending_loads_lock = threading.Lock()
 
         # ------------------------------------------------------------------
         # Verification task handling.  Each verification runs in the background
         # using a dedicated thread-pool so that expensive hashing does not
-        # block either the gRPC worker threads or the model-loading executor.
+        # block either the gRPC worker threads or the replica-loading executor.
         # ------------------------------------------------------------------
 
         self._verification_executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=max(2, num_thread // 2),
-            thread_name_prefix="model-verifier",
+            thread_name_prefix="replica-verifier",
         )
 
-        # Map (model_path, replica_uuid) -> (VerificationStatus, err_msg)
+        # Map (disk_path, replica_uuid) -> (VerificationStatus, err_msg)
         self._verification_results: dict[
             tuple[str, str], tuple[store_daemon_pb2.VerificationStatus, str]
         ] = {}
@@ -197,7 +197,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         self.store_engine = _cs.create_store_engine(cs_cfg)
 
         # Initialize global store connection
-        self.global_store_stub: global_store_pb2_grpc.GlobalModelStoreStub | None = None
+        self.global_store_stub: global_store_pb2_grpc.GlobalStoreStub | None = None
         self.grpc_channel: grpc.Channel | None = None  # Declared once here
         self.connection_manager: GlobalStoreConnectionManager | None = None
 
@@ -206,7 +206,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         # Initialize components
         self.replica_manager: ReplicaManager = ReplicaManager(self)
-        self.model_loader = ModelLoader(self)
+        self.artifact_loader = ArtifactLoader(self)
         self.health_check_server: HealthCheckServer | None = None
         self.worker_manager: None = None  # Deprecated
 
@@ -286,7 +286,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         try:
             self.grpc_channel = grpc.insecure_channel(self.global_store_address)
-            self.global_store_stub = global_store_pb2_grpc.GlobalModelStoreStub(
+            self.global_store_stub = global_store_pb2_grpc.GlobalStoreStub(
                 self.grpc_channel
             )
             logger.info(f"Connected to GlobalStore at {self.global_store_address}")
@@ -476,39 +476,59 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             "connected": bool(self.global_store_stub),
             "local_state_version": 0,
             "last_successful_sync": 0,
-            "registered_models_count": 0,
+            "registered_artifacts_count": 0,
             "pending_changes": False,
         }
 
     # gRPC service methods
 
-    def LoadModel(
-        self, request: store_daemon_pb2.LoadModelRequest, context: grpc.ServicerContext
-    ) -> store_daemon_pb2.LoadModelResponse:
-        """Load a model into memory (async version)."""
+    def MaterializeReplica(
+        self,
+        request: store_daemon_pb2.MaterializeReplicaRequest,
+        context: grpc.ServicerContext,
+    ) -> store_daemon_pb2.MaterializeReplicaResponse:
+        """Materialize a replica into memory (async version)."""
         # Increment active operations
         self.active_operations.increment()
         self._update_runtime_metrics()
 
         try:
+            # --------------------------------------------------------------
+            # Early request validation
+            # Ensure at least one of artifact_id or disk_path is provided.
+            # This validation must run before device checks in the loader so
+            # that truly malformed requests return INVALID_ARGUMENT regardless
+            # of target device type.
+            # --------------------------------------------------------------
+            artifact_id = getattr(request, "artifact_id", "")
+            disk_path = getattr(request, "disk_path", "")
+            if (not artifact_id) and (not disk_path):
+                logger.error(
+                    "artifact_id (mi2:...) or disk_path must be provided for materialization"
+                )
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                return store_daemon_pb2.MaterializeReplicaResponse(
+                    status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+                )
+
             # Extract PID and track it if provided
             self.process_watcher.add_pid(request.pid)
 
             # Use async loading - returns immediately after allocation
             allocation_success, returned_mem_handle, loading_future = (
-                self.model_loader.start_async_load(request, context)
+                self.artifact_loader.start_async_load(request, context)
             )
 
             if not allocation_success:
                 # Memory allocation failed
-                return store_daemon_pb2.LoadModelResponse(
-                    status=store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_FAILED
+                return store_daemon_pb2.MaterializeReplicaResponse(
+                    status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
                 )
 
             assert returned_mem_handle is not None
 
             # Store the loading future for later confirmation
-            load_key = (request.model_path, request.replica_uuid)
+            load_key = (request.disk_path, request.replica_uuid)
             with self._pending_loads_lock:
                 self._pending_loads[load_key] = loading_future
 
@@ -521,7 +541,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             try:
                 device_id = resolve_device_id(request.device_uuid, default=0)
                 self.replica_manager.add_ref(
-                    model_path=request.model_path,
+                    disk_path=request.disk_path,
                     device_id=device_id,
                     pid=request.pid,
                     size_bytes=request.size_bytes,
@@ -529,17 +549,17 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 )
             except Exception:
                 logger.exception(
-                    "Failed to add initial reference for model %s (pid=%s)",
-                    request.model_path,
+                    "Failed to add initial reference for replica %s (pid=%s)",
+                    request.disk_path,
                     request.pid,
                 )
             # --------------------------------------------------------------------
 
             # Update metrics
-            MODELS_ALLOCATED_TOTAL.labels(
+            ARTIFACTS_ALLOCATED_TOTAL.labels(
                 device_type=get_device_type_label(request.target_device_type)
             ).inc()
-            PENDING_LOADS.inc()
+            PENDING_MATERIALIZATIONS.inc()
 
             # Register cleanup callback
             def cleanup_pending_load(fut):
@@ -547,7 +567,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 with self._pending_loads_lock:
                     self._pending_loads.pop(load_key, None)
                 # Update pending loads metric
-                PENDING_LOADS.dec()
+                PENDING_MATERIALIZATIONS.dec()
                 # Check if load failed and update verification results
                 try:
                     result = fut.result()
@@ -560,19 +580,19 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                                 request.device_uuid, default=0
                             )
                             self.replica_manager.remove_ref(
-                                model_path=request.model_path,
+                                disk_path=request.disk_path,
                                 device_id=device_id_local,
                                 pid=request.pid,
                             )
                         except Exception:
                             logger.exception(
                                 "Failed to remove reference for %s after load failure",
-                                request.model_path,
+                                request.disk_path,
                             )
                         with self._verification_lock:
                             self._verification_results[load_key] = (
                                 store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED,
-                                "Model loading failed",
+                                "Replica loading failed",
                             )
                 except Exception as e:
                     logger.exception(f"Exception in loading future for {load_key}: {e}")
@@ -585,9 +605,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             loading_future.add_done_callback(cleanup_pending_load)
 
             # Return success with ALLOCATED status
-            response = store_daemon_pb2.LoadModelResponse(
-                model_path=request.model_path,
-                status=store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED,
+            response = store_daemon_pb2.MaterializeReplicaResponse(
+                disk_path=request.disk_path,
+                status=store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
             )
 
             response.mem_handle.CopyFrom(
@@ -601,32 +621,32 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             self.active_operations.decrement()
             self._update_runtime_metrics()
 
-    def ConfirmModel(
+    def ConfirmReplica(
         self,
-        request: store_daemon_pb2.ConfirmModelRequest,
+        request: store_daemon_pb2.ConfirmReplicaRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.ConfirmModelResponse:
-        """Confirm that a model has been successfully loaded into memory."""
-        model_path = request.model_path
+    ) -> store_daemon_pb2.ConfirmReplicaResponse:
+        """Confirm that a replica has been successfully loaded into memory."""
+        disk_path = request.disk_path
         replica_uuid = request.replica_uuid
         device_type = request.target_device_type
 
         # Validate request parameters
-        if not model_path:
-            logger.error("model_path is empty in ConfirmModel request")
+        if not disk_path:
+            logger.error("disk_path is empty in ConfirmReplica request")
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            return store_daemon_pb2.ConfirmModelResponse(model_path="", code=1)
+            return store_daemon_pb2.ConfirmReplicaResponse(disk_path="", code=1)
 
         # Only GPU device type is supported
         if device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
             logger.error(
-                f"Unsupported device type {device_type} in ConfirmModel request. Only GPU is supported."
+                f"Unsupported device type {device_type} in ConfirmReplica request. Only GPU is supported."
             )
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            return store_daemon_pb2.ConfirmModelResponse(model_path=model_path, code=1)
+            return store_daemon_pb2.ConfirmReplicaResponse(disk_path=disk_path, code=1)
 
         # Check if there's a pending load future
-        load_key = (model_path, replica_uuid)
+        load_key = (disk_path, replica_uuid)
         loading_future = None
 
         with self._pending_loads_lock:
@@ -641,7 +661,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
                 # Record wait duration
                 wait_duration = time.time() - wait_start
-                ASYNC_LOAD_WAIT_DURATION.labels(
+                MATERIALIZE_WAIT_DURATION.labels(
                     device_type=get_device_type_label(device_type)
                 ).observe(wait_duration)
 
@@ -649,66 +669,68 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 load_result = LoadResult.from_value(result)
 
                 if not load_result.success:
-                    logger.error(f"Model loading failed for {model_path}")
+                    logger.error(f"Replica loading failed for {disk_path}")
                     context.set_code(grpc.StatusCode.INTERNAL)
-                    return store_daemon_pb2.ConfirmModelResponse(
-                        model_path=model_path, code=1
+                    return store_daemon_pb2.ConfirmReplicaResponse(
+                        disk_path=disk_path, code=1
                     )
 
             except TimeoutError:
-                logger.error(f"ConfirmModel timed out waiting for {model_path} to load")
+                logger.error(
+                    f"ConfirmReplica timed out waiting for {disk_path} to load"
+                )
                 context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
-                return store_daemon_pb2.ConfirmModelResponse(
-                    model_path=model_path, code=1
+                return store_daemon_pb2.ConfirmReplicaResponse(
+                    disk_path=disk_path, code=1
                 )
             except Exception as e:
                 logger.exception(
-                    f"Exception while waiting for {model_path} to load: {e}"
+                    f"Exception while waiting for {disk_path} to load: {e}"
                 )
                 context.set_code(grpc.StatusCode.INTERNAL)
-                return store_daemon_pb2.ConfirmModelResponse(
-                    model_path=model_path, code=1
+                return store_daemon_pb2.ConfirmReplicaResponse(
+                    disk_path=disk_path, code=1
                 )
 
         # For GPU loads, still need to confirm and register
-        # Registration is now fully automatic and tied to successful model
-        # verification.  *ConfirmModel* therefore only serves as a convenient
+        # Registration is now fully automatic and tied to successful replica
+        # verification.  *ConfirmReplica* therefore only serves as a convenient
         # blocking call for clients that need to wait until the asynchronous
         # load step has completed.
 
-        return store_daemon_pb2.ConfirmModelResponse(model_path=model_path, code=0)
+        return store_daemon_pb2.ConfirmReplicaResponse(disk_path=disk_path, code=0)
 
-    def UnloadModel(
+    def UnloadReplica(
         self,
-        request: store_daemon_pb2.UnloadModelRequest,
+        request: store_daemon_pb2.UnloadReplicaRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.UnloadModelResponse:
-        """Unload a model from memory."""
-        model_path = request.model_path
+    ) -> store_daemon_pb2.UnloadReplicaResponse:
+        """Unload a replica from memory."""
+        disk_path = request.disk_path
         device_type = request.target_device_type
 
-        if not model_path:
-            logger.error("model_path is empty in UnloadModel request")
+        if not disk_path:
+            logger.error("disk_path is empty in UnloadReplica request")
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            return store_daemon_pb2.UnloadModelResponse(model_path="", code=1)
+            return store_daemon_pb2.UnloadReplicaResponse(disk_path="", code=1)
 
         # Extract optional fields
         pid = request.pid
 
         # Delegate to replica manager with PID tracking
-        success = self.replica_manager.unload_model(
-            model_path=model_path, device_type=device_type, pid=pid
+        success = self.replica_manager.unload_replica(
+            disk_path=disk_path, device_type=device_type, pid=pid
         )
 
         # NOTE: We intentionally keep the PID under watch even if it currently holds
-        # zero model references.  This avoids racy situations where another thread
-        # may concurrently LoadModel for the same PID between the ref-count check
+        # zero replica references.  This avoids racy situations where another thread
+        # may concurrently LoadArtifact for the same PID between the ref-count check
         # and the removal call.  The watcher will automatically stop monitoring
         # the PID once the process actually exits (detected in _on_pid_dead).
 
         if not success:
             context.set_code(grpc.StatusCode.INTERNAL)
-            return store_daemon_pb2.UnloadModelResponse(model_path=model_path, code=1)
+            return store_daemon_pb2.UnloadReplicaResponse(disk_path=disk_path, code=1)
 
         # Update runtime metrics
         self._update_runtime_metrics()
@@ -717,7 +739,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         with contextlib.suppress(Exception):
             context.set_code(grpc.StatusCode.OK)
 
-        return store_daemon_pb2.UnloadModelResponse(model_path=model_path, code=0)
+        return store_daemon_pb2.UnloadReplicaResponse(disk_path=disk_path, code=0)
 
     def ClearMem(
         self, request: store_daemon_pb2.ClearMemRequest, context: grpc.ServicerContext
@@ -788,26 +810,28 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             context.set_details(f"Failed to get worker status: {str(e)}")
             return store_daemon_pb2.GetWorkerStatusResponse()
 
-    def GetLoadedModels(
+    def GetLoadedReplicas(
         self,
-        request: store_daemon_pb2.GetLoadedModelsRequest,
+        request: store_daemon_pb2.GetLoadedReplicasRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.GetLoadedModelsResponse:
-        """Get information about all loaded models with reference tracking."""
+    ) -> store_daemon_pb2.GetLoadedReplicasResponse:
+        """Get information about all loaded replicas with reference tracking."""
         try:
-            # Get loaded models from replica manager
-            loaded_models = self.replica_manager.get_loaded_models()
+            # Get loaded replicas from replica manager
+            loaded_replicas = self.replica_manager.get_loaded_replicas()
 
             # Apply filters if provided
-            if request.HasField("model_id_filter") and request.model_id_filter:
-                loaded_models = [
-                    m for m in loaded_models if request.model_id_filter in m["model_id"]
+            if request.HasField("artifact_id_filter") and request.artifact_id_filter:
+                loaded_replicas = [
+                    m
+                    for m in loaded_replicas
+                    if request.artifact_id_filter in m["artifact_id"]
                 ]
 
             if request.HasField("device_id_filter"):
-                loaded_models = [
+                loaded_replicas = [
                     m
-                    for m in loaded_models
+                    for m in loaded_replicas
                     if m["device_id"] == request.device_id_filter
                 ]
 
@@ -815,41 +839,41 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             proto_models = []
             total_size = 0
 
-            for model in loaded_models:
-                proto_model = store_daemon_pb2.LoadedModelInfo(
-                    model_id=model["model_id"],
-                    device_id=model["device_id"],
-                    ref_count=model["ref_count"],
-                    pids=model["pids"],
-                    size_bytes=model["size_bytes"],
-                    keep_for_global=model["keep_for_global"],
-                    last_access_timestamp=int(model["last_access_ts"]),
+            for replica in loaded_replicas:
+                proto_model = store_daemon_pb2.LoadedReplicaInfo(
+                    artifact_id=replica["artifact_id"],
+                    device_id=replica["device_id"],
+                    ref_count=replica["ref_count"],
+                    pids=replica["pids"],
+                    size_bytes=replica["size_bytes"],
+                    keep_for_global=replica["keep_for_global"],
+                    last_access_timestamp=int(replica["last_access_ts"]),
                 )
                 proto_models.append(proto_model)
-                total_size += model["size_bytes"]
+                total_size += replica["size_bytes"]
 
-            return store_daemon_pb2.GetLoadedModelsResponse(
-                models=proto_models,
-                total_models=len(proto_models),
+            return store_daemon_pb2.GetLoadedReplicasResponse(
+                replicas=proto_models,
+                total_replicas=len(proto_models),
                 total_size_bytes=total_size,
             )
 
         except Exception as e:
-            logger.exception(f"Error getting loaded models: {e}")
+            logger.exception(f"Error getting loaded replicas: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"Failed to get loaded models: {str(e)}")
-            return store_daemon_pb2.GetLoadedModelsResponse()
+            context.set_details(f"Failed to get loaded replicas: {str(e)}")
+            return store_daemon_pb2.GetLoadedReplicasResponse()
 
-    # ========== Memory TensorDict Registration RPCs ==========
+    # ========== Memory Artifact Registration RPCs ==========
 
-    def BeginRegisterTensorDict(
+    def BeginRegisterArtifact(
         self,
-        request: store_daemon_pb2.BeginRegisterTensorDictRequest,
+        request: store_daemon_pb2.BeginRegisterArtifactRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.BeginRegisterTensorDictResponse:
+    ) -> store_daemon_pb2.BeginRegisterArtifactResponse:
         try:
-            reg: _cs.StoreEngine.TensorDictRegistration = {
-                "model_id": request.model_id,
+            reg: _cs.StoreEngine.ArtifactRegistration = {
+                "artifact_id": request.artifact_id,
                 "tensor_index_key": request.tensor_index_key
                 if request.WhichOneof("index") == "tensor_index_key"
                 else "",
@@ -868,9 +892,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 "ttl_ms": int(request.ttl_ms) if request.HasField("ttl_ms") else 0,
             }
 
-            result = self.store_engine.begin_register_tensor_dict(reg)
+            result = self.store_engine.begin_register_artifact(reg)
 
-            resp = store_daemon_pb2.BeginRegisterTensorDictResponse(
+            resp = store_daemon_pb2.BeginRegisterArtifactResponse(
                 registration_id=result["registration_id"],
                 device_id=result["device_id"],
                 size=result["size_bytes"],
@@ -879,18 +903,18 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             return resp
         except ValueError as e:
             logger.exception(
-                "BeginRegisterTensorDict failed with invalid argument: %s", e
+                "BeginRegisterArtifact failed with invalid argument: %s", e
             )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
-            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+            return store_daemon_pb2.BeginRegisterArtifactResponse()
         except MemoryError as e:
-            logger.exception("BeginRegisterTensorDict failed with memory error: %s", e)
+            logger.exception("BeginRegisterArtifact failed with memory error: %s", e)
             context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
             context.set_details(str(e))
-            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+            return store_daemon_pb2.BeginRegisterArtifactResponse()
         except Exception as e:  # noqa: BLE001
-            logger.exception("BeginRegisterTensorDict failed: %s", e)
+            logger.exception("BeginRegisterArtifact failed: %s", e)
             # Check for specific error messages in the exception string
             error_msg = str(e).lower()
             if "not found" in error_msg:
@@ -906,42 +930,42 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             else:
                 context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return store_daemon_pb2.BeginRegisterTensorDictResponse()
+            return store_daemon_pb2.BeginRegisterArtifactResponse()
 
-    def CommitRegisteredTensorDict(
+    def CommitRegisteredArtifact(
         self,
-        request: store_daemon_pb2.CommitRegisteredTensorDictRequest,
+        request: store_daemon_pb2.CommitRegisteredArtifactRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.CommitRegisteredTensorDictResponse:
+    ) -> store_daemon_pb2.CommitRegisteredArtifactResponse:
         try:
-            result = self.store_engine.commit_registered_tensor_dict(
+            result = self.store_engine.commit_registered_artifact(
                 request.registration_id
             )
             # Build descriptor from returned dict
-            desc = store_daemon_pb2.ModelDescriptor(
-                model_id=str(result["model_id"]),
+            desc = store_daemon_pb2.ArtifactDescriptor(
+                artifact_id=str(result["artifact_id"]),
                 index_multihash=str(result.get("index_multihash", "")),
                 data_multihash=str(result.get("data_multihash", "")),
                 schema_version=str(result.get("schema_version", "")),
                 encoding=str(result.get("encoding", "")),
                 total_size=int(result.get("size_bytes", 0)),
             )
-            return store_daemon_pb2.CommitRegisteredTensorDictResponse(
+            return store_daemon_pb2.CommitRegisteredArtifactResponse(
                 registration_id=str(result["registration_id"]),
-                model_id=str(result["model_id"]),
+                artifact_id=str(result["artifact_id"]),
                 device_id=int(result["device_id"]),
                 size=int(result["size_bytes"]),
                 descriptor=desc,
             )
         except ValueError as e:
             logger.exception(
-                "CommitRegisteredTensorDict failed with invalid argument: %s", e
+                "CommitRegisteredArtifact failed with invalid argument: %s", e
             )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
-            return store_daemon_pb2.CommitRegisteredTensorDictResponse()
+            return store_daemon_pb2.CommitRegisteredArtifactResponse()
         except Exception as e:  # noqa: BLE001
-            logger.exception("CommitRegisteredTensorDict failed: %s", e)
+            logger.exception("CommitRegisteredArtifact failed: %s", e)
             # Check for specific error messages in the exception string
             error_msg = str(e).lower()
             if "not found" in error_msg:
@@ -955,25 +979,25 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             else:
                 context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return store_daemon_pb2.CommitRegisteredTensorDictResponse()
+            return store_daemon_pb2.CommitRegisteredArtifactResponse()
 
-    def AbortRegisteredTensorDict(
+    def AbortRegisteredArtifact(
         self,
-        request: store_daemon_pb2.AbortRegisteredTensorDictRequest,
+        request: store_daemon_pb2.AbortRegisteredArtifactRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.AbortRegisteredTensorDictResponse:
+    ) -> store_daemon_pb2.AbortRegisteredArtifactResponse:
         try:
-            self.store_engine.abort_registered_tensor_dict(request.registration_id)
-            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=True)
+            self.store_engine.abort_registered_artifact(request.registration_id)
+            return store_daemon_pb2.AbortRegisteredArtifactResponse(ok=True)
         except ValueError as e:
             logger.exception(
-                "AbortRegisteredTensorDict failed with invalid argument: %s", e
+                "AbortRegisteredArtifact failed with invalid argument: %s", e
             )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
-            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=False)
+            return store_daemon_pb2.AbortRegisteredArtifactResponse(ok=False)
         except Exception as e:  # noqa: BLE001
-            logger.exception("AbortRegisteredTensorDict failed: %s", e)
+            logger.exception("AbortRegisteredArtifact failed: %s", e)
             # Check for specific error messages in the exception string
             error_msg = str(e).lower()
             if "not found" in error_msg:
@@ -983,7 +1007,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             else:
                 context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return store_daemon_pb2.AbortRegisteredTensorDictResponse(ok=False)
+            return store_daemon_pb2.AbortRegisteredArtifactResponse(ok=False)
 
     def LockTransportChunks(
         self,
@@ -1003,8 +1027,8 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             dev.type = _cs.DeviceType.NONE
             dev.ordinal = -1
             dev.uuid = ""
-            inst_key = _cs.InstanceKey()
-            inst_key.model_id = request.model_id
+            inst_key = _cs.ReplicaKey()
+            inst_key.artifact_id = request.artifact_id
             inst_key.device = dev
             inst_key.replica = 0
 
@@ -1013,7 +1037,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             if status != 0:
                 context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
                 context.set_details(
-                    f"Failed to lock chunks for model {request.model_id}"
+                    f"Failed to lock chunks for replica {request.artifact_id}"
                 )
                 return store_daemon_pb2.LockChunksResponse()
 
@@ -1026,7 +1050,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             self._active_chunk_locks[lock_token] = (inst_key, indices)
 
             logger.info(
-                f"Locked {len(indices)} chunks for model {request.model_id}, token: {lock_token}"
+                f"Locked {len(indices)} chunks for replica {request.artifact_id}, token: {lock_token}"
             )
 
             return store_daemon_pb2.LockChunksResponse(lock_token=lock_token)
@@ -1064,11 +1088,11 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
             if status != 0:
                 logger.warning(
-                    f"Failed to unlock chunks for model {inst_key.model_id}, token: {request.lock_token}"
+                    f"Failed to unlock chunks for replica {inst_key.artifact_id}, token: {request.lock_token}"
                 )
             else:
                 logger.info(
-                    f"Unlocked {len(indices)} chunks for model {inst_key.model_id}, token: {request.lock_token}"
+                    f"Unlocked {len(indices)} chunks for replica {inst_key.artifact_id}, token: {request.lock_token}"
                 )
 
             return store_daemon_pb2.UnlockChunksResponse()
@@ -1105,7 +1129,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         if self.health_check_server:
             self.health_check_server.stop()
 
-        self.model_loader.shutdown()
+        self.artifact_loader.shutdown()
         logger.info("Graceful shutdown completed")
 
     # ------------------------------------------------------------------
@@ -1115,7 +1139,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
     def schedule_verification(
         self,
         *,
-        model_path: str,
+        disk_path: str,
         replica_uuid: str,
         device_uuid: str,
         cuda_ptr: int,
@@ -1126,7 +1150,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         """Handle reference counting and (optionally) schedule data verification.
 
         This helper now solely schedules data integrity verification.  Reference
-        accounting is performed directly in *LoadModel* to guarantee a single
+        accounting is performed directly in *LoadArtifact* to guarantee a single
         authoritative code-path.
         """
 
@@ -1137,10 +1161,10 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         # ------- Verification scheduling (mandatory) -------
         verification_path = os.path.join(
-            self.storage_path, model_path, "verification.json"
+            self.storage_path, disk_path, "verification.json"
         )
         expected_info = read_verification_json(verification_path)
-        memory_size = int(expected_info.get("model_size", 0))
+        memory_size = int(expected_info.get("artifact_size", 0))
 
         # Guard – require valid pointer and expected_info to proceed.
         if not (cuda_ptr and expected_info):
@@ -1149,7 +1173,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         if not replica_uuid:
             return  # cannot track without unique identifier
 
-        key = (model_path, replica_uuid)
+        key = (disk_path, replica_uuid)
         with self._verification_lock:
             self._verification_results[key] = (
                 store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_IN_PROGRESS,
@@ -1182,12 +1206,12 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
         try:
             logger.info(
-                "Verifying model data from GPU (device_id=%s, cuda_ptr=%s, memory_size=%s)",
+                "Verifying replica data from GPU (device_id=%s, cuda_ptr=%s, memory_size=%s)",
                 device_id,
                 cuda_ptr,
                 memory_size,
             )
-            passed: bool = _ckpt_helpers.verify_model_data_from_gpu(
+            passed: bool = _ckpt_helpers.verify_artifact_data_from_gpu(
                 device_id,
                 cuda_ptr,
                 memory_size,
@@ -1197,15 +1221,15 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             logger.info("Verification passed: %s", passed)
 
             latency = time.time() - start_ts
-            MODEL_VERIFICATION_LATENCY.observe(latency)
-            MODEL_VERIFICATION_TOTAL.labels(
+            ARTIFACT_VERIFICATION_LATENCY.observe(latency)
+            ARTIFACT_VERIFICATION_TOTAL.labels(
                 status="passed" if passed else "failed"
             ).inc()
 
             return (passed, "" if passed else "verification mismatch")
 
         except Exception as exc:  # noqa: BLE001
-            MODEL_VERIFICATION_TOTAL.labels(status="failed").inc()
+            ARTIFACT_VERIFICATION_TOTAL.labels(status="failed").inc()
             return False, str(exc)
 
     def _verification_done_callback(self, future: Future, key: tuple[str, str]):
@@ -1232,12 +1256,12 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         #     Global-Store (via ReplicaManager.confirm_model).
         #   • On failure   → unload the faulty replica to free resources.
         # ------------------------------------------------------------------
-        model_path, replica_uuid = key
+        disk_path, replica_uuid = key
 
         if passed:
             try:
-                self.replica_manager.confirm_model(
-                    model_path=model_path,
+                self.replica_manager.confirm_replica(
+                    disk_path=disk_path,
                     replica_uuid=replica_uuid,
                     device_type=store_daemon_pb2.DEVICE_TYPE_GPU,
                 )
@@ -1247,8 +1271,8 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 )
         else:
             try:
-                self.replica_manager.unload_model(
-                    model_path,
+                self.replica_manager.unload_replica(
+                    disk_path,
                     device_type=store_daemon_pb2.DEVICE_TYPE_GPU,
                 )
             except Exception:
@@ -1260,14 +1284,14 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
     # gRPC APIs for verification
     # ------------------------------------------------------------------
 
-    def WaitModelVerification(
+    def WaitReplicaVerification(
         self,
-        request: store_daemon_pb2.VerificationRequest,
+        request: store_daemon_pb2.ReplicaVerificationRequest,
         context: grpc.ServicerContext,
-    ) -> store_daemon_pb2.VerificationResponse:
-        """Allow clients to query the verification status for a model replica."""
+    ) -> store_daemon_pb2.ReplicaVerificationResponse:
+        """Allow clients to query the verification status for a replica."""
 
-        key = (request.model_identifier, request.replica_uuid)
+        key = (request.artifact_id, request.replica_uuid)
 
         deadline = time.time() + (
             request.timeout_ms / 1000 if request.timeout_ms else 30
@@ -1287,10 +1311,12 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_PASSED,
                 store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED,
             ):
-                return store_daemon_pb2.VerificationResponse(status=status, err_msg=err)
+                return store_daemon_pb2.ReplicaVerificationResponse(
+                    status=status, err_msg=err
+                )
 
             if time.time() >= deadline:
-                return store_daemon_pb2.VerificationResponse(
+                return store_daemon_pb2.ReplicaVerificationResponse(
                     status=status, err_msg="timeout"
                 )
 
@@ -1318,11 +1344,11 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 mem_pool_info.chunk_size_bytes = self.store_engine.get_chunk_size()
                 # TODO: Get allocated_chunks_count from C++ layer when available
 
-            # Parse C++ metrics to get detailed model and GPU information
+            # Parse C++ metrics to get detailed replica and GPU information
             gpu_devices = []
-            cpu_models = []
-            total_models = 0
-            total_model_size = 0
+            cpu_replicas = []
+            total_replicas = 0
+            total_artifact_size = 0
             comm_info = store_daemon_pb2.CommunicationInfo(
                 enabled=self.enable_p2p_engine
             )
@@ -1334,10 +1360,10 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
 
                     metrics_text = _cs.get_global_metrics_text().decode()
 
-                    # Parse metrics to extract model and GPU information
+                    # Parse metrics to extract replica and GPU information
                     # Map device_id (int) -> {"total": value, "free": value}
                     gpu_memory_metrics: dict[int, dict[str, int]] = {}
-                    model_counts = {"cpu": 0, "gpu": 0}
+                    replica_counts = {"cpu": 0, "gpu": 0}
 
                     for line in metrics_text.split("\n"):
                         if not line or line.startswith("#"):
@@ -1371,20 +1397,20 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                                         value
                                     )
 
-                        # Parse model counts
-                        elif "store_daemon_models_in_memory" in line:
-                            # Format: store_daemon_models_in_memory{location="cpu|gpu"} value
+                        # Parse replica counts
+                        elif "store_daemon_replicas_in_memory" in line:
+                            # Format: store_daemon_replicas_in_memory{location="cpu|gpu"} value
                             if '{location="cpu"}' in line:
-                                model_counts["cpu"] = int(float(line.split()[-1]))
+                                replica_counts["cpu"] = int(float(line.split()[-1]))
                             elif '{location="gpu"}' in line:
-                                model_counts["gpu"] = int(float(line.split()[-1]))
+                                replica_counts["gpu"] = int(float(line.split()[-1]))
 
-                        # Parse total model size
+                        # Parse total replica size (C++ metric emits replica-level total)
                         elif (
-                            "store_daemon_total_model_size_bytes" in line
+                            "store_daemon_total_replica_size_bytes" in line
                             and "{" not in line
                         ):
-                            total_model_size = int(float(line.split()[-1]))
+                            total_artifact_size = int(float(line.split()[-1]))
 
                         # Parse RDMA metrics
                         elif (
@@ -1435,13 +1461,13 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                         gpu_info.used_memory_bytes = (
                             gpu_info.total_memory_bytes - gpu_info.free_memory_bytes
                         )
-                        # TODO: Get actual loaded models per GPU when available from C++ layer
+                        # TODO: Get actual loaded replicas per GPU when available from C++ layer
                         gpu_devices.append(gpu_info)
 
-                    total_models = model_counts["cpu"] + model_counts["gpu"]
+                    total_replicas = replica_counts["cpu"] + replica_counts["gpu"]
 
-                    # Note: Individual model details are not available from current C++ API
-                    # We would need to extend the C++ layer to expose per-model information
+                    # Note: Individual replica details are not available from current C++ API
+                    # We would need to extend the C++ layer to expose per-replica information
 
                 except Exception as e:
                     logger.warning(f"Failed to parse C++ metrics: {e}")
@@ -1455,10 +1481,10 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
                 worker_id=self.worker_id or "",
                 memory_pool_info=mem_pool_info,
                 gpu_devices=gpu_devices,
-                cpu_models=cpu_models,
+                cpu_replicas=cpu_replicas,
                 communication_info=comm_info,
-                total_models_loaded=total_models,
-                total_model_size_bytes=total_model_size,
+                total_replicas_loaded=total_replicas,
+                total_artifact_size_bytes=total_artifact_size,
                 storage_path=str(self.storage_path),
                 num_worker_threads=self.config.server.num_threads if self.config else 0,
             )

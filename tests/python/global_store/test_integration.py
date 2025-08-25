@@ -3,7 +3,7 @@
 """Integration tests for Global Store full stack."""
 
 
-from scstore.global_store.models import MemoryType, ModelReplica, Worker
+from scstore.global_store.models import MemoryType, Replica, Worker
 
 
 class TestIntegration:
@@ -12,7 +12,7 @@ class TestIntegration:
     def test_worker_lifecycle(self, services):
         """Test complete worker lifecycle."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
 
         # Register worker
         worker = worker_service.register_worker(
@@ -28,9 +28,9 @@ class TestIntegration:
 
         # Register replicas
         for i in range(3):
-            model_service.register_replica(
-                ModelReplica(
-                    model_id=f"model_{i}",
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id=f"model_{i}",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -51,14 +51,14 @@ class TestIntegration:
         assert success is True
 
         # Verify replicas are marked unavailable
-        replicas = model_service.list_replicas(node_id="node1")
+        replicas = artifact_service.list_replicas(node_id="node1")
         for replica in replicas:
             assert replica.is_available is False
 
     def test_multi_node_load_balancing(self, services):
         """Test load balancing across multiple nodes."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         transport_service = services["transport"]
 
         # Register 3 workers on different nodes
@@ -84,9 +84,9 @@ class TestIntegration:
         ]
 
         for i, (worker_id, mem_type, current_requests) in enumerate(replicas_data):
-            model_service.register_replica(
-                ModelReplica(
-                    model_id="distributed_model",
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="distributed_artifact",
                     node_id=f"node{i}",
                     node_address=f"192.168.1.{i+1}",
                     node_port=8080,
@@ -101,7 +101,7 @@ class TestIntegration:
 
         # Request should go to GPU node with lowest load (node0)
         selected, _ = transport_service.request_transport(
-            model_id="distributed_model",
+            artifact_id="distributed_artifact",
             source_node_id="client",
             source_address="10.0.0.100",
             source_port=9999,
@@ -113,7 +113,7 @@ class TestIntegration:
     def test_concurrent_transport_requests(self, services):
         """Test handling concurrent transport requests."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         transport_service = services["transport"]
 
         # Setup worker and replica
@@ -128,9 +128,9 @@ class TestIntegration:
             )
         )
 
-        replica = model_service.register_replica(
-            ModelReplica(
-                model_id="concurrent_model",
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="concurrent_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -146,7 +146,7 @@ class TestIntegration:
         transport_ids = []
         for i in range(3):
             selected, transport_id = transport_service.request_transport(
-                model_id="concurrent_model",
+                artifact_id="concurrent_artifact",
                 source_node_id=f"client_{i}",
                 source_address="192.168.2.1",
                 source_port=9000 + i,
@@ -155,7 +155,7 @@ class TestIntegration:
             assert selected.replica_id == replica.replica_id
 
         # Verify current load
-        updated_replicas = model_service.list_replicas(model_id="concurrent_model")
+        updated_replicas = artifact_service.list_replicas(artifact_id="concurrent_artifact")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].current_requests == 3
 
@@ -165,14 +165,14 @@ class TestIntegration:
             assert result is not None
 
         # Verify load is back to zero
-        final_replicas = model_service.list_replicas(model_id="concurrent_model")
+        final_replicas = artifact_service.list_replicas(artifact_id="concurrent_artifact")
         assert len(final_replicas) == 1
         assert final_replicas[0].current_requests == 0
 
     def test_worker_heartbeat_and_cleanup(self, services):
         """Test worker heartbeat and cleanup functionality."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
 
         # Register worker
         worker = worker_service.register_worker(
@@ -187,9 +187,9 @@ class TestIntegration:
         )
 
         # Register replica for this worker
-        model_service.register_replica(
-            ModelReplica(
-                model_id="heartbeat_model",
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="heartbeat_artifact",
                 node_id="heartbeat_node",
                 node_address="192.168.1.100",
                 node_port=8080,
@@ -217,14 +217,14 @@ class TestIntegration:
         assert success is True
 
         # Verify replica is marked unavailable
-        updated_replicas = model_service.list_replicas(model_id="heartbeat_model")
+        updated_replicas = artifact_service.list_replicas(artifact_id="heartbeat_artifact")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].is_available is False
 
-    def test_model_replica_update_flow(self, services):
-        """Test model replica registration and update flow."""
+    def test_artifact_replica_update_flow(self, services):
+        """Test artifact replica registration and update flow."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
 
         # Register worker
         worker = worker_service.register_worker(
@@ -239,9 +239,9 @@ class TestIntegration:
         )
 
         # Initial replica registration
-        initial_replica = model_service.register_replica(
-            ModelReplica(
-                model_id="update_model",
+        initial_replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="update_artifact",
                 node_id="update_node",
                 node_address="192.168.1.200",
                 node_port=8080,
@@ -254,15 +254,15 @@ class TestIntegration:
         )
 
         # Verify initial state
-        replicas = model_service.list_replicas(model_id="update_model")
+        replicas = artifact_service.list_replicas(artifact_id="update_artifact")
         assert len(replicas) == 1
         assert replicas[0].max_concurrency == 5
         assert replicas[0].memory_size == 1024
 
         # Update replica with different parameters
-        updated_replica = model_service.register_replica(
-            ModelReplica(
-                model_id="update_model",
+        updated_replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="update_artifact",
                 node_id="update_node",
                 node_address="192.168.1.200",
                 node_port=8080,
@@ -280,7 +280,7 @@ class TestIntegration:
         assert updated_replica.max_concurrency == 10
 
         # Verify in database
-        updated_replicas = model_service.list_replicas(model_id="update_model")
+        updated_replicas = artifact_service.list_replicas(artifact_id="update_artifact")
         assert len(updated_replicas) == 1
         assert updated_replicas[0].memory_size == 2048
         assert updated_replicas[0].max_concurrency == 10
@@ -288,7 +288,7 @@ class TestIntegration:
     def test_cross_service_data_consistency(self, services):
         """Test data consistency across service boundaries."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         transport_service = services["transport"]
 
         # Register worker
@@ -304,9 +304,9 @@ class TestIntegration:
         )
 
         # Register replica
-        model_service.register_replica(
-            ModelReplica(
-                model_id="consistency_model",
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="consistency_artifact",
                 node_id="consistency_node",
                 node_address="192.168.1.150",
                 node_port=8080,
@@ -320,17 +320,17 @@ class TestIntegration:
 
         # Request transport
         selected, transport_id = transport_service.request_transport(
-            model_id="consistency_model",
+            artifact_id="consistency_artifact",
             source_node_id="consistency_client",
             source_address="192.168.2.100",
             source_port=9000,
         )
 
         # Verify consistency across services
-        # Model service should show updated current_requests
-        model_replicas = model_service.list_replicas(model_id="consistency_model")
-        assert len(model_replicas) == 1
-        assert model_replicas[0].current_requests == 1
+        # Artifact service should show updated current_requests
+        artifact_replicas = artifact_service.list_replicas(artifact_id="consistency_artifact")
+        assert len(artifact_replicas) == 1
+        assert artifact_replicas[0].current_requests == 1
 
         # Worker should still be available
         active_workers = worker_service.list_active_workers()
@@ -342,14 +342,14 @@ class TestIntegration:
         assert result is not None
 
         # Verify consistency after completion
-        final_replicas = model_service.list_replicas(model_id="consistency_model")
+        final_replicas = artifact_service.list_replicas(artifact_id="consistency_artifact")
         assert len(final_replicas) == 1
         assert final_replicas[0].current_requests == 0
 
     def test_multiple_models_same_worker(self, services):
         """Test multiple models hosted on the same worker."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         transport_service = services["transport"]
 
         # Register single worker
@@ -365,13 +365,13 @@ class TestIntegration:
         )
 
         # Register multiple models on same worker
-        model_ids = ["model_a", "model_b", "model_c"]
+        artifact_ids = ["model_a", "model_b", "model_c"]
         replicas = []
 
-        for i, model_id in enumerate(model_ids):
-            replica = model_service.register_replica(
-                ModelReplica(
-                    model_id=model_id,
+        for i, artifact_id in enumerate(artifact_ids):
+            replica = artifact_service.register_replica(
+                Replica(
+                    artifact_id=artifact_id,
                     node_id="multi_model_node",
                     node_address="192.168.1.250",
                     node_port=8080 + i,
@@ -386,28 +386,28 @@ class TestIntegration:
 
         # Request transports for different models
         transport_ids = {}
-        for model_id in model_ids:
+        for artifact_id in artifact_ids:
             selected, transport_id = transport_service.request_transport(
-                model_id=model_id,
+                artifact_id=artifact_id,
                 source_node_id="multi_client",
                 source_address="192.168.3.1",
                 source_port=9000,
             )
-            transport_ids[model_id] = transport_id
+            transport_ids[artifact_id] = transport_id
             assert selected.worker_id == worker.worker_id
 
-        # Verify each model has one active request
-        for model_id in model_ids:
-            model_replicas = model_service.list_replicas(model_id=model_id)
-            assert len(model_replicas) == 1
-            assert model_replicas[0].current_requests == 1
+        # Verify each artifact has one active request
+        for artifact_id in artifact_ids:
+            artifact_replicas = artifact_service.list_replicas(artifact_id=artifact_id)
+            assert len(artifact_replicas) == 1
+            assert artifact_replicas[0].current_requests == 1
 
         # Unregister worker - should affect all models
         success = worker_service.unregister_worker(worker.worker_id)
         assert success is True
 
         # Verify all replicas are marked unavailable
-        for model_id in model_ids:
-            model_replicas = model_service.list_replicas(model_id=model_id)
-            assert len(model_replicas) == 1
-            assert model_replicas[0].is_available is False
+        for artifact_id in artifact_ids:
+            artifact_replicas = artifact_service.list_replicas(artifact_id=artifact_id)
+            assert len(artifact_replicas) == 1
+            assert artifact_replicas[0].is_available is False

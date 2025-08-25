@@ -30,179 +30,176 @@
 
 namespace global_store {
 
-class GlobalModelStore final {
+class GlobalStore final {
  public:
   static constexpr char const* service_full_name() {
-    return "global_store.GlobalModelStore";
+    return "global_store.GlobalStore";
   }
   class StubInterface {
    public:
     virtual ~StubInterface() {}
-    virtual ::grpc::Status RegisterModelReplica(
+    virtual ::grpc::Status RegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
-        ::global_store::RegisterModelReplicaResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>>
-    AsyncRegisterModelReplica(
+        const ::global_store::RegisterReplicaRequest& request,
+        ::global_store::RegisterReplicaResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>>
+    AsyncRegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>>(
-          AsyncRegisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>>(
+          AsyncRegisterReplicaRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>>
-    PrepareAsyncRegisterModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>>
+    PrepareAsyncRegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>>(
-          PrepareAsyncRegisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>>(
+          PrepareAsyncRegisterReplicaRaw(context, request, cq));
     }
-    virtual ::grpc::Status UpdateModelReplica(
+    virtual ::grpc::Status UpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
-        ::global_store::UpdateModelReplicaResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>>
-    AsyncUpdateModelReplica(
+        const ::global_store::UpdateReplicaRequest& request,
+        ::global_store::UpdateReplicaResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>>
+    AsyncUpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>>(
-          AsyncUpdateModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>>(
+          AsyncUpdateReplicaRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>>
-    PrepareAsyncUpdateModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>>
+    PrepareAsyncUpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>>(
-          PrepareAsyncUpdateModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>>(
+          PrepareAsyncUpdateReplicaRaw(context, request, cq));
     }
-    virtual ::grpc::Status UnregisterModelReplica(
+    virtual ::grpc::Status UnregisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
-        ::global_store::UnregisterModelReplicaResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>>
-    AsyncUnregisterModelReplica(
+        const ::global_store::UnregisterReplicaRequest& request,
+        ::global_store::UnregisterReplicaResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>>
+    AsyncUnregisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>>(
+          AsyncUnregisterReplicaRaw(context, request, cq));
+    }
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>>
+    PrepareAsyncUnregisterReplica(
+        ::grpc::ClientContext* context,
+        const ::global_store::UnregisterReplicaRequest& request,
+        ::grpc::CompletionQueue* cq) {
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>>(
+          PrepareAsyncUnregisterReplicaRaw(context, request, cq));
+    }
+    virtual ::grpc::Status RequestReplicaTransport(
+        ::grpc::ClientContext* context,
+        const ::global_store::RequestReplicaTransportRequest& request,
+        ::global_store::RequestReplicaTransportResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>>
+    AsyncRequestReplicaTransport(
+        ::grpc::ClientContext* context,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
       return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>>(
-          AsyncUnregisterModelReplicaRaw(context, request, cq));
+          ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>>(
+          AsyncRequestReplicaTransportRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>>
-    PrepareAsyncUnregisterModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>>
+    PrepareAsyncRequestReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
       return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>>(
-          PrepareAsyncUnregisterModelReplicaRaw(context, request, cq));
+          ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>>(
+          PrepareAsyncRequestReplicaTransportRaw(context, request, cq));
     }
-    virtual ::grpc::Status RequestModelReplicaTransport(
+    virtual ::grpc::Status CompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
-        ::global_store::RequestModelReplicaTransportResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>>
-    AsyncRequestModelReplicaTransport(
+        const ::global_store::CompleteReplicaTransportRequest& request,
+        ::global_store::CompleteReplicaTransportResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>>
+    AsyncCompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
       return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>>(
-          AsyncRequestModelReplicaTransportRaw(context, request, cq));
+          ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>>(
+          AsyncCompleteReplicaTransportRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>>
-    PrepareAsyncRequestModelReplicaTransport(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>>
+    PrepareAsyncCompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
       return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>>(
-          PrepareAsyncRequestModelReplicaTransportRaw(context, request, cq));
+          ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>>(
+          PrepareAsyncCompleteReplicaTransportRaw(context, request, cq));
     }
-    virtual ::grpc::Status CompleteModelReplicaTransport(
+    virtual ::grpc::Status ListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
-        ::global_store::CompleteModelReplicaTransportResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>>
-    AsyncCompleteModelReplicaTransport(
+        const ::global_store::ListReplicasRequest& request,
+        ::global_store::ListReplicasResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>> AsyncListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>>(
-          AsyncCompleteModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>>(
+          AsyncListReplicasRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>>
-    PrepareAsyncCompleteModelReplicaTransport(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>>
+    PrepareAsyncListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<
-          ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>>(
-          PrepareAsyncCompleteModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>>(
+          PrepareAsyncListReplicasRaw(context, request, cq));
     }
-    virtual ::grpc::Status ListModelReplicas(
+    virtual ::grpc::Status GetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
-        ::global_store::ListModelReplicasResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>>
-    AsyncListModelReplicas(
+        const ::global_store::GetArtifactInfoByIdRequest& request,
+        ::global_store::GetArtifactInfoByIdResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>>
+    AsyncGetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>>(
-          AsyncListModelReplicasRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>>(
+          AsyncGetArtifactInfoByIdRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>>
-    PrepareAsyncListModelReplicas(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>>
+    PrepareAsyncGetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>>(
-          PrepareAsyncListModelReplicasRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>>(
+          PrepareAsyncGetArtifactInfoByIdRaw(context, request, cq));
     }
-    virtual ::grpc::Status GetModelInfoById(
+    virtual ::grpc::Status GetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
-        ::global_store::GetModelInfoByIdResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>
-    AsyncGetModelInfoById(
+        const ::global_store::GetArtifactIndexRequest& request,
+        ::global_store::GetArtifactIndexResponse* response) = 0;
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>>
+    AsyncGetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>(
-          AsyncGetModelInfoByIdRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>>(
+          AsyncGetArtifactIndexRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>
-    PrepareAsyncGetModelInfoById(
+    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>>
+    PrepareAsyncGetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>>(
-          PrepareAsyncGetModelInfoByIdRaw(context, request, cq));
-    }
-    virtual ::grpc::Status GetModelIndex(
-        ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
-        ::global_store::GetModelIndexResponse* response) = 0;
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>
-    AsyncGetModelIndex(
-        ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
-        ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>(
-          AsyncGetModelIndexRaw(context, request, cq));
-    }
-    std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>
-    PrepareAsyncGetModelIndex(
-        ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
-        ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>>(
-          PrepareAsyncGetModelIndexRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>>(
+          PrepareAsyncGetArtifactIndexRaw(context, request, cq));
     }
     virtual ::grpc::Status RegisterWorker(
         ::grpc::ClientContext* context,
@@ -390,85 +387,85 @@ class GlobalModelStore final {
     class async_interface {
      public:
       virtual ~async_interface() {}
-      virtual void RegisterModelReplica(
+      virtual void RegisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest* request,
-          ::global_store::RegisterModelReplicaResponse* response,
+          const ::global_store::RegisterReplicaRequest* request,
+          ::global_store::RegisterReplicaResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void RegisterModelReplica(
+      virtual void RegisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest* request,
-          ::global_store::RegisterModelReplicaResponse* response,
+          const ::global_store::RegisterReplicaRequest* request,
+          ::global_store::RegisterReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void UpdateModelReplica(
+      virtual void UpdateReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest* request,
-          ::global_store::UpdateModelReplicaResponse* response,
+          const ::global_store::UpdateReplicaRequest* request,
+          ::global_store::UpdateReplicaResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void UpdateModelReplica(
+      virtual void UpdateReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest* request,
-          ::global_store::UpdateModelReplicaResponse* response,
+          const ::global_store::UpdateReplicaRequest* request,
+          ::global_store::UpdateReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void UnregisterModelReplica(
+      virtual void UnregisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest* request,
-          ::global_store::UnregisterModelReplicaResponse* response,
+          const ::global_store::UnregisterReplicaRequest* request,
+          ::global_store::UnregisterReplicaResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void UnregisterModelReplica(
+      virtual void UnregisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest* request,
-          ::global_store::UnregisterModelReplicaResponse* response,
+          const ::global_store::UnregisterReplicaRequest* request,
+          ::global_store::UnregisterReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void RequestModelReplicaTransport(
+      virtual void RequestReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest* request,
-          ::global_store::RequestModelReplicaTransportResponse* response,
+          const ::global_store::RequestReplicaTransportRequest* request,
+          ::global_store::RequestReplicaTransportResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void RequestModelReplicaTransport(
+      virtual void RequestReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest* request,
-          ::global_store::RequestModelReplicaTransportResponse* response,
+          const ::global_store::RequestReplicaTransportRequest* request,
+          ::global_store::RequestReplicaTransportResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void CompleteModelReplicaTransport(
+      virtual void CompleteReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest* request,
-          ::global_store::CompleteModelReplicaTransportResponse* response,
+          const ::global_store::CompleteReplicaTransportRequest* request,
+          ::global_store::CompleteReplicaTransportResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void CompleteModelReplicaTransport(
+      virtual void CompleteReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest* request,
-          ::global_store::CompleteModelReplicaTransportResponse* response,
+          const ::global_store::CompleteReplicaTransportRequest* request,
+          ::global_store::CompleteReplicaTransportResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void ListModelReplicas(
+      virtual void ListReplicas(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest* request,
-          ::global_store::ListModelReplicasResponse* response,
+          const ::global_store::ListReplicasRequest* request,
+          ::global_store::ListReplicasResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void ListModelReplicas(
+      virtual void ListReplicas(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest* request,
-          ::global_store::ListModelReplicasResponse* response,
+          const ::global_store::ListReplicasRequest* request,
+          ::global_store::ListReplicasResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void GetModelInfoById(
+      virtual void GetArtifactInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest* request,
-          ::global_store::GetModelInfoByIdResponse* response,
+          const ::global_store::GetArtifactInfoByIdRequest* request,
+          ::global_store::GetArtifactInfoByIdResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void GetModelInfoById(
+      virtual void GetArtifactInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest* request,
-          ::global_store::GetModelInfoByIdResponse* response,
+          const ::global_store::GetArtifactInfoByIdRequest* request,
+          ::global_store::GetArtifactInfoByIdResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
-      virtual void GetModelIndex(
+      virtual void GetArtifactIndex(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest* request,
-          ::global_store::GetModelIndexResponse* response,
+          const ::global_store::GetArtifactIndexRequest* request,
+          ::global_store::GetArtifactIndexResponse* response,
           std::function<void(::grpc::Status)>) = 0;
-      virtual void GetModelIndex(
+      virtual void GetArtifactIndex(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest* request,
-          ::global_store::GetModelIndexResponse* response,
+          const ::global_store::GetArtifactIndexRequest* request,
+          ::global_store::GetArtifactIndexResponse* response,
           ::grpc::ClientUnaryReactor* reactor) = 0;
       virtual void RegisterWorker(
           ::grpc::ClientContext* context,
@@ -570,84 +567,82 @@ class GlobalModelStore final {
     }
 
    private:
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>*
-    AsyncRegisterModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>* AsyncRegisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterModelReplicaResponse>*
-    PrepareAsyncRegisterModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterReplicaResponse>*
+    PrepareAsyncRegisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>*
-    AsyncUpdateModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>* AsyncUpdateReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateModelReplicaResponse>*
-    PrepareAsyncUpdateModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UpdateReplicaResponse>*
+    PrepareAsyncUpdateReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>*
-    AsyncUnregisterModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>*
+    AsyncUnregisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterModelReplicaResponse>*
-    PrepareAsyncUnregisterModelReplicaRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::UnregisterReplicaResponse>*
+    PrepareAsyncUnregisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>*
-    AsyncRequestModelReplicaTransportRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>*
+    AsyncRequestReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestModelReplicaTransportResponse>*
-    PrepareAsyncRequestModelReplicaTransportRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RequestReplicaTransportResponse>*
+    PrepareAsyncRequestReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>*
-    AsyncCompleteModelReplicaTransportRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>*
+    AsyncCompleteReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteModelReplicaTransportResponse>*
-    PrepareAsyncCompleteModelReplicaTransportRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::CompleteReplicaTransportResponse>*
+    PrepareAsyncCompleteReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>*
-    AsyncListModelReplicasRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>* AsyncListReplicasRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListModelReplicasResponse>*
-    PrepareAsyncListModelReplicasRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::ListReplicasResponse>*
+    PrepareAsyncListReplicasRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*
-    AsyncGetModelInfoByIdRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>*
+    AsyncGetArtifactInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelInfoByIdResponse>*
-    PrepareAsyncGetModelInfoByIdRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactInfoByIdResponse>*
+    PrepareAsyncGetArtifactInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>*
+    AsyncGetArtifactIndexRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
-    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetModelIndexResponse>*
-    PrepareAsyncGetModelIndexRaw(
+    virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::GetArtifactIndexResponse>*
+    PrepareAsyncGetArtifactIndexRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) = 0;
     virtual ::grpc::ClientAsyncResponseReaderInterface<::global_store::RegisterWorkerResponse>* AsyncRegisterWorkerRaw(
         ::grpc::ClientContext* context,
@@ -741,161 +736,158 @@ class GlobalModelStore final {
     Stub(
         const std::shared_ptr<::grpc::ChannelInterface>& channel,
         const ::grpc::StubOptions& options = ::grpc::StubOptions());
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
-        ::global_store::RegisterModelReplicaResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>>
-    AsyncRegisterModelReplica(
+        const ::global_store::RegisterReplicaRequest& request,
+        ::global_store::RegisterReplicaResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>> AsyncRegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>>(
-          AsyncRegisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>>(
+          AsyncRegisterReplicaRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>>
-    PrepareAsyncRegisterModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>>
+    PrepareAsyncRegisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>>(
-          PrepareAsyncRegisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>>(
+          PrepareAsyncRegisterReplicaRaw(context, request, cq));
     }
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
-        ::global_store::UpdateModelReplicaResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>>
-    AsyncUpdateModelReplica(
+        const ::global_store::UpdateReplicaRequest& request,
+        ::global_store::UpdateReplicaResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>> AsyncUpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>>(
-          AsyncUpdateModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>>(
+          AsyncUpdateReplicaRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>>
-    PrepareAsyncUpdateModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>> PrepareAsyncUpdateReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>>(
-          PrepareAsyncUpdateModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>>(
+          PrepareAsyncUpdateReplicaRaw(context, request, cq));
     }
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
-        ::global_store::UnregisterModelReplicaResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>>
-    AsyncUnregisterModelReplica(
+        const ::global_store::UnregisterReplicaRequest& request,
+        ::global_store::UnregisterReplicaResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>> AsyncUnregisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>>(
-          AsyncUnregisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>>(
+          AsyncUnregisterReplicaRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>>
-    PrepareAsyncUnregisterModelReplica(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>>
+    PrepareAsyncUnregisterReplica(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>>(
-          PrepareAsyncUnregisterModelReplicaRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>>(
+          PrepareAsyncUnregisterReplicaRaw(context, request, cq));
     }
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
-        ::global_store::RequestModelReplicaTransportResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>>
-    AsyncRequestModelReplicaTransport(
+        const ::global_store::RequestReplicaTransportRequest& request,
+        ::global_store::RequestReplicaTransportResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>>
+    AsyncRequestReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>>(
-          AsyncRequestModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>>(
+          AsyncRequestReplicaTransportRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>>
-    PrepareAsyncRequestModelReplicaTransport(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>>
+    PrepareAsyncRequestReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>>(
-          PrepareAsyncRequestModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>>(
+          PrepareAsyncRequestReplicaTransportRaw(context, request, cq));
     }
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
-        ::global_store::CompleteModelReplicaTransportResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>>
-    AsyncCompleteModelReplicaTransport(
+        const ::global_store::CompleteReplicaTransportRequest& request,
+        ::global_store::CompleteReplicaTransportResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>>
+    AsyncCompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>>(
-          AsyncCompleteModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>>(
+          AsyncCompleteReplicaTransportRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>>
-    PrepareAsyncCompleteModelReplicaTransport(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>>
+    PrepareAsyncCompleteReplicaTransport(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>>(
-          PrepareAsyncCompleteModelReplicaTransportRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>>(
+          PrepareAsyncCompleteReplicaTransportRaw(context, request, cq));
     }
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
-        ::global_store::ListModelReplicasResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>> AsyncListModelReplicas(
+        const ::global_store::ListReplicasRequest& request,
+        ::global_store::ListReplicasResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>> AsyncListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>>(
-          AsyncListModelReplicasRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>>(
+          AsyncListReplicasRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>>
-    PrepareAsyncListModelReplicas(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>> PrepareAsyncListReplicas(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>>(
-          PrepareAsyncListModelReplicasRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>>(
+          PrepareAsyncListReplicasRaw(context, request, cq));
     }
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
-        ::global_store::GetModelInfoByIdResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>> AsyncGetModelInfoById(
+        const ::global_store::GetArtifactInfoByIdRequest& request,
+        ::global_store::GetArtifactInfoByIdResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>>
+    AsyncGetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>(
-          AsyncGetModelInfoByIdRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>>(
+          AsyncGetArtifactInfoByIdRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>
-    PrepareAsyncGetModelInfoById(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>>
+    PrepareAsyncGetArtifactInfoById(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>>(
-          PrepareAsyncGetModelInfoByIdRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>>(
+          PrepareAsyncGetArtifactInfoByIdRaw(context, request, cq));
     }
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
-        ::global_store::GetModelIndexResponse* response) override;
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>> AsyncGetModelIndex(
+        const ::global_store::GetArtifactIndexRequest& request,
+        ::global_store::GetArtifactIndexResponse* response) override;
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>> AsyncGetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>>(
-          AsyncGetModelIndexRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>>(
+          AsyncGetArtifactIndexRaw(context, request, cq));
     }
-    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>> PrepareAsyncGetModelIndex(
+    std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>>
+    PrepareAsyncGetArtifactIndex(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) {
-      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>>(
-          PrepareAsyncGetModelIndexRaw(context, request, cq));
+      return std::unique_ptr<::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>>(
+          PrepareAsyncGetArtifactIndexRaw(context, request, cq));
     }
     ::grpc::Status RegisterWorker(
         ::grpc::ClientContext* context,
@@ -1073,85 +1065,85 @@ class GlobalModelStore final {
     }
     class async final : public StubInterface::async_interface {
      public:
-      void RegisterModelReplica(
+      void RegisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest* request,
-          ::global_store::RegisterModelReplicaResponse* response,
+          const ::global_store::RegisterReplicaRequest* request,
+          ::global_store::RegisterReplicaResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void RegisterModelReplica(
+      void RegisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::RegisterModelReplicaRequest* request,
-          ::global_store::RegisterModelReplicaResponse* response,
+          const ::global_store::RegisterReplicaRequest* request,
+          ::global_store::RegisterReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void UpdateModelReplica(
+      void UpdateReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest* request,
-          ::global_store::UpdateModelReplicaResponse* response,
+          const ::global_store::UpdateReplicaRequest* request,
+          ::global_store::UpdateReplicaResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void UpdateModelReplica(
+      void UpdateReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UpdateModelReplicaRequest* request,
-          ::global_store::UpdateModelReplicaResponse* response,
+          const ::global_store::UpdateReplicaRequest* request,
+          ::global_store::UpdateReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void UnregisterModelReplica(
+      void UnregisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest* request,
-          ::global_store::UnregisterModelReplicaResponse* response,
+          const ::global_store::UnregisterReplicaRequest* request,
+          ::global_store::UnregisterReplicaResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void UnregisterModelReplica(
+      void UnregisterReplica(
           ::grpc::ClientContext* context,
-          const ::global_store::UnregisterModelReplicaRequest* request,
-          ::global_store::UnregisterModelReplicaResponse* response,
+          const ::global_store::UnregisterReplicaRequest* request,
+          ::global_store::UnregisterReplicaResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void RequestModelReplicaTransport(
+      void RequestReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest* request,
-          ::global_store::RequestModelReplicaTransportResponse* response,
+          const ::global_store::RequestReplicaTransportRequest* request,
+          ::global_store::RequestReplicaTransportResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void RequestModelReplicaTransport(
+      void RequestReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::RequestModelReplicaTransportRequest* request,
-          ::global_store::RequestModelReplicaTransportResponse* response,
+          const ::global_store::RequestReplicaTransportRequest* request,
+          ::global_store::RequestReplicaTransportResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void CompleteModelReplicaTransport(
+      void CompleteReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest* request,
-          ::global_store::CompleteModelReplicaTransportResponse* response,
+          const ::global_store::CompleteReplicaTransportRequest* request,
+          ::global_store::CompleteReplicaTransportResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void CompleteModelReplicaTransport(
+      void CompleteReplicaTransport(
           ::grpc::ClientContext* context,
-          const ::global_store::CompleteModelReplicaTransportRequest* request,
-          ::global_store::CompleteModelReplicaTransportResponse* response,
+          const ::global_store::CompleteReplicaTransportRequest* request,
+          ::global_store::CompleteReplicaTransportResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void ListModelReplicas(
+      void ListReplicas(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest* request,
-          ::global_store::ListModelReplicasResponse* response,
+          const ::global_store::ListReplicasRequest* request,
+          ::global_store::ListReplicasResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void ListModelReplicas(
+      void ListReplicas(
           ::grpc::ClientContext* context,
-          const ::global_store::ListModelReplicasRequest* request,
-          ::global_store::ListModelReplicasResponse* response,
+          const ::global_store::ListReplicasRequest* request,
+          ::global_store::ListReplicasResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void GetModelInfoById(
+      void GetArtifactInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest* request,
-          ::global_store::GetModelInfoByIdResponse* response,
+          const ::global_store::GetArtifactInfoByIdRequest* request,
+          ::global_store::GetArtifactInfoByIdResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void GetModelInfoById(
+      void GetArtifactInfoById(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelInfoByIdRequest* request,
-          ::global_store::GetModelInfoByIdResponse* response,
+          const ::global_store::GetArtifactInfoByIdRequest* request,
+          ::global_store::GetArtifactInfoByIdResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
-      void GetModelIndex(
+      void GetArtifactIndex(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest* request,
-          ::global_store::GetModelIndexResponse* response,
+          const ::global_store::GetArtifactIndexRequest* request,
+          ::global_store::GetArtifactIndexResponse* response,
           std::function<void(::grpc::Status)>) override;
-      void GetModelIndex(
+      void GetArtifactIndex(
           ::grpc::ClientContext* context,
-          const ::global_store::GetModelIndexRequest* request,
-          ::global_store::GetModelIndexResponse* response,
+          const ::global_store::GetArtifactIndexRequest* request,
+          ::global_store::GetArtifactIndexResponse* response,
           ::grpc::ClientUnaryReactor* reactor) override;
       void RegisterWorker(
           ::grpc::ClientContext* context,
@@ -1259,74 +1251,72 @@ class GlobalModelStore final {
    private:
     std::shared_ptr<::grpc::ChannelInterface> channel_;
     class async async_stub_{this};
-    ::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>* AsyncRegisterModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>* AsyncRegisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::RegisterModelReplicaResponse>* PrepareAsyncRegisterModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::RegisterReplicaResponse>* PrepareAsyncRegisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RegisterModelReplicaRequest& request,
+        const ::global_store::RegisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>* AsyncUpdateModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>* AsyncUpdateReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::UpdateModelReplicaResponse>* PrepareAsyncUpdateModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::UpdateReplicaResponse>* PrepareAsyncUpdateReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UpdateModelReplicaRequest& request,
+        const ::global_store::UpdateReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>* AsyncUnregisterModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>* AsyncUnregisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::UnregisterModelReplicaResponse>*
-    PrepareAsyncUnregisterModelReplicaRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::UnregisterReplicaResponse>* PrepareAsyncUnregisterReplicaRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::UnregisterModelReplicaRequest& request,
+        const ::global_store::UnregisterReplicaRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>*
-    AsyncRequestModelReplicaTransportRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>* AsyncRequestReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::RequestModelReplicaTransportResponse>*
-    PrepareAsyncRequestModelReplicaTransportRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::RequestReplicaTransportResponse>*
+    PrepareAsyncRequestReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest& request,
+        const ::global_store::RequestReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>*
-    AsyncCompleteModelReplicaTransportRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>*
+    AsyncCompleteReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::CompleteModelReplicaTransportResponse>*
-    PrepareAsyncCompleteModelReplicaTransportRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::CompleteReplicaTransportResponse>*
+    PrepareAsyncCompleteReplicaTransportRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest& request,
+        const ::global_store::CompleteReplicaTransportRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>* AsyncListModelReplicasRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>* AsyncListReplicasRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::ListModelReplicasResponse>* PrepareAsyncListModelReplicasRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::ListReplicasResponse>* PrepareAsyncListReplicasRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::ListModelReplicasRequest& request,
+        const ::global_store::ListReplicasRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>* AsyncGetModelInfoByIdRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>* AsyncGetArtifactInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelInfoByIdResponse>* PrepareAsyncGetModelInfoByIdRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetArtifactInfoByIdResponse>* PrepareAsyncGetArtifactInfoByIdRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelInfoByIdRequest& request,
+        const ::global_store::GetArtifactInfoByIdRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>* AsyncGetModelIndexRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>* AsyncGetArtifactIndexRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    ::grpc::ClientAsyncResponseReader<::global_store::GetModelIndexResponse>* PrepareAsyncGetModelIndexRaw(
+    ::grpc::ClientAsyncResponseReader<::global_store::GetArtifactIndexResponse>* PrepareAsyncGetArtifactIndexRaw(
         ::grpc::ClientContext* context,
-        const ::global_store::GetModelIndexRequest& request,
+        const ::global_store::GetArtifactIndexRequest& request,
         ::grpc::CompletionQueue* cq) override;
     ::grpc::ClientAsyncResponseReader<::global_store::RegisterWorkerResponse>* AsyncRegisterWorkerRaw(
         ::grpc::ClientContext* context,
@@ -1402,14 +1392,14 @@ class GlobalModelStore final {
         ::grpc::ClientContext* context,
         const ::global_store::BatchUpdateChunkStatesRequest& request,
         ::grpc::CompletionQueue* cq) override;
-    const ::grpc::internal::RpcMethod rpcmethod_RegisterModelReplica_;
-    const ::grpc::internal::RpcMethod rpcmethod_UpdateModelReplica_;
-    const ::grpc::internal::RpcMethod rpcmethod_UnregisterModelReplica_;
-    const ::grpc::internal::RpcMethod rpcmethod_RequestModelReplicaTransport_;
-    const ::grpc::internal::RpcMethod rpcmethod_CompleteModelReplicaTransport_;
-    const ::grpc::internal::RpcMethod rpcmethod_ListModelReplicas_;
-    const ::grpc::internal::RpcMethod rpcmethod_GetModelInfoById_;
-    const ::grpc::internal::RpcMethod rpcmethod_GetModelIndex_;
+    const ::grpc::internal::RpcMethod rpcmethod_RegisterReplica_;
+    const ::grpc::internal::RpcMethod rpcmethod_UpdateReplica_;
+    const ::grpc::internal::RpcMethod rpcmethod_UnregisterReplica_;
+    const ::grpc::internal::RpcMethod rpcmethod_RequestReplicaTransport_;
+    const ::grpc::internal::RpcMethod rpcmethod_CompleteReplicaTransport_;
+    const ::grpc::internal::RpcMethod rpcmethod_ListReplicas_;
+    const ::grpc::internal::RpcMethod rpcmethod_GetArtifactInfoById_;
+    const ::grpc::internal::RpcMethod rpcmethod_GetArtifactIndex_;
     const ::grpc::internal::RpcMethod rpcmethod_RegisterWorker_;
     const ::grpc::internal::RpcMethod rpcmethod_WorkerHeartbeat_;
     const ::grpc::internal::RpcMethod rpcmethod_UnregisterWorker_;
@@ -1428,38 +1418,38 @@ class GlobalModelStore final {
    public:
     Service();
     virtual ~Service();
-    virtual ::grpc::Status RegisterModelReplica(
+    virtual ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* context,
-        const ::global_store::RegisterModelReplicaRequest* request,
-        ::global_store::RegisterModelReplicaResponse* response);
-    virtual ::grpc::Status UpdateModelReplica(
+        const ::global_store::RegisterReplicaRequest* request,
+        ::global_store::RegisterReplicaResponse* response);
+    virtual ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* context,
-        const ::global_store::UpdateModelReplicaRequest* request,
-        ::global_store::UpdateModelReplicaResponse* response);
-    virtual ::grpc::Status UnregisterModelReplica(
+        const ::global_store::UpdateReplicaRequest* request,
+        ::global_store::UpdateReplicaResponse* response);
+    virtual ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* context,
-        const ::global_store::UnregisterModelReplicaRequest* request,
-        ::global_store::UnregisterModelReplicaResponse* response);
-    virtual ::grpc::Status RequestModelReplicaTransport(
+        const ::global_store::UnregisterReplicaRequest* request,
+        ::global_store::UnregisterReplicaResponse* response);
+    virtual ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* context,
-        const ::global_store::RequestModelReplicaTransportRequest* request,
-        ::global_store::RequestModelReplicaTransportResponse* response);
-    virtual ::grpc::Status CompleteModelReplicaTransport(
+        const ::global_store::RequestReplicaTransportRequest* request,
+        ::global_store::RequestReplicaTransportResponse* response);
+    virtual ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* context,
-        const ::global_store::CompleteModelReplicaTransportRequest* request,
-        ::global_store::CompleteModelReplicaTransportResponse* response);
-    virtual ::grpc::Status ListModelReplicas(
+        const ::global_store::CompleteReplicaTransportRequest* request,
+        ::global_store::CompleteReplicaTransportResponse* response);
+    virtual ::grpc::Status ListReplicas(
         ::grpc::ServerContext* context,
-        const ::global_store::ListModelReplicasRequest* request,
-        ::global_store::ListModelReplicasResponse* response);
-    virtual ::grpc::Status GetModelInfoById(
+        const ::global_store::ListReplicasRequest* request,
+        ::global_store::ListReplicasResponse* response);
+    virtual ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* context,
-        const ::global_store::GetModelInfoByIdRequest* request,
-        ::global_store::GetModelInfoByIdResponse* response);
-    virtual ::grpc::Status GetModelIndex(
+        const ::global_store::GetArtifactInfoByIdRequest* request,
+        ::global_store::GetArtifactInfoByIdResponse* response);
+    virtual ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* context,
-        const ::global_store::GetModelIndexRequest* request,
-        ::global_store::GetModelIndexResponse* response);
+        const ::global_store::GetArtifactIndexRequest* request,
+        ::global_store::GetArtifactIndexResponse* response);
     virtual ::grpc::Status RegisterWorker(
         ::grpc::ServerContext* context,
         const ::global_store::RegisterWorkerRequest* request,
@@ -1498,29 +1488,29 @@ class GlobalModelStore final {
         ::global_store::BatchUpdateChunkStatesResponse* response);
   };
   template <class BaseClass>
-  class WithAsyncMethod_RegisterModelReplica : public BaseClass {
+  class WithAsyncMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_RegisterModelReplica() {
+    WithAsyncMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodAsync(0);
     }
-    ~WithAsyncMethod_RegisterModelReplica() override {
+    ~WithAsyncMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestRegisterModelReplica(
+    void RequestRegisterReplica(
         ::grpc::ServerContext* context,
-        ::global_store::RegisterModelReplicaRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::RegisterModelReplicaResponse>* response,
+        ::global_store::RegisterReplicaRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::RegisterReplicaResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1528,29 +1518,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_UpdateModelReplica : public BaseClass {
+  class WithAsyncMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_UpdateModelReplica() {
+    WithAsyncMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodAsync(1);
     }
-    ~WithAsyncMethod_UpdateModelReplica() override {
+    ~WithAsyncMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestUpdateModelReplica(
+    void RequestUpdateReplica(
         ::grpc::ServerContext* context,
-        ::global_store::UpdateModelReplicaRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::UpdateModelReplicaResponse>* response,
+        ::global_store::UpdateReplicaRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::UpdateReplicaResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1558,29 +1548,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_UnregisterModelReplica : public BaseClass {
+  class WithAsyncMethod_UnregisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_UnregisterModelReplica() {
+    WithAsyncMethod_UnregisterReplica() {
       ::grpc::Service::MarkMethodAsync(2);
     }
-    ~WithAsyncMethod_UnregisterModelReplica() override {
+    ~WithAsyncMethod_UnregisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestUnregisterModelReplica(
+    void RequestUnregisterReplica(
         ::grpc::ServerContext* context,
-        ::global_store::UnregisterModelReplicaRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::UnregisterModelReplicaResponse>* response,
+        ::global_store::UnregisterReplicaRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::UnregisterReplicaResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1588,29 +1578,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_RequestModelReplicaTransport : public BaseClass {
+  class WithAsyncMethod_RequestReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_RequestModelReplicaTransport() {
+    WithAsyncMethod_RequestReplicaTransport() {
       ::grpc::Service::MarkMethodAsync(3);
     }
-    ~WithAsyncMethod_RequestModelReplicaTransport() override {
+    ~WithAsyncMethod_RequestReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestRequestModelReplicaTransport(
+    void RequestRequestReplicaTransport(
         ::grpc::ServerContext* context,
-        ::global_store::RequestModelReplicaTransportRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::RequestModelReplicaTransportResponse>* response,
+        ::global_store::RequestReplicaTransportRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::RequestReplicaTransportResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1618,29 +1608,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_CompleteModelReplicaTransport : public BaseClass {
+  class WithAsyncMethod_CompleteReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_CompleteModelReplicaTransport() {
+    WithAsyncMethod_CompleteReplicaTransport() {
       ::grpc::Service::MarkMethodAsync(4);
     }
-    ~WithAsyncMethod_CompleteModelReplicaTransport() override {
+    ~WithAsyncMethod_CompleteReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestCompleteModelReplicaTransport(
+    void RequestCompleteReplicaTransport(
         ::grpc::ServerContext* context,
-        ::global_store::CompleteModelReplicaTransportRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::CompleteModelReplicaTransportResponse>* response,
+        ::global_store::CompleteReplicaTransportRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::CompleteReplicaTransportResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1648,29 +1638,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_ListModelReplicas : public BaseClass {
+  class WithAsyncMethod_ListReplicas : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_ListModelReplicas() {
+    WithAsyncMethod_ListReplicas() {
       ::grpc::Service::MarkMethodAsync(5);
     }
-    ~WithAsyncMethod_ListModelReplicas() override {
+    ~WithAsyncMethod_ListReplicas() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestListModelReplicas(
+    void RequestListReplicas(
         ::grpc::ServerContext* context,
-        ::global_store::ListModelReplicasRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::ListModelReplicasResponse>* response,
+        ::global_store::ListReplicasRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::ListReplicasResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1678,29 +1668,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_GetModelInfoById : public BaseClass {
+  class WithAsyncMethod_GetArtifactInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_GetModelInfoById() {
+    WithAsyncMethod_GetArtifactInfoById() {
       ::grpc::Service::MarkMethodAsync(6);
     }
-    ~WithAsyncMethod_GetModelInfoById() override {
+    ~WithAsyncMethod_GetArtifactInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelInfoById(
+    void RequestGetArtifactInfoById(
         ::grpc::ServerContext* context,
-        ::global_store::GetModelInfoByIdRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::GetModelInfoByIdResponse>* response,
+        ::global_store::GetArtifactInfoByIdRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::GetArtifactInfoByIdResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -1708,29 +1698,29 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithAsyncMethod_GetModelIndex : public BaseClass {
+  class WithAsyncMethod_GetArtifactIndex : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithAsyncMethod_GetModelIndex() {
+    WithAsyncMethod_GetArtifactIndex() {
       ::grpc::Service::MarkMethodAsync(7);
     }
-    ~WithAsyncMethod_GetModelIndex() override {
+    ~WithAsyncMethod_GetArtifactIndex() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelIndex(
+    void RequestGetArtifactIndex(
         ::grpc::ServerContext* context,
-        ::global_store::GetModelIndexRequest* request,
-        ::grpc::ServerAsyncResponseWriter<::global_store::GetModelIndexResponse>* response,
+        ::global_store::GetArtifactIndexRequest* request,
+        ::grpc::ServerAsyncResponseWriter<::global_store::GetArtifactIndexResponse>* response,
         ::grpc::CompletionQueue* new_call_cq,
         ::grpc::ServerCompletionQueue* notification_cq,
         void* tag) {
@@ -2007,380 +1997,377 @@ class GlobalModelStore final {
       ::grpc::Service::RequestAsyncUnary(16, context, request, response, new_call_cq, notification_cq, tag);
     }
   };
-  typedef WithAsyncMethod_RegisterModelReplica<WithAsyncMethod_UpdateModelReplica<
-      WithAsyncMethod_UnregisterModelReplica<WithAsyncMethod_RequestModelReplicaTransport<
-          WithAsyncMethod_CompleteModelReplicaTransport<WithAsyncMethod_ListModelReplicas<
-              WithAsyncMethod_GetModelInfoById<WithAsyncMethod_GetModelIndex<WithAsyncMethod_RegisterWorker<
-                  WithAsyncMethod_WorkerHeartbeat<WithAsyncMethod_UnregisterWorker<WithAsyncMethod_ListActiveWorkers<
-                      WithAsyncMethod_SynchronizeWorkerState<WithAsyncMethod_RequestFullStateSync<
-                          WithAsyncMethod_HealthCheck<WithAsyncMethod_QueryChunkLocations<
-                              WithAsyncMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
+  typedef WithAsyncMethod_RegisterReplica<WithAsyncMethod_UpdateReplica<WithAsyncMethod_UnregisterReplica<
+      WithAsyncMethod_RequestReplicaTransport<WithAsyncMethod_CompleteReplicaTransport<WithAsyncMethod_ListReplicas<
+          WithAsyncMethod_GetArtifactInfoById<WithAsyncMethod_GetArtifactIndex<WithAsyncMethod_RegisterWorker<
+              WithAsyncMethod_WorkerHeartbeat<WithAsyncMethod_UnregisterWorker<WithAsyncMethod_ListActiveWorkers<
+                  WithAsyncMethod_SynchronizeWorkerState<WithAsyncMethod_RequestFullStateSync<
+                      WithAsyncMethod_HealthCheck<WithAsyncMethod_QueryChunkLocations<
+                          WithAsyncMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       AsyncService;
   template <class BaseClass>
-  class WithCallbackMethod_RegisterModelReplica : public BaseClass {
+  class WithCallbackMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_RegisterModelReplica() {
+    WithCallbackMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodCallback(
           0,
-          new ::grpc::internal::CallbackUnaryHandler<
-              ::global_store::RegisterModelReplicaRequest,
-              ::global_store::RegisterModelReplicaResponse>(
-              [this](
-                  ::grpc::CallbackServerContext* context,
-                  const ::global_store::RegisterModelReplicaRequest* request,
-                  ::global_store::RegisterModelReplicaResponse* response) {
-                return this->RegisterModelReplica(context, request, response);
-              }));
+          new ::grpc::internal::
+              CallbackUnaryHandler<::global_store::RegisterReplicaRequest, ::global_store::RegisterReplicaResponse>(
+                  [this](
+                      ::grpc::CallbackServerContext* context,
+                      const ::global_store::RegisterReplicaRequest* request,
+                      ::global_store::RegisterReplicaResponse* response) {
+                    return this->RegisterReplica(context, request, response);
+                  }));
     }
-    void SetMessageAllocatorFor_RegisterModelReplica(
-        ::grpc::MessageAllocator<
-            ::global_store::RegisterModelReplicaRequest,
-            ::global_store::RegisterModelReplicaResponse>* allocator) {
+    void SetMessageAllocatorFor_RegisterReplica(
+        ::grpc::MessageAllocator<::global_store::RegisterReplicaRequest, ::global_store::RegisterReplicaResponse>*
+            allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(0);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::RegisterModelReplicaRequest,
-          ::global_store::RegisterModelReplicaResponse>*>(handler)
+          ::global_store::RegisterReplicaRequest,
+          ::global_store::RegisterReplicaResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_RegisterModelReplica() override {
+    ~WithCallbackMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* RegisterModelReplica(
+    virtual ::grpc::ServerUnaryReactor* RegisterReplica(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_UpdateModelReplica : public BaseClass {
+  class WithCallbackMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_UpdateModelReplica() {
+    WithCallbackMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodCallback(
           1,
-          new ::grpc::internal::CallbackUnaryHandler<
-              ::global_store::UpdateModelReplicaRequest,
-              ::global_store::UpdateModelReplicaResponse>([this](
-                                                              ::grpc::CallbackServerContext* context,
-                                                              const ::global_store::UpdateModelReplicaRequest* request,
-                                                              ::global_store::UpdateModelReplicaResponse* response) {
-            return this->UpdateModelReplica(context, request, response);
-          }));
+          new ::grpc::internal::
+              CallbackUnaryHandler<::global_store::UpdateReplicaRequest, ::global_store::UpdateReplicaResponse>(
+                  [this](
+                      ::grpc::CallbackServerContext* context,
+                      const ::global_store::UpdateReplicaRequest* request,
+                      ::global_store::UpdateReplicaResponse* response) {
+                    return this->UpdateReplica(context, request, response);
+                  }));
     }
-    void SetMessageAllocatorFor_UpdateModelReplica(
-        ::grpc::MessageAllocator<::global_store::UpdateModelReplicaRequest, ::global_store::UpdateModelReplicaResponse>*
+    void SetMessageAllocatorFor_UpdateReplica(
+        ::grpc::MessageAllocator<::global_store::UpdateReplicaRequest, ::global_store::UpdateReplicaResponse>*
             allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(1);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::UpdateModelReplicaRequest,
-          ::global_store::UpdateModelReplicaResponse>*>(handler)
+          ::global_store::UpdateReplicaRequest,
+          ::global_store::UpdateReplicaResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_UpdateModelReplica() override {
+    ~WithCallbackMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* UpdateModelReplica(
+    virtual ::grpc::ServerUnaryReactor* UpdateReplica(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_UnregisterModelReplica : public BaseClass {
+  class WithCallbackMethod_UnregisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_UnregisterModelReplica() {
+    WithCallbackMethod_UnregisterReplica() {
       ::grpc::Service::MarkMethodCallback(
           2,
-          new ::grpc::internal::CallbackUnaryHandler<
-              ::global_store::UnregisterModelReplicaRequest,
-              ::global_store::UnregisterModelReplicaResponse>(
-              [this](
-                  ::grpc::CallbackServerContext* context,
-                  const ::global_store::UnregisterModelReplicaRequest* request,
-                  ::global_store::UnregisterModelReplicaResponse* response) {
-                return this->UnregisterModelReplica(context, request, response);
-              }));
+          new ::grpc::internal::
+              CallbackUnaryHandler<::global_store::UnregisterReplicaRequest, ::global_store::UnregisterReplicaResponse>(
+                  [this](
+                      ::grpc::CallbackServerContext* context,
+                      const ::global_store::UnregisterReplicaRequest* request,
+                      ::global_store::UnregisterReplicaResponse* response) {
+                    return this->UnregisterReplica(context, request, response);
+                  }));
     }
-    void SetMessageAllocatorFor_UnregisterModelReplica(
-        ::grpc::MessageAllocator<
-            ::global_store::UnregisterModelReplicaRequest,
-            ::global_store::UnregisterModelReplicaResponse>* allocator) {
+    void SetMessageAllocatorFor_UnregisterReplica(
+        ::grpc::MessageAllocator<::global_store::UnregisterReplicaRequest, ::global_store::UnregisterReplicaResponse>*
+            allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(2);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::UnregisterModelReplicaRequest,
-          ::global_store::UnregisterModelReplicaResponse>*>(handler)
+          ::global_store::UnregisterReplicaRequest,
+          ::global_store::UnregisterReplicaResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_UnregisterModelReplica() override {
+    ~WithCallbackMethod_UnregisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* UnregisterModelReplica(
+    virtual ::grpc::ServerUnaryReactor* UnregisterReplica(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_RequestModelReplicaTransport : public BaseClass {
+  class WithCallbackMethod_RequestReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_RequestModelReplicaTransport() {
+    WithCallbackMethod_RequestReplicaTransport() {
       ::grpc::Service::MarkMethodCallback(
           3,
           new ::grpc::internal::CallbackUnaryHandler<
-              ::global_store::RequestModelReplicaTransportRequest,
-              ::global_store::RequestModelReplicaTransportResponse>(
+              ::global_store::RequestReplicaTransportRequest,
+              ::global_store::RequestReplicaTransportResponse>(
               [this](
                   ::grpc::CallbackServerContext* context,
-                  const ::global_store::RequestModelReplicaTransportRequest* request,
-                  ::global_store::RequestModelReplicaTransportResponse* response) {
-                return this->RequestModelReplicaTransport(context, request, response);
+                  const ::global_store::RequestReplicaTransportRequest* request,
+                  ::global_store::RequestReplicaTransportResponse* response) {
+                return this->RequestReplicaTransport(context, request, response);
               }));
     }
-    void SetMessageAllocatorFor_RequestModelReplicaTransport(
+    void SetMessageAllocatorFor_RequestReplicaTransport(
         ::grpc::MessageAllocator<
-            ::global_store::RequestModelReplicaTransportRequest,
-            ::global_store::RequestModelReplicaTransportResponse>* allocator) {
+            ::global_store::RequestReplicaTransportRequest,
+            ::global_store::RequestReplicaTransportResponse>* allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(3);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::RequestModelReplicaTransportRequest,
-          ::global_store::RequestModelReplicaTransportResponse>*>(handler)
+          ::global_store::RequestReplicaTransportRequest,
+          ::global_store::RequestReplicaTransportResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_RequestModelReplicaTransport() override {
+    ~WithCallbackMethod_RequestReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* RequestModelReplicaTransport(
+    virtual ::grpc::ServerUnaryReactor* RequestReplicaTransport(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_CompleteModelReplicaTransport : public BaseClass {
+  class WithCallbackMethod_CompleteReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_CompleteModelReplicaTransport() {
+    WithCallbackMethod_CompleteReplicaTransport() {
       ::grpc::Service::MarkMethodCallback(
           4,
           new ::grpc::internal::CallbackUnaryHandler<
-              ::global_store::CompleteModelReplicaTransportRequest,
-              ::global_store::CompleteModelReplicaTransportResponse>(
+              ::global_store::CompleteReplicaTransportRequest,
+              ::global_store::CompleteReplicaTransportResponse>(
               [this](
                   ::grpc::CallbackServerContext* context,
-                  const ::global_store::CompleteModelReplicaTransportRequest* request,
-                  ::global_store::CompleteModelReplicaTransportResponse* response) {
-                return this->CompleteModelReplicaTransport(context, request, response);
+                  const ::global_store::CompleteReplicaTransportRequest* request,
+                  ::global_store::CompleteReplicaTransportResponse* response) {
+                return this->CompleteReplicaTransport(context, request, response);
               }));
     }
-    void SetMessageAllocatorFor_CompleteModelReplicaTransport(
+    void SetMessageAllocatorFor_CompleteReplicaTransport(
         ::grpc::MessageAllocator<
-            ::global_store::CompleteModelReplicaTransportRequest,
-            ::global_store::CompleteModelReplicaTransportResponse>* allocator) {
+            ::global_store::CompleteReplicaTransportRequest,
+            ::global_store::CompleteReplicaTransportResponse>* allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(4);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::CompleteModelReplicaTransportRequest,
-          ::global_store::CompleteModelReplicaTransportResponse>*>(handler)
+          ::global_store::CompleteReplicaTransportRequest,
+          ::global_store::CompleteReplicaTransportResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_CompleteModelReplicaTransport() override {
+    ~WithCallbackMethod_CompleteReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* CompleteModelReplicaTransport(
+    virtual ::grpc::ServerUnaryReactor* CompleteReplicaTransport(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_ListModelReplicas : public BaseClass {
+  class WithCallbackMethod_ListReplicas : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_ListModelReplicas() {
+    WithCallbackMethod_ListReplicas() {
       ::grpc::Service::MarkMethodCallback(
           5,
           new ::grpc::internal::
-              CallbackUnaryHandler<::global_store::ListModelReplicasRequest, ::global_store::ListModelReplicasResponse>(
+              CallbackUnaryHandler<::global_store::ListReplicasRequest, ::global_store::ListReplicasResponse>(
                   [this](
                       ::grpc::CallbackServerContext* context,
-                      const ::global_store::ListModelReplicasRequest* request,
-                      ::global_store::ListModelReplicasResponse* response) {
-                    return this->ListModelReplicas(context, request, response);
+                      const ::global_store::ListReplicasRequest* request,
+                      ::global_store::ListReplicasResponse* response) {
+                    return this->ListReplicas(context, request, response);
                   }));
     }
-    void SetMessageAllocatorFor_ListModelReplicas(
-        ::grpc::MessageAllocator<::global_store::ListModelReplicasRequest, ::global_store::ListModelReplicasResponse>*
+    void SetMessageAllocatorFor_ListReplicas(
+        ::grpc::MessageAllocator<::global_store::ListReplicasRequest, ::global_store::ListReplicasResponse>*
             allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(5);
-      static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::ListModelReplicasRequest,
-          ::global_store::ListModelReplicasResponse>*>(handler)
+      static_cast<::grpc::internal::
+                      CallbackUnaryHandler<::global_store::ListReplicasRequest, ::global_store::ListReplicasResponse>*>(
+          handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_ListModelReplicas() override {
+    ~WithCallbackMethod_ListReplicas() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* ListModelReplicas(
+    virtual ::grpc::ServerUnaryReactor* ListReplicas(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_GetModelInfoById : public BaseClass {
+  class WithCallbackMethod_GetArtifactInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_GetModelInfoById() {
+    WithCallbackMethod_GetArtifactInfoById() {
       ::grpc::Service::MarkMethodCallback(
           6,
-          new ::grpc::internal::
-              CallbackUnaryHandler<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>(
-                  [this](
-                      ::grpc::CallbackServerContext* context,
-                      const ::global_store::GetModelInfoByIdRequest* request,
-                      ::global_store::GetModelInfoByIdResponse* response) {
-                    return this->GetModelInfoById(context, request, response);
-                  }));
+          new ::grpc::internal::CallbackUnaryHandler<
+              ::global_store::GetArtifactInfoByIdRequest,
+              ::global_store::GetArtifactInfoByIdResponse>(
+              [this](
+                  ::grpc::CallbackServerContext* context,
+                  const ::global_store::GetArtifactInfoByIdRequest* request,
+                  ::global_store::GetArtifactInfoByIdResponse* response) {
+                return this->GetArtifactInfoById(context, request, response);
+              }));
     }
-    void SetMessageAllocatorFor_GetModelInfoById(
-        ::grpc::MessageAllocator<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>*
-            allocator) {
+    void SetMessageAllocatorFor_GetArtifactInfoById(
+        ::grpc::MessageAllocator<
+            ::global_store::GetArtifactInfoByIdRequest,
+            ::global_store::GetArtifactInfoByIdResponse>* allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(6);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::GetModelInfoByIdRequest,
-          ::global_store::GetModelInfoByIdResponse>*>(handler)
+          ::global_store::GetArtifactInfoByIdRequest,
+          ::global_store::GetArtifactInfoByIdResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_GetModelInfoById() override {
+    ~WithCallbackMethod_GetArtifactInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelInfoById(
+    virtual ::grpc::ServerUnaryReactor* GetArtifactInfoById(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) {
       return nullptr;
     }
   };
   template <class BaseClass>
-  class WithCallbackMethod_GetModelIndex : public BaseClass {
+  class WithCallbackMethod_GetArtifactIndex : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithCallbackMethod_GetModelIndex() {
+    WithCallbackMethod_GetArtifactIndex() {
       ::grpc::Service::MarkMethodCallback(
           7,
           new ::grpc::internal::
-              CallbackUnaryHandler<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>(
+              CallbackUnaryHandler<::global_store::GetArtifactIndexRequest, ::global_store::GetArtifactIndexResponse>(
                   [this](
                       ::grpc::CallbackServerContext* context,
-                      const ::global_store::GetModelIndexRequest* request,
-                      ::global_store::GetModelIndexResponse* response) {
-                    return this->GetModelIndex(context, request, response);
+                      const ::global_store::GetArtifactIndexRequest* request,
+                      ::global_store::GetArtifactIndexResponse* response) {
+                    return this->GetArtifactIndex(context, request, response);
                   }));
     }
-    void SetMessageAllocatorFor_GetModelIndex(
-        ::grpc::MessageAllocator<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>*
+    void SetMessageAllocatorFor_GetArtifactIndex(
+        ::grpc::MessageAllocator<::global_store::GetArtifactIndexRequest, ::global_store::GetArtifactIndexResponse>*
             allocator) {
       ::grpc::internal::MethodHandler* const handler = ::grpc::Service::GetHandler(7);
       static_cast<::grpc::internal::CallbackUnaryHandler<
-          ::global_store::GetModelIndexRequest,
-          ::global_store::GetModelIndexResponse>*>(handler)
+          ::global_store::GetArtifactIndexRequest,
+          ::global_store::GetArtifactIndexResponse>*>(handler)
           ->SetMessageAllocator(allocator);
     }
-    ~WithCallbackMethod_GetModelIndex() override {
+    ~WithCallbackMethod_GetArtifactIndex() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelIndex(
+    virtual ::grpc::ServerUnaryReactor* GetArtifactIndex(
         ::grpc::CallbackServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) {
       return nullptr;
     }
   };
@@ -2796,181 +2783,180 @@ class GlobalModelStore final {
       return nullptr;
     }
   };
-  typedef WithCallbackMethod_RegisterModelReplica<
-      WithCallbackMethod_UpdateModelReplica<WithCallbackMethod_UnregisterModelReplica<
-          WithCallbackMethod_RequestModelReplicaTransport<WithCallbackMethod_CompleteModelReplicaTransport<
-              WithCallbackMethod_ListModelReplicas<WithCallbackMethod_GetModelInfoById<
-                  WithCallbackMethod_GetModelIndex<WithCallbackMethod_RegisterWorker<WithCallbackMethod_WorkerHeartbeat<
-                      WithCallbackMethod_UnregisterWorker<WithCallbackMethod_ListActiveWorkers<
-                          WithCallbackMethod_SynchronizeWorkerState<WithCallbackMethod_RequestFullStateSync<
-                              WithCallbackMethod_HealthCheck<WithCallbackMethod_QueryChunkLocations<
-                                  WithCallbackMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
+  typedef WithCallbackMethod_RegisterReplica<WithCallbackMethod_UpdateReplica<WithCallbackMethod_UnregisterReplica<
+      WithCallbackMethod_RequestReplicaTransport<WithCallbackMethod_CompleteReplicaTransport<
+          WithCallbackMethod_ListReplicas<WithCallbackMethod_GetArtifactInfoById<
+              WithCallbackMethod_GetArtifactIndex<WithCallbackMethod_RegisterWorker<WithCallbackMethod_WorkerHeartbeat<
+                  WithCallbackMethod_UnregisterWorker<WithCallbackMethod_ListActiveWorkers<
+                      WithCallbackMethod_SynchronizeWorkerState<WithCallbackMethod_RequestFullStateSync<
+                          WithCallbackMethod_HealthCheck<WithCallbackMethod_QueryChunkLocations<
+                              WithCallbackMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       CallbackService;
   typedef CallbackService ExperimentalCallbackService;
   template <class BaseClass>
-  class WithGenericMethod_RegisterModelReplica : public BaseClass {
+  class WithGenericMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_RegisterModelReplica() {
+    WithGenericMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodGeneric(0);
     }
-    ~WithGenericMethod_RegisterModelReplica() override {
+    ~WithGenericMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_UpdateModelReplica : public BaseClass {
+  class WithGenericMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_UpdateModelReplica() {
+    WithGenericMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodGeneric(1);
     }
-    ~WithGenericMethod_UpdateModelReplica() override {
+    ~WithGenericMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_UnregisterModelReplica : public BaseClass {
+  class WithGenericMethod_UnregisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_UnregisterModelReplica() {
+    WithGenericMethod_UnregisterReplica() {
       ::grpc::Service::MarkMethodGeneric(2);
     }
-    ~WithGenericMethod_UnregisterModelReplica() override {
+    ~WithGenericMethod_UnregisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_RequestModelReplicaTransport : public BaseClass {
+  class WithGenericMethod_RequestReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_RequestModelReplicaTransport() {
+    WithGenericMethod_RequestReplicaTransport() {
       ::grpc::Service::MarkMethodGeneric(3);
     }
-    ~WithGenericMethod_RequestModelReplicaTransport() override {
+    ~WithGenericMethod_RequestReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_CompleteModelReplicaTransport : public BaseClass {
+  class WithGenericMethod_CompleteReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_CompleteModelReplicaTransport() {
+    WithGenericMethod_CompleteReplicaTransport() {
       ::grpc::Service::MarkMethodGeneric(4);
     }
-    ~WithGenericMethod_CompleteModelReplicaTransport() override {
+    ~WithGenericMethod_CompleteReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_ListModelReplicas : public BaseClass {
+  class WithGenericMethod_ListReplicas : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_ListModelReplicas() {
+    WithGenericMethod_ListReplicas() {
       ::grpc::Service::MarkMethodGeneric(5);
     }
-    ~WithGenericMethod_ListModelReplicas() override {
+    ~WithGenericMethod_ListReplicas() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_GetModelInfoById : public BaseClass {
+  class WithGenericMethod_GetArtifactInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_GetModelInfoById() {
+    WithGenericMethod_GetArtifactInfoById() {
       ::grpc::Service::MarkMethodGeneric(6);
     }
-    ~WithGenericMethod_GetModelInfoById() override {
+    ~WithGenericMethod_GetArtifactInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
   };
   template <class BaseClass>
-  class WithGenericMethod_GetModelIndex : public BaseClass {
+  class WithGenericMethod_GetArtifactIndex : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithGenericMethod_GetModelIndex() {
+    WithGenericMethod_GetArtifactIndex() {
       ::grpc::Service::MarkMethodGeneric(7);
     }
-    ~WithGenericMethod_GetModelIndex() override {
+    ~WithGenericMethod_GetArtifactIndex() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
@@ -3165,26 +3151,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_RegisterModelReplica : public BaseClass {
+  class WithRawMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_RegisterModelReplica() {
+    WithRawMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodRaw(0);
     }
-    ~WithRawMethod_RegisterModelReplica() override {
+    ~WithRawMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestRegisterModelReplica(
+    void RequestRegisterReplica(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3195,26 +3181,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_UpdateModelReplica : public BaseClass {
+  class WithRawMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_UpdateModelReplica() {
+    WithRawMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodRaw(1);
     }
-    ~WithRawMethod_UpdateModelReplica() override {
+    ~WithRawMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestUpdateModelReplica(
+    void RequestUpdateReplica(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3225,26 +3211,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_UnregisterModelReplica : public BaseClass {
+  class WithRawMethod_UnregisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_UnregisterModelReplica() {
+    WithRawMethod_UnregisterReplica() {
       ::grpc::Service::MarkMethodRaw(2);
     }
-    ~WithRawMethod_UnregisterModelReplica() override {
+    ~WithRawMethod_UnregisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestUnregisterModelReplica(
+    void RequestUnregisterReplica(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3255,26 +3241,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_RequestModelReplicaTransport : public BaseClass {
+  class WithRawMethod_RequestReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_RequestModelReplicaTransport() {
+    WithRawMethod_RequestReplicaTransport() {
       ::grpc::Service::MarkMethodRaw(3);
     }
-    ~WithRawMethod_RequestModelReplicaTransport() override {
+    ~WithRawMethod_RequestReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestRequestModelReplicaTransport(
+    void RequestRequestReplicaTransport(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3285,26 +3271,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_CompleteModelReplicaTransport : public BaseClass {
+  class WithRawMethod_CompleteReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_CompleteModelReplicaTransport() {
+    WithRawMethod_CompleteReplicaTransport() {
       ::grpc::Service::MarkMethodRaw(4);
     }
-    ~WithRawMethod_CompleteModelReplicaTransport() override {
+    ~WithRawMethod_CompleteReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestCompleteModelReplicaTransport(
+    void RequestCompleteReplicaTransport(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3315,26 +3301,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_ListModelReplicas : public BaseClass {
+  class WithRawMethod_ListReplicas : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_ListModelReplicas() {
+    WithRawMethod_ListReplicas() {
       ::grpc::Service::MarkMethodRaw(5);
     }
-    ~WithRawMethod_ListModelReplicas() override {
+    ~WithRawMethod_ListReplicas() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestListModelReplicas(
+    void RequestListReplicas(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3345,26 +3331,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_GetModelInfoById : public BaseClass {
+  class WithRawMethod_GetArtifactInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_GetModelInfoById() {
+    WithRawMethod_GetArtifactInfoById() {
       ::grpc::Service::MarkMethodRaw(6);
     }
-    ~WithRawMethod_GetModelInfoById() override {
+    ~WithRawMethod_GetArtifactInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelInfoById(
+    void RequestGetArtifactInfoById(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3375,26 +3361,26 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawMethod_GetModelIndex : public BaseClass {
+  class WithRawMethod_GetArtifactIndex : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawMethod_GetModelIndex() {
+    WithRawMethod_GetArtifactIndex() {
       ::grpc::Service::MarkMethodRaw(7);
     }
-    ~WithRawMethod_GetModelIndex() override {
+    ~WithRawMethod_GetArtifactIndex() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    void RequestGetModelIndex(
+    void RequestGetArtifactIndex(
         ::grpc::ServerContext* context,
         ::grpc::ByteBuffer* request,
         ::grpc::ServerAsyncResponseWriter<::grpc::ByteBuffer>* response,
@@ -3675,32 +3661,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_RegisterModelReplica : public BaseClass {
+  class WithRawCallbackMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_RegisterModelReplica() {
+    WithRawCallbackMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodRawCallback(
           0,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->RegisterModelReplica(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->RegisterReplica(context, request, response); }));
     }
-    ~WithRawCallbackMethod_RegisterModelReplica() override {
+    ~WithRawCallbackMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RegisterModelReplica(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* RegisterModelReplica(
+    virtual ::grpc::ServerUnaryReactor* RegisterReplica(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3708,32 +3694,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_UpdateModelReplica : public BaseClass {
+  class WithRawCallbackMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_UpdateModelReplica() {
+    WithRawCallbackMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodRawCallback(
           1,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->UpdateModelReplica(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->UpdateReplica(context, request, response); }));
     }
-    ~WithRawCallbackMethod_UpdateModelReplica() override {
+    ~WithRawCallbackMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UpdateModelReplica(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* UpdateModelReplica(
+    virtual ::grpc::ServerUnaryReactor* UpdateReplica(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3741,32 +3727,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_UnregisterModelReplica : public BaseClass {
+  class WithRawCallbackMethod_UnregisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_UnregisterModelReplica() {
+    WithRawCallbackMethod_UnregisterReplica() {
       ::grpc::Service::MarkMethodRawCallback(
           2,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->UnregisterModelReplica(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->UnregisterReplica(context, request, response); }));
     }
-    ~WithRawCallbackMethod_UnregisterModelReplica() override {
+    ~WithRawCallbackMethod_UnregisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status UnregisterModelReplica(
+    ::grpc::Status UnregisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* UnregisterModelReplica(
+    virtual ::grpc::ServerUnaryReactor* UnregisterReplica(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3774,34 +3760,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_RequestModelReplicaTransport : public BaseClass {
+  class WithRawCallbackMethod_RequestReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_RequestModelReplicaTransport() {
+    WithRawCallbackMethod_RequestReplicaTransport() {
       ::grpc::Service::MarkMethodRawCallback(
           3,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) {
-                return this->RequestModelReplicaTransport(context, request, response);
-              }));
+                  ::grpc::ByteBuffer* response) { return this->RequestReplicaTransport(context, request, response); }));
     }
-    ~WithRawCallbackMethod_RequestModelReplicaTransport() override {
+    ~WithRawCallbackMethod_RequestReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status RequestModelReplicaTransport(
+    ::grpc::Status RequestReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* RequestModelReplicaTransport(
+    virtual ::grpc::ServerUnaryReactor* RequestReplicaTransport(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3809,12 +3793,12 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_CompleteModelReplicaTransport : public BaseClass {
+  class WithRawCallbackMethod_CompleteReplicaTransport : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_CompleteModelReplicaTransport() {
+    WithRawCallbackMethod_CompleteReplicaTransport() {
       ::grpc::Service::MarkMethodRawCallback(
           4,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
@@ -3822,21 +3806,21 @@ class GlobalModelStore final {
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
                   ::grpc::ByteBuffer* response) {
-                return this->CompleteModelReplicaTransport(context, request, response);
+                return this->CompleteReplicaTransport(context, request, response);
               }));
     }
-    ~WithRawCallbackMethod_CompleteModelReplicaTransport() override {
+    ~WithRawCallbackMethod_CompleteReplicaTransport() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
+    ::grpc::Status CompleteReplicaTransport(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* CompleteModelReplicaTransport(
+    virtual ::grpc::ServerUnaryReactor* CompleteReplicaTransport(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3844,32 +3828,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_ListModelReplicas : public BaseClass {
+  class WithRawCallbackMethod_ListReplicas : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_ListModelReplicas() {
+    WithRawCallbackMethod_ListReplicas() {
       ::grpc::Service::MarkMethodRawCallback(
           5,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->ListModelReplicas(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->ListReplicas(context, request, response); }));
     }
-    ~WithRawCallbackMethod_ListModelReplicas() override {
+    ~WithRawCallbackMethod_ListReplicas() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status ListReplicas(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* ListModelReplicas(
+    virtual ::grpc::ServerUnaryReactor* ListReplicas(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3877,32 +3861,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_GetModelInfoById : public BaseClass {
+  class WithRawCallbackMethod_GetArtifactInfoById : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_GetModelInfoById() {
+    WithRawCallbackMethod_GetArtifactInfoById() {
       ::grpc::Service::MarkMethodRawCallback(
           6,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->GetModelInfoById(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->GetArtifactInfoById(context, request, response); }));
     }
-    ~WithRawCallbackMethod_GetModelInfoById() override {
+    ~WithRawCallbackMethod_GetArtifactInfoById() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelInfoById(
+    ::grpc::Status GetArtifactInfoById(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelInfoById(
+    virtual ::grpc::ServerUnaryReactor* GetArtifactInfoById(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -3910,32 +3894,32 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithRawCallbackMethod_GetModelIndex : public BaseClass {
+  class WithRawCallbackMethod_GetArtifactIndex : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithRawCallbackMethod_GetModelIndex() {
+    WithRawCallbackMethod_GetArtifactIndex() {
       ::grpc::Service::MarkMethodRawCallback(
           7,
           new ::grpc::internal::CallbackUnaryHandler<::grpc::ByteBuffer, ::grpc::ByteBuffer>(
               [this](
                   ::grpc::CallbackServerContext* context,
                   const ::grpc::ByteBuffer* request,
-                  ::grpc::ByteBuffer* response) { return this->GetModelIndex(context, request, response); }));
+                  ::grpc::ByteBuffer* response) { return this->GetArtifactIndex(context, request, response); }));
     }
-    ~WithRawCallbackMethod_GetModelIndex() override {
+    ~WithRawCallbackMethod_GetArtifactIndex() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable synchronous version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status GetArtifactIndex(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
-    virtual ::grpc::ServerUnaryReactor* GetModelIndex(
+    virtual ::grpc::ServerUnaryReactor* GetArtifactIndex(
         ::grpc::CallbackServerContext* /*context*/,
         const ::grpc::ByteBuffer* /*request*/,
         ::grpc::ByteBuffer* /*response*/) {
@@ -4240,302 +4224,298 @@ class GlobalModelStore final {
     }
   };
   template <class BaseClass>
-  class WithStreamedUnaryMethod_RegisterModelReplica : public BaseClass {
+  class WithStreamedUnaryMethod_RegisterReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithStreamedUnaryMethod_RegisterModelReplica() {
+    WithStreamedUnaryMethod_RegisterReplica() {
       ::grpc::Service::MarkMethodStreamed(
           0,
-          new ::grpc::internal::StreamedUnaryHandler<
-              ::global_store::RegisterModelReplicaRequest,
-              ::global_store::RegisterModelReplicaResponse>(
-              [this](
-                  ::grpc::ServerContext* context,
-                  ::grpc::ServerUnaryStreamer<
-                      ::global_store::RegisterModelReplicaRequest,
-                      ::global_store::RegisterModelReplicaResponse>* streamer) {
-                return this->StreamedRegisterModelReplica(context, streamer);
-              }));
-    }
-    ~WithStreamedUnaryMethod_RegisterModelReplica() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status RegisterModelReplica(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::RegisterModelReplicaRequest* /*request*/,
-        ::global_store::RegisterModelReplicaResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedRegisterModelReplica(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::RegisterModelReplicaRequest,
-            ::global_store::RegisterModelReplicaResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_UpdateModelReplica : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_UpdateModelReplica() {
-      ::grpc::Service::MarkMethodStreamed(
-          1,
-          new ::grpc::internal::StreamedUnaryHandler<
-              ::global_store::UpdateModelReplicaRequest,
-              ::global_store::UpdateModelReplicaResponse>(
-              [this](
-                  ::grpc::ServerContext* context,
-                  ::grpc::ServerUnaryStreamer<
-                      ::global_store::UpdateModelReplicaRequest,
-                      ::global_store::UpdateModelReplicaResponse>* streamer) {
-                return this->StreamedUpdateModelReplica(context, streamer);
-              }));
-    }
-    ~WithStreamedUnaryMethod_UpdateModelReplica() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status UpdateModelReplica(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::UpdateModelReplicaRequest* /*request*/,
-        ::global_store::UpdateModelReplicaResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedUpdateModelReplica(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::UpdateModelReplicaRequest,
-            ::global_store::UpdateModelReplicaResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_UnregisterModelReplica : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_UnregisterModelReplica() {
-      ::grpc::Service::MarkMethodStreamed(
-          2,
-          new ::grpc::internal::StreamedUnaryHandler<
-              ::global_store::UnregisterModelReplicaRequest,
-              ::global_store::UnregisterModelReplicaResponse>(
-              [this](
-                  ::grpc::ServerContext* context,
-                  ::grpc::ServerUnaryStreamer<
-                      ::global_store::UnregisterModelReplicaRequest,
-                      ::global_store::UnregisterModelReplicaResponse>* streamer) {
-                return this->StreamedUnregisterModelReplica(context, streamer);
-              }));
-    }
-    ~WithStreamedUnaryMethod_UnregisterModelReplica() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status UnregisterModelReplica(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::UnregisterModelReplicaRequest* /*request*/,
-        ::global_store::UnregisterModelReplicaResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedUnregisterModelReplica(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::UnregisterModelReplicaRequest,
-            ::global_store::UnregisterModelReplicaResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_RequestModelReplicaTransport : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_RequestModelReplicaTransport() {
-      ::grpc::Service::MarkMethodStreamed(
-          3,
-          new ::grpc::internal::StreamedUnaryHandler<
-              ::global_store::RequestModelReplicaTransportRequest,
-              ::global_store::RequestModelReplicaTransportResponse>(
-              [this](
-                  ::grpc::ServerContext* context,
-                  ::grpc::ServerUnaryStreamer<
-                      ::global_store::RequestModelReplicaTransportRequest,
-                      ::global_store::RequestModelReplicaTransportResponse>* streamer) {
-                return this->StreamedRequestModelReplicaTransport(context, streamer);
-              }));
-    }
-    ~WithStreamedUnaryMethod_RequestModelReplicaTransport() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status RequestModelReplicaTransport(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::RequestModelReplicaTransportRequest* /*request*/,
-        ::global_store::RequestModelReplicaTransportResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedRequestModelReplicaTransport(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::RequestModelReplicaTransportRequest,
-            ::global_store::RequestModelReplicaTransportResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_CompleteModelReplicaTransport : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_CompleteModelReplicaTransport() {
-      ::grpc::Service::MarkMethodStreamed(
-          4,
-          new ::grpc::internal::StreamedUnaryHandler<
-              ::global_store::CompleteModelReplicaTransportRequest,
-              ::global_store::CompleteModelReplicaTransportResponse>(
-              [this](
-                  ::grpc::ServerContext* context,
-                  ::grpc::ServerUnaryStreamer<
-                      ::global_store::CompleteModelReplicaTransportRequest,
-                      ::global_store::CompleteModelReplicaTransportResponse>* streamer) {
-                return this->StreamedCompleteModelReplicaTransport(context, streamer);
-              }));
-    }
-    ~WithStreamedUnaryMethod_CompleteModelReplicaTransport() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status CompleteModelReplicaTransport(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::CompleteModelReplicaTransportRequest* /*request*/,
-        ::global_store::CompleteModelReplicaTransportResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedCompleteModelReplicaTransport(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::CompleteModelReplicaTransportRequest,
-            ::global_store::CompleteModelReplicaTransportResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_ListModelReplicas : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_ListModelReplicas() {
-      ::grpc::Service::MarkMethodStreamed(
-          5,
           new ::grpc::internal::
-              StreamedUnaryHandler<::global_store::ListModelReplicasRequest, ::global_store::ListModelReplicasResponse>(
+              StreamedUnaryHandler<::global_store::RegisterReplicaRequest, ::global_store::RegisterReplicaResponse>(
                   [this](
                       ::grpc::ServerContext* context,
                       ::grpc::ServerUnaryStreamer<
-                          ::global_store::ListModelReplicasRequest,
-                          ::global_store::ListModelReplicasResponse>* streamer) {
-                    return this->StreamedListModelReplicas(context, streamer);
+                          ::global_store::RegisterReplicaRequest,
+                          ::global_store::RegisterReplicaResponse>* streamer) {
+                    return this->StreamedRegisterReplica(context, streamer);
                   }));
     }
-    ~WithStreamedUnaryMethod_ListModelReplicas() override {
+    ~WithStreamedUnaryMethod_RegisterReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable regular version of this method
-    ::grpc::Status ListModelReplicas(
+    ::grpc::Status RegisterReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::ListModelReplicasRequest* /*request*/,
-        ::global_store::ListModelReplicasResponse* /*response*/) override {
+        const ::global_store::RegisterReplicaRequest* /*request*/,
+        ::global_store::RegisterReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
     // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedListModelReplicas(
+    virtual ::grpc::Status StreamedRegisterReplica(
         ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<
-            ::global_store::ListModelReplicasRequest,
-            ::global_store::ListModelReplicasResponse>* server_unary_streamer) = 0;
-  };
-  template <class BaseClass>
-  class WithStreamedUnaryMethod_GetModelInfoById : public BaseClass {
-   private:
-    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
-
-   public:
-    WithStreamedUnaryMethod_GetModelInfoById() {
-      ::grpc::Service::MarkMethodStreamed(
-          6,
-          new ::grpc::internal::
-              StreamedUnaryHandler<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>(
-                  [this](
-                      ::grpc::ServerContext* context,
-                      ::grpc::ServerUnaryStreamer<
-                          ::global_store::GetModelInfoByIdRequest,
-                          ::global_store::GetModelInfoByIdResponse>* streamer) {
-                    return this->StreamedGetModelInfoById(context, streamer);
-                  }));
-    }
-    ~WithStreamedUnaryMethod_GetModelInfoById() override {
-      BaseClassMustBeDerivedFromService(this);
-    }
-    // disable regular version of this method
-    ::grpc::Status GetModelInfoById(
-        ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelInfoByIdRequest* /*request*/,
-        ::global_store::GetModelInfoByIdResponse* /*response*/) override {
-      abort();
-      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
-    }
-    // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedGetModelInfoById(
-        ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<::global_store::GetModelInfoByIdRequest, ::global_store::GetModelInfoByIdResponse>*
+        ::grpc::ServerUnaryStreamer<::global_store::RegisterReplicaRequest, ::global_store::RegisterReplicaResponse>*
             server_unary_streamer) = 0;
   };
   template <class BaseClass>
-  class WithStreamedUnaryMethod_GetModelIndex : public BaseClass {
+  class WithStreamedUnaryMethod_UpdateReplica : public BaseClass {
    private:
     void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
 
    public:
-    WithStreamedUnaryMethod_GetModelIndex() {
+    WithStreamedUnaryMethod_UpdateReplica() {
       ::grpc::Service::MarkMethodStreamed(
-          7,
+          1,
           new ::grpc::internal::
-              StreamedUnaryHandler<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>(
+              StreamedUnaryHandler<::global_store::UpdateReplicaRequest, ::global_store::UpdateReplicaResponse>(
                   [this](
                       ::grpc::ServerContext* context,
                       ::grpc::ServerUnaryStreamer<
-                          ::global_store::GetModelIndexRequest,
-                          ::global_store::GetModelIndexResponse>* streamer) {
-                    return this->StreamedGetModelIndex(context, streamer);
+                          ::global_store::UpdateReplicaRequest,
+                          ::global_store::UpdateReplicaResponse>* streamer) {
+                    return this->StreamedUpdateReplica(context, streamer);
                   }));
     }
-    ~WithStreamedUnaryMethod_GetModelIndex() override {
+    ~WithStreamedUnaryMethod_UpdateReplica() override {
       BaseClassMustBeDerivedFromService(this);
     }
     // disable regular version of this method
-    ::grpc::Status GetModelIndex(
+    ::grpc::Status UpdateReplica(
         ::grpc::ServerContext* /*context*/,
-        const ::global_store::GetModelIndexRequest* /*request*/,
-        ::global_store::GetModelIndexResponse* /*response*/) override {
+        const ::global_store::UpdateReplicaRequest* /*request*/,
+        ::global_store::UpdateReplicaResponse* /*response*/) override {
       abort();
       return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
     }
     // replace default version of method with streamed unary
-    virtual ::grpc::Status StreamedGetModelIndex(
+    virtual ::grpc::Status StreamedUpdateReplica(
         ::grpc::ServerContext* context,
-        ::grpc::ServerUnaryStreamer<::global_store::GetModelIndexRequest, ::global_store::GetModelIndexResponse>*
+        ::grpc::ServerUnaryStreamer<::global_store::UpdateReplicaRequest, ::global_store::UpdateReplicaResponse>*
+            server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_UnregisterReplica : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_UnregisterReplica() {
+      ::grpc::Service::MarkMethodStreamed(
+          2,
+          new ::grpc::internal::
+              StreamedUnaryHandler<::global_store::UnregisterReplicaRequest, ::global_store::UnregisterReplicaResponse>(
+                  [this](
+                      ::grpc::ServerContext* context,
+                      ::grpc::ServerUnaryStreamer<
+                          ::global_store::UnregisterReplicaRequest,
+                          ::global_store::UnregisterReplicaResponse>* streamer) {
+                    return this->StreamedUnregisterReplica(context, streamer);
+                  }));
+    }
+    ~WithStreamedUnaryMethod_UnregisterReplica() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status UnregisterReplica(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::UnregisterReplicaRequest* /*request*/,
+        ::global_store::UnregisterReplicaResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedUnregisterReplica(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<
+            ::global_store::UnregisterReplicaRequest,
+            ::global_store::UnregisterReplicaResponse>* server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_RequestReplicaTransport : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_RequestReplicaTransport() {
+      ::grpc::Service::MarkMethodStreamed(
+          3,
+          new ::grpc::internal::StreamedUnaryHandler<
+              ::global_store::RequestReplicaTransportRequest,
+              ::global_store::RequestReplicaTransportResponse>(
+              [this](
+                  ::grpc::ServerContext* context,
+                  ::grpc::ServerUnaryStreamer<
+                      ::global_store::RequestReplicaTransportRequest,
+                      ::global_store::RequestReplicaTransportResponse>* streamer) {
+                return this->StreamedRequestReplicaTransport(context, streamer);
+              }));
+    }
+    ~WithStreamedUnaryMethod_RequestReplicaTransport() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status RequestReplicaTransport(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::RequestReplicaTransportRequest* /*request*/,
+        ::global_store::RequestReplicaTransportResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedRequestReplicaTransport(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<
+            ::global_store::RequestReplicaTransportRequest,
+            ::global_store::RequestReplicaTransportResponse>* server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_CompleteReplicaTransport : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_CompleteReplicaTransport() {
+      ::grpc::Service::MarkMethodStreamed(
+          4,
+          new ::grpc::internal::StreamedUnaryHandler<
+              ::global_store::CompleteReplicaTransportRequest,
+              ::global_store::CompleteReplicaTransportResponse>(
+              [this](
+                  ::grpc::ServerContext* context,
+                  ::grpc::ServerUnaryStreamer<
+                      ::global_store::CompleteReplicaTransportRequest,
+                      ::global_store::CompleteReplicaTransportResponse>* streamer) {
+                return this->StreamedCompleteReplicaTransport(context, streamer);
+              }));
+    }
+    ~WithStreamedUnaryMethod_CompleteReplicaTransport() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status CompleteReplicaTransport(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::CompleteReplicaTransportRequest* /*request*/,
+        ::global_store::CompleteReplicaTransportResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedCompleteReplicaTransport(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<
+            ::global_store::CompleteReplicaTransportRequest,
+            ::global_store::CompleteReplicaTransportResponse>* server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_ListReplicas : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_ListReplicas() {
+      ::grpc::Service::MarkMethodStreamed(
+          5,
+          new ::grpc::internal::
+              StreamedUnaryHandler<::global_store::ListReplicasRequest, ::global_store::ListReplicasResponse>(
+                  [this](
+                      ::grpc::ServerContext* context,
+                      ::grpc::ServerUnaryStreamer<
+                          ::global_store::ListReplicasRequest,
+                          ::global_store::ListReplicasResponse>* streamer) {
+                    return this->StreamedListReplicas(context, streamer);
+                  }));
+    }
+    ~WithStreamedUnaryMethod_ListReplicas() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status ListReplicas(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::ListReplicasRequest* /*request*/,
+        ::global_store::ListReplicasResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedListReplicas(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<::global_store::ListReplicasRequest, ::global_store::ListReplicasResponse>*
+            server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_GetArtifactInfoById : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_GetArtifactInfoById() {
+      ::grpc::Service::MarkMethodStreamed(
+          6,
+          new ::grpc::internal::StreamedUnaryHandler<
+              ::global_store::GetArtifactInfoByIdRequest,
+              ::global_store::GetArtifactInfoByIdResponse>(
+              [this](
+                  ::grpc::ServerContext* context,
+                  ::grpc::ServerUnaryStreamer<
+                      ::global_store::GetArtifactInfoByIdRequest,
+                      ::global_store::GetArtifactInfoByIdResponse>* streamer) {
+                return this->StreamedGetArtifactInfoById(context, streamer);
+              }));
+    }
+    ~WithStreamedUnaryMethod_GetArtifactInfoById() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status GetArtifactInfoById(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetArtifactInfoByIdRequest* /*request*/,
+        ::global_store::GetArtifactInfoByIdResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedGetArtifactInfoById(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<
+            ::global_store::GetArtifactInfoByIdRequest,
+            ::global_store::GetArtifactInfoByIdResponse>* server_unary_streamer) = 0;
+  };
+  template <class BaseClass>
+  class WithStreamedUnaryMethod_GetArtifactIndex : public BaseClass {
+   private:
+    void BaseClassMustBeDerivedFromService(const Service* /*service*/) {}
+
+   public:
+    WithStreamedUnaryMethod_GetArtifactIndex() {
+      ::grpc::Service::MarkMethodStreamed(
+          7,
+          new ::grpc::internal::
+              StreamedUnaryHandler<::global_store::GetArtifactIndexRequest, ::global_store::GetArtifactIndexResponse>(
+                  [this](
+                      ::grpc::ServerContext* context,
+                      ::grpc::ServerUnaryStreamer<
+                          ::global_store::GetArtifactIndexRequest,
+                          ::global_store::GetArtifactIndexResponse>* streamer) {
+                    return this->StreamedGetArtifactIndex(context, streamer);
+                  }));
+    }
+    ~WithStreamedUnaryMethod_GetArtifactIndex() override {
+      BaseClassMustBeDerivedFromService(this);
+    }
+    // disable regular version of this method
+    ::grpc::Status GetArtifactIndex(
+        ::grpc::ServerContext* /*context*/,
+        const ::global_store::GetArtifactIndexRequest* /*request*/,
+        ::global_store::GetArtifactIndexResponse* /*response*/) override {
+      abort();
+      return ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED, "");
+    }
+    // replace default version of method with streamed unary
+    virtual ::grpc::Status StreamedGetArtifactIndex(
+        ::grpc::ServerContext* context,
+        ::grpc::ServerUnaryStreamer<::global_store::GetArtifactIndexRequest, ::global_store::GetArtifactIndexResponse>*
             server_unary_streamer) = 0;
   };
   template <class BaseClass>
@@ -4869,10 +4849,10 @@ class GlobalModelStore final {
             ::global_store::BatchUpdateChunkStatesRequest,
             ::global_store::BatchUpdateChunkStatesResponse>* server_unary_streamer) = 0;
   };
-  typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
-      WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
-          WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
-              WithStreamedUnaryMethod_GetModelInfoById<WithStreamedUnaryMethod_GetModelIndex<
+  typedef WithStreamedUnaryMethod_RegisterReplica<WithStreamedUnaryMethod_UpdateReplica<
+      WithStreamedUnaryMethod_UnregisterReplica<WithStreamedUnaryMethod_RequestReplicaTransport<
+          WithStreamedUnaryMethod_CompleteReplicaTransport<WithStreamedUnaryMethod_ListReplicas<
+              WithStreamedUnaryMethod_GetArtifactInfoById<WithStreamedUnaryMethod_GetArtifactIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<
@@ -4880,10 +4860,10 @@ class GlobalModelStore final {
                                   WithStreamedUnaryMethod_BatchUpdateChunkStates<Service>>>>>>>>>>>>>>>>>
       StreamedUnaryService;
   typedef Service SplitStreamedService;
-  typedef WithStreamedUnaryMethod_RegisterModelReplica<WithStreamedUnaryMethod_UpdateModelReplica<
-      WithStreamedUnaryMethod_UnregisterModelReplica<WithStreamedUnaryMethod_RequestModelReplicaTransport<
-          WithStreamedUnaryMethod_CompleteModelReplicaTransport<WithStreamedUnaryMethod_ListModelReplicas<
-              WithStreamedUnaryMethod_GetModelInfoById<WithStreamedUnaryMethod_GetModelIndex<
+  typedef WithStreamedUnaryMethod_RegisterReplica<WithStreamedUnaryMethod_UpdateReplica<
+      WithStreamedUnaryMethod_UnregisterReplica<WithStreamedUnaryMethod_RequestReplicaTransport<
+          WithStreamedUnaryMethod_CompleteReplicaTransport<WithStreamedUnaryMethod_ListReplicas<
+              WithStreamedUnaryMethod_GetArtifactInfoById<WithStreamedUnaryMethod_GetArtifactIndex<
                   WithStreamedUnaryMethod_RegisterWorker<WithStreamedUnaryMethod_WorkerHeartbeat<
                       WithStreamedUnaryMethod_UnregisterWorker<WithStreamedUnaryMethod_ListActiveWorkers<
                           WithStreamedUnaryMethod_SynchronizeWorkerState<WithStreamedUnaryMethod_RequestFullStateSync<

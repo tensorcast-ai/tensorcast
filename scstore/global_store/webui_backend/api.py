@@ -65,7 +65,7 @@ async def get_summary(client: GrpcClient) -> ApiResponse:
         active_workers=stats["active_workers"],
         total_replicas=stats["total_replicas"],
         available_replicas=stats["total_replicas"],  # TODO: Need to track availability
-        total_models=stats["total_models"],
+        total_artifacts=stats["total_artifacts"],
         active_transports=stats["active_transports"],
         total_memory_bytes=total_memory,
         available_memory_bytes=available_memory,
@@ -89,10 +89,10 @@ async def list_workers(
     worker_list = []
     for w in workers:
         # Get replica count for this worker
-        all_replicas = await client.list_model_replicas()
+        all_replicas = await client.list_replicas()
         replica_count = 0
-        for model_replicas in all_replicas.values():
-            for replica in model_replicas:
+        for artifact_replicas in all_replicas.values():
+            for replica in artifact_replicas:
                 if replica.node_id == w.node_id:
                     replica_count += 1
 
@@ -140,10 +140,10 @@ async def get_worker(worker_id: str, client: GrpcClient) -> ApiResponse:
     for w in workers:
         if w.worker_id == worker_id:
             # Get replica count for this worker
-            all_replicas = await client.list_model_replicas()
+            all_replicas = await client.list_replicas()
             replica_count = 0
-            for model_replicas in all_replicas.values():
-                for replica in model_replicas:
+            for artifact_replicas in all_replicas.values():
+                for replica in artifact_replicas:
                     if replica.node_id == w.node_id:
                         replica_count += 1
 
@@ -170,7 +170,7 @@ async def get_worker(worker_id: str, client: GrpcClient) -> ApiResponse:
 @api_router.get("/replicas", response_model=ApiResponse)
 async def list_replicas(
     client: GrpcClient,
-    model_id: str | None = Query(None),
+    artifact_id: str | None = Query(None),
     node_id: str | None = Query(None),
     memory_type: MemoryType | None = _memory_type_query_none,
     worker_id: str | None = Query(None),
@@ -197,8 +197,8 @@ async def list_replicas(
     # same filtering rules again on the client side after fetching the data.
     # ------------------------------------------------------------------
 
-    all_replicas = await client.list_model_replicas(
-        model_id=model_id,
+    all_replicas = await client.list_replicas(
+        artifact_id=artifact_id,
         node_id=node_id,
         memory_type=proto_memory_type,
     )
@@ -228,9 +228,9 @@ async def list_replicas(
     replica_list = []
     replica_id_counter = 0  # Generate replica IDs since proto doesn't have them
 
-    for model_id_key, replicas in all_replicas.items():
-        # Apply *model_id* filter locally in case the server ignored it
-        if model_id and model_id_key != model_id:
+    for artifact_id_key, replicas in all_replicas.items():
+        # Apply *artifact_id* filter locally in case the server ignored it
+        if artifact_id and artifact_id_key != artifact_id:
             continue
 
         for r in replicas:
@@ -246,7 +246,7 @@ async def list_replicas(
             replica_list.append(
                 {
                     "replica_id": f"replica-{replica_id_counter}",
-                    "model_id": model_id_key,
+                    "artifact_id": artifact_id_key,
                     "node_id": r.node_id,
                     "node_address": r.node_address,
                     "node_port": r.node_port,
@@ -285,15 +285,15 @@ async def get_replica(replica_id: str, client: GrpcClient) -> ApiResponse:
     """Get a specific replica by ID."""
     # Since proto doesn't have replica IDs, we need to enumerate all replicas
     # This is a limitation of the current proto design
-    all_replicas = await client.list_model_replicas()
+    all_replicas = await client.list_replicas()
 
     replica_id_counter = 0
-    for model_id_key, replicas in all_replicas.items():
+    for artifact_id_key, replicas in all_replicas.items():
         for r in replicas:
             if f"replica-{replica_id_counter}" == replica_id:
                 replica_data = {
                     "replica_id": replica_id,
-                    "model_id": model_id_key,
+                    "artifact_id": artifact_id_key,
                     "node_id": r.node_id,
                     "node_address": r.node_address,
                     "node_port": r.node_port,
@@ -312,15 +312,15 @@ async def get_replica(replica_id: str, client: GrpcClient) -> ApiResponse:
     raise HTTPException(status_code=404, detail="Replica not found")
 
 
-@api_router.get("/models", response_model=ApiResponse)
-async def list_models(client: GrpcClient) -> ApiResponse:
-    """List all models with summary statistics."""
-    # Get all replicas grouped by model
-    all_replicas = await client.list_model_replicas()
+@api_router.get("/artifacts", response_model=ApiResponse)
+async def list_artifacts(client: GrpcClient) -> ApiResponse:
+    """List all artifacts with summary statistics."""
+    # Get all replicas grouped by artifact
+    all_replicas = await client.list_replicas()
 
-    # Build model statistics
-    models = []
-    for model_id, replicas in all_replicas.items():
+    # Build artifact statistics
+    artifacts = []
+    for artifact_id, replicas in all_replicas.items():
         gpu_count = sum(1 for r in replicas if r.memory_type == 0)  # GPU = 0
         ram_count = sum(1 for r in replicas if r.memory_type == 1)  # RAM = 1
         disk_count = sum(1 for r in replicas if r.memory_type == 2)  # DISK = 2
@@ -328,9 +328,9 @@ async def list_models(client: GrpcClient) -> ApiResponse:
         total_size = sum(r.memory_size for r in replicas)
         unique_nodes = {r.node_id for r in replicas}
 
-        models.append(
+        artifacts.append(
             {
-                "model_id": model_id,
+                "artifact_id": artifact_id,
                 "replica_count": len(replicas),
                 "gpu_replicas": gpu_count,
                 "ram_replicas": ram_count,
@@ -340,20 +340,20 @@ async def list_models(client: GrpcClient) -> ApiResponse:
             }
         )
 
-    return ApiResponse(data=models)
+    return ApiResponse(data=artifacts)
 
 
-@api_router.get("/models/{model_id}", response_model=ApiResponse)
-async def get_model(model_id: str, client: GrpcClient) -> ApiResponse:
-    """Get a specific model's summary by model_id."""
-    # Get model info
-    model_info = await client.get_model_info(model_id)
-    if not model_info:
-        raise HTTPException(status_code=404, detail="Model not found")
+@api_router.get("/artifacts/{artifact_id}", response_model=ApiResponse)
+async def get_artifact(artifact_id: str, client: GrpcClient) -> ApiResponse:
+    """Get a specific artifact's summary by artifact_id."""
+    # Get artifact info
+    artifact_info = await client.get_artifact_info(artifact_id)
+    if not artifact_info:
+        raise HTTPException(status_code=404, detail="Artifact not found")
 
     # Get detailed replica information
-    all_replicas = await client.list_model_replicas(model_id=model_id)
-    replicas = all_replicas.get(model_id, [])
+    all_replicas = await client.list_replicas(artifact_id=artifact_id)
+    replicas = all_replicas.get(artifact_id, [])
 
     gpu_count = sum(1 for r in replicas if r.memory_type == 0)
     ram_count = sum(1 for r in replicas if r.memory_type == 1)
@@ -385,8 +385,8 @@ async def get_model(model_id: str, client: GrpcClient) -> ApiResponse:
         elif r.memory_type == 2:
             nodes_data[r.node_id]["disk_replicas"] += 1  # type: ignore[operator]
 
-    model_data = {
-        "model_id": model_id,
+    artifact_summary = {
+        "artifact_id": artifact_id,
         "replica_count": len(replicas),
         "gpu_replicas": gpu_count,
         "ram_replicas": ram_count,
@@ -396,14 +396,14 @@ async def get_model(model_id: str, client: GrpcClient) -> ApiResponse:
         "nodes": list(nodes_data.values()),
     }
 
-    return ApiResponse(data=model_data)
+    return ApiResponse(data=artifact_summary)
 
 
 @api_router.get("/nodes", response_model=ApiResponse)
 async def list_nodes(client: GrpcClient) -> ApiResponse:
     """List all nodes with aggregated statistics."""
     # Get all replicas and workers to build node statistics
-    all_replicas = await client.list_model_replicas()
+    all_replicas = await client.list_replicas()
     workers = await client.list_active_workers(include_unavailable=True)
 
     # Build node statistics from replicas
@@ -417,12 +417,12 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
             "worker_count": 0,
             "active_workers": 0,
             "replica_count": 0,
-            "model_count": 0,
+            "artifact_count": 0,
             "gpu_memory": 0,
             "ram_memory": 0,
             "disk_memory": 0,
             "total_memory": 0,
-            "models": set(),
+            "artifacts": set(),
         }
 
     # Count workers per node
@@ -433,7 +433,7 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
                 nodes_data[w.node_id]["active_workers"] += 1
 
     # Add replica statistics
-    for model_id_key, replicas in all_replicas.items():
+    for artifact_id_key, replicas in all_replicas.items():
         for r in replicas:
             if r.node_id not in nodes_data:
                 # Node has replicas but no active workers
@@ -443,16 +443,16 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
                     "worker_count": 0,
                     "active_workers": 0,
                     "replica_count": 0,
-                    "model_count": 0,
+                    "artifact_count": 0,
                     "gpu_memory": 0,
                     "ram_memory": 0,
                     "disk_memory": 0,
                     "total_memory": 0,
-                    "models": set(),
+                    "artifacts": set(),
                 }
 
             nodes_data[r.node_id]["replica_count"] += 1
-            nodes_data[r.node_id]["models"].add(model_id_key)
+            nodes_data[r.node_id]["artifacts"].add(artifact_id_key)
             nodes_data[r.node_id]["total_memory"] += int(r.memory_size)
 
             if r.memory_type == 0:  # GPU
@@ -462,11 +462,11 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
             elif r.memory_type == 2:  # DISK
                 nodes_data[r.node_id]["disk_memory"] += int(r.memory_size)
 
-    # Convert sets to counts and prepare final data
+    # Convert sets to counts and materialize_replica final data
     nodes_list = []
     for data in nodes_data.values():
-        data["model_count"] = len(data["models"])
-        del data["models"]  # Remove the set
+        data["artifact_count"] = len(data["artifacts"])
+        del data["artifacts"]  # Remove the set
         nodes_list.append(data)
 
     # Sort by node_id for consistent ordering
@@ -479,7 +479,7 @@ async def list_nodes(client: GrpcClient) -> ApiResponse:
 async def list_transports(
     client: GrpcClient,
     status: str | None = Query(None),
-    model_id: str | None = Query(None),
+    artifact_id: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
 ) -> ApiResponse:
@@ -503,8 +503,8 @@ async def list_transports(
     # Apply filters if any transports exist
     if status:
         transports = [t for t in transports if t.get("status") == status]
-    if model_id:
-        transports = [t for t in transports if t.get("model_id") == model_id]
+    if artifact_id:
+        transports = [t for t in transports if t.get("artifact_id") == artifact_id]
 
     # Apply pagination
     total_count = len(transports)

@@ -79,10 +79,10 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
   info.comm_dev_type =
       device_id >= 0 ? communicator::COMMUNICATE_ENGINE_DEV_GPU : communicator::COMMUNICATE_ENGINE_DEV_CPU;
 
-  // Calculate total model size
-  info.model_size = 0;
+  // Calculate total artifact size
+  info.artifact_size = 0;
   for (size_t size : buffer_sizes) {
-    info.model_size += size;
+    info.artifact_size += size;
   }
 
   return info;

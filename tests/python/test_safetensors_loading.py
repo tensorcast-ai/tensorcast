@@ -6,24 +6,24 @@ import torch
 from safetensors.torch import save_file as st_save
 
 from scstore.torch_util import build_indices_from_safetensors
-from tests.python.utils.model_utils import create_dummy_safetensors_model
+from tests.python.utils.artifact_utils import create_dummy_safetensors
 
 
 def test_build_indices_from_safetensors_single_and_multi(tmp_path: Path):
     storage_root = tmp_path / "models"
     storage_root.mkdir(parents=True, exist_ok=True)
 
-    # Model directory with a single weights.safetensors
-    model_id = "st_simple"
-    create_dummy_safetensors_model(storage_root, model_id)
+    # Artifact directory with a single weights.safetensors
+    artifact_id = "st_simple"
+    create_dummy_safetensors(storage_root, artifact_id)
 
     # Force safetensors header path by removing tensor_index.json if present
-    index_file = storage_root / model_id / "tensor_index.json"
+    index_file = storage_root / artifact_id / "tensor_index.json"
     if index_file.exists():
         index_file.unlink()
 
     # Validate our header parser produces indices without raising (single file)
-    meta_idx, data_idx = build_indices_from_safetensors(storage_root / model_id)
+    meta_idx, data_idx = build_indices_from_safetensors(storage_root / artifact_id)
     assert set(meta_idx.keys()) == {"t"}
     assert set(data_idx.keys()) == {"t"}
     shape, stride, dtype, storage_offset = meta_idx["t"]
@@ -36,9 +36,9 @@ def test_build_indices_from_safetensors_single_and_multi(tmp_path: Path):
 
     # Create a second safetensors to validate multi-file concatenation
     extra = torch.arange(16, dtype=torch.uint8)
-    st_save({"u": extra}, str(storage_root / model_id / "extra.safetensors"))
+    st_save({"u": extra}, str(storage_root / artifact_id / "extra.safetensors"))
 
-    meta2, data2 = build_indices_from_safetensors(storage_root / model_id)
+    meta2, data2 = build_indices_from_safetensors(storage_root / artifact_id)
     assert set(meta2.keys()) == {"t", "u"}
     assert set(data2.keys()) == {"t", "u"}
     # Files are processed in lexicographic order: extra.safetensors then weights.safetensors

@@ -14,16 +14,16 @@ from pathlib import Path
 from scstore._C import inspect_or_generate_descriptor
 
 
-def generate_model_id_from_path(model_dir: str | Path) -> dict:
+def generate_artifact_id_from_path(artifact_path: str | Path) -> dict:
     """Generate descriptor via C++ pipeline for an existing directory."""
-    d = Path(str(model_dir))
+    d = Path(str(artifact_path))
     if not d.exists() or not d.is_dir():
-        raise ValueError(f"Invalid model_dir: {d}")
+        raise ValueError(f"Invalid artifact_path: {d}")
 
     desc = inspect_or_generate_descriptor(str(d))
     # Return as a plain dict
     return {
-        "model_id": desc["model_id"],
+        "artifact_id": desc["artifact_id"],
         "index_multihash": desc["index_multihash"],
         "data_multihash": desc["data_multihash"],
         "schema_version": desc.get("schema_version", "v2"),
@@ -32,4 +32,4 @@ def generate_model_id_from_path(model_dir: str | Path) -> dict:
     }
 
 
-__all__ = ["generate_model_id_from_path"]
+__all__ = ["generate_artifact_id_from_path"]

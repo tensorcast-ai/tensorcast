@@ -35,7 +35,7 @@ def _gauge_value(gauge):
 # -----------------------------------------------------------------------------
 
 
-def _register_replica(gs, *, model: str, replica_id: str, capacity: int = 1):
+def _register_replica(gs, *, artifact: str, replica_id: str, capacity: int = 1):
     worker_req = global_store_pb2.RegisterWorkerRequest(
         node_id=replica_id,
         node_address="127.0.0.1",
@@ -56,13 +56,13 @@ def _register_replica(gs, *, model: str, replica_id: str, capacity: int = 1):
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    rep_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model,
+    rep_req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact,
         mem_info=mem_info,
         max_concurrency=capacity,
         worker_id=w_resp.worker_id,
     )
-    gs.RegisterModelReplica(rep_req, FakeContext())
+    gs.RegisterReplica(rep_req, FakeContext())
 
 
 @pytest.mark.integration
@@ -70,7 +70,7 @@ def test_metrics_consistency(global_store_service):
     """Ensure Prometheus counters/gauges reflect transport lifecycle (Scenario 11)."""
 
     gs = global_store_service
-    model = "metrics-test-model"
+    artifact = "metrics-test-artifact"
 
     # Clean registry (best-effort) to avoid metric carry-over across tests.
     for metric in (
@@ -86,33 +86,33 @@ def test_metrics_consistency(global_store_service):
         prometheus_client.REGISTRY.register(metric)
 
     # Register 1-capacity replica so active transports gauge increments to 1 only.
-    _register_replica(gs, model=model, replica_id="METRIC", capacity=1)
+    _register_replica(gs, artifact=artifact, replica_id="METRIC", capacity=1)
 
     # ---- Acquire first transport ----
-    req = global_store_pb2.RequestModelReplicaTransportRequest(model_id=model)
-    resp = gs.RequestModelReplicaTransport(req, FakeContext())
+    req = global_store_pb2.RequestReplicaTransportRequest(artifact_id=artifact)
+    resp = gs.RequestReplicaTransport(req, FakeContext())
     assert resp.status == global_store_pb2.Status.OK
 
     # Gauge should be 1 (one in-flight transport)
     assert _gauge_value(gs_metrics.ACTIVE_TRANSPORTS_GAUGE) == 1
 
     # ---- Acquire second request with wait_timeout so that it times out ----
-    to_req = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_id=model,
+    to_req = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact,
         wait_timeout_ms=5,
     )
-    to_resp = gs.RequestModelReplicaTransport(to_req, FakeContext())
+    to_resp = gs.RequestReplicaTransport(to_req, FakeContext())
     assert to_resp.status == global_store_pb2.Status.TIMED_OUT
 
     # Counter check
-    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_id=model, status="success") == 1
-    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, model_id=model, status="timeout") == 1
+    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, artifact_id=artifact, status="success") == 1
+    assert _counter_value(gs_metrics.TRANSPORT_REQUEST_COUNTER, artifact_id=artifact, status="timeout") == 1
 
     # ---- Complete first transport ----
-    comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(
+    comp_req = global_store_pb2.CompleteReplicaTransportRequest(
         transport_id=resp.transport_id
     )
-    comp_resp = gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+    comp_resp = gs.CompleteReplicaTransport(comp_req, FakeContext())
     assert comp_resp.status == global_store_pb2.Status.OK
 
     # Gauge should be back to 0
@@ -126,6 +126,6 @@ def test_metrics_consistency(global_store_service):
     hist_count = next(
         s.value
         for s in samples
-        if s.name.endswith("_count") and s.labels.get("model_id") == model
+        if s.name.endswith("_count") and s.labels.get("artifact_id") == artifact
     )
     assert hist_count >= 2

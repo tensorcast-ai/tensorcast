@@ -11,17 +11,17 @@ import pytest
 from scstore.proto import store_daemon_pb2
 
 
-def _ensure_minimal_model_files(storage_root: Path, model_id: str, size_bytes: int) -> None:
-    model_dir = storage_root / model_id
-    model_dir.mkdir(parents=True, exist_ok=True)
+def _ensure_minimal_model_files(storage_root: Path, artifact_id: str, size_bytes: int) -> None:
+    artifact_dir = storage_root / artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     # Remove any existing partition files to avoid size mismatches
-    for p in model_dir.glob("tensor.data*"):
+    for p in artifact_dir.glob("tensor.data*"):
         try:
             p.unlink()
         except Exception:
             pass
-    # Create a single-file model matching the expected size
-    data_file = model_dir / "tensor.data"
+    # Create a single-file artifact matching the expected size
+    data_file = artifact_dir / "tensor.data"
     with data_file.open("wb") as f:
         f.truncate(size_bytes)
 
@@ -74,8 +74,8 @@ class _Ctx:
 def test_begin_commit_abort_memory_registration(servicer):
     ctx = _Ctx()
 
-    # Ensure minimal model directory/files exist to satisfy Model::create checks
-    _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_model", 1 * 1024 * 1024)
+    # Ensure minimal artifact directory/files exist to satisfy Artifact::create checks
+    _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_artifact", 1 * 1024 * 1024)
 
     # Begin with index data path to ensure deterministic index hashing
     idx = store_daemon_pb2.TensorIndexData(
@@ -83,21 +83,21 @@ def test_begin_commit_abort_memory_registration(servicer):
         schema_version="v2",
         encoding="json",
     )
-    req = store_daemon_pb2.BeginRegisterTensorDictRequest(
-        model_id="py_mem_model",
+    req = store_daemon_pb2.BeginRegisterArtifactRequest(
+        artifact_id="py_mem_artifact",
         device_id=0,
         total_size=1 * 1024 * 1024,
         enable_p2p=False,
         tensor_index_data=idx,
     )
-    resp = servicer.BeginRegisterTensorDict(req, ctx)
+    resp = servicer.BeginRegisterArtifact(req, ctx)
     assert ctx.code is None
     assert resp.registration_id
     assert resp.daemon_ipc_handle != b""
 
     # Commit
-    c_resp = servicer.CommitRegisteredTensorDict(
-        store_daemon_pb2.CommitRegisteredTensorDictRequest(
+    c_resp = servicer.CommitRegisteredArtifact(
+        store_daemon_pb2.CommitRegisteredArtifactRequest(
             registration_id=resp.registration_id
         ),
         ctx,
@@ -105,8 +105,8 @@ def test_begin_commit_abort_memory_registration(servicer):
     assert ctx.code is None
     assert c_resp.registration_id == resp.registration_id
     # Enforce content addressing (mi2) per RFC-0007
-    assert c_resp.model_id.startswith("mi2:")
-    assert c_resp.descriptor.model_id == c_resp.model_id
+    assert c_resp.artifact_id.startswith("mi2:")
+    assert c_resp.descriptor.artifact_id == c_resp.artifact_id
     # Multihashes must be populated under content-addressing
     assert c_resp.descriptor.index_multihash != ""
     assert c_resp.descriptor.data_multihash != ""
@@ -115,8 +115,8 @@ def test_begin_commit_abort_memory_registration(servicer):
     assert c_resp.size == 1 * 1024 * 1024
 
     # Abort after commit should return ok=False or INTERNAL
-    a_resp = servicer.AbortRegisteredTensorDict(
-        store_daemon_pb2.AbortRegisteredTensorDictRequest(
+    a_resp = servicer.AbortRegisteredArtifact(
+        store_daemon_pb2.AbortRegisteredArtifactRequest(
             registration_id=resp.registration_id
         ),
         ctx,
@@ -126,8 +126,8 @@ def test_begin_commit_abort_memory_registration(servicer):
 
     # Double commit should surface NOT_FOUND/INTERNAL
     ctx2 = _Ctx()
-    servicer.CommitRegisteredTensorDict(
-        store_daemon_pb2.CommitRegisteredTensorDictRequest(
+    servicer.CommitRegisteredArtifact(
+        store_daemon_pb2.CommitRegisteredArtifactRequest(
             registration_id=resp.registration_id
         ),
         ctx2,
@@ -138,7 +138,7 @@ def test_begin_commit_abort_memory_registration(servicer):
 def test_begin_with_index_data_and_ttl(servicer):
     ctx = _Ctx()
 
-    # Ensure minimal model directory/files exist to satisfy Model::create checks
+    # Ensure minimal artifact directory/files exist to satisfy Artifact::create checks
     _ensure_minimal_model_files(Path(servicer.storage_path), "py_mem_ttl", 1024)
 
     # Provide index data oneof
@@ -147,21 +147,21 @@ def test_begin_with_index_data_and_ttl(servicer):
         schema_version="v2",
         encoding="json",
     )
-    req = store_daemon_pb2.BeginRegisterTensorDictRequest(
-        model_id="py_mem_ttl",
+    req = store_daemon_pb2.BeginRegisterArtifactRequest(
+        artifact_id="py_mem_ttl",
         device_id=0,
         total_size=1024,
         enable_p2p=False,
         ttl_ms=5,
         tensor_index_data=idx,
     )
-    resp = servicer.BeginRegisterTensorDict(req, ctx)
+    resp = servicer.BeginRegisterArtifact(req, ctx)
     assert ctx.code is None
 
     # Wait past TTL and attempt commit
     time.sleep(0.02)
-    c_resp = servicer.CommitRegisteredTensorDict(
-        store_daemon_pb2.CommitRegisteredTensorDictRequest(
+    c_resp = servicer.CommitRegisteredArtifact(
+        store_daemon_pb2.CommitRegisteredArtifactRequest(
             registration_id=resp.registration_id
         ),
         ctx,
@@ -170,8 +170,8 @@ def test_begin_with_index_data_and_ttl(servicer):
 
     # Abort unknown id should return NOT_FOUND/INTERNAL
     ctx2 = _Ctx()
-    a_resp = servicer.AbortRegisteredTensorDict(
-        store_daemon_pb2.AbortRegisteredTensorDictRequest(
+    a_resp = servicer.AbortRegisteredArtifact(
+        store_daemon_pb2.AbortRegisteredArtifactRequest(
             registration_id=str(uuid.uuid4())
         ),
         ctx2,
@@ -183,14 +183,14 @@ def test_begin_invalid_args(servicer):
     ctx = _Ctx()
 
     # Missing key/data => handled by service path; here pass empty key with size 0 to trigger errors downstream
-    req = store_daemon_pb2.BeginRegisterTensorDictRequest(
-        model_id="",
+    req = store_daemon_pb2.BeginRegisterArtifactRequest(
+        artifact_id="",
         device_id=-1,
         total_size=0,
         enable_p2p=False,
         tensor_index_key="",
     )
-    resp = servicer.BeginRegisterTensorDict(req, ctx)
+    resp = servicer.BeginRegisterArtifact(req, ctx)
     assert ctx.code in (grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.INTERNAL)
 
 

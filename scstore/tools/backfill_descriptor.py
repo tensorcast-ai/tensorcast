@@ -2,17 +2,17 @@
 #  Copyright (c) 2025, StepCast Team.
 
 """
-Backfill model_descriptor.json for existing model directories per RFC-0007.
+Backfill artifact_descriptor.json for existing artifact directories per RFC-0007.
 
 Usage:
-  python -m scstore.tools.backfill_descriptor <model_dir> [--recursive]
+  python -m scstore.tools.backfill_descriptor <artifact_path> [--recursive]
 
 Behavior:
   - Delegates to the unified C++ pipeline to compute/inspect the descriptor.
-  - Writes model_descriptor.json when missing (and may persist canonical index
+  - Writes artifact_descriptor.json when missing (and may persist canonical index
     for safetensors directories if the core decides to do so).
   - With --recursive, walks the directory and backfills each subdirectory
-    containing a recognizable model layout.
+    containing a recognizable artifact layout.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from pathlib import Path
 from scstore._C import inspect_or_generate_descriptor
 
 
-def backfill_one(model_dir: Path) -> None:
-    desc = inspect_or_generate_descriptor(str(model_dir))
+def backfill_one(artifact_path: Path) -> None:
+    desc = inspect_or_generate_descriptor(str(artifact_path))
 
     print(
         json.dumps(
             {
-                "model_dir": str(model_dir),
-                "model_id": desc["model_id"],
+                "artifact_path": str(artifact_path),
+                "artifact_id": desc["artifact_id"],
                 "index_multihash": desc["index_multihash"],
                 "data_multihash": desc["data_multihash"],
             },
@@ -42,7 +42,7 @@ def backfill_one(model_dir: Path) -> None:
 
 
 def detect_model_dirs(root: Path) -> list[Path]:
-    """Heuristically detect model directories under root.
+    """Heuristically detect artifact directories under root.
 
     A directory is considered a candidate if it contains any of:
       - tensor.data or tensor.data_* files
@@ -61,11 +61,11 @@ def detect_model_dirs(root: Path) -> list[Path]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model_dir", type=str, help="Model directory or root path")
-    parser.add_argument("--recursive", action="store_true", help="Recursively process all detected model directories")
+    parser.add_argument("artifact_path", type=str, help="Artifact directory or root path")
+    parser.add_argument("--recursive", action="store_true", help="Recursively process all detected artifact directories")
     args = parser.parse_args(argv)
 
-    root = Path(args.model_dir)
+    root = Path(args.artifact_path)
     if not root.exists():
         print(f"Path does not exist: {root}", file=sys.stderr)
         return 2
@@ -73,13 +73,13 @@ def main(argv: list[str]) -> int:
     if args.recursive:
         dirs = detect_model_dirs(root)
         if not dirs:
-            print("No model directories detected", file=sys.stderr)
+            print("No artifact directories detected", file=sys.stderr)
             return 1
         for d in dirs:
             try:
                 backfill_one(d)
             except Exception as e:  # noqa: BLE001
-                print(json.dumps({"model_dir": str(d), "error": str(e)}), file=sys.stderr)
+                print(json.dumps({"artifact_path": str(d), "error": str(e)}), file=sys.stderr)
         return 0
 
     # Single directory
@@ -87,12 +87,12 @@ def main(argv: list[str]) -> int:
         backfill_one(root)
         return 0
     except Exception as e:  # noqa: BLE001
-        print(json.dumps({"model_dir": str(root), "error": str(e)}), file=sys.stderr)
+        print(json.dumps({"artifact_path": str(root), "error": str(e)}), file=sys.stderr)
         return 1
 
 
 if __name__ == "__main__":
-    # python -m scstore.tools.backfill_descriptor /path/to/model_dir --write-index
+    # python -m scstore.tools.backfill_descriptor /path/to/artifact --write-index
     # python -m scstore.tools.backfill_descriptor /datasets/checkpoints --write-index --recursive
     raise SystemExit(main(sys.argv[1:]))
 

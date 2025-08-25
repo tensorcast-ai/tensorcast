@@ -18,11 +18,11 @@ const MockTest: React.FC = () => {
     { path: '/api/summary', name: 'Summary' },
     { path: '/api/workers', name: 'Workers List' },
     { path: '/api/nodes', name: 'Nodes List' },
-    { path: '/api/models', name: 'Models List' },
+    { path: '/api/artifacts', name: 'Artifacts List' },
     { path: '/api/replicas', name: 'Replicas List' },
     { path: '/api/transports?page=1&page_size=5', name: 'Transports (Paginated)' },
     { path: '/api/workers/worker-1', name: 'Single Worker' },
-    { path: '/api/models/text-classifier', name: 'Single Model' },
+    { path: '/api/artifacts/text-classifier', name: 'Single Artifact' },
     { path: '/api/replicas?worker_id=worker-1', name: 'Filtered Replicas' },
   ];
 

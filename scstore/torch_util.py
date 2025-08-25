@@ -61,7 +61,7 @@ from scstore._C import (  # noqa: E402
     get_device_uuid_map,
     inspect_or_generate_descriptor,
     restore_tensors,
-    restore_tensors_from_model_path,
+    restore_tensors_from_disk,
     save_model_to_disk,
 )
 
@@ -129,7 +129,7 @@ def calculate_tensor_device_offsets(
 
 
 def build_indices_from_safetensors(
-    model_dir: os.PathLike | Path,
+    artifact_dir: os.PathLike | Path,
 ) -> tuple[
     dict[str, tuple[list[int], list[int], str, int]], dict[str, tuple[int, int]]
 ]:
@@ -137,9 +137,9 @@ def build_indices_from_safetensors(
 
     Returns (tensor_meta_index, tensor_data_index).
     """
-    model_dir_path = Path(str(model_dir))
+    artifact_dir = Path(str(artifact_dir))
     # Use C++ helper to build canonical index bytes (strict canonical JSON)
-    index_bytes = build_canonical_index_from_safetensors(str(model_dir_path))
+    index_bytes = build_canonical_index_from_safetensors(str(artifact_dir))
     try:
         index_obj = json.loads(index_bytes)
     except Exception as e:  # noqa: BLE001
@@ -161,7 +161,7 @@ def build_indices_from_safetensors(
 
 def save_dict(
     state_dict: dict[str, torch.Tensor],
-    model_path: str | os.PathLike,
+    disk_path: str | os.PathLike,
     use_streaming: bool = True,
     streaming_config: dict | None = None,
 ) -> dict:
@@ -180,37 +180,39 @@ def save_dict(
         )
 
     config = streaming_config or {}
-    # Delegate to C++ to write partitions, tensor_index.json, and model_descriptor.json
+    # Delegate to C++ to write partitions, tensor_index.json, and artifact_descriptor.json
     descriptor = save_model_to_disk(
-        tensor_names, tensor_data_index, meta_state_dict, str(model_path), config
+        tensor_names, tensor_data_index, meta_state_dict, str(disk_path), config
     )
     return dict(descriptor)
 
 
 def load_dict_from_disk(
-    model_path: str | os.PathLike,
+    disk_path: str | os.PathLike,
     *,
     device_id: int | torch.device = 0,
     storage_path: str | os.PathLike | None = None,
 ) -> dict[str, torch.Tensor]:
     """Load a checkpoint directly from disk files, without contacting the daemon.
 
-    - Uses tensor_index.json (or safetensors headers) and partition files under model_dir.
+    - Uses tensor_index.json (or safetensors headers) and partition files under artifact directory.
     - Loads to CUDA device if available; falls back to CPU when CUDA is not available.
     """
-    # Resolve model directory
-    raw_model_path = Path(str(model_path))
+    # Resolve artifact directory
+    raw_disk_path = Path(str(disk_path))
     if storage_path and str(storage_path) != "":
-        model_dir = Path(str(storage_path)) / raw_model_path
+        artifact_dir = Path(str(storage_path)) / raw_disk_path
     else:
-        model_dir = raw_model_path
+        artifact_dir = raw_disk_path
 
-    index_path = model_dir / "tensor_index.json"
-    safetensors_files: list[Path] = sorted(model_dir.glob("*.safetensors"))
+    index_path = artifact_dir / "tensor_index.json"
+    safetensors_files: list[Path] = sorted(artifact_dir.glob("*.safetensors"))
 
     # If safetensors present and no tensor_index.json, build indices from safetensors headers
     if safetensors_files and not index_path.exists():
-        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(model_dir)
+        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(
+            artifact_dir
+        )
     else:
         with open(index_path, "r") as f:
             tensor_index = json.load(f)
@@ -229,7 +231,7 @@ def load_dict_from_disk(
             tensor_data_index[name] = (offset, size)
 
     device_id_int: int = resolve_device(device_id)
-    # Compute coalesced offsets and adapt to the flat mapping API expected by restore_tensors_from_model_path
+    # Compute coalesced offsets and adapt to the flat mapping API expected by restore_tensors_from_disk
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
         tensor_data_index, device_id_int
     )
@@ -240,9 +242,9 @@ def load_dict_from_disk(
     # Choose device: load to CPU (-1) if CUDA unavailable
     target_device_for_local = device_id_int if torch.cuda.is_available() else -1
 
-    state_dict = restore_tensors_from_model_path(
+    state_dict = restore_tensors_from_disk(
         tensor_meta_index,
-        str(model_dir),
+        str(artifact_dir),
         per_tensor_offsets,
         target_device_for_local,
     )
@@ -250,22 +252,22 @@ def load_dict_from_disk(
 
 
 def load_dict(
-    model_path: str | os.PathLike | None = None,
+    disk_path: str | os.PathLike | None = None,
     device_id: int | torch.device = 0,
     storage_path: str | os.PathLike | None = None,
     enable_verification: bool = True,
     pinned_allocation_timeout_ms: int = 30000,
     wait_for_completion: bool = True,
 ):
-    """Load a model checkpoint into memory.
+    """Load a artifact checkpoint into memory.
 
     Args:
-        model_path: Path to the model checkpoint
+        disk_path: Path to the artifact checkpoint
         device_id: Target device (int or torch.device)
-        storage_path: Base storage path for models
-        enable_verification: Whether to enable async model verification
+        storage_path: Base storage path for artifacts
+        enable_verification: Whether to enable async artifact verification
         pinned_allocation_timeout_ms: Timeout for pinned memory allocation
-        wait_for_completion: If True (default), wait for model to be fully loaded.
+        wait_for_completion: If True (default), wait for artifact to be fully loaded.
                            If False, return immediately after memory allocation and
                            return a tuple (state_dict, confirm_fn) where confirm_fn
                            must be called to ensure loading is complete.
@@ -277,23 +279,31 @@ def load_dict(
     """
     client = DaemonCtl(get_daemon_address())
 
-    if not storage_path:
+    # Respect explicit empty string ("") to mean "use disk_path as-is".
+    # Only fallback to env default when storage_path is None.
+    if storage_path is None:
         storage_path = os.getenv("STORAGE_PATH", "./models")
 
     # Normalize device_id early to avoid runtime type checks
     device_id_int: int = resolve_device(device_id)
 
-    if model_path is None or storage_path is None:
-        raise ValueError("model_path and storage_path must be provided")
+    if disk_path is None or storage_path is None:
+        raise ValueError("disk_path and storage_path must be provided")
 
-    model_dir = Path(str(storage_path)) / str(model_path)
+    raw_disk_path = Path(str(disk_path))
+    if isinstance(storage_path, (str, os.PathLike)) and str(storage_path) == "":
+        artifact_dir = raw_disk_path
+    else:
+        artifact_dir = Path(str(storage_path)) / str(raw_disk_path)
 
-    index_path = model_dir / "tensor_index.json"
-    safetensors_files: list[Path] = sorted(model_dir.glob("*.safetensors"))
+    index_path = artifact_dir / "tensor_index.json"
+    safetensors_files: list[Path] = sorted(artifact_dir.glob("*.safetensors"))
 
     # If safetensors present and no tensor_index.json, build indices from safetensors headers
     if safetensors_files and not index_path.exists():
-        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(model_dir)
+        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(
+            artifact_dir
+        )
     else:
         with open(index_path, "r") as f:
             tensor_index = json.load(f)
@@ -322,13 +332,31 @@ def load_dict(
     device_uuid = device_uuid_map[device_id_int]
     replica_uuid = _get_uuid()
 
-    result = client.load_into_gpu(
-        str(model_path),
-        replica_uuid,
-        device_uuid,
-        pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-        wait_for_completion=wait_for_completion,
-    )
+    # If CUDA is not available, or daemon is unavailable at runtime, fall back to local disk loading.
+    if not torch.cuda.is_available():
+        return load_dict_from_disk(
+            artifact_dir,
+            device_id=device_id_int,
+            storage_path="",
+        )
+
+    try:
+        result = client.load_into_gpu(
+            str(disk_path),
+            replica_uuid,
+            device_uuid,
+            pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
+            wait_for_completion=wait_for_completion,
+        )
+    except RuntimeError as e:
+        # Gracefully degrade to local load when daemon is not running
+        if "Local StoreDaemon" in str(e) or "not available" in str(e):
+            return load_dict_from_disk(
+                artifact_dir,
+                device_id=device_id_int,
+                storage_path="",
+            )
+        raise
 
     if wait_for_completion:
         cuda_memory_handle = result
@@ -340,7 +368,7 @@ def load_dict(
     # Map the CUDA IPC handle returned by the daemon to a local device pointer
     cuda_memory_ptr = get_cuda_memory_ptr(device_id_int, cuda_memory_handle)
 
-    # load model state_dict
+    # load artifact state_dict
     start = time.time()
     state_dict = restore_tensors(
         tensor_meta_index,
@@ -363,8 +391,8 @@ def load_dict(
         timeout: int,
     ) -> None:  # pragma: no cover – simple helper
         try:
-            resp = ctl.wait_model_verification(
-                model_identifier=identifier,
+            resp = ctl.wait_artifact_verification(
+                artifact_identifier=identifier,
                 replica_uuid=replica,
                 timeout_ms=timeout,
             )
@@ -378,26 +406,26 @@ def load_dict(
                 == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED
             ):
                 logger.fatal(
-                    "Model verification failed (identifier=%s, replica=%s): %s",
+                    "Artifact verification failed (identifier=%s, replica=%s): %s",
                     identifier,
                     replica,
                     resp.err_msg or "no details",
                 )
-                # Abort the entire process to avoid serving corrupted model
+                # Abort the entire process to avoid serving corrupted artifact
                 os._exit(1)
             elif (
                 resp.status
                 == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_PASSED
             ):
                 logger.info(
-                    "Model verification passed (identifier=%s, replica=%s)",
+                    "Artifact verification passed (identifier=%s, replica=%s)",
                     identifier,
                     replica,
                 )
             else:
                 # UNKNOWN / IN_PROGRESS after timeout – treat as pass but warn
                 logger.warning(
-                    "Model verification not complete (status=%s, id=%s, replica=%s): %s",
+                    "Artifact verification not complete (status=%s, id=%s, replica=%s): %s",
                     resp.status,
                     identifier,
                     replica,
@@ -411,17 +439,17 @@ def load_dict(
         verification_timeout_ms = pinned_allocation_timeout_ms + 30000
         t = threading.Thread(
             target=_monitor_verification,
-            args=(client, model_path, replica_uuid, verification_timeout_ms),
+            args=(client, disk_path, replica_uuid, verification_timeout_ms),
             daemon=True,
         )
 
         t.start()
 
-    # Per RFC-0007: after load completes, ensure model_descriptor.json exists.
+    # Per RFC-0007: after load completes, ensure artifact_descriptor.json exists.
     try:
-        _ = inspect_or_generate_descriptor(str(model_dir))
+        _ = inspect_or_generate_descriptor(str(artifact_dir))
     except Exception as e:
-        logger.warning("Failed to ensure model_descriptor.json: %s", e)
+        logger.warning("Failed to ensure artifact_descriptor.json: %s", e)
 
     # Return based on mode
     if wait_for_completion:
@@ -429,7 +457,7 @@ def load_dict(
     else:
 
         def confirm_load() -> bool:
-            """Confirm that the async model loading has completed.
+            """Confirm that the async artifact loading has completed.
 
             Returns:
                 True if loading succeeded, False otherwise
@@ -439,34 +467,34 @@ def load_dict(
                 if (
                     load_status
                     and load_status
-                    == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_FAILED
+                    == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
                 ):
-                    logger.error(f"Model allocation failed for {model_path}")
+                    logger.error(f"Artifact allocation failed for {disk_path}")
                     return False
 
-                # Call ConfirmModel to wait for loading completion
-                success = client.confirm_model_loaded(
-                    str(model_path),
+                # Call ConfirmReplica to wait for loading completion
+                success = client.confirm_replica_loaded(
+                    str(disk_path),
                     replica_uuid,
                 )
 
                 if not success:
-                    logger.error(f"Failed to confirm model loading for {model_path}")
+                    logger.error(f"Failed to confirm artifact loading for {disk_path}")
                     return False
 
-                logger.info(f"Model {model_path} loading confirmed successfully")
+                logger.info(f"Artifact {disk_path} loading confirmed successfully")
                 return True
 
             except Exception as e:
-                logger.exception(f"Error confirming model load: {e}")
+                logger.exception(f"Error confirming artifact load: {e}")
                 return False
 
         return state_dict, confirm_load
 
 
-def register_tensor_dict(
-    tensor_dict: dict[str, torch.Tensor],
-    model_id: str,
+def register_artifact(
+    artifact: dict[str, torch.Tensor],
+    artifact_id: str,
     *,
     device_id: int | torch.device | None = None,
     enable_p2p: bool = True,
@@ -477,19 +505,19 @@ def register_tensor_dict(
 
     Returns a tuple ``(state_dict, commit_info)`` where:
     - ``state_dict``: tensors reference the daemon-owned memory
-    - ``commit_info``: includes ``registration_id``, ``model_id`` (mi2:...),
+    - ``commit_info``: includes ``registration_id``, ``artifact_id`` (mi2:...),
       ``device_id``, ``size_bytes``, and ``descriptor`` (RFC-0007 ModelDescriptor)
     """
-    if not tensor_dict:
-        raise ValueError("tensor_dict must not be empty")
+    if not artifact:
+        raise ValueError("artifact must not be empty")
 
     # Resolve and validate device per spec:
-    # a) device_id is None: infer from tensor_dict → all tensors must be CUDA and on the same device
-    # b) device_id is provided: tensor_dict must be CPU tensors only
+    # a) device_id is None: infer from artifact → all tensors must be CUDA and on the same device
+    # b) device_id is provided: artifact must be CPU tensors only
     if device_id is None:
         # Require all tensors to be CUDA and on the same device
         dev_index: int | None = None
-        for t in tensor_dict.values():
+        for t in artifact.values():
             if not t.is_cuda:
                 raise ValueError(
                     "When device_id is None, all tensors must be CUDA tensors on the same device"
@@ -502,27 +530,25 @@ def register_tensor_dict(
                         "All CUDA tensors must be on the same device when inferring device_id"
                     )
         if dev_index is None:
-            raise ValueError(
-                "tensor_dict is empty or has no tensors to infer device from"
-            )
+            raise ValueError("artifact is empty or has no tensors to infer device from")
         target_device_id = int(dev_index)
         input_mode = "cuda"
     else:
         target_device_id = resolve_device(device_id)
         # Enforce CPU-only input in this mode
-        for t in tensor_dict.values():
+        for t in artifact.values():
             if t.is_cuda:
                 raise ValueError(
-                    "When device_id is specified, tensor_dict must contain CPU tensors only"
+                    "When device_id is specified, artifact must contain CPU tensors only"
                 )
         input_mode = "cpu"
 
     # Build canonical meta index and source storage info
     tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
     tensor_source_index: dict[str, tuple[int, int]] = {}
-    for name, t in tensor_dict.items():
+    for name, t in artifact.items():
         if not isinstance(name, str) or not name:
-            raise ValueError("All tensor_dict keys must be non-empty strings")
+            raise ValueError("All artifact keys must be non-empty strings")
         storage = t.untyped_storage()
         data_ptr = int(storage.data_ptr())
         size_bytes = int(storage.size())
@@ -540,7 +566,7 @@ def register_tensor_dict(
     )
     unique_chunks = tensor_copy_chunks.get(target_device_id, [])
     if not unique_chunks:
-        raise ValueError("Failed to compute coalesced layout for tensor_dict")
+        raise ValueError("Failed to compute coalesced layout for artifact")
     total_size_bytes = max(dst + sz for _, sz, dst, _ in unique_chunks)
 
     # Build v2-equivalent index JSON using destination offsets
@@ -566,8 +592,8 @@ def register_tensor_dict(
 
     # Begin registration with inline index data
     ctl = DaemonCtl(daemon_address or get_daemon_address())
-    begin = ctl.begin_register_tensor_dict(
-        model_id=model_id,
+    begin = ctl.begin_register_artifact(
+        artifact_id=artifact_id,
         device_id=target_device_id,
         total_size_bytes=total_size_bytes,
         enable_p2p=enable_p2p,
@@ -591,7 +617,7 @@ def register_tensor_dict(
     )
 
     # Copy payloads into daemon memory
-    for name, src in tensor_dict.items():
+    for name, src in artifact.items():
         dst = dest_state_dict[name]
         local = src
         if input_mode == "cpu":
@@ -615,7 +641,7 @@ def register_tensor_dict(
     torch.cuda.synchronize(target_device_id)
 
     # Finalize registration and optionally return content-addressed descriptor
-    commit_info = ctl.commit_registered_tensor_dict(
+    commit_info = ctl.commit_registered_artifact(
         begin["registration_id"], timeout_s=60.0
     )
 

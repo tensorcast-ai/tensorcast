@@ -7,7 +7,7 @@ Synchronous (thread-based) connection manager for Store Daemon high-availability
 
 This implementation removes all asyncio dependencies so the daemon can run in
 pure multi-threaded environments.  It still provides the same public interface
-(start/stop/register_model_replica/…) but performs all background work in
+(start/stop/register_replica/…) but performs all background work in
 `threading.Thread`s and uses blocking gRPC stubs (`grpc.insecure_channel`).
 """
 
@@ -50,53 +50,53 @@ class StateChangeQueue:
     """Thread-safe queue for pending registrations/unregistrations."""
 
     def __init__(self) -> None:
-        self._model_registrations: Dict[
-            str, global_store_pb2.RegisterModelReplicaRequest
+        self._replica_registrations: Dict[
+            str, global_store_pb2.RegisterReplicaRequest
         ] = {}
-        self._model_unregistrations: set[str] = set()
+        self._replica_unregistrations: set[str] = set()
         self._lock = threading.Lock()
 
     # Public helpers ------------------------------------------------------------------
 
-    def queue_model_registration(
-        self, request: global_store_pb2.RegisterModelReplicaRequest
+    def queue_replica_registration(
+        self, request: global_store_pb2.RegisterReplicaRequest
     ) -> None:
-        key = f"{request.model_id}:{request.mem_info.node_id}:{request.mem_info.device_id}"
+        key = f"{request.artifact_id}:{request.mem_info.node_id}:{request.mem_info.device_id}"
         with self._lock:
-            self._model_registrations[key] = request
-            self._model_unregistrations.discard(key)
-            logger.debug("Queued model registration: %s", key)
+            self._replica_registrations[key] = request
+            self._replica_unregistrations.discard(key)
+            logger.debug("Queued replica registration: %s", key)
             metrics.HA_PENDING_CHANGES.labels(type="registrations").set(
-                len(self._model_registrations)
+                len(self._replica_registrations)
             )
             metrics.HA_PENDING_CHANGES.labels(type="unregistrations").set(
-                len(self._model_unregistrations)
+                len(self._replica_unregistrations)
             )
 
-    def queue_model_unregistration(
-        self, model_id: str, node_id: str, device_id: int
+    def queue_replica_unregistration(
+        self, artifact_id: str, node_id: str, device_id: int
     ) -> None:
-        key = f"{model_id}:{node_id}:{device_id}"
+        key = f"{artifact_id}:{node_id}:{device_id}"
         with self._lock:
-            self._model_unregistrations.add(key)
-            self._model_registrations.pop(key, None)
-            logger.debug("Queued model unregistration: %s", key)
+            self._replica_unregistrations.add(key)
+            self._replica_registrations.pop(key, None)
+            logger.debug("Queued replica unregistration: %s", key)
             metrics.HA_PENDING_CHANGES.labels(type="registrations").set(
-                len(self._model_registrations)
+                len(self._replica_registrations)
             )
             metrics.HA_PENDING_CHANGES.labels(type="unregistrations").set(
-                len(self._model_unregistrations)
+                len(self._replica_unregistrations)
             )
 
     def get_pending_changes(self) -> Dict[str, Any]:
         """Atomically obtain & clear pending changes."""
         with self._lock:
             changes = {
-                "registrations": dict(self._model_registrations),
-                "unregistrations": set(self._model_unregistrations),
+                "registrations": dict(self._replica_registrations),
+                "unregistrations": set(self._replica_unregistrations),
             }
-            self._model_registrations.clear()
-            self._model_unregistrations.clear()
+            self._replica_registrations.clear()
+            self._replica_unregistrations.clear()
             # Reset pending changes metrics
             metrics.HA_PENDING_CHANGES.labels(type="registrations").set(0)
             metrics.HA_PENDING_CHANGES.labels(type="unregistrations").set(0)
@@ -104,7 +104,7 @@ class StateChangeQueue:
 
     def is_empty(self) -> bool:
         with self._lock:
-            return not self._model_registrations and not self._model_unregistrations
+            return not self._replica_registrations and not self._replica_unregistrations
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ class GlobalStoreConnectionManager:
 
         # gRPC channel & stub (blocking version)
         self.grpc_channel: grpc.Channel | None = None
-        self.global_store_stub: global_store_pb2_grpc.GlobalModelStoreStub | None = None
+        self.global_store_stub: global_store_pb2_grpc.GlobalStoreStub | None = None
 
         # State & bookkeeping ----------------------------------------------------
         self._state_lock = threading.RLock()  # Reentrant lock for nested calls
@@ -134,7 +134,7 @@ class GlobalStoreConnectionManager:
         self.state_change_queue = StateChangeQueue()
         self._local_state_version = 0
         self._last_successful_sync = 0
-        self._registered_models: set[str] = set()
+        self._registered_artifacts: set[str] = set()
 
         # Periodic/heartbeat intervals
         self._heartbeat_interval_sec: float = 10.0  # updated after RegisterWorker
@@ -201,19 +201,19 @@ class GlobalStoreConnectionManager:
             self._last_successful_sync = value
 
     @property
-    def registered_models(self) -> set[str]:
+    def registered_artifacts(self) -> set[str]:
         with self._state_lock:
-            return self._registered_models.copy()
+            return self._registered_artifacts.copy()
 
-    def _add_registered_model(self, model_id: str) -> None:
+    def _add_registered_artifact(self, artifact_id: str) -> None:
         with self._state_lock:
-            self._registered_models.add(model_id)
-            metrics.HA_REGISTERED_MODELS.set(len(self._registered_models))
+            self._registered_artifacts.add(artifact_id)
+            metrics.HA_REGISTERED_ARTIFACTS.set(len(self._registered_artifacts))
 
-    def _remove_registered_model(self, model_id: str) -> None:
+    def _remove_registered_artifact(self, artifact_id: str) -> None:
         with self._state_lock:
-            self._registered_models.discard(model_id)
-            metrics.HA_REGISTERED_MODELS.set(len(self._registered_models))
+            self._registered_artifacts.discard(artifact_id)
+            metrics.HA_REGISTERED_ARTIFACTS.set(len(self._registered_artifacts))
 
     # ------------------------------------------------------------------
     # Public lifecycle helpers
@@ -411,11 +411,9 @@ class GlobalStoreConnectionManager:
 
             # Build blocking gRPC channel
             self.grpc_channel = grpc.insecure_channel(self._address)
-            self.global_store_stub = global_store_pb2_grpc.GlobalModelStoreStub(
+            self.global_store_stub = global_store_pb2_grpc.GlobalStoreStub(
                 self.grpc_channel
             )
-            # Expose stub on servicer for backwards compatibility
-            self._servicer.global_store_stub = self.global_store_stub
 
             # Smoke-test connection
             self._test_connection()
@@ -485,25 +483,25 @@ class GlobalStoreConnectionManager:
         )
         if pending["registrations"]:
             logger.info(
-                "Syncing %d queued model registrations", len(pending["registrations"])
+                "Syncing %d queued replica registrations", len(pending["registrations"])
             )
             for key, req in pending["registrations"].items():
                 try:
-                    self.global_store_stub.RegisterModelReplica(req)
-                    logger.debug("Synced model registration: %s", key)
+                    self.global_store_stub.RegisterReplica(req)
+                    logger.debug("Synced replica registration: %s", key)
                 except Exception as exc:
                     logger.error("Failed to sync registration %s: %s", key, exc)
-                    self.state_change_queue.queue_model_registration(req)
+                    self.state_change_queue.queue_replica_registration(req)
 
         if pending["unregistrations"]:
             logger.info(
-                "Syncing %d queued model unregistrations",
+                "Syncing %d queued replica unregistrations",
                 len(pending["unregistrations"]),
             )
             for key in pending["unregistrations"]:
-                model_id, *_ = key.split(":", 1)
-                self._remove_registered_model(model_id)
-                logger.debug("Marked %s as unregistered", model_id)
+                artifact_id, *_ = key.split(":", 1)
+                self._remove_registered_artifact(artifact_id)
+                logger.debug("Marked %s as unregistered", artifact_id)
 
         self.last_successful_sync = int(time.time())
 
@@ -525,7 +523,6 @@ class GlobalStoreConnectionManager:
         self.grpc_channel = None
         self.global_store_stub = None
         self.connection_state = ConnectionState.DISCONNECTED
-        self._servicer.global_store_stub = None
 
     # ------------------------------------------------------------------
     # Heartbeat & State-sync helpers
@@ -545,7 +542,7 @@ class GlobalStoreConnectionManager:
                 accepting_new_requests=not self._servicer.shutting_down,
                 state_version=self.local_state_version,
                 state_checksum=state_checksum,
-                registered_model_ids=list(self.registered_models),
+                registered_artifact_ids=list(self.registered_artifacts),
                 last_successful_sync=self.last_successful_sync,
                 global_store_status=global_store_pb2.CONNECTED,
             )
@@ -558,20 +555,20 @@ class GlobalStoreConnectionManager:
                     expected_version=response.expected_state_version
                 )
 
-            if response.obsolete_models:
+            if response.obsolete_replicas:
                 logger.info(
-                    "Received %d obsolete models to remove",
-                    len(response.obsolete_models),
+                    "Received %d obsolete artifacts to remove",
+                    len(response.obsolete_replicas),
                 )
-                for model_id in response.obsolete_models:
-                    self._remove_registered_model(model_id)
+                for artifact_id in response.obsolete_replicas:
+                    self._remove_registered_artifact(artifact_id)
 
         except Exception as exc:
             logger.error("Failed to send heartbeat: %s", exc)
             metrics.HA_HEARTBEAT_TOTAL.labels(status="failure").inc()
 
     def _compute_current_state_checksum(self) -> str:
-        sorted_models = sorted(self.registered_models)
+        sorted_models = sorted(self.registered_artifacts)
         raw = ":".join(sorted_models)
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -612,38 +609,42 @@ class GlobalStoreConnectionManager:
             for change in resp.state_changes:
                 change_type = change.type
                 replica_info = change.replica_info
-                model_id = replica_info.model_id
+                artifact_id = replica_info.artifact_id
 
                 if change_type == global_store_pb2.StateChange.REMOVE_REPLICA:
                     try:
-                        self._servicer.replica_manager.unload_model(
-                            model_id,
+                        self._servicer.replica_manager.unload_replica(
+                            artifact_id,
                             store_daemon_pb2.DEVICE_TYPE_GPU,
                         )
                     except Exception:
-                        logger.debug("Failed to unload model %s during sync", model_id)
-                    self._remove_registered_model(model_id)
+                        logger.debug(
+                            "Failed to unload replica %s during sync", artifact_id
+                        )
+                    self._remove_registered_artifact(artifact_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="REMOVE_REPLICA"
                     ).inc()
 
                 elif change_type == global_store_pb2.StateChange.ADD_REPLICA:
                     # Add a new replica that was registered elsewhere
-                    logger.info("Adding replica for model %s from state sync", model_id)
-                    self._add_registered_model(model_id)
+                    logger.info(
+                        "Adding replica for replica %s from state sync", artifact_id
+                    )
+                    self._add_registered_artifact(artifact_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="ADD_REPLICA"
                     ).inc()
-                    # Note: We don't actually load the model here, just track it
-                    # The model will be loaded when needed via LoadModel RPC
+                    # Note: We don't actually load the replica here, just track it
+                    # The replica will be loaded when needed via MaterializeReplica RPC
 
                 elif change_type == global_store_pb2.StateChange.UPDATE_REPLICA:
                     # Update replica metadata (e.g., status changes)
                     logger.info(
-                        "Updating replica for model %s from state sync", model_id
+                        "Updating replica for replica %s from state sync", artifact_id
                     )
                     # For now, just ensure it's in our registered set
-                    self._add_registered_model(model_id)
+                    self._add_registered_artifact(artifact_id)
                     metrics.HA_STATE_CHANGES_TOTAL.labels(
                         change_type="UPDATE_REPLICA"
                     ).inc()
@@ -657,8 +658,8 @@ class GlobalStoreConnectionManager:
     # Public proxies used by other components
     # ------------------------------------------------------------------
 
-    def register_model_replica(
-        self, request: global_store_pb2.RegisterModelReplicaRequest
+    def register_replica(
+        self, request: global_store_pb2.RegisterReplicaRequest
     ) -> bool:
         if (
             self.connection_state is ConnectionState.CONNECTED
@@ -667,39 +668,39 @@ class GlobalStoreConnectionManager:
             # Type-narrowing hint for static checkers
             assert self.global_store_stub is not None
             try:
-                resp = self.global_store_stub.RegisterModelReplica(request)
+                resp = self.global_store_stub.RegisterReplica(request)
                 if resp.status == global_store_pb2.Status.OK:
-                    self._add_registered_model(request.model_id)
+                    self._add_registered_artifact(request.artifact_id)
                     self.local_state_version += 1
                     return True
             except Exception as exc:
-                logger.error("RegisterModelReplica RPC failed: %s", exc)
+                logger.error("RegisterReplica RPC failed: %s", exc)
         # Offline/failure – queue for later
-        self.state_change_queue.queue_model_registration(request)
+        self.state_change_queue.queue_replica_registration(request)
         return False
 
-    def unregister_model_replica(
-        self, model_id: str, replica_id: str, device_id: int = 0
+    def unregister_replica(
+        self, artifact_id: str, replica_id: str, device_id: int = 0
     ) -> bool:
         if (
             self.connection_state is ConnectionState.CONNECTED
             and self.global_store_stub
         ):
             try:
-                req = global_store_pb2.UnregisterModelReplicaRequest(
-                    model_id=model_id,
+                req = global_store_pb2.UnregisterReplicaRequest(
+                    artifact_id=artifact_id,
                     replica_id=replica_id,
                 )
-                resp = self.global_store_stub.UnregisterModelReplica(req)
+                resp = self.global_store_stub.UnregisterReplica(req)
                 if resp.status == global_store_pb2.Status.OK:
-                    self._remove_registered_model(model_id)
+                    self._remove_registered_artifact(artifact_id)
                     self.local_state_version += 1
                     return True
             except Exception as exc:
-                logger.error("UnregisterModelReplica RPC failed: %s", exc)
+                logger.error("UnRegisterReplica RPC failed: %s", exc)
         # Queue for later
-        self.state_change_queue.queue_model_unregistration(
-            model_id, self._servicer.node_id, device_id
+        self.state_change_queue.queue_replica_unregistration(
+            artifact_id, self._servicer.node_id, device_id
         )
         return False
 
@@ -709,6 +710,6 @@ class GlobalStoreConnectionManager:
             "connected": self.connection_state is ConnectionState.CONNECTED,
             "local_state_version": self.local_state_version,
             "last_successful_sync": self.last_successful_sync,
-            "registered_models_count": len(self.registered_models),
+            "registered_artifacts_count": len(self.registered_artifacts),
             "pending_changes": not self.state_change_queue.is_empty(),
         }

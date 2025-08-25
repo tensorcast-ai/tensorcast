@@ -17,15 +17,15 @@
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
 // p2p_loader.h and source.h are included indirectly via other headers. Avoid unused includes.
-#include "core/store/model/memory_manager.h"
-#include "core/store/model/model_memory_coordinator.h"
+#include "core/store/replica/memory_manager.h"
+#include "core/store/replica/replica_memory_coordinator.h"
 
 namespace stepcast::store {
 
 ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_plan(
-    const InstanceKey& key,
-    ModelLocation target,
-    const ModelMemoryCoordinator& memory,
+    const ReplicaKey& key,
+    MemoryLocation target,
+    const ReplicaMemoryCoordinator& memory,
     GlobalStoreClient& global_store) {
   LoadPlan plan;
   plan.target = target;
@@ -35,10 +35,10 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
   std::vector<uint32_t> missing_chunks;
 
   const size_t chunk_size = memory.get_chunk_size();
-  // Retrieve total model size (may fail if not allocated yet)
-  size_t model_size = 0;
-  if (auto size_or = memory.get_model_size(key); size_or.ok()) {
-    model_size = *size_or;
+  // Retrieve total artifact size (may fail if not allocated yet)
+  size_t artifact_size = 0;
+  if (auto size_or = memory.get_artifact_size(key); size_or.ok()) {
+    artifact_size = *size_or;
   }
   plan.total_chunks = chunk_mappings.size();
   plan.total_bytes = 0;
@@ -48,7 +48,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
     const auto& mapping = chunk_mappings[i];
     bool available_at_target = false;
 
-    if (target == ModelLocation::GPU) {
+    if (target == MemoryLocation::GPU) {
       // For GPU target, check if chunk is already in the target GPU
       // TODO: Get actual device ID from context
       int device_id = 0; // TODO: Obtain real device id from context
@@ -56,15 +56,15 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
       auto it = mapping.gpu_state.find(dev_key);
       available_at_target =
           (it != mapping.gpu_state.end() && (it->second == ChunkState::HOT || it->second == ChunkState::COPIED_GPU));
-    } else if (target == ModelLocation::PAGEABLE_CPU) {
+    } else if (target == MemoryLocation::PAGEABLE_CPU) {
       // For CPU target, check if chunk is resident
       available_at_target = (mapping.cpu_state == ChunkState::HOT || mapping.cpu_state == ChunkState::COLD);
     }
 
     if (!available_at_target) {
       missing_chunks.push_back(i);
-      if (model_size > 0) {
-        plan.total_bytes += std::min(chunk_size, model_size - i * chunk_size);
+      if (artifact_size > 0) {
+        plan.total_bytes += std::min(chunk_size, artifact_size - i * chunk_size);
       }
     }
   }
@@ -77,11 +77,11 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
     bool chunk_assigned = false;
 
     // Priority 1: Local copy (CPU→GPU or GPU→CPU)
-    if (target == ModelLocation::GPU &&
+    if (target == MemoryLocation::GPU &&
         (mapping.cpu_state == ChunkState::HOT || mapping.cpu_state == ChunkState::COLD)) {
       source_groups[ChunkSource::LOCAL_CPU].push_back(chunk_idx);
       chunk_assigned = true;
-    } else if (target == ModelLocation::PAGEABLE_CPU) {
+    } else if (target == MemoryLocation::PAGEABLE_CPU) {
       // Check if chunk is available on any local GPU
       for (const auto& [device_key, state] : mapping.gpu_state) {
         if (state == ChunkState::HOT || state == ChunkState::COPIED_GPU) {
@@ -94,7 +94,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
 
     if (!chunk_assigned) {
       // Priority 2: P2P from remote replica
-      auto remote_status = global_store.query_chunk_locations(key.model_id, {chunk_idx});
+      auto remote_status = global_store.query_chunk_locations(key.artifact_id, {chunk_idx});
 
       if (remote_status.ok() && !remote_status->empty()) {
         // Convert ChunkLocationInfo → P2PSource candidates (simplified)
@@ -104,7 +104,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
           src.size_bytes = 0; // Unknown at this stage
           src.ip = loc.node_address;
           src.port = static_cast<uint16_t>(loc.p2p_port);
-          src.location.type = ModelLocation::PAGEABLE_CPU; // Assume CPU for now
+          src.location.type = MemoryLocation::PAGEABLE_CPU; // Assume CPU for now
           candidates.push_back(std::move(src));
         }
 
@@ -146,7 +146,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
 
 std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
     const LoadPlan& plan,
-    ModelMemoryCoordinator& memory,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager) {
   return std::async(std::launch::async, [plan, &memory, mem_manager]() {
     return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {}); // No-op progress callback
@@ -155,7 +155,7 @@ std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
 
 absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
     const LoadPlan& plan,
-    ModelMemoryCoordinator& memory,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   if (plan.operations.empty()) {
@@ -188,10 +188,10 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
 
   // Post-loading memory management
   if (overall_status.ok()) {
-    const auto& instance_key = mem_manager->instance_key();
+    const auto& replica_key = mem_manager->replica_key();
 
     // Check if this was a DRAM load
-    if (plan.target == ModelLocation::PAGEABLE_CPU) {
+    if (plan.target == MemoryLocation::PAGEABLE_CPU) {
       // After initial DRAM load, mark configured ratio as preemptible
       float preemptible_ratio = 0.5F; // TODO: Make configurable
       auto preempt_status = mem_manager->mark_cpu_preemptible(preemptible_ratio);
@@ -200,10 +200,10 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
       } else {
         VLOG(1) << "Marked " << (preemptible_ratio * 100) << "% of CPU chunks as preemptible after DRAM load";
       }
-    } else if (plan.target == ModelLocation::GPU) {
+    } else if (plan.target == MemoryLocation::GPU) {
       // Check if GPU loading is complete
       int device_id = mem_manager->get_local_device_id();
-      if (device_id >= 0 && memory.is_gpu_loading_complete(instance_key, device_id)) {
+      if (device_id >= 0 && memory.is_gpu_loading_complete(replica_key, device_id)) {
         // GPU loading complete, mark all DRAM chunks as preemptible
         auto preempt_status = mem_manager->mark_cpu_preemptible(1.0F);
         if (!preempt_status.ok()) {
@@ -220,7 +220,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
 
 absl::Status ChunkAwareLoadingStrategy::execute_operation(
     const LoadOperation& op,
-    ModelMemoryCoordinator& memory,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   switch (op.source) {
@@ -244,24 +244,24 @@ absl::Status ChunkAwareLoadingStrategy::execute_operation(
 
 absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     const std::vector<uint32_t>& chunks,
-    ModelLocation target,
-    ModelMemoryCoordinator& memory,
+    MemoryLocation target,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
-  if (target != ModelLocation::GPU) {
+  if (target != MemoryLocation::GPU) {
     return absl::InvalidArgumentError("Local CPU copy only supports GPU target");
   }
 
   // Lock chunks for transfer
   absl::Status lock_status =
-      memory.lock_chunks_for_transfer(mem_manager->instance_key(), ModelLocation::PAGEABLE_CPU, target, chunks);
+      memory.lock_chunks_for_transfer(mem_manager->replica_key(), MemoryLocation::PAGEABLE_CPU, target, chunks);
   if (!lock_status.ok()) {
     return lock_status;
   }
 
   // Get pointers
-  auto cpu_ptrs = mem_manager->get_pointer(ModelLocation::PAGEABLE_CPU);
-  auto gpu_ptrs = mem_manager->get_pointer(ModelLocation::GPU);
+  auto cpu_ptrs = mem_manager->get_pointer(MemoryLocation::PAGEABLE_CPU);
+  auto gpu_ptrs = mem_manager->get_pointer(MemoryLocation::GPU);
 
   if (cpu_ptrs.empty() || gpu_ptrs.empty()) {
     return absl::InternalError("Memory pointers not available");
@@ -271,10 +271,10 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   void* gpu_base = gpu_ptrs[0];
   const size_t chunk_size = memory.get_chunk_size();
 
-  // Get total model size
-  size_t model_size = 0;
-  if (auto size_or = memory.get_model_size(mem_manager->instance_key()); size_or.ok()) {
-    model_size = *size_or;
+  // Get total artifact size
+  size_t artifact_size = 0;
+  if (auto size_or = memory.get_artifact_size(mem_manager->replica_key()); size_or.ok()) {
+    artifact_size = *size_or;
   } else {
     return size_or.status();
   }
@@ -292,7 +292,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
 
   for (uint32_t chunk_idx : chunks) {
     size_t offset = chunk_idx * chunk_size;
-    size_t size = std::min(chunk_size, model_size - offset);
+    size_t size = std::min(chunk_size, artifact_size - offset);
 
     void* src = static_cast<char*>(cpu_base) + offset;
     void* dst = static_cast<char*>(gpu_base) + offset;
@@ -327,7 +327,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   auto state = copy_status.ok() ? ChunkState::COPIED_GPU : ChunkState::HOT;
   // Update chunk states; ignore failure unless copy_status was ok
   auto upd_status = memory.update_chunk_states(
-      mem_manager->instance_key(), target, chunks, state, std::optional<int>(mem_manager->get_local_device_id()));
+      mem_manager->replica_key(), target, chunks, state, std::optional<int>(mem_manager->get_local_device_id()));
   if (!upd_status.ok() && copy_status.ok()) {
     copy_status = upd_status;
   }
@@ -337,7 +337,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
 
 absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
     const LoadOperation& op,
-    ModelMemoryCoordinator& memory,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Group chunks by remote source
@@ -384,13 +384,13 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
 
     if (load_status.ok()) {
       // Update chunk states after successful P2P transfer
-      auto state = (op.target == ModelLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
+      auto state = (op.target == MemoryLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
       auto upd_status = memory.update_chunk_states(
-          mem_manager->instance_key(),
+          mem_manager->replica_key(),
           op.target,
           chunks,
           state,
-          (op.target == ModelLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
+          (op.target == MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
       (void)upd_status; // ignore result for now
     }
   }
@@ -400,19 +400,19 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
 
 absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     const std::vector<uint32_t>& chunks,
-    ModelLocation target,
-    ModelMemoryCoordinator& memory,
+    MemoryLocation target,
+    ReplicaMemoryCoordinator& memory,
     const std::shared_ptr<MemoryManager>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Create disk loader
   // Note: We'd need the actual disk source path from MemoryManager
   // For now, use the instance key to construct the path
-  const std::string& model_id = mem_manager->instance_key().model_id;
-  if (absl::StartsWith(model_id, "mi2:")) {
+  const std::string& artifact_id = mem_manager->replica_key().artifact_id;
+  if (absl::StartsWith(artifact_id, "mi2:")) {
     return absl::FailedPreconditionError(
-        "ChunkAwareLoadingStrategy: disk load path is undefined for content-addressed model_id; require GS routing");
+        "ChunkAwareLoadingStrategy: disk load path is undefined for content-addressed artifact_id; require GS routing");
   }
-  std::filesystem::path disk_path = model_id;
+  std::filesystem::path disk_path = artifact_id;
   auto loader = std::make_unique<DiskLoader>(DiskSource{.path = disk_path, .expected_size = std::nullopt});
 
   // Initialize loader
@@ -432,13 +432,13 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
 
   if (load_status.ok()) {
     // Update chunk states
-    auto state = (target == ModelLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
+    auto state = (target == MemoryLocation::GPU) ? ChunkState::COPIED_GPU : ChunkState::HOT;
     auto upd_status = memory.update_chunk_states(
-        mem_manager->instance_key(),
+        mem_manager->replica_key(),
         target,
         chunks,
         state,
-        (target == ModelLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
+        (target == MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id()) : std::nullopt);
     (void)upd_status; // suppress unused warning
     progress_cb(chunks.size(), chunks.size());
   }

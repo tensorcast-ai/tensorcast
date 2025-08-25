@@ -10,7 +10,7 @@ import threading
 import subprocess
 from unittest.mock import Mock, patch
 
-from tests.python.utils.model_utils import create_dummy_model
+from tests.python.utils.artifact_utils import create_dummy_artifact
 # Re-export Mock as _Mock for local readability when wrapping functions
 _Mock = Mock
 from concurrent.futures import Future
@@ -51,11 +51,11 @@ class TestLifecycleIntegration:
         )
 
         # ------------------------------------------------------------------
-        # Prepare dummy model files expected by the various lifecycle tests.
+        # Prepare dummy artifact files expected by the various lifecycle tests.
         # ------------------------------------------------------------------
         storage_root = config.server.storage_path
-        for model_id in [f"model{i}" for i in range(5)] + [f"test_model_{i}" for i in range(3)]:
-            create_dummy_model(storage_root, model_id)
+        for artifact_id in [f"artifact{i}" for i in range(5)] + [f"test_artifact_{i}" for i in range(3)]:
+            create_dummy_artifact(storage_root, artifact_id)
 
         # Create the servicer with the real StoreEngine
         servicer = StoreDaemonServicer(config=config)
@@ -73,9 +73,9 @@ class TestLifecycleIntegration:
         servicer = servicer_with_mocks
         context = Mock()
 
-        # 1. Load model with PID
-        load_request = store_daemon_pb2.LoadModelRequest(
-            model_path="model1",
+        # 1. Load artifact with PID
+        load_request = store_daemon_pb2.MaterializeReplicaRequest(
+            disk_path="model1",
             replica_uuid="uuid1",
             device_uuid="gpu0",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -84,37 +84,37 @@ class TestLifecycleIntegration:
             size_bytes=1024 * 1024,  # 1MB
         )
 
-        load_response = servicer.LoadModel(load_request, context)
+        load_response = servicer.MaterializeReplica(load_request, context)
         assert (
             load_response.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         )
 
-        # 2. Confirm model
-        confirm_request = store_daemon_pb2.ConfirmModelRequest(
-            model_path="model1",
+        # 2. Confirm artifact
+        confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path="model1",
             replica_uuid="uuid1",
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
 
-        confirm_response = servicer.ConfirmModel(confirm_request, context)
+        confirm_response = servicer.ConfirmReplica(confirm_request, context)
         assert confirm_response.code == 0
 
-        # 3. Check model is loaded
-        models = servicer.replica_manager.get_loaded_models()
-        assert len(models) == 1
-        assert models[0]["ref_count"] == 1
-        assert os.getpid() in models[0]["pids"]
+        # 3. Check artifact is loaded
+        replicas = servicer.replica_manager.get_loaded_replicas()
+        assert len(replicas) == 1
+        assert replicas[0]["ref_count"] == 1
+        assert os.getpid() in replicas[0]["pids"]
 
         # 4. Simulate process death by manually calling callback
         servicer._on_pid_dead(os.getpid())
 
         # 5. Check reference was removed
-        models = servicer.replica_manager.get_loaded_models()
-        assert len(models) == 1
-        assert models[0]["ref_count"] == 0
+        replicas = servicer.replica_manager.get_loaded_replicas()
+        assert len(replicas) == 1
+        assert replicas[0]["ref_count"] == 0
 
-        # 6. Model should now be evictable
+        # 6. Artifact should now be evictable
         info = servicer.replica_manager.get_replica_info("model1", 0)
         assert info is not None
         assert info.is_evictable()
@@ -136,9 +136,9 @@ class TestLifecycleIntegration:
             global_store_address=None,  # No global store for testing
         )
 
-        # Ensure the dummy model directory exists for the subprocess test
+        # Ensure the dummy artifact directory exists for the subprocess test
         storage_root = config.server.storage_path
-        create_dummy_model(storage_root, "model1")
+        create_dummy_artifact(storage_root, "model1")
 
         # Use real StoreEngine for subprocess lifecycle test
         servicer = StoreDaemonServicer(config=config)
@@ -155,9 +155,9 @@ class TestLifecycleIntegration:
                 stderr=subprocess.PIPE,
             )
             proc_pid = proc.pid
-            # Load model with subprocess PID
-            load_request = store_daemon_pb2.LoadModelRequest(
-                model_path="model1",
+            # Load artifact with subprocess PID
+            load_request = store_daemon_pb2.MaterializeReplicaRequest(
+                disk_path="model1",
                 replica_uuid="uuid1",
                 device_uuid="gpu0",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -165,26 +165,26 @@ class TestLifecycleIntegration:
                 size_bytes=1024 * 1024,
             )
 
-            load_response = servicer.LoadModel(load_request, context)
+            load_response = servicer.MaterializeReplica(load_request, context)
             assert (
                 load_response.status
-                == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+                == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
             )
 
-            # Confirm model
-            confirm_request = store_daemon_pb2.ConfirmModelRequest(
-                model_path="model1",
+            # Confirm artifact
+            confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
+                disk_path="model1",
                 replica_uuid="uuid1",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
 
-            servicer.ConfirmModel(confirm_request, context)
+            servicer.ConfirmReplica(confirm_request, context)
 
             # Check reference exists
             assert proc_pid in servicer.process_watcher.get_monitored_pids()
-            models = servicer.replica_manager.get_loaded_models()
-            assert len(models) == 1
-            assert proc_pid in models[0]["pids"]
+            replicas = servicer.replica_manager.get_loaded_replicas()
+            assert len(replicas) == 1
+            assert proc_pid in replicas[0]["pids"]
 
             # Kill subprocess
             proc.terminate()
@@ -195,9 +195,9 @@ class TestLifecycleIntegration:
 
             # Check reference was removed
             assert proc_pid not in servicer.process_watcher.get_monitored_pids()
-            models = servicer.replica_manager.get_loaded_models()
-            if models:  # Model might be evicted
-                assert proc_pid not in models[0]["pids"]
+            replicas = servicer.replica_manager.get_loaded_replicas()
+            if replicas:  # Artifact might be evicted
+                assert proc_pid not in replicas[0]["pids"]
 
         finally:
             # Ensure subprocess is cleaned up
@@ -216,11 +216,11 @@ class TestLifecycleIntegration:
         servicer = servicer_with_mocks
         context = Mock()
 
-        # Load multiple models
+        # Load multiple replicas
         for i in range(3):
             # Load
-            load_request = store_daemon_pb2.LoadModelRequest(
-                model_path=f"model{i}",
+            load_request = store_daemon_pb2.MaterializeReplicaRequest(
+                disk_path=f"artifact{i}",
                 replica_uuid=f"uuid{i}",
                 device_uuid="gpu0",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -228,15 +228,15 @@ class TestLifecycleIntegration:
                 keep_for_global=(i == 2),  # Last one is global
                 size_bytes=(i + 1) * 1024 * 1024,  # Different sizes
             )
-            servicer.LoadModel(load_request, context)
+            servicer.MaterializeReplica(load_request, context)
 
             # Confirm
-            confirm_request = store_daemon_pb2.ConfirmModelRequest(
-                model_path=f"model{i}",
+            confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
+                disk_path=f"artifact{i}",
                 replica_uuid=f"uuid{i}",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
-            servicer.ConfirmModel(confirm_request, context)
+            servicer.ConfirmReplica(confirm_request, context)
 
         # Remove references to make evictable
         for i in range(3):
@@ -248,11 +248,11 @@ class TestLifecycleIntegration:
         # Wait a bit for eviction to complete
         time.sleep(0.1)
 
-        # Global model should be preserved if possible
-        models = servicer.replica_manager.get_loaded_models()
-        if models:
-            global_models = [m for m in models if m["keep_for_global"]]
-            assert len(global_models) <= 1  # At most one global model
+        # Global artifact should be preserved if possible
+        replicas = servicer.replica_manager.get_loaded_replicas()
+        if replicas:
+            global_replicas = [m for m in replicas if m["keep_for_global"]]
+            assert len(global_replicas) <= 1  # At most one global artifact
 
     def test_concurrent_lifecycle_operations(self, servicer_with_mocks):
         """Test concurrent load/unload/eviction operations."""
@@ -266,29 +266,29 @@ class TestLifecycleIntegration:
                 pid = 2000 + idx
 
                 # Load
-                load_request = store_daemon_pb2.LoadModelRequest(
-                    model_path=f"model{idx % 5}",  # Reuse some models
+                load_request = store_daemon_pb2.MaterializeReplicaRequest(
+                    disk_path=f"artifact{idx % 5}",  # Reuse some artifacts
                     replica_uuid=f"uuid{idx}",
                     device_uuid="gpu0",
                     target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                     pid=pid,
                 )
-                servicer.LoadModel(load_request, context)
+                servicer.MaterializeReplica(load_request, context)
 
                 # Confirm
-                confirm_request = store_daemon_pb2.ConfirmModelRequest(
-                    model_path=f"model{idx % 5}",
+                confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
+                    disk_path=f"artifact{idx % 5}",
                     replica_uuid=f"uuid{idx}",
                     target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 )
-                servicer.ConfirmModel(confirm_request, context)
+                servicer.ConfirmReplica(confirm_request, context)
 
                 # Simulate some work
                 time.sleep(0.01)
 
                 # Unload using ReplicaManager with explicit device_id
-                servicer.replica_manager.unload_model(
-                    model_path=f"model{idx % 5}",
+                servicer.replica_manager.unload_replica(
+                    disk_path=f"artifact{idx % 5}",
                     device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                     device_id=0,
                     pid=pid,
@@ -311,21 +311,21 @@ class TestLifecycleIntegration:
         # Should complete without errors
         assert len(errors) == 0
 
-        # All models should be cleaned up eventually
+        # All replicas should be cleaned up eventually
         time.sleep(0.5)
-        models = servicer.replica_manager.get_loaded_models()
+        replicas = servicer.replica_manager.get_loaded_replicas()
         # All refs should be 0 since we unloaded everything
-        assert all(m["ref_count"] == 0 for m in models)
+        assert all(m["ref_count"] == 0 for m in replicas)
 
     def test_get_loaded_models_rpc(self, servicer_with_mocks):
-        """Test GetLoadedModels RPC functionality."""
+        """Test GetLoadedReplicas RPC functionality."""
         servicer = servicer_with_mocks
         context = Mock()
 
-        # Load some models
+        # Load some replicas
         for i in range(3):
-            load_request = store_daemon_pb2.LoadModelRequest(
-                model_path=f"test_model_{i}",
+            load_request = store_daemon_pb2.MaterializeReplicaRequest(
+                disk_path=f"test_artifact_{i}",
                 replica_uuid=f"uuid{i}",
                 device_uuid="gpu0",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -333,35 +333,35 @@ class TestLifecycleIntegration:
                 keep_for_global=(i == 1),
                 size_bytes=(i + 1) * 1024 * 1024,  # Different sizes
             )
-            servicer.LoadModel(load_request, context)
+            servicer.MaterializeReplica(load_request, context)
 
-            confirm_request = store_daemon_pb2.ConfirmModelRequest(
-                model_path=f"test_model_{i}",
+            confirm_request = store_daemon_pb2.ConfirmReplicaRequest(
+                disk_path=f"test_artifact_{i}",
                 replica_uuid=f"uuid{i}",
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
-            servicer.ConfirmModel(confirm_request, context)
+            servicer.ConfirmReplica(confirm_request, context)
 
-        # Test GetLoadedModels without filter
-        request = store_daemon_pb2.GetLoadedModelsRequest()
-        response = servicer.GetLoadedModels(request, context)
+        # Test GetLoadedReplicas without filter
+        request = store_daemon_pb2.GetLoadedReplicasRequest()
+        response = servicer.GetLoadedReplicas(request, context)
 
-        assert response.total_models == 3
+        assert response.total_replicas == 3
         assert response.total_size_bytes == 6 * 1024 * 1024  # 1+2+3 MB
-        assert len(response.models) == 3
+        assert len(response.replicas) == 3
 
-        # Test with model filter
-        request = store_daemon_pb2.GetLoadedModelsRequest(
-            model_id_filter="test_model_1"
+        # Test with artifact filter
+        request = store_daemon_pb2.GetLoadedReplicasRequest(
+            artifact_id_filter="test_artifact_1"
         )
-        response = servicer.GetLoadedModels(request, context)
+        response = servicer.GetLoadedReplicas(request, context)
 
-        assert response.total_models == 1
-        assert response.models[0].model_id == "test_model_1"
-        assert response.models[0].keep_for_global is True  # This was set in LoadModel
+        assert response.total_replicas == 1
+        assert response.replicas[0].artifact_id == "test_artifact_1"
+        assert response.replicas[0].keep_for_global is True  # This was set in MaterializeReplica
 
         # Test with device filter (all on device 0)
-        request = store_daemon_pb2.GetLoadedModelsRequest(device_id_filter=0)
-        response = servicer.GetLoadedModels(request, context)
+        request = store_daemon_pb2.GetLoadedReplicasRequest(device_id_filter=0)
+        response = servicer.GetLoadedReplicas(request, context)
 
-        assert response.total_models == 3
+        assert response.total_replicas == 3

@@ -25,14 +25,14 @@ This guide provides practical instructions for deploying, configuring, and manag
     ```
 
 2.  **Set up the environment**:
-    - Create an installation directory (e.g., `/opt/model-store`).
+    - Create an installation directory (e.g., `/opt/stepcast-store`).
     - Create a Python virtual environment.
-    - Install the `stepcast-model-store` wheel and its dependencies using `uv` or `pip`.
+    - Install the `stepcast-store` wheel and its dependencies using `uv` or `pip`.
 
     ```bash
-    sudo mkdir -p /opt/model-store
-    sudo chown -R $(whoami):$(whoami) /opt/model-store
-    cd /opt/model-store
+    sudo mkdir -p /opt/stepcast-store
+    sudo chown -R $(whoami):$(whoami) /opt/stepcast-store
+    cd /opt/stepcast-store
 
     python3 -m venv .venv
     source .venv/bin/activate
@@ -86,19 +86,19 @@ shutdown:
 
 lifecycle:
   gpu_memory_limit_fraction: 0.75 # Start evicting when usage > 75 %
-  global_cache_fraction: 0.20     # Reserve 20 % for globally cached models
+  global_cache_fraction: 0.20     # Reserve 20 % for globally cached artifacts
   proc_check_interval_s: 5.0
   eviction_check_interval_s: 30.0
 ```
 
 ### Key Parameters
 
-- `server.storage_path`: The **most critical** setting. This is the root directory where models are stored on the shared filesystem (e.g., JuiceFS, NFS).
+- `server.storage_path`: The **most critical** setting. This is the root directory where artifacts are stored on the shared filesystem (e.g., JuiceFS, NFS).
 - `server.mem_pool_size`: The size of the pre-allocated pinned memory pool for staging data. A larger pool can improve performance for concurrent loads but consumes more system RAM.
 - `global_store_address`: Set this to register with the Global Store. If omitted, the daemon runs in standalone mode.
 - `high_availability.heartbeat_interval_ms`: How often the daemon sends heartbeat messages when registered.
 - `high_availability.registration_retry_delay_ms`: Delay between retries when registration with the Global Store fails.
-- `lifecycle.gpu_memory_limit_fraction`: GPU usage threshold that triggers automatic eviction of unused models. Default is now **0.75**.
+- `lifecycle.gpu_memory_limit_fraction`: GPU usage threshold that triggers automatic eviction of unused artifacts. Default is now **0.75**.
 
 ## Running the Service
 
@@ -135,7 +135,7 @@ scstore start \
 Key points:
 
 * The daemon will listen on `0.0.0.0:8073` (default).
-* Models will be stored under `./models` in the current directory.
+* Artifacts will be stored under `./models` in the current directory.
 * `--blocking` keeps the process in the foreground so logs are printed to your terminal. Omit it to run in the background.
 * No Global Store registration occurs because we did **not** pass `--global-store-address`.
 
@@ -148,12 +148,12 @@ Key points:
 | `--config, -c` | *(none)* | Path to YAML configuration file. CLI flags always override values read from the file. |
 | `--host` | `0.0.0.0` | Bind address for the gRPC server. |
 | `--port` | `8073` | gRPC port for client connections. |
-| `--storage-path` | `""` | Directory for model files (required for local mode). |
+| `--storage-path` | `""` | Directory for artifact files (required for local mode). |
 | `--mem-pool-size` | `8GB` | Size of the pinned memory staging pool. Accepts human-readable units (e.g. `64MB`, `1GB`). |
 | `--num-threads` | `10` | Size of the internal worker thread pool. |
 | `--chunk-size` | `32MB` | Maximum chunk size sent over the wire. |
 | `--enable-p2p-engine` | `False` | Enable the high-performance communication engine. |
-| `--enable-p2p-access` | `False` | Require explicit model registration before load. Useful for fine-grained access control. |
+| `--enable-p2p-access` | `False` | Require explicit artifact registration before load. Useful for fine-grained access control. |
 | `--enable-rdma` | `False` | Enable RDMA transport inside the communication engine. Requires compatible NIC & kernel modules. |
 | `--global-store-address` | *(none)* | Address of the Global Store in the form `host:port`. If omitted, the daemon runs in standalone mode. |
 | `--p2p-port` | `9090` | Port used by the P2P data plane (TCP or RDMA). |
@@ -172,13 +172,13 @@ Key points:
 
 ### 📝 Configuration File Schema (YAML)
 
-Below is a flattened list of the most important keys recognised by `StoreDaemon`.  They correspond 1-to-1 with the [`StoreDaemonConfig`](https://github.com/stepai/model-store/blob/main/scstore/store_daemon/config.py) Pydantic model.
+Below is a flattened list of the most important keys recognised by `StoreDaemon`.  They correspond 1-to-1 with the [`StoreDaemonConfig`](https://github.com/stepai/stepcast-store/blob/main/scstore/store_daemon/config.py) Pydantic artifact.
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `server.host` | `0.0.0.0` | Bind address for the gRPC server. |
 | `server.port` | `50052` | gRPC port. |
-| `server.storage_path` | `/tmp/models` | Local directory for model storage. **Must exist**. |
+| `server.storage_path` | `/tmp/models` | Local directory for artifact storage. **Must exist**. |
 | `server.mem_pool_size` | `8GB` | Pinned memory pool size (human-readable units supported). |
 | `server.enable_p2p_engine` | `true` | Enable the communication engine. |
 | `global_store_address` | *(none)* | Global Store address (`host:port`). |

@@ -2,7 +2,7 @@
 
 // All rights reserved.
 //
-// Trace framework for measuring model loading pipeline latency.
+// Trace framework for measuring replica loading pipeline latency.
 #pragma once
 
 #include <cstdint>
@@ -35,14 +35,14 @@ struct Span {
   void* cuda_stream = nullptr;
 };
 
-struct ModelTrace {
-  // All spans recorded for the model.
+struct ReplicaTrace {
+  // All spans recorded for the replica.
   std::vector<Span> spans ABSL_GUARDED_BY(m);
   // Mutex to protect access to the spans vector.
   absl::Mutex m;
 };
 
-// TraceManager is a thread-safe singleton that manages spans for all models.
+// TraceManager is a thread-safe singleton that manages spans for all artifacts/replicas.
 class TraceManager {
  public:
   using SpanId = uint64_t;
@@ -81,66 +81,54 @@ class TraceManager {
   // ---------------------------------------------------------------------
 
   // Begin/end span variants that carry an explicit request id so that
-  // multiple concurrent loads of the same model can be distinguished.
-  SpanId begin_span(const std::string& model_id, const std::string& request_id, const std::string& stage);
+  // multiple concurrent loads of the same replica can be distinguished.
+  SpanId begin_span(const std::string& artifact_id, const std::string& request_id, const std::string& stage);
 
   // Begin span with CUDA stream information for better visualization.
   SpanId begin_span(
-      const std::string& model_id,
+      const std::string& artifact_id,
       const std::string& request_id,
       const std::string& stage,
       void* cuda_stream);
 
-  void end_span(const std::string& model_id, const std::string& request_id, SpanId span_id);
+  void end_span(const std::string& artifact_id, const std::string& request_id, SpanId span_id);
 
-  // Dump a human-readable summary for a particular (model_id, request_id)
+  // Dump a human-readable summary for a particular (artifact_id, request_id)
   // pair.
-  void dump_summary(const std::string& model_id, const std::string& request_id, std::ostream& os);
+  void dump_summary(const std::string& artifact_id, const std::string& request_id, std::ostream& os);
 
-  // Generate Chrome Trace format JSON for a particular (model_id, request_id) pair.
+  // Generate Chrome Trace format JSON for a particular (artifact_id, request_id) pair.
   // Returns the JSON string that can be loaded in chrome://tracing.
-  std::string generate_chrome_trace(const std::string& model_id, const std::string& request_id);
+  std::string generate_chrome_trace(const std::string& artifact_id, const std::string& request_id);
 
-  // Erase all trace data for the specified (model_id, request_id).  This
+  // Erase all trace data for the specified (artifact_id, request_id).  This
   // helps keep memory usage bounded in long-running processes.
-  void clear_trace(const std::string& model_id, const std::string& request_id);
+  void clear_trace(const std::string& artifact_id, const std::string& request_id);
 
-  // Back-compat overloads that operate without a request id (treated as
-  // an empty string internally).
-  SpanId begin_span(const std::string& model_id, const std::string& stage) {
-    return begin_span(model_id, /*request_id=*/"", stage);
-  }
-  void end_span(const std::string& model_id, SpanId span_id) {
-    end_span(model_id, /*request_id=*/"", span_id);
-  }
-  void dump_summary(const std::string& model_id, std::ostream& os) {
-    dump_summary(model_id, /*request_id=*/"", os);
-  }
-
-  // Backward-compat helper: retrieves trace using legacy key (model_id only).
-  std::shared_ptr<ModelTrace> get_or_create_model_trace(const std::string& model_id);
+  // Helper: retrieves trace using key (artifact_id only).
+  std::shared_ptr<ReplicaTrace> get_or_create_artifact_trace(const std::string& artifact_id);
 
   // -----------------------------------------------------------------
-  // Model-id helpers (mirrors request-id helpers)
+  // artifact-id helpers (mirrors request-id helpers)
   // -----------------------------------------------------------------
-  static void set_current_model_id(const std::string& model_id) {
-    tls_model_id_ = model_id;
+  static void set_current_artifact_id(const std::string& artifact_id) {
+    tls_artifact_id_ = artifact_id;
   }
-  static const std::string& current_model_id() {
-    return tls_model_id_;
+  static const std::string& current_artifact_id() {
+    return tls_artifact_id_;
   }
 
-  class ModelIdGuard {
+  class ArtifactIdGuard {
    public:
-    explicit ModelIdGuard(const std::string& model_id) : previous_id_(TraceManager::current_model_id()) {
-      TraceManager::set_current_model_id(model_id);
+    explicit ArtifactIdGuard(const std::string& artifact_id) : previous_id_(TraceManager::current_artifact_id()) {
+      TraceManager::set_current_artifact_id(artifact_id);
     }
-    ~ModelIdGuard() {
-      TraceManager::set_current_model_id(previous_id_);
+    ~ArtifactIdGuard() {
+      TraceManager::set_current_artifact_id(previous_id_);
     }
 
-    ModelIdGuard(const ModelIdGuard&) = delete;
-    ModelIdGuard& operator=(const ModelIdGuard&) = delete;
+    ArtifactIdGuard(const ArtifactIdGuard&) = delete;
+    ArtifactIdGuard& operator=(const ArtifactIdGuard&) = delete;
 
    private:
     std::string previous_id_;
@@ -149,21 +137,21 @@ class TraceManager {
  private:
   TraceManager() = default;
 
-  // Helper that returns (model_id|request_id) combined key for the map.
-  static std::string make_key(const std::string& model_id, const std::string& request_id);
+  // Helper that returns (artifact_id|request_id) combined key for the map.
+  static std::string make_key(const std::string& artifact_id, const std::string& request_id);
 
-  std::shared_ptr<ModelTrace> get_or_create_model_trace_internal(const std::string& key);
+  std::shared_ptr<ReplicaTrace> get_or_create_trace_internal(const std::string& key);
 
   // Thread-local request id (empty when no context active).
   static thread_local std::string tls_request_id_;
 
-  // Thread-local current model identifier used for implicit propagation.
-  static thread_local std::string tls_model_id_;
+  // Thread-local current replica identifier used for implicit propagation.
+  static thread_local std::string tls_artifact_id_;
 
-  // Protects access to the traces_ map itself. Individual ModelTrace objects
+  // Protects access to the traces_ map itself. Individual ReplicaTrace objects
   // have their own mutex for fine-grained locking.
   absl::Mutex global_mutex_;
-  absl::flat_hash_map<std::string, std::shared_ptr<ModelTrace>> traces_ ABSL_GUARDED_BY(global_mutex_);
+  absl::flat_hash_map<std::string, std::shared_ptr<ReplicaTrace>> traces_ ABSL_GUARDED_BY(global_mutex_);
 
   // Max number of trace entries kept in memory.
   static constexpr size_t kMaxTraces = 256;
@@ -179,12 +167,12 @@ class TraceManager {
 class TraceSummaryGuard {
  public:
   explicit TraceSummaryGuard(
-      const std::string& model_id,
+      const std::string& artifact_id,
       const std::string& request_id = TraceManager::current_request_id())
-      : model_id_(model_id), request_id_(request_id) {}
+      : artifact_id_(artifact_id), request_id_(request_id) {}
   ~TraceSummaryGuard() {
     std::ostringstream oss;
-    TraceManager::instance().dump_summary(model_id_, request_id_, oss);
+    TraceManager::instance().dump_summary(artifact_id_, request_id_, oss);
     if (!oss.str().empty()) {
       LOG(INFO) << "[TraceSummary] " << oss.str();
     }
@@ -193,10 +181,10 @@ class TraceSummaryGuard {
     const char* trace_output_dir = std::getenv("SC_TRACE_OUTPUT_DIR");
     if (trace_output_dir != nullptr && trace_output_dir[0] != '\0') {
       try {
-        std::string chrome_trace_json = TraceManager::instance().generate_chrome_trace(model_id_, request_id_);
+        std::string chrome_trace_json = TraceManager::instance().generate_chrome_trace(artifact_id_, request_id_);
 
-        // Generate filename: model_id+request_id.json
-        std::string filename = model_id_;
+        // Generate filename: artifact_id+request_id.json
+        std::string filename = artifact_id_;
         if (!request_id_.empty()) {
           filename += "+" + request_id_;
         }
@@ -228,16 +216,16 @@ class TraceSummaryGuard {
       }
     }
 
-    // Clear the trace data for this (model_id, request_id) pair to avoid
+    // Clear the trace data for this (artifact_id, request_id) pair to avoid
     // holding unbounded history once the summary has been emitted.
-    TraceManager::instance().clear_trace(model_id_, request_id_);
+    TraceManager::instance().clear_trace(artifact_id_, request_id_);
   }
 
   TraceSummaryGuard(const TraceSummaryGuard&) = delete;
   TraceSummaryGuard& operator=(const TraceSummaryGuard&) = delete;
 
  private:
-  std::string model_id_;
+  std::string artifact_id_;
   std::string request_id_;
 };
 

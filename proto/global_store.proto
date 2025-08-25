@@ -2,25 +2,25 @@ syntax = "proto3";
 
 package global_store;
 
-service GlobalModelStore {
-  rpc RegisterModelReplica(RegisterModelReplicaRequest) returns (RegisterModelReplicaResponse) {}
+service GlobalStore {
+  rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
 
-  rpc UpdateModelReplica(UpdateModelReplicaRequest) returns (UpdateModelReplicaResponse) {}
+  rpc UpdateReplica(UpdateReplicaRequest) returns (UpdateReplicaResponse) {}
 
-  rpc UnregisterModelReplica(UnregisterModelReplicaRequest)
-      returns (UnregisterModelReplicaResponse) {}
+  rpc UnregisterReplica(UnregisterReplicaRequest)
+      returns (UnregisterReplicaResponse) {}
 
-  rpc RequestModelReplicaTransport(RequestModelReplicaTransportRequest) returns (RequestModelReplicaTransportResponse) {}
+  rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
 
-  rpc CompleteModelReplicaTransport(CompleteModelReplicaTransportRequest) returns (CompleteModelReplicaTransportResponse) {}
+  rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
 
-  rpc ListModelReplicas(ListModelReplicasRequest) returns (ListModelReplicasResponse) {}
+  rpc ListReplicas(ListReplicasRequest) returns (ListReplicasResponse) {}
 
-  // Content-addressed query by model_id (mi2:...)
-  rpc GetModelInfoById(GetModelInfoByIdRequest) returns (GetModelInfoByIdResponse) {}
+  // Content-addressed query by artifact_id (mi2:...)
+  rpc GetArtifactInfoById(GetArtifactInfoByIdRequest) returns (GetArtifactInfoByIdResponse) {}
 
-  // Get model tensor index data by key
-  rpc GetModelIndex(GetModelIndexRequest) returns (GetModelIndexResponse) {}
+  // Get artifact tensor index data by key
+  rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
 
   // Worker management
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
@@ -93,7 +93,7 @@ message WorkerHeartbeatRequest {
   // Enhanced fields for HA
   uint64 state_version = 4;              // 增量状态版本
   string state_checksum = 5;             // 当前状态校验和
-  repeated string registered_model_ids = 6; // 本地注册的模型列表（内容寻址ID）
+  repeated string registered_artifact_ids = 6; // 本地注册的 Artifact 列表（内容寻址ID）
   int64 last_successful_sync = 7;        // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
 }
@@ -104,7 +104,7 @@ message WorkerHeartbeatResponse {
   // Enhanced fields for HA
   bool state_sync_required = 2;          // 触发状态同步
   uint64 expected_state_version = 3;     // 期望状态版本
-  repeated string obsolete_models = 4;   // 应该取消注册的模型
+  repeated string obsolete_replicas = 4;   // 应该取消注册的副本
   int64 server_timestamp = 5;            // 服务器时间戳
 }
 
@@ -148,12 +148,12 @@ message WorkerLocalState {
   string worker_id = 1;
   uint64 state_version = 2;
   string state_checksum = 3;
-  repeated ModelReplicaInfo local_replicas = 4;
+  repeated ReplicaInfo local_replicas = 4;
   int64 last_update_timestamp = 5;
 }
 
-message ModelReplicaInfo {
-  string model_id = 1;                     // content-addressed model ID (mi2:...)
+message ReplicaInfo {
+  string artifact_id = 1;                     // content-addressed artifact ID (mi2:...)
   string replica_id = 2;
   MemoryInfo memory_info = 3;
   uint32 max_concurrency = 4;
@@ -163,8 +163,8 @@ message ModelReplicaInfo {
 }
 
 // RFC-0007 descriptor for content-addressed identity
-message ModelDescriptor {
-  string model_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
+message ArtifactDescriptor {
+  string artifact_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
   string index_multihash = 2;    // Multibase over multihash (sha2-256), base32
   string data_multihash = 3;     // Multibase over multihash (sha2-256 root), base32
   string schema_version = 4;     // e.g., "v2"
@@ -192,7 +192,7 @@ message StateChange {
   }
 
   ChangeType type = 1;
-  ModelReplicaInfo replica_info = 2;
+  ReplicaInfo replica_info = 2;
   string reason = 3;
 }
 
@@ -204,55 +204,55 @@ message RequestFullStateSyncRequest {
 message RequestFullStateSyncResponse {
   Status status = 1;
   uint64 new_state_version = 2;
-  repeated ModelReplicaInfo expected_replicas = 3;
+  repeated ReplicaInfo expected_replicas = 3;
   string new_state_checksum = 4;
 }
 
-// Removed legacy disk-path based model info messages
+// Removed legacy disk-path based artifact info messages
 
-// Content-addressed model info
-message GetModelInfoByIdRequest {
-  string model_id = 1;                      // "mi2:..."
+// Content-addressed artifact info
+message GetArtifactInfoByIdRequest {
+  string artifact_id = 1;                      // "mi2:..."
 }
 
-message GetModelInfoByIdResponse {
+message GetArtifactInfoByIdResponse {
   Status status = 1;
   repeated MemoryInfo replicas = 2;         // All replicas under the content ID
 }
 
-// Get model index request
-message GetModelIndexRequest {
+// Get artifact index request
+message GetArtifactIndexRequest {
   string tensor_index_key = 1;             // SHA-256 hash of canonical index
 }
 
-// Get model index response
-message GetModelIndexResponse {
+// Get artifact index response
+message GetArtifactIndexResponse {
   Status status = 1;
   bytes tensor_index_data = 2;             // Canonical JSON bytes
   string encoding = 3;                     // Encoding format (e.g., "json")
   string schema_version = 4;               // Schema version (e.g., "v2")
 }
 
-message ListModelReplicasRequest {
+message ListReplicasRequest {
   optional string node_id = 1;
   optional string node_address = 2;
   optional string node_port = 3;
   optional MemoryType memory_type = 4;
   optional uint32 device_id = 5;
-  optional string model_id = 6;            // content-addressed filter
+  optional string artifact_id = 6;            // content-addressed filter
 }
 
-message ListModelReplicasResponse {
-  map<string, MemoryInfoList> model_replicas = 1;
+message ListReplicasResponse {
+  map<string, MemoryInfoList> artifact_replicas = 1;
 }
 
-message RegisterModelReplicaRequest {
-  string model_id = 1;                      // content-addressed ID (mi2:...), optional for disk/mixed flows
+message RegisterReplicaRequest {
+  string artifact_id = 1;                      // content-addressed ID (mi2:...), optional for disk/mixed flows
   MemoryInfo mem_info = 2;
   uint32 max_concurrency = 3;
   string worker_id = 4;
 
-  // Optional tensor index data for UPSERT (if key not yet in model_indices)
+  // Optional tensor index data for UPSERT (if key not yet in artifact_indices)
   optional bytes tensor_index_data = 5;    // Canonical JSON bytes (for UPSERT)
   optional string encoding = 6;            // Encoding format (e.g., "json")
   optional string schema_version = 7;      // Schema version (e.g., "v2")
@@ -260,32 +260,32 @@ message RegisterModelReplicaRequest {
   optional string disk_path = 8;
 
   // RFC-0007: Optionally include content-addressed descriptor for persistence
-  optional ModelDescriptor descriptor = 9;
+  optional ArtifactDescriptor descriptor = 9;
 }
 
-message RegisterModelReplicaResponse {
+message RegisterReplicaResponse {
   Status status = 1;
-  string model_id = 2;
+  string artifact_id = 2;
   string replica_id = 3;
 }
 
-message UpdateModelReplicaRequest {
-  string model_id = 1;
+message UpdateReplicaRequest {
+  string artifact_id = 1;
   string replica_id = 2;
 }
 
-message UpdateModelReplicaResponse {
+message UpdateReplicaResponse {
   Status status = 1;
-  string model_id = 2;
+  string artifact_id = 2;
   string replica_id = 3;
 }
 
-message UnregisterModelReplicaRequest {
-  string model_id = 1;
+message UnregisterReplicaRequest {
+  string artifact_id = 1;
   string replica_id = 2;
 }
 
-message UnregisterModelReplicaResponse {
+message UnregisterReplicaResponse {
   Status status = 1;
 }
 
@@ -319,8 +319,8 @@ message MemoryInfoList {
   repeated MemoryInfo list = 1;
 }
 
-message RequestModelReplicaTransportRequest {
-  string model_id = 1;                      // content-addressed id
+message RequestReplicaTransportRequest {
+  string artifact_id = 1;                      // content-addressed id
   MemoryInfo local_memory_info = 2;
   uint32 wait_timeout_ms = 3;
   string source_node_id = 4;
@@ -328,21 +328,19 @@ message RequestModelReplicaTransportRequest {
   uint32 source_port = 6;
 }
 
-message RequestModelReplicaTransportResponse {
+message RequestReplicaTransportResponse {
   Status status = 1;
   MemoryInfo remote_memory_info = 2;
   string transport_id = 3;
 }
 
-message CompleteModelReplicaTransportRequest {
+message CompleteReplicaTransportRequest {
   string transport_id = 1;
 }
 
-message CompleteModelReplicaTransportResponse {
+message CompleteReplicaTransportResponse {
   Status status = 1;
 }
-
-// Removed legacy GetModelReplica RPC messages
 
 // ========== Health Check ==========
 
@@ -367,7 +365,7 @@ enum ChunkState {
 
 // Query chunk locations request
 message QueryChunkLocationsRequest {
-  string model_id = 1;
+  string artifact_id = 1;
   repeated uint32 chunk_indices = 2;  // Specific chunks to query
 }
 
@@ -391,7 +389,7 @@ message QueryChunkLocationsResponse {
 
 // Chunk state update
 message ChunkStateUpdate {
-  string model_id = 1;
+  string artifact_id = 1;
   uint32 chunk_idx = 2;
   ChunkState state = 3;
   string device_uuid = 4;

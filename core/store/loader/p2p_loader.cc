@@ -34,7 +34,7 @@ absl::Status P2PLoader::initialize() {
   }
 
   if (source_.size_bytes == 0) {
-    return absl::InvalidArgumentError("Model size must be greater than 0");
+    return absl::InvalidArgumentError("Artifact size must be greater than 0");
   }
 
   if (source_.memory_keys.empty()) {
@@ -53,14 +53,14 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
     size_t chunk_size,
     uint64_t expected_total) {
   namespace fs = std::filesystem;
-  fs::path model_dir(dir);
-  if (dir.empty() || !fs::exists(model_dir) || !fs::is_directory(model_dir)) {
-    return absl::NotFoundError("Fallback model directory not found or not a directory");
+  fs::path artifact_dir_path(dir);
+  if (dir.empty() || !fs::exists(artifact_dir_path) || !fs::is_directory(artifact_dir_path)) {
+    return absl::NotFoundError("Fallback replica directory not found or not a directory");
   }
   std::vector<fs::path> paths;
   std::vector<size_t> sizes;
   uint64_t total = 0;
-  for (const auto& entry : fs::directory_iterator(model_dir)) {
+  for (const auto& entry : fs::directory_iterator(artifact_dir_path)) {
     if (entry.is_regular_file()) {
       const std::string filename = entry.path().filename().string();
       if (filename.rfind("tensor.data", 0) == 0) {
@@ -142,7 +142,7 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
   return std::make_unique<Wrapper>(remote_src);
 }
 
-absl::StatusOr<uint64_t> P2PLoader::get_model_size() {
+absl::StatusOr<uint64_t> P2PLoader::get_artifact_size() {
   absl::MutexLock lock(&mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("P2PLoader not initialized");

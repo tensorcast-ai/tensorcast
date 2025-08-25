@@ -4,8 +4,8 @@ import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
 import Workers from './pages/Workers'
 import Replicas from './pages/Replicas'
-import Models from './pages/Models'
-import ModelDetail from './pages/ModelDetail'
+import Artifacts from './pages/Artifacts'
+import ArtifactDetail from './pages/ArtifactDetail'
 import Transports from './pages/Transports'
 import Nodes from './pages/Nodes'
 import MockTest from './pages/MockTest'
@@ -24,8 +24,8 @@ function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/workers" element={<Workers />} />
               <Route path="/replicas" element={<Replicas />} />
-              <Route path="/models" element={<Models />} />
-              <Route path="/models/:modelName" element={<ModelDetail />} />
+              <Route path="/artifacts" element={<Artifacts />} />
+              <Route path="/artifacts/:artifactId" element={<ArtifactDetail />} />
               <Route path="/transports" element={<Transports />} />
               <Route path="/nodes" element={<Nodes />} />
               {import.meta.env.DEV && <Route path="/mock-test" element={<MockTest />} />}

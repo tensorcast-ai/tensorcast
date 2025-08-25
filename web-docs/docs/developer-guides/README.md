@@ -32,7 +32,7 @@ Deep-dive into the high-performance C++ core:
 - **[Overview](core/checkpoint/README.md)** - Introduction to the checkpoint system
 - **[Architecture](core/checkpoint/architecture.md)** - Detailed architecture design
 - **[Data Format](core/checkpoint/data-format.md)** - Binary data format specification
-- **[Verification Integration](core/checkpoint/verification-integration.md)** - Model integrity verification
+- **[Verification Integration](core/checkpoint/verification-integration.md)** - Artifact integrity verification
 
 ### Store Module
 - **[Overview](core/store/overview.md)** - Introduction to the core store system
@@ -72,8 +72,8 @@ bazel build //core:libscstore.so --compilation_mode=dbg --config=linux
 
 # Build tests
 bazel build //tests/cpp:gpu_ce_test
-bazel build //tests/cpp:model_p2p_registration_test --compilation_mode=dbg
-bazel build //tests/cpp:model_p2p_transfer_test --compilation_mode=dbg
+bazel build //tests/cpp:replica_p2p_registration_test --compilation_mode=dbg
+bazel build //tests/cpp:replica_p2p_transfer_test --compilation_mode=dbg
 ```
 
 ## Development Topics by Area

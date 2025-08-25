@@ -18,19 +18,19 @@
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
-#include "core/store/components/model_registry.h"
+#include "core/store/components/replica_registry.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/model/memory_state.h"
-#include "core/store/model/model.h"
+#include "core/store/replica/memory_state.h"
+#include "core/store/replica/replica.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace stepcast::store {
 
-class PrepareOrchestrator; // Forward declaration for friend access
+class MaterializeOrchestrator; // Forward declaration for friend access
 
 class StoreEngine {
-  friend class PrepareOrchestrator;
+  friend class MaterializeOrchestrator;
 
  public:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -38,13 +38,13 @@ class StoreEngine {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Legacy AsyncLoadResult and load() interface have been fully removed;
-  // callers should use ModelHandle returned from prepare().
+  // callers should use ReplicaHandle returned from materialize_replica().
 
-  struct ModelInfo {
-    std::string model_id;
+  struct ReplicaInfo {
+    std::string artifact_id;
     uint64_t size_bytes;
-    ModelLocation cpu_state;
-    ModelLocation gpu_state;
+    MemoryLocation cpu_state;
+    MemoryLocation gpu_state;
     int gpu_device_id;
     std::string gpu_device_uuid;
     bool is_registered_for_comm;
@@ -65,34 +65,29 @@ class StoreEngine {
   // ═══════════════════════════════════════════════════════════════════════════════════════
 
   // ─────────────────────────────────────────────────────────────────────────
-  // New prepare() API (multi-device binding)
+  // New materialize_replica() API (multi-device binding)
   // ─────────────────────────────────────────────────────────────────────────
 
-  enum class PrepareMode : uint8_t { AUTO, COPY_ONLY, LOAD_ONLY };
+  enum class MaterializeMode : uint8_t { AUTO, COPY_ONLY, LOAD_ONLY };
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Lightweight handle that callers receive from prepare().
+  // Lightweight handle that callers receive from materialize_replica().
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * @brief Unified load / copy entry. Replaces load(ModelLoadSpec).
-   *
-   * @param model_id      Model identifier (logical name, e.g. "llama-7b")
-   * @param target_device Target device where the model instance should reside.
-   * @param mode          Loading strategy hint.
-   * @param hints         Advanced tuning knobs (reuse existing struct).
+   * @brief Unified materialization entry. Replaces materialize_replica().
    */
-  absl::StatusOr<ModelHandle> prepare(
+  absl::StatusOr<ReplicaHandle> materialize_replica(
       const DeviceKey& target_device,
-      PrepareMode mode = PrepareMode::AUTO,
-      const LoadingHints& hints = {});
+      MaterializeMode mode = MaterializeMode::AUTO,
+      const MaterializeHints& hints = {});
 
   // ------------------------------------------------------------------------
-  // Memory TensorDict Registration (coalesced) – Phase A (RFC-0006)
+  // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
 
-  struct TensorDictRegistration {
-    std::string model_id; // Logical model identifier
+  struct ArtifactRegistration {
+    std::string artifact_id; // Logical artifact identifier (old artifact_id)
     std::string tensor_index_key; // Canonical JSON SHA-256 hex (lowercase)
     std::optional<std::string> tensor_index_data; // Optional canonical JSON bytes for UPSERT
     std::string schema_version{"v2"}; // Data-format schema version
@@ -115,7 +110,7 @@ class StoreEngine {
    * Allocates target GPU memory and returns a CUDA IPC handle for the caller
    * (user process) to write tensor bytes directly into daemon-owned memory.
    */
-  absl::StatusOr<RegistrationBeginResult> begin_register_tensor_dict(const TensorDictRegistration& reg);
+  absl::StatusOr<RegistrationBeginResult> begin_register_artifact(const ArtifactRegistration& reg);
 
   /**
    * @brief Commit a previously begun registration.  Finalizes the replica by
@@ -125,7 +120,7 @@ class StoreEngine {
    */
   struct RegistrationCommitResult {
     std::string registration_id;
-    std::string model_id;
+    std::string artifact_id;
     int device_id{0};
     uint64_t size_bytes{0};
     // RFC-0007: Expose content-address components for callers who need
@@ -136,41 +131,41 @@ class StoreEngine {
     std::string encoding; // e.g. "json" or "cbor"
   };
 
-  absl::StatusOr<RegistrationCommitResult> commit_registered_tensor_dict(std::string_view registration_id);
+  absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
 
   /**
    * @brief Abort a pending registration and release allocated memory.
    */
-  absl::Status abort_registered_tensor_dict(std::string_view registration_id);
+  absl::Status abort_registered_artifact(std::string_view registration_id);
 
   // ------------------------------------------------------------------------
   // Query helpers (multi-device binding)
   // ------------------------------------------------------------------------
 
   /**
-   * @brief Returns the set of devices where a given model_id is already loaded.
+   * @brief Returns the set of devices where a given artifact_id is already loaded.
    */
-  [[nodiscard]] std::vector<DeviceKey> get_loaded_devices(std::string_view model_id) const;
+  [[nodiscard]] std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
 
   /**
-   * @brief Returns all InstanceKey(s) that reside on a particular device.
+   * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */
-  [[nodiscard]] std::vector<InstanceKey> list_device_models(const DeviceKey& device) const;
+  [[nodiscard]] std::vector<ReplicaKey> list_device_replicas(const DeviceKey& device) const;
 
-  // Model management
+  // Replica management
   // ─────────────────────────────────────────────────────────────────────
-  // NEW InstanceKey-centric APIs (Multi-Device Binding)
+  // NEW ReplicaKey-centric APIs (Multi-Device Binding)
   // ─────────────────────────────────────────────────────────────────────
-  int wait_instance_ready(const InstanceKey& key);
-  int unload_instance(const InstanceKey& key);
-  [[nodiscard]] MemoryState get_instance_state(const InstanceKey& key, DeviceType memory_type) const;
-  absl::StatusOr<uint64_t> get_instance_gpu_ptr(const InstanceKey& key);
-  // Return total model size in bytes for the given instance.
-  absl::StatusOr<uint64_t> get_instance_size(const InstanceKey& key);
+  int wait_replica_ready(const ReplicaKey& key);
+  int unload_replica(const ReplicaKey& key);
+  [[nodiscard]] MemoryState get_replica_state(const ReplicaKey& key, DeviceType memory_type) const;
+  absl::StatusOr<uint64_t> get_replica_gpu_ptr(const ReplicaKey& key);
+  // Return total artifact size in bytes for the given replica.
+  absl::StatusOr<uint64_t> get_replica_size(const ReplicaKey& key);
 
-  // Remote memory registration helpers (InstanceKey version)
-  absl::StatusOr<CommRegistrationInfo> enable_remote_instance_access(const InstanceKey& key, ModelLocation location);
-  absl::Status disable_remote_instance_access(const InstanceKey& key, ModelLocation location);
+  // Remote memory registration helpers (ReplicaKey version)
+  absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
+  absl::Status disable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
 
   // --------------------------------------------------------------------
   // Memory & Registration helpers
@@ -186,7 +181,7 @@ class StoreEngine {
   }
   [[nodiscard]] size_t get_available_memory() const;
   void update_memory_pool_metrics();
-  [[nodiscard]] std::vector<ModelInfo> get_all_models_info() const;
+  [[nodiscard]] std::vector<ReplicaInfo> get_all_replicas_info() const;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Distributed Memory Pool (DVMP) chunk locking API
@@ -195,28 +190,23 @@ class StoreEngine {
   /**
    * @brief Lock chunks for H2D or P2P transfer to prevent concurrent eviction.
    *
-   * @param instance_key Fully-qualified key identifying the concrete model instance.
-   *        Using InstanceKey avoids ambiguity when the same model_id is loaded on
-   *        multiple GPUs.
+   * @param replica_key Fully-qualified key identifying the concrete replica.
    * @param chunk_indices List of chunk indices to lock.
    *
    * @return absl::Status OK on success, ResourceExhausted if any chunk is already locked.
    */
-  absl::Status lock_chunks(const InstanceKey& instance_key, absl::Span<const uint32_t> chunk_indices);
+  absl::Status lock_chunks(const ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices);
 
   /**
    * @brief Unlock chunks after H2D or P2P transfer completion.
    *
-   * @param instance_key Same InstanceKey that was previously passed to lock_chunks().
+   * @param replica_key Same ReplicaKey that was previously passed to lock_chunks().
    * @param chunk_indices List of chunk indices to unlock.
    * @param copied_gpu Whether the chunks were successfully copied to GPU.
    *
    * @return absl::Status OK on success.
    */
-  absl::Status unlock_chunks(
-      const InstanceKey& instance_key,
-      absl::Span<const uint32_t> chunk_indices,
-      bool copied_gpu);
+  absl::Status unlock_chunks(const ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices, bool copied_gpu);
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -235,7 +225,7 @@ class StoreEngine {
   // ═══════════════════════════════════════════════════════════════════════════
 
   gsl::not_null<std::unique_ptr<DeviceManager>> device_manager_;
-  gsl::not_null<std::unique_ptr<ModelRegistry>> model_registry_;
+  gsl::not_null<std::unique_ptr<ReplicaRegistry>> replica_registry_;
   gsl::not_null<std::unique_ptr<MetricsCollector>> metrics_collector_;
   std::unique_ptr<GlobalStoreClient> global_store_client_;
   std::shared_ptr<CommunicationManager> comm_manager_;
@@ -250,28 +240,28 @@ class StoreEngine {
   void initialize_global_store(const StoreEngineOptions& opts);
   void initialize_communication_manager(const StoreEngineOptions& opts);
 
-  // Model loading helpers - using new unified types
-  absl::StatusOr<ModelHandle> load_from_disk_internal(
-      const std::string& model_identifier,
+  // Replica loading helpers - using new unified types
+  absl::StatusOr<ReplicaHandle> ingest_from_disk_internal(
+      const std::string& artifact_identifier,
       const DiskSource& source,
-      const ModelTarget& target,
-      const LoadingHints& hints);
+      const ReplicaTarget& target,
+      const MaterializeHints& hints);
 
-  absl::StatusOr<ModelHandle> load_from_p2p_internal(
-      const std::string& model_identifier,
+  absl::StatusOr<ReplicaHandle> ingest_from_p2p_internal(
+      const std::string& artifact_identifier,
       const P2PSource& source,
-      const ModelTarget& target,
-      const LoadingHints& hints);
+      const ReplicaTarget& target,
+      const MaterializeHints& hints);
 
-  static absl::StatusOr<ModelHandle> load_from_buffer_internal(
-      const std::string& model_identifier,
+  static absl::StatusOr<ReplicaHandle> ingest_from_buffer_internal(
+      const std::string& artifact_identifier,
       const InlineBufferSource& source,
-      const ModelTarget& target,
-      const LoadingHints& hints);
+      const ReplicaTarget& target,
+      const MaterializeHints& hints);
 
   // Memory management helpers
-  absl::Status try_evict_memory_for_model(size_t required_size);
-  std::shared_ptr<Model> get_or_create_model(const std::string& model_identifier, const ModelConfig& config);
+  absl::Status try_evict_memory_for_replica(size_t required_size);
+  std::shared_ptr<Replica> get_or_create_replica(const std::string& artifact_identifier, const ReplicaConfig& config);
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
@@ -281,7 +271,7 @@ class StoreEngine {
   // ═══════════════════════════════════════════════════════════════════════════
   struct PendingRegistrationEntry {
     std::string registration_id;
-    std::string model_id;
+    std::string artifact_id;
     int device_id{0};
     uint64_t size_bytes{0};
     std::string tensor_index_key;
@@ -289,7 +279,7 @@ class StoreEngine {
     std::string schema_version;
     std::string encoding;
     bool enable_p2p{true};
-    std::shared_ptr<Model> model; // Backing model for memory ownership
+    std::shared_ptr<Replica> replica; // Backing replica for memory ownership
     void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
     std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup

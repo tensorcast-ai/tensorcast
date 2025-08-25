@@ -1,11 +1,11 @@
 ---
 title: Architecture Documentation
-description: Technical architecture documentation for the distributed model storage system
+description: Technical architecture documentation for the distributed artifact storage system
 ---
 
 # Architecture Documentation
 
-This section contains detailed technical documentation about the system architecture of the distributed model storage system.
+This section contains detailed technical documentation about the system architecture of the distributed artifact storage system.
 
 ## Documentation Structure
 
@@ -22,7 +22,7 @@ In-depth documentation of the Store Daemon's internal architecture, component in
 Comprehensive guide to the system's high availability features, failure recovery mechanisms, and state synchronization protocols.
 
 ### [P2P Transfer Strategies](./p2p-transfer-strategies.md)
-Details about peer-to-peer model transfer strategies, load balancing algorithms, and performance optimizations.
+Details about peer-to-peer artifact transfer strategies, load balancing algorithms, and performance optimizations.
 
 ## Quick Navigation
 

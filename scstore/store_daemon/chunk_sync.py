@@ -47,15 +47,15 @@ class ChunkSyncWorker:
         self._stop_event = threading.Event()
         self._sync_thread: threading.Thread | None = None
         self._channel: grpc.Channel | None = None
-        # NOTE: The generated gRPC module exposes `GlobalModelStoreStub`,
+        # NOTE: The generated gRPC module exposes `GlobalStoreStub`,
         # *not* `GlobalStoreStub`.  Using the correct name avoids runtime and
         # type-checking errors.
-        self._stub: global_store_pb2_grpc.GlobalModelStoreStub | None = None
+        self._stub: global_store_pb2_grpc.GlobalStoreStub | None = None
 
         # Track last sync state to compute deltas
         self._last_chunk_states: dict[
             str, dict[int, int]
-        ] = {}  # model_id -> chunk_idx -> state
+        ] = {}  # artifact_id -> chunk_idx -> state
 
     def start(self) -> None:
         """Start the chunk synchronization worker."""
@@ -70,7 +70,7 @@ class ChunkSyncWorker:
 
         # Create gRPC channel and stub
         self._channel = grpc.insecure_channel(self.global_store_address)
-        self._stub = global_store_pb2_grpc.GlobalModelStoreStub(self._channel)
+        self._stub = global_store_pb2_grpc.GlobalStoreStub(self._channel)
 
         self._stop_event.clear()
         self._sync_thread = threading.Thread(
@@ -119,22 +119,22 @@ class ChunkSyncWorker:
         if not self.servicer.store_engine:
             return
 
-        # Get current chunk states from all models
+        # Get current chunk states from all replicas
         current_states = self._get_all_chunk_states()
 
         # Compute deltas
         updates = []
-        for model_id, chunk_states in current_states.items():
-            last_states = self._last_chunk_states.get(model_id, {})
+        for artifact_id, chunk_states in current_states.items():
+            last_states = self._last_chunk_states.get(artifact_id, {})
 
             for chunk_idx, state in chunk_states.items():
                 if chunk_idx not in last_states or last_states[chunk_idx] != state:
                     updates.append(
                         global_store_pb2.ChunkStateUpdate(
-                            model_id=model_id,
+                            artifact_id=artifact_id,
                             chunk_idx=chunk_idx,
                             state=self._map_chunk_state(state),
-                            device_uuid=self._get_device_uuid(model_id),
+                            device_uuid=self._get_device_uuid(artifact_id),
                             replica=0,  # TODO: Get actual replica number
                         )
                     )
@@ -163,23 +163,22 @@ class ChunkSyncWorker:
         self._last_chunk_states = current_states
 
     def _get_all_chunk_states(self) -> dict[str, dict[int, int]]:
-        """Get chunk states for all models from Store Engine.
+        """Get chunk states for all artifacts from Store Engine.
 
         Returns:
-            Dictionary mapping model_id -> chunk_idx -> state
+            Dictionary mapping artifact_id -> chunk_idx -> state
         """
-        # Build up state map: model_id -> chunk_idx -> state
+        # Build up state map: artifact_id -> chunk_idx -> state
         result: dict[str, dict[int, int]] = {}
 
-        # Get list of loaded models from replica manager
-        if hasattr(self.servicer, "replica_manager"):
-            for model_info in self.servicer.replica_manager.get_loaded_models():
-                # `get_loaded_models` returns a dict with a `model_id` entry
-                model_path = str(model_info.get("model_id", ""))
-                model_id = self._extract_model_id(model_path)
+        # Get list of loaded replicas from replica manager
+        for replica_info in self.servicer.replica_manager.get_loaded_replicas():
+            # Use artifact identifier from replica info dict
+            disk_path = str(replica_info.get("artifact_id", ""))
+            artifact_id = self._extract_artifact_id(disk_path)
 
-                # TODO: Replace placeholder with actual store_engine snapshot
-                result[model_id] = {}
+            # TODO: Replace placeholder with actual store_engine snapshot
+            result[artifact_id] = {}
 
         return result
 
@@ -202,12 +201,12 @@ class ChunkSyncWorker:
             else global_store_pb2.ChunkState.CHUNK_HOT  # Default to HOT for unknown states
         )
 
-    def _get_device_uuid(self, model_id: str) -> str:
-        """Get device UUID for a model."""
-        # TODO: Get actual device UUID from model metadata
+    def _get_device_uuid(self, artifact_id: str) -> str:
+        """Get device UUID for a replica."""
+        # TODO: Get actual device UUID from replica metadata
         return ""
 
-    def _extract_model_id(self, model_path: str) -> str:
-        """Extract model ID from model path."""
+    def _extract_artifact_id(self, disk_path: str) -> str:
+        """Extract replica ID from replica path."""
         # Simple extraction - use last component of path
-        return model_path.split("/")[-1] if "/" in model_path else model_path
+        return disk_path.split("/")[-1] if "/" in disk_path else disk_path

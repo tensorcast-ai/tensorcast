@@ -9,7 +9,6 @@ import torch  # noqa: F401
 import scstore._store_engine as _cs
 
 from scstore.store_daemon.ckpt_collector import (
-    StoreEngineCollector,
     GlobalMetricsCollector,
 )
 
@@ -90,7 +89,8 @@ def test_store_engine_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
         registry.register(metric)
 
     # 3. Register the global metrics collector (no longer needs store_engine)
-    registry.register(GlobalMetricsCollector())
+    # Register typed as Any to satisfy Collector protocol in typed contexts
+    registry.register(GlobalMetricsCollector()) # pyright: ignore[reportArgumentType]
 
     # 4. Scrape metrics snapshot
     metrics_blob = generate_latest(registry).decode()
@@ -100,7 +100,7 @@ def test_store_engine_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
     # ------------------------------------------------------------------
     assert "store_daemon_memory_pool_total_bytes" in metrics_blob
     assert "store_daemon_memory_pool_available_bytes" in metrics_blob
-    assert "store_daemon_models_in_memory" in metrics_blob
+    assert "store_daemon_replicas_in_memory" in metrics_blob
     # Check TYPE comments are correct (gauge by default)
     assert "# TYPE store_daemon_memory_pool_total_bytes gauge" in metrics_blob
     # Ensure counter detection for *_total naming convention works
@@ -143,37 +143,11 @@ def test_store_engine_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
     collector = GlobalMetricsCollector()
     collected_families = list(collector.collect())
     # Find our gauge family
-    models_family = next((f for f in collected_families if f.name.startswith("store_daemon_models_in_memory")), None)
+    models_family = next((f for f in collected_families if f.name.startswith("store_daemon_replicas_in_memory")), None)
     assert models_family is not None, "labelled models metric not found by collector"
     # Family samples are tuples: (name, labels, value, timestamp)
     has_labelled_sample = any(sample.labels.get("location") in ["cpu", "gpu"] for sample in models_family.samples)
     assert has_labelled_sample, "collector failed to attach labels to sample"
 
 
-@pytest.mark.skipif(_cs is None, reason="C++ StoreEngine extension not available")
-def test_backward_compatibility() -> None:  # noqa: D401
-    """Ensure StoreEngineCollector still works for backward compatibility."""
 
-    storage_path = Path("/tmp/test_compat")
-    storage_path.mkdir(exist_ok=True)
-
-    cs = _cs.create_store_engine({
-        "storage_path": str(storage_path),
-        "memory_pool_size": 1024,
-        "num_thread": 1,
-        "chunk_size": 1024,
-        "enable_p2p_engine": False,
-        "enable_rdma": False,
-        "pinned_memory_timeout_ms": 0,
-    })
-
-    # Old API should still work (store_engine param is ignored)
-    collector = StoreEngineCollector(cs)
-
-    # Should be able to collect metrics
-    families = list(collector.collect())
-    assert len(families) > 0
-
-    # Verify some metrics exist
-    metric_names = {family.name for family in families}
-    assert "store_daemon_memory_pool_total_bytes" in metric_names

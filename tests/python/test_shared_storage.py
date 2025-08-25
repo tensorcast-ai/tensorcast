@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 
 import torch
 
@@ -43,19 +43,27 @@ def test_shared_storage_roundtrip(tmp_path):
         "indep2": indep2,
     }
 
-    save_path = tmp_path / "model"
+    save_path = tmp_path / "artifact"
     # Use non-streaming path to target save_tensors directly; streaming path is tested elsewhere.
     save_dict(state_dict, str(save_path), use_streaming=False)
 
-    loaded_state_dict = load_dict(str(save_path), device_id=0, storage_path="", enable_verification=False)
+    loaded_state_dict = cast(
+        dict[str, torch.Tensor],
+        load_dict(str(save_path), device_id=0, storage_path="", enable_verification=False),
+    )
+
+    # For value comparisons, normalize to CPU to avoid device mismatch errors
+    loaded_for_compare: dict[str, torch.Tensor] = {
+        k: (v.cpu() if v.is_cuda else v) for k, v in loaded_state_dict.items()
+    }
 
     # -----------------------
     # (1) Value equality check for every tensor
     # -----------------------
     for name, original in state_dict.items():
         assert torch.equal(
-            original, loaded_state_dict[name]
-        ), f"Tensor content mismatch for {name}, {original} != {loaded_state_dict[name]}"
+            original, loaded_for_compare[name]
+        ), f"Tensor content mismatch for {name}, {original} != {loaded_for_compare[name]}"
 
     # -----------------------
     # (2) Storage sharing semantics helpers

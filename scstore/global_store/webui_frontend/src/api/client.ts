@@ -33,7 +33,7 @@ export interface GlobalMetrics {
   active_workers: number
   total_replicas: number
   available_replicas: number
-  total_models: number
+  total_artifacts: number
   active_transports: number
   total_memory_bytes: number
   available_memory_bytes: number
@@ -56,7 +56,7 @@ export interface WorkerOut {
 
 export interface ReplicaOut {
   replica_id: string
-  model_id: string
+  artifact_id: string
   node_id: string
   node_address: string
   node_port: number
@@ -72,8 +72,8 @@ export interface ReplicaOut {
   worker_accepting: boolean
 }
 
-export interface ModelSummary {
-  model_id: string
+export interface ArtifactSummary {
+  artifact_id: string
   total_replicas: number
   available_replicas: number
   gpu_replicas: number
@@ -96,7 +96,7 @@ export interface NodeSummary {
 export interface TransportOut {
   transport_id: string
   replica_id: string
-  model_id: string
+  artifact_id: string
   source_node_id: string
   source_address: string
   source_port: number

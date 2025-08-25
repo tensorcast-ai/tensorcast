@@ -35,27 +35,27 @@ class DummyStoreEngine:
     The stub purposefully accepts *any* arguments via ``Mock`` to keep the
     surface minimal and flexible.  Where the production code relies on a
     structured return object (e.g. *comm_info* from
-    ``enable_remote_instance_access``), the default mock is pre-configured to
+    ``enable_remote_replica_access``), the default mock is pre-configured to
     return a compatible object so that tests which do not explicitly override
     the return value continue to work out-of-the-box.
     """
 
     def __init__(self) -> None:
         # Methods directly probed by ``ReplicaManager``
-        self.unload_instance = Mock(return_value=0)
-        self.disable_remote_instance_access = Mock(return_value=True)
+        self.unload_replica = Mock(return_value=0)
+        self.disable_remote_replica_access = Mock(return_value=True)
 
         # GPU memory stats – default to a single device with plenty of free
         # memory (total, free).  Tests can override as required.
         self.get_gpu_memory_stats = Mock(return_value=[(16 * 1024**3, 8 * 1024**3)])
 
-        self.wait_instance_ready = Mock(return_value=0)
+        self.wait_replica_ready = Mock(return_value=0)
 
-        # *enable_remote_instance_access* must yield an object with the
+        # *enable_remote_replica_access* must yield an object with the
         # following attributes.  A simple ``Mock`` is sufficient.
-        self.enable_remote_instance_access = Mock(
+        self.enable_remote_replica_access = Mock(
             return_value=Mock(
-                model_size=1024,
+                artifact_size=1024,
                 device_id=0,
                 remote_memory_keys=[],
                 buffer_sizes=[],
@@ -106,7 +106,7 @@ class TestReplicaManagerLifecycle:
 
         # Add reference
         success = manager.add_ref(
-            model_path="model1",
+            disk_path="model1",
             device_id=0,
             pid=1234,
             size_bytes=1024 * 1024,
@@ -169,7 +169,7 @@ class TestReplicaManagerLifecycle:
         servicer = MockServicer()
         manager = ReplicaManager(servicer)
 
-        # Add same PID to multiple models
+        # Add same PID to multiple artifacts
         manager.add_ref("model1", 0, 1234, 1024)
         manager.add_ref("model2", 0, 1234, 2048)
         manager.add_ref("model3", 1, 1234, 4096)
@@ -190,21 +190,21 @@ class TestReplicaManagerLifecycle:
         assert info3 is not None
         assert info3.ref_count == 0
 
-    def test_get_loaded_models(self):
-        """Test getting loaded models information."""
+    def test_get_loaded_replicas(self):
+        """Test getting loaded replicas information."""
         servicer = MockServicer()
         manager = ReplicaManager(servicer)
 
-        # Add some models
+        # Add some artifacts
         manager.add_ref("model1", 0, 1234, 1024, keep_for_global=True)
-        # Add another model with a valid integer device_id
+        # Add another artifact with a valid integer device_id
         manager.add_ref("model2", 0, 5678, 2048, keep_for_global=False)
 
-        models = manager.get_loaded_models()
+        models = manager.get_loaded_replicas()
         assert len(models) == 2
 
         # Check model1
-        model1 = next(m for m in models if m["model_id"] == "model1")
+        model1 = next(m for m in models if m["artifact_id"] == "model1")
         assert model1["device_id"] == 0
         assert model1["ref_count"] == 1
         assert model1["pids"] == [1234]
@@ -216,23 +216,23 @@ class TestReplicaManagerLifecycle:
         servicer = MockServicer()
         manager = ReplicaManager(servicer)
 
-        # Add models with different characteristics
+        # Add artifacts with different characteristics
         now = time.time()
 
-        # Model 1: Has references - not evictable
+        # Artifact 1: Has references - not evictable
         manager.add_ref("model1", 0, 1234, 1024 * 1024)
 
-        # Model 2: No refs, old, local
+        # Artifact 2: No refs, old, local
         manager.add_ref("model2", 0, 5678, 2048 * 1024)
         manager.remove_ref("model2", 0, 5678)
         manager._replicas[ReplicaKey("model2", 0)].last_access_ts = now - 100
 
-        # Model 3: No refs, recent, local
+        # Artifact 3: No refs, recent, local
         manager.add_ref("model3", 0, 9999, 4096 * 1024)
         manager.remove_ref("model3", 0, 9999)
         manager._replicas[ReplicaKey("model3", 0)].last_access_ts = now - 10
 
-        # Model 4: No refs, old, global
+        # Artifact 4: No refs, old, global
         manager.add_ref("model4", 0, 8888, 512 * 1024, keep_for_global=True)
         manager.remove_ref("model4", 0, 8888)
         manager._replicas[ReplicaKey("model4", 0)].last_access_ts = now - 100
@@ -250,8 +250,8 @@ class TestReplicaManagerLifecycle:
     def test_maybe_evict(self):
         """Test eviction when memory is needed."""
         servicer = MockServicer()
-        servicer.store_engine.unload_instance.return_value = 0
-        servicer.store_engine.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_replica.return_value = 0
+        servicer.store_engine.disable_remote_replica_access.return_value = True
         # Mock GPU memory stats to return proper format
         servicer.store_engine.get_gpu_memory_stats.return_value = [
             (10 * 1024**3, 2 * 1024**3)  # 10GB total, 2GB free
@@ -269,16 +269,16 @@ class TestReplicaManagerLifecycle:
         evicted = manager.maybe_evict(bytes_needed=1024 * 1024, device_id=0)
 
         assert len(evicted) >= 1
-        assert servicer.store_engine.unload_instance.called
+        assert servicer.store_engine.unload_replica.called
 
     def test_periodic_evict(self):
         """Test periodic eviction."""
         servicer = MockServicer()
-        servicer.store_engine.unload_instance.return_value = 0
-        servicer.store_engine.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_replica.return_value = 0
+        servicer.store_engine.disable_remote_replica_access.return_value = True
         manager = ReplicaManager(servicer)
 
-        # Add evictable model
+        # Add evictable artifact
         manager.add_ref("model1", 0, 1234, 1024 * 1024)
         manager.remove_ref("model1", 0, 1234)
 
@@ -290,8 +290,8 @@ class TestReplicaManagerLifecycle:
     def test_shutdown_evict_local_replicas(self):
         """Test evicting local replicas during shutdown."""
         servicer = MockServicer()
-        servicer.store_engine.unload_instance.return_value = 0
-        servicer.store_engine.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_replica.return_value = 0
+        servicer.store_engine.disable_remote_replica_access.return_value = True
         manager = ReplicaManager(servicer)
 
         # Add local and global models
@@ -314,24 +314,24 @@ class TestReplicaManagerLifecycle:
         assert manager.get_replica_info("global1", 0) is not None
 
     def test_confirm_model_with_pid(self):
-        """Test model confirmation with PID tracking."""
+        """Test artifact confirmation with PID tracking."""
         servicer = MockServicer()
-        servicer.store_engine.wait_instance_ready.return_value = 0
-        servicer.store_engine.enable_remote_instance_access.return_value = Mock(
-            model_size=1024, device_id=0, remote_memory_keys=[], buffer_sizes=[]
+        servicer.store_engine.wait_replica_ready.return_value = 0
+        servicer.store_engine.enable_remote_replica_access.return_value = Mock(
+            artifact_size=1024, device_id=0, remote_memory_keys=[], buffer_sizes=[]
         )
 
-        # Configure global store stub to handle RegisterModelReplica
+        # Configure global store stub to handle RegisterReplica
         mock_response = Mock()
         mock_response.status = 0  # OK status
         mock_response.replica_id = "replica-123"
-        servicer.global_store_stub.RegisterModelReplica.return_value = mock_response
+        servicer.global_store_stub.RegisterReplica.return_value = mock_response
 
         manager = ReplicaManager(servicer)
 
         # Add reference first (since confirm_model no longer handles this)
         manager.add_ref(
-            model_path="model1",
+            disk_path="model1",
             device_id=0,  # GPU device 0
             pid=1234,
             size_bytes=1024,
@@ -345,19 +345,19 @@ class TestReplicaManagerLifecycle:
         assert 1234 in info.pids
 
     def test_unload_model_with_ref_count(self):
-        """Test unloading model respects reference counting."""
+        """Test unloading artifact respects reference counting."""
         servicer = MockServicer()
-        servicer.store_engine.unload_instance.return_value = 0
-        servicer.store_engine.disable_remote_instance_access.return_value = True
+        servicer.store_engine.unload_replica.return_value = 0
+        servicer.store_engine.disable_remote_replica_access.return_value = True
         manager = ReplicaManager(servicer)
 
-        # Add model with references
+        # Add artifact with references
         manager.add_ref("model1", 0, 1234, 1024)
         manager.add_ref("model1", 0, 5678, 1024)
 
         # Try to unload with PID 1234
-        success = manager.unload_model(
-            model_path="model1",
+        success = manager.unload_replica(
+            disk_path="model1",
             device_type=store_daemon_pb2.DEVICE_TYPE_GPU,
             device_id=0,
             pid=1234,
@@ -365,17 +365,17 @@ class TestReplicaManagerLifecycle:
 
         # Should succeed but not actually unload
         assert success is True
-        assert not servicer.store_engine.unload_instance.called
+        assert not servicer.store_engine.unload_replica.called
 
-        # Model should still have one reference
+        # Artifact should still have one reference
         info = manager.get_replica_info("model1", 0)
         assert info is not None
         assert info.ref_count == 1
         assert 5678 in info.pids
 
         # Unload with last PID
-        success = manager.unload_model(
-            model_path="model1",
+        success = manager.unload_replica(
+            disk_path="model1",
             device_type=store_daemon_pb2.DEVICE_TYPE_GPU,
             device_id=0,
             pid=5678,
@@ -383,7 +383,7 @@ class TestReplicaManagerLifecycle:
 
         # Should actually unload now
         assert success is True
-        assert servicer.store_engine.unload_instance.called
+        assert servicer.store_engine.unload_replica.called
 
     def test_concurrent_operations(self):
         """Test thread safety of concurrent operations."""
@@ -394,21 +394,21 @@ class TestReplicaManagerLifecycle:
         def add_refs():
             try:
                 for i in range(100):
-                    manager.add_ref(f"model{i % 10}", 0, i, 1024)
+                    manager.add_ref(f"artifact{i % 10}", 0, i, 1024)
             except Exception as e:
                 errors.append(e)
 
         def remove_refs():
             try:
                 for i in range(100):
-                    manager.remove_ref(f"model{i % 10}", 0, i)
+                    manager.remove_ref(f"artifact{i % 10}", 0, i)
             except Exception as e:
                 errors.append(e)
 
         def get_models():
             try:
                 for _ in range(50):
-                    manager.get_loaded_models()
+                    manager.get_loaded_replicas()
             except Exception as e:
                 errors.append(e)
 
@@ -428,13 +428,13 @@ class TestReplicaManagerLifecycle:
         # Should complete without errors
         assert len(errors) == 0
 
-    @patch("scstore.store_daemon.replica_manager.MODEL_REF_COUNT")
+    @patch("scstore.store_daemon.replica_manager.ARTIFACT_REF_COUNT")
     @patch("scstore.store_daemon.replica_manager.GPU_CACHE_BYTES")
     @patch("scstore.store_daemon.replica_manager.EVICTIONS_TOTAL")
     def test_metrics_updates(self, mock_evictions, mock_cache_bytes, mock_ref_count):
         """Test that metrics are properly updated."""
         servicer = MockServicer()
-        servicer.store_engine.unload_instance.return_value = 0
+        servicer.store_engine.unload_replica.return_value = 0
         servicer.store_engine.get_gpu_memory_stats.return_value = [
             (10 * 1024**3, 5 * 1024**3)
         ]
@@ -442,7 +442,7 @@ class TestReplicaManagerLifecycle:
 
         # Add reference - should update ref count
         manager.add_ref("model1", 0, 1234, 1024, keep_for_global=True)
-        mock_ref_count.labels.assert_called_with(model="model1", device_id="0")
+        mock_ref_count.labels.assert_called_with(artifact="model1", device_id="0")
         mock_ref_count.labels().set.assert_called_with(1)
 
         # Get GPU stats - should update cache bytes
@@ -450,7 +450,7 @@ class TestReplicaManagerLifecycle:
         mock_cache_bytes.labels.assert_any_call(type="global")
         mock_cache_bytes.labels().set.assert_called()
 
-        # Evict model
+        # Evict artifact
         manager.remove_ref("model1", 0, 1234)
         evicted = manager.maybe_evict(1024, 0)
         if evicted:

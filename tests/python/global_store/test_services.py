@@ -4,7 +4,7 @@
 
 import pytest
 
-from scstore.global_store.models import ModelReplica, Worker, MemoryType
+from scstore.global_store.models import Replica, Worker, MemoryType
 from scstore.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
 
 
@@ -83,7 +83,7 @@ class TestServices:
     def test_worker_service_unregistration(self, services):
         """Test worker unregistration."""
         worker_service = services["worker"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
 
         # Register worker
         worker = worker_service.register_worker(
@@ -98,9 +98,9 @@ class TestServices:
         )
 
         # Register a replica for this worker
-        replica = model_service.register_replica(
-            ModelReplica(
-                model_id="test_model",
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -116,7 +116,7 @@ class TestServices:
         assert success is True
 
         # Verify replica is marked unavailable
-        found_replicas = model_service.list_replicas(model_id="test_model")
+        found_replicas = artifact_service.list_replicas(artifact_id="test_artifact")
         assert len(found_replicas) == 1
         assert found_replicas[0].is_available is False
 
@@ -149,9 +149,9 @@ class TestServices:
         accepting_count = sum(1 for w in accepting_workers if w.accepting_new_requests)
         assert accepting_count >= 2
 
-    def test_model_service_registration(self, services, repositories):
-        """Test model replica registration."""
-        model_service = services["model"]
+    def test_artifact_service_registration(self, services, repositories):
+        """Test artifact replica registration."""
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Register worker first
@@ -167,8 +167,8 @@ class TestServices:
         )
 
         # Register replica
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -178,12 +178,12 @@ class TestServices:
             worker_id=worker.worker_id,
         )
 
-        registered = model_service.register_replica(replica)
+        registered = artifact_service.register_replica(replica)
         assert registered.replica_id is not None
 
         # Register again (should update)
-        replica2 = ModelReplica(
-            model_id="test_model",
+        replica2 = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -194,14 +194,14 @@ class TestServices:
             max_concurrency=20,
         )
 
-        updated = model_service.register_replica(replica2)
+        updated = artifact_service.register_replica(replica2)
         assert updated.replica_id == registered.replica_id
         assert updated.memory_size == 2048
         assert updated.max_concurrency == 20
 
-    def test_model_service_unregistration(self, services):
-        """Test model replica unregistration."""
-        model_service = services["model"]
+    def test_artifact_service_unregistration(self, services):
+        """Test artifact replica unregistration."""
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Register worker and replica
@@ -216,9 +216,9 @@ class TestServices:
             )
         )
 
-        replica = model_service.register_replica(
-            ModelReplica(
-                model_id="test_model",
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -230,16 +230,16 @@ class TestServices:
         )
 
         # Unregister replica
-        success = model_service.unregister_replica(replica.replica_id, "test_model")
+        success = artifact_service.unregister_replica(replica.replica_id, "test_artifact")
         assert success is True
 
         # Verify replica is removed
-        found_replicas = model_service.list_replicas(model_id="test_model")
+        found_replicas = artifact_service.list_replicas(artifact_id="test_artifact")
         assert len(found_replicas) == 0
 
-    def test_model_service_list_replicas(self, services):
-        """Test listing model replicas."""
-        model_service = services["model"]
+    def test_artifact_service_list_replicas(self, services):
+        """Test listing artifact replicas."""
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Register worker
@@ -256,9 +256,9 @@ class TestServices:
 
         # Register multiple replicas
         for i in range(3):
-            model_service.register_replica(
-                ModelReplica(
-                    model_id=f"model_{i}",
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id=f"model_{i}",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080 + i,
@@ -270,18 +270,18 @@ class TestServices:
             )
 
         # List all replicas
-        all_replicas = model_service.list_replicas()
+        all_replicas = artifact_service.list_replicas()
         assert len(all_replicas) >= 3
 
-        # List replicas for specific model
-        model_0_replicas = model_service.list_replicas(model_id="model_0")
-        assert len(model_0_replicas) == 1
-        assert model_0_replicas[0].model_id == "model_0"
+        # List replicas for specific artifact
+        replicas = artifact_service.list_replicas(artifact_id="model_0")
+        assert len(replicas) == 1
+        assert replicas[0].artifact_id == "model_0"
 
     def test_transport_service_request(self, services, repositories):
         """Test transport request logic."""
         transport_service = services["transport"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Setup worker and replica
@@ -296,9 +296,9 @@ class TestServices:
             )
         )
 
-        replica = model_service.register_replica(
-            ModelReplica(
-                model_id="test_model",
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -312,7 +312,7 @@ class TestServices:
 
         # Request transport
         selected, transport_id = transport_service.request_transport(
-            model_id="test_model",
+            artifact_id="test_artifact",
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
@@ -333,7 +333,7 @@ class TestServices:
         # No replicas available
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
-                model_id="nonexistent_model",
+                artifact_id="nonexistent_artifact",
                 source_node_id="source",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -343,7 +343,7 @@ class TestServices:
     def test_transport_service_concurrency_limit(self, services):
         """Test concurrency limiting."""
         transport_service = services["transport"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Setup worker and replica with low concurrency
@@ -358,9 +358,9 @@ class TestServices:
             )
         )
 
-        replica = model_service.register_replica(
-            ModelReplica(
-                model_id="test_model",
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -376,7 +376,7 @@ class TestServices:
         transport_ids = []
         for i in range(2):
             _, transport_id = transport_service.request_transport(
-                model_id="test_model",
+                artifact_id="test_artifact",
                 source_node_id=f"source_{i}",
                 source_address="192.168.2.1",
                 source_port=9090 + i,
@@ -386,7 +386,7 @@ class TestServices:
         # Third request should timeout (no capacity)
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
-                model_id="test_model",
+                artifact_id="test_artifact",
                 source_node_id="source_3",
                 source_address="192.168.2.1",
                 source_port=9093,
@@ -398,7 +398,7 @@ class TestServices:
 
         # Now request should succeed
         _, transport_id = transport_service.request_transport(
-            model_id="test_model",
+            artifact_id="test_artifact",
             source_node_id="source_3",
             source_address="192.168.2.1",
             source_port=9093,
@@ -413,15 +413,15 @@ class TestServices:
         with pytest.raises(NotFoundError):
             transport_service.complete_transport("nonexistent_transport_id")
 
-    def test_model_service_validation(self, services):
-        """Test model service validation."""
-        model_service = services["model"]
+    def test_artifact_service_validation(self, services):
+        """Test artifact service validation."""
+        artifact_service = services["artifact"]
 
-        # Missing model id
+        # Missing artifact id
         with pytest.raises(ValidationError):
-            model_service.register_replica(
-                ModelReplica(
-                    model_id="",  # Empty model id
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="",  # Empty artifact id
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -435,7 +435,7 @@ class TestServices:
     def test_transport_service_with_load_balancing(self, services):
         """Test transport service with multiple replicas and load balancing."""
         transport_service = services["transport"]
-        model_service = services["model"]
+        artifact_service = services["artifact"]
         worker_service = services["worker"]
 
         # Register multiple workers
@@ -459,9 +459,9 @@ class TestServices:
         memory_types = [MemoryType.GPU, MemoryType.GPU, MemoryType.RAM]
 
         for i, (load, mem_type) in enumerate(zip(loads, memory_types)):
-            replica = model_service.register_replica(
-                ModelReplica(
-                    model_id="balanced_model",
+            replica = artifact_service.register_replica(
+                Replica(
+                    artifact_id="balanced_artifact",
                     node_id=f"node_{i}",
                     node_address=f"192.168.1.{i+1}",
                     node_port=8080,
@@ -477,7 +477,7 @@ class TestServices:
 
         # Request transport - should select GPU replica with lower load (node_1)
         selected, transport_id = transport_service.request_transport(
-            model_id="balanced_model",
+            artifact_id="balanced_artifact",
             source_node_id="client",
             source_address="192.168.2.1",
             source_port=9000,

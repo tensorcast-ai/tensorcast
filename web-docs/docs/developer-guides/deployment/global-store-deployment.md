@@ -6,12 +6,12 @@ sidebar_position: 2
 
 # Global Store Deployment Best Practices
 
-The Global Store is a centralized model registry service that manages model metadata, worker registration, and state synchronization across the distributed model serving infrastructure.
+The Global Store is a centralized artifact registry service that manages artifact metadata, worker registration, and state synchronization across the distributed artifact serving infrastructure.
 
 ## Architecture Overview
 
 The Global Store provides:
-- **Centralized Model Registry**: Tracks all models and their replicas across the cluster
+- **Centralized Artifact Registry**: Tracks all artifacts and their replicas across the cluster
 - **Worker Management**: Handles worker registration, heartbeats, and health monitoring
 - **State Synchronization**: Ensures consistency across distributed workers
 - **High Availability**: Supports persistent storage and recovery mechanisms
@@ -113,7 +113,7 @@ docker run -d \
   -v /var/lib/global_store:/data \
   -e GLOBAL_STORE_DB_PATH=/data/models.db \
   -e GLOBAL_STORE_MAX_WORKERS=20 \
-  hub.i.basemind.com/stepcast/global-model-store:latest
+  hub.i.basemind.com/stepcast/global-store:latest
 ```
 
 ### 4. Kubernetes Deployment (High Availability)
@@ -137,7 +137,7 @@ python -m scstore.global_store --db-file /var/lib/global_store/models.db
 
 Benefits:
 - **Automatic Recovery**: Global Store recovers state from database on restart
-- **Worker State Preservation**: Maintains worker registrations and model assignments
+- **Worker State Preservation**: Maintains worker registrations and artifact assignments
 - **Audit Trail**: Preserves historical data for debugging
 
 ### 2. Recovery Mechanisms
@@ -146,12 +146,12 @@ The Global Store implements several recovery features:
 
 #### Database Recovery
 - Automatically initiated on startup when using persistent storage
-- Restores worker registrations, model metadata, and replica assignments
+- Restores worker registrations, artifact metadata, and replica assignments
 - Validates data integrity during recovery
 
 #### Worker Re-registration
 - Workers can perform recovery registration after Global Store restart
-- Preserves worker identity and model assignments when possible
+- Preserves worker identity and artifact assignments when possible
 - Supports state synchronization after recovery
 
 #### State Synchronization
@@ -165,7 +165,7 @@ The Global Store implements several recovery features:
 Available at `http://<host>:<metrics_port>/metrics`:
 - Worker registration/deregistration counts
 - Active worker count
-- Model registration metrics
+- Artifact registration metrics
 - Request latencies
 - Error rates
 
@@ -181,7 +181,7 @@ curl http://localhost:8001/health
 #### Web UI Monitoring
 Access at `http://<host>:<ui_port>`:
 - Real-time worker status
-- Model distribution visualization
+- Artifact distribution visualization
 - System metrics dashboard
 - Configuration viewer
 
@@ -204,7 +204,7 @@ spec:
     spec:
       containers:
       - name: global-store
-        image: hub.i.basemind.com/stepcast/global-model-store:latest
+        image: hub.i.basemind.com/stepcast/global-store:latest
         env:
         - name: GLOBAL_STORE_DB_PATH
           value: /data/models.db
@@ -262,7 +262,7 @@ spec:
 
 - **CPU**: 2-4 cores for moderate load, 4-8 cores for high load
 - **Memory**: 4-8 GB minimum, 16 GB recommended for large deployments
-- **Storage**: 20-50 GB SSD for database, depending on model count
+- **Storage**: 20-50 GB SSD for database, depending on artifact count
 
 ### 2. Database Maintenance
 
@@ -349,7 +349,7 @@ python -m scstore.global_store
    # Trigger full state sync for specific worker
    grpcurl -d '{"worker_id": "worker-123"}' \
      localhost:50051 \
-     global_store.GlobalModelStore/RequestFullStateSync
+     global_store.GlobalStore/RequestFullStateSync
    ```
 
 ## Conclusion
@@ -360,4 +360,4 @@ The Global Store is designed for high availability through:
 - State synchronization protocols
 - Comprehensive monitoring and metrics
 
-Follow these best practices to ensure reliable operation of your model serving infrastructure.
+Follow these best practices to ensure reliable operation of your artifact serving infrastructure.

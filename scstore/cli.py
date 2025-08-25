@@ -47,7 +47,7 @@ def cli():
 @click.option(
     "--storage-path",
     default="",
-    help="Path to model storage directory (default: '')",
+    help="Path to artifact storage directory (default: '')",
 )
 @click.option(
     "--mem-pool-size",
@@ -73,7 +73,7 @@ def cli():
 @click.option(
     "--enable-p2p-access",
     is_flag=True,
-    help="Whether model registration is required (default: True)",
+    help="Whether artifact registration is required (default: True)",
 )
 @click.option(
     "--enable-rdma",

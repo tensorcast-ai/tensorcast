@@ -12,11 +12,11 @@
 namespace stepcast::store {
 
 // ---------------------------------------------------------------------------
-// Helper for propagating request-id & model-id across std::async / thread pools
+// Helper for propagating request-id & replica-id across std::async / thread pools
 // ---------------------------------------------------------------------------
 
 // Wrap a callable so that it automatically restores the current request_id
-// and model_id in the new thread before executing the underlying functor.
+// and artifact_id in the new thread before executing the underlying functor.
 //
 // Example:
 //   auto fut = std::async(std::launch::async,
@@ -26,11 +26,11 @@ namespace stepcast::store {
 template <typename Fn>
 auto with_trace_ctx(Fn&& fn) {
   std::string rid = TraceManager::current_request_id();
-  std::string mid = TraceManager::current_model_id();
+  std::string mid = TraceManager::current_artifact_id();
   return [rid = std::move(rid), mid = std::move(mid), fn = std::forward<Fn>(fn)](
              auto&&... args) mutable -> decltype(auto) {
     TraceManager::RequestIdGuard _rid_guard(rid);
-    TraceManager::ModelIdGuard _mid_guard(mid);
+    TraceManager::ArtifactIdGuard _mid_guard(mid);
     return std::invoke(std::forward<decltype(fn)>(fn), std::forward<decltype(args)>(args)...);
   };
 }

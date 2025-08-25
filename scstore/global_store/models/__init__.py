@@ -2,8 +2,8 @@
 
 """Domain models for Global Store."""
 
-from .model_replica import MemoryType, ModelReplica
+from .replica import MemoryType, Replica
 from .transport import Transport
 from .worker import Worker
 
-__all__ = ["ModelReplica", "Transport", "Worker", "MemoryType"]
+__all__ = ["Replica", "Transport", "Worker", "MemoryType"]

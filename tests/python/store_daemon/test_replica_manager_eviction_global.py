@@ -45,16 +45,16 @@ def test_global_cache_fraction_eviction(fraction: float, expected_min_evict: int
     manager = ReplicaManager(servicer)
     for i in range(3):
         manager.add_ref(
-            model_path=f"model{i}",
+            disk_path=f"artifact{i}",
             device_id=0,
             pid=1000 + i,
             size_bytes=1 * 1024**3,
             keep_for_global=True,
         )
         # Remove ref to make it evictable
-        manager.remove_ref(f"model{i}", 0, 1000 + i)
+        manager.remove_ref(f"artifact{i}", 0, 1000 + i)
         # Ensure deterministic ordering by making accesses equally old
-        manager._replicas[ReplicaKey(f"model{i}", 0)].last_access_ts -= i + 1
+        manager._replicas[ReplicaKey(f"artifact{i}", 0)].last_access_ts -= i + 1
 
     # bytes_needed=0 to test pure limit behaviour
     candidates = manager._select_eviction_candidates(bytes_needed=0, device_id=0)

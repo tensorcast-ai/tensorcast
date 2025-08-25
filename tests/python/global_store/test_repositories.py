@@ -4,7 +4,7 @@
 
 import pytest
 
-from scstore.global_store.models import ModelReplica, Worker, MemoryType
+from scstore.global_store.models import Replica, Worker, MemoryType
 
 
 class TestRepositories:
@@ -89,13 +89,13 @@ class TestRepositories:
         accepting_count = sum(1 for w in accepting_workers if w.accepting_new_requests)
         assert accepting_count >= 2  # At least workers 0 and 2
 
-    def test_model_replica_repository_crud(self, repositories):
-        """Test ModelReplica CRUD operations."""
+    def test_artifact_replica_repository_crud(self, repositories):
+        """Test Replica CRUD operations."""
         replica_repo = repositories["replica"]
 
         # Create
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -105,10 +105,10 @@ class TestRepositories:
             worker_id="worker1",
         )
         created = replica_repo.create(replica)
-        assert created.model_id == "test_model"
+        assert created.artifact_id == "test_artifact"
 
         # Find by ID
-        found = replica_repo.find_by_id(created.replica_id, "test_model")
+        found = replica_repo.find_by_id(created.replica_id, "test_artifact")
         assert found is not None
         assert found.memory_type == MemoryType.GPU
 
@@ -118,17 +118,17 @@ class TestRepositories:
         assert updated.max_concurrency == 20
 
         # Delete
-        deleted = replica_repo.delete(created.replica_id, "test_model")
+        deleted = replica_repo.delete(created.replica_id, "test_artifact")
         assert deleted is True
 
-    def test_model_replica_repository_find_by_model(self, repositories):
-        """Test finding replicas by model name."""
+    def test_artifact_replica_repository_find_by_model(self, repositories):
+        """Test finding replicas by artifact name."""
         replica_repo = repositories["replica"]
 
         # Create replicas for different models
         for i in range(3):
-            replica = ModelReplica(
-                model_id=f"model_{i % 2}",  # Two different models
+            replica = Replica(
+                artifact_id=f"model_{i % 2}",  # Two different models
                 node_id=f"node_{i}",
                 node_address=f"192.168.1.{i+1}",
                 node_port=8080,
@@ -139,15 +139,15 @@ class TestRepositories:
             )
             replica_repo.create(replica)
 
-        # Find replicas for model_0
-        model_0_replicas = replica_repo.find_by_model("model_0")
-        assert len(model_0_replicas) >= 2  # Created for indices 0 and 2
+        # Find replicas for artifact name 'model_0'
+        replicas = replica_repo.find_by_artifact("model_0")
+        assert len(replicas) >= 2  # Created for indices 0 and 2
 
-        # Find replicas for model_1
-        model_1_replicas = replica_repo.find_by_model("model_1")
-        assert len(model_1_replicas) >= 1  # Created for index 1
+        # Find replicas for artifact name 'model_1'
+        replicas = replica_repo.find_by_artifact("model_1")
+        assert len(replicas) >= 1  # Created for index 1
 
-    def test_model_replica_load_balancing(self, repositories):
+    def test_artifact_replica_load_balancing(self, repositories):
         """Test load balancing query."""
         replica_repo = repositories["replica"]
         worker_repo = repositories["worker"]
@@ -167,8 +167,8 @@ class TestRepositories:
 
         # Create replicas with different priorities
         replicas = [
-            ModelReplica(
-                model_id="test_model",
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -178,8 +178,8 @@ class TestRepositories:
                 current_requests=5,
                 worker_id="worker1",
             ),
-            ModelReplica(
-                model_id="test_model",
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node2",
                 node_address="192.168.1.2",
                 node_port=8080,
@@ -189,8 +189,8 @@ class TestRepositories:
                 current_requests=2,
                 worker_id="worker1",
             ),
-            ModelReplica(
-                model_id="test_model",
+            Replica(
+                artifact_id="test_artifact",
                 node_id="node3",
                 node_address="192.168.1.3",
                 node_port=8080,
@@ -207,7 +207,7 @@ class TestRepositories:
 
         # Test load balancing selection
         selected = replica_repo.find_available_for_transport(
-            "test_model", heartbeat_timeout_seconds=60
+            "test_artifact", heartbeat_timeout_seconds=60
         )
 
         # Should select GPU replica (lowest load among GPU replicas)
@@ -215,17 +215,17 @@ class TestRepositories:
         assert selected.memory_type == MemoryType.GPU
         assert selected.current_requests == 3  # Incremented by query
 
-    def test_model_replica_no_available_for_transport(self, repositories):
+    def test_artifact_replica_no_available_for_transport(self, repositories):
         """Test when no replicas are available for transport."""
         replica_repo = repositories["replica"]
 
         # No replicas created
         selected = replica_repo.find_available_for_transport(
-            "nonexistent_model", heartbeat_timeout_seconds=60
+            "nonexistent_artifact", heartbeat_timeout_seconds=60
         )
         assert selected is None
 
-    def test_model_replica_full_capacity(self, repositories):
+    def test_artifact_replica_full_capacity(self, repositories):
         """Test replicas at full capacity."""
         replica_repo = repositories["replica"]
         worker_repo = repositories["worker"]
@@ -244,8 +244,8 @@ class TestRepositories:
         worker_repo.create(worker)
 
         # Create replica at full capacity
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -259,7 +259,7 @@ class TestRepositories:
 
         # Should not be selected for transport
         selected = replica_repo.find_available_for_transport(
-            "test_model", heartbeat_timeout_seconds=60
+            "test_artifact", heartbeat_timeout_seconds=60
         )
         assert selected is None
 
@@ -269,8 +269,8 @@ class TestRepositories:
         replica_repo = repositories["replica"]
 
         # Create a replica first for foreign key constraint
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -285,13 +285,13 @@ class TestRepositories:
         from scstore.global_store.models import Transport
         transport = Transport(
             replica_id=created_replica.replica_id,
-            model_id="test_model",
+            artifact_id="test_artifact",
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9000,
         )
         created_transport = transport_repo.create(transport)
-        assert created_transport.model_id == "test_model"
+        assert created_transport.artifact_id == "test_artifact"
 
         # Find by ID
         found = transport_repo.find_by_id(created_transport.transport_id)
@@ -322,8 +322,8 @@ class TestRepositories:
 
         # Create replicas for this worker
         for i in range(3):
-            replica = ModelReplica(
-                model_id=f"worker_model_{i}",
+            replica = Replica(
+                artifact_id=f"worker_model_{i}",
                 node_id="temp_node",
                 node_address="192.168.1.100",
                 node_port=8080 + i,
@@ -340,6 +340,6 @@ class TestRepositories:
 
         # Verify replicas are marked unavailable
         for i in range(3):
-            replicas = replica_repo.find_by_model(f"worker_model_{i}")
+            replicas = replica_repo.find_by_artifact(f"worker_model_{i}")
             assert len(replicas) == 1
             assert replicas[0].is_available is False

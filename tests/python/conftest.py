@@ -39,7 +39,7 @@ def setup_logging():
 def in_memory_db():
     """
     Fixture that provides an in-memory DuckDB database for testing.
-    This is used by the GlobalModelStoreServicer internally.
+    This is used by the GlobalStoreServicer internally.
     """
     if duckdb is None:
         # Skip only if a test actually requests this fixture in an environment

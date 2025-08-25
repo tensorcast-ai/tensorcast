@@ -1,6 +1,6 @@
 ---
 title: Global Store Development Guide
-description: Development guide for the centralized model registry and coordination service
+description: Development guide for the centralized artifact registry and coordination service
 sidebar_position: 2
 ---
 
@@ -21,19 +21,19 @@ scstore/global_store/
 ├── init.sql              # Database schema
 ├── models/               # Domain models
 │   ├── __init__.py
-│   ├── model_replica.py  # ModelReplica entity
+│   ├── replica.py        # Replica entity
 │   ├── worker.py         # Worker entity
 │   └── transport.py      # Transport entity
 ├── repositories/         # Data access layer
 │   ├── __init__.py
 │   ├── base.py          # Base repository
-│   ├── model_replica_repository.py
+│   ├── replica_repository.py
 │   ├── worker_repository.py
 │   ├── transport_repository.py
 │   └── chunk_directory_repository.py
 ├── services/            # Business logic layer
 │   ├── __init__.py
-│   ├── model_service.py
+│   ├── artifact_service.py
 │   ├── transport_service.py
 │   ├── worker_service.py
 │   ├── chunk_service.py
@@ -56,14 +56,14 @@ graph TD
     C --> E[Database<br/>DuckDB]
 
     subgraph Service Layer
-        B1[ModelService]
+        B1[ArtifactService]
         B2[TransportService]
         B3[WorkerService]
         B4[RecoveryService]
     end
 
     subgraph Repository Layer
-        C1[ModelReplicaRepository]
+        C1[ReplicaRepository]
         C2[WorkerRepository]
         C3[TransportRepository]
     end
@@ -82,17 +82,16 @@ The Global Store exposes its functionality through a gRPC interface defined in [
 
 ### Service Groups
 
-#### Model Replica Management
-- `RegisterModelReplica`: Register a new model replica
-- `UpdateModelReplica`: Update replica heartbeat
-- `UnregisterModelReplica`: Remove a replica
-- `GetModelInfo`: Retrieve model metadata
-- `GetModelReplica`: Get replica details
-- `ListModelReplicas`: Query replicas with filters
+#### Artifact Replica Management
+- `RegisterReplica`: Register a new artifact replica
+- `UpdateReplica`: Update replica heartbeat
+- `UnregisterReplica`: Remove a replica
+- `GetArtifactInfoById`: Retrieve artifact replicas by content-addressed ID
+- `ListReplicas`: Query replicas with filters
 
 #### Transport Operations
-- `RequestModelReplicaTransport`: Request model transfer with load balancing
-- `CompleteModelReplicaTransport`: Mark transport as completed
+- `RequestReplicaTransport`: Request artifact transfer with load balancing
+- `CompleteReplicaTransport`: Mark transport as completed
 
 #### Worker Management
 - `RegisterWorker`: Register Store Daemon worker
@@ -110,32 +109,32 @@ The Global Store exposes its functionality through a gRPC interface defined in [
 
 ## Service Layer Details
 
-### ModelService
-Manages model replica registration and lifecycle.
+### ArtifactService
+Manages artifact replica registration and lifecycle.
 
 ```python
-class ModelService:
-    def register_replica(self, replica_info: ModelReplicaInfo) -> ModelReplica:
-        """Register or update a model replica."""
+class ArtifactService:
+    def register_replica(self, replica_info: ReplicaInfo) -> Replica:
+        """Register or update a artifact replica."""
 
     def update_heartbeat(self, replica_id: UUID) -> None:
         """Update replica's last heartbeat timestamp."""
 
-    def get_model_replicas(self, model_id: str) -> List[ModelReplica]:
-        """Get all replicas for a model, prioritized by availability."""
+    def get_model_replicas(self, artifact_id: str) -> List[Replica]:
+        """Get all replicas for a artifact, prioritized by availability."""
 ```
 
 ### TransportService
-Coordinates model transfers with intelligent load balancing.
+Coordinates artifact transfers with intelligent load balancing.
 
 ```python
 class TransportService:
     def request_transport(
         self,
-        model_id: str,
+        artifact_id: str,
         target_node_id: str
-    ) -> Tuple[ModelReplica, UUID]:
-        """Request model transport with load balancing."""
+    ) -> Tuple[Replica, UUID]:
+        """Request artifact transport with load balancing."""
 
     def complete_transport(self, transport_id: UUID) -> None:
         """Complete transport and release resources."""
@@ -167,7 +166,7 @@ Manages distributed chunk directory queries and updates.
 ```python
 class ChunkService:
     def query_chunk_locations(
-        self, model_id: str, chunk_indices: Optional[List[int]] = None
+        self, artifact_id: str, chunk_indices: Optional[List[int]] = None
     ) -> List[ChunkLocation]:
         """Return candidate locations for requested chunks."""
 
@@ -223,9 +222,9 @@ class BaseRepository:
 The complete schema is defined in `init.sql`. Key tables:
 
 - **workers**: Store Daemon registrations
-- **model_replicas**: Model instance locations
+- **replicas**: Artifact instance locations
 - **replica_counters**: High-frequency load tracking
-- **model_transports**: In-flight transfers
+- **transports**: In-flight transfers
 - **chunk_directory**: Chunk-level metadata and state
 
 ## Configuration
@@ -255,8 +254,8 @@ GLOBAL_STORE_OPTIMIZE_INTERVAL_MS=3600000
 Global Store exposes Prometheus metrics on `:8000/metrics`:
 
 ### Key Metrics
-- `global_store_model_replicas`: Total replica count
-- `global_store_model_replicas_per_model`: Per-model distribution
+- `global_store_replicas_total`: Total replica count
+- `global_store_replicas_per_artifact`: Per-artifact distribution
 - `global_store_transport_requests_total`: Transport success/failure
 - `global_store_transport_wait_seconds`: Load balancer latency
 - `global_store_state_sync_operations_total`: HA sync operations
@@ -270,7 +269,7 @@ from scstore.global_store.metrics import (
 )
 
 # In service methods
-REPLICA_GAUGE.labels(model_id=model_id).inc()
+REPLICA_GAUGE.labels(artifact_id=artifact_id).inc()
 TRANSPORT_COUNTER.labels(status="success").inc()
 ```
 
@@ -315,7 +314,7 @@ pytest tests/python/global_store/test_services.py -v
 
 ### Adding a New Feature
 
-1. **Define Domain Model** (if needed)
+1. **Define Domain Artifact** (if needed)
    ```python
    # models/new_model.py
    @dataclass
@@ -328,7 +327,7 @@ pytest tests/python/global_store/test_services.py -v
    ```python
    # repositories/new_repository.py
    class NewRepository(BaseRepository):
-       def create(self, model: NewModel) -> NewModel:
+       def create(self, artifact: NewModel) -> NewModel:
            # Implementation
    ```
 

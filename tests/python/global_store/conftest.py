@@ -10,17 +10,17 @@ from uuid import uuid4
 import pytest
 import duckdb
 
-from scstore.global_store.grpc_service import GlobalModelStoreServicer
+from scstore.global_store.grpc_service import GlobalStoreServicer
 from scstore.proto import global_store_pb2
 from scstore.global_store.config import GlobalStoreConfig
-from scstore.global_store.models import ModelReplica, Worker, Transport, MemoryType
+from scstore.global_store.models import Replica, Worker, Transport, MemoryType
 from scstore.global_store.repositories import (
-    ModelReplicaRepository,
+    ReplicaRepository,
     TransportRepository,
     WorkerRepository,
 )
 from scstore.global_store.services import (
-    ModelService,
+    ArtifactService,
     TransportService,
     WorkerService,
 )
@@ -116,8 +116,8 @@ class MockContext:
 
 @pytest.fixture
 def servicer():
-    """Create an in-memory GlobalModelStoreServicer for testing"""
-    return GlobalModelStoreServicer()
+    """Create an in-memory GlobalStoreServicer for testing"""
+    return GlobalStoreServicer()
 
 
 @pytest.fixture
@@ -172,7 +172,7 @@ def db_connection():
 def repositories(db_connection):
     """Create repository instances."""
     return {
-        "replica": ModelReplicaRepository(db_connection),
+        "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
         "worker": WorkerRepository(db_connection),
     }
@@ -182,7 +182,7 @@ def repositories(db_connection):
 def services(repositories):
     """Create service instances."""
     return {
-        "model": ModelService(repositories["replica"]),
+        "artifact": ArtifactService(repositories["replica"]),
         "transport": TransportService(
             repositories["replica"], repositories["transport"]
         ),
@@ -210,9 +210,9 @@ def sample_worker():
 
 @pytest.fixture
 def sample_replica():
-    """Create a sample ModelReplica instance for testing."""
-    return ModelReplica(
-        model_id="test_model",
+    """Create a sample Replica instance for testing."""
+    return Replica(
+        artifact_id="test_artifact",
         node_id="node1",
         node_address="192.168.1.1",
         node_port=8080,
@@ -238,15 +238,15 @@ def temp_db_file():
 # Test utilities
 # =============================================================================
 
-def create_test_replicas(num_replicas, model_id="test_model", memory_types=None):
+def create_test_replicas(num_replicas, artifact_id="test_artifact", memory_types=None):
     """Create multiple test replicas with varied configurations."""
     if memory_types is None:
         memory_types = [MemoryType.GPU, MemoryType.RAM, MemoryType.DISK]
 
     replicas = []
     for i in range(num_replicas):
-        replicas.append(ModelReplica(
-            model_id=model_id,
+        replicas.append(Replica(
+            artifact_id=artifact_id,
             node_id=f"node{i}",
             node_address=f"192.168.1.{i+1}",
             node_port=8080 + i,

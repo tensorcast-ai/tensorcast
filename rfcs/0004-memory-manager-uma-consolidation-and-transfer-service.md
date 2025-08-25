@@ -3,7 +3,7 @@
 ## 1. Overview
 
 ### Problem Statement
-The current `MemoryManager` mixes orchestration (location-level state, lifecycle) with execution details (DVMP pin/evict, direct-write planning, streaming buffer sizing, P2P export, sink construction). `ModelMemoryCoordinator` (UMA) owns chunk mapping and VRAM allocations but some DVMP interactions still occur in `MemoryManager`. This blending:
+The current `MemoryManager` mixes orchestration (location-level state, lifecycle) with execution details (DVMP pin/evict, direct-write planning, streaming buffer sizing, P2P export, sink construction). `ReplicaMemoryCoordinator` (UMA) owns chunk mapping and VRAM allocations but some DVMP interactions still occur in `MemoryManager`. This blending:
 - Increases lock coupling and risk of deadlocks
 - Inflates cognitive load and change amplification
 - Duplicates responsibilities (state, ranges, resource mgmt)
@@ -13,7 +13,7 @@ The current `MemoryManager` mixes orchestration (location-level state, lifecycle
 - Slim `MemoryManager` to an orchestration façade for location-level state and async task lifecycle
 - Introduce `TransferService` to own data movement paths and staging buffer management
 - Remove direct DVMP logic from `MemoryManager` where possible
-- Keep external `Model` API stable; enable incremental migration
+- Keep external `Artifact` API stable; enable incremental migration
 
 ### Non-Goals / Constraints
 - No new `HostStagingManager` module. All staging logic (ensure/release streaming pinned buffer, alignment checks, sizing heuristics) is owned by `TransferService`.
@@ -24,12 +24,12 @@ The current `MemoryManager` mixes orchestration (location-level state, lifecycle
 
 ## 2. Scope
 - In-scope:
-  - `core/store/model/memory_manager.{h,cc}`
-  - `core/store/model/model_memory_coordinator.{h,cc}`
+  - `core/store/replica/memory_manager.{h,cc}`
+  - `core/store/replica/replica_memory_coordinator.{h,cc}`
   - `core/store/loader/*` sink/source interaction points (construction via façade)
   - `core/common/memory/distributed_virtual_memory_pool.*` used by UMA
 - Out-of-scope:
-  - Public `Model` API changes (none)
+  - Public `Artifact` API changes (none)
   - Loader behavioral changes beyond delegating orchestration to `MemoryManager`
 
 ---
@@ -42,7 +42,7 @@ The current `MemoryManager` mixes orchestration (location-level state, lifecycle
   - CPU↔GPU copies, sink building, and pump-based loads
   - P2P export/unexport with DVMP pin leases and communicator registration
   - Direct-write token planning for DVMP write paths
-- `ModelMemoryCoordinator` (UMA) handles:
+- `ReplicaMemoryCoordinator` (UMA) handles:
   - DRAM allocation via DVMP and lazy VRAM allocations per device via `CudaMemory`
   - Chunk mapping (CPU/GPU states), missing-chunk queries
   - Sync-from-DVMP of CPU chunk states (already has APIs)
@@ -58,7 +58,7 @@ This creates cross-layer coupling and duplicated logic (e.g., range building, DV
   - Owns only location-level state machine and async orchestration
   - Delegates data movement to `TransferService`
   - Delegates unified memory facts and DVMP-affecting logic to UMA
-- ModelMemoryCoordinator (UMA):
+- ReplicaMemoryCoordinator (UMA):
   - Sole authority for DRAM/VRAM allocations and base pointers
   - Owns chunk states and update/lock ordering around transfers
   - Provides direct-write planning utilities (fold DVMP pin/leases inside UMA)
@@ -69,16 +69,16 @@ This creates cross-layer coupling and duplicated logic (e.g., range building, DV
 - ChunkExportService (new lightweight service):
   - Single place to perform CPU/GPU chunk export/unexport for P2P
   - Coalesces chunk indices into byte ranges
-  - Uses UMA for base pointers, model bytes, and DVMP-backed pin leases (via UMA helpers)
+  - Uses UMA for base pointers, artifact bytes, and DVMP-backed pin leases (via UMA helpers)
   - Registers/unregisters ranges with `CommunicateEngine` and records registration info for later unexport (holds keepalive)
   - Emits metrics and minimizes DVMP/UMA lock time
 
 ### 4.2 Diagram
 ```mermaid
 flowchart TD
-  A[Model] --> B[Loader]
+  A[Artifact] --> B[Loader]
   A --> C[MemoryManager (Façade)]
-  C --> G[UMA (ModelMemoryCoordinator)]
+  C --> G[UMA (ReplicaMemoryCoordinator)]
   C --> T[TransferService]
   C --> K[ChunkExportService]
   T --> H[DVMP IO]
@@ -98,7 +98,7 @@ sequenceDiagram
   participant UMA as UMA
   participant CE as CommunicateEngine
   MM->>CES: export_chunks(loc, indices)
-  CES->>UMA: get base ptr/model bytes; (optional) create_direct_write_token
+  CES->>UMA: get base ptr/artifact bytes; (optional) create_direct_write_token
   UMA-->>CES: base ptr, token/leases
   CES->>CES: coalesce indices -> ranges
   CES->>CE: register ranges (keys)
@@ -148,11 +148,11 @@ sequenceDiagram
   - `plan_direct_write(ranges)` → delegate UMA `create_direct_write_token(key, ranges)`
   - `export_chunks_for_p2p(location, chunks, engine)` / `unexport_chunks_for_p2p(...)` → delegate to `ChunkExportService`
 
-### 5.2 ModelMemoryCoordinator (UMA)
+### 5.2 ReplicaMemoryCoordinator (UMA)
 - New/clarified public APIs:
-  - `absl::StatusOr<DirectWriteToken> create_direct_write_token(const InstanceKey&, absl::Span<const VaRange> ranges)`
+  - `absl::StatusOr<DirectWriteToken> create_direct_write_token(const ReplicaKey&, absl::Span<const VaRange> ranges)`
     - Encapsulates DVMP `pin_range` and VA->local address translation; returns keepalive for leases
-  - `absl::Status post_gpu_load_policy(const InstanceKey&, size_t bytes, enum { EvictCPU, MarkPreemptible, Keep })`
+  - `absl::Status post_gpu_load_policy(const ReplicaKey&, size_t bytes, enum { EvictCPU, MarkPreemptible, Keep })`
 - Existing APIs retained:
   - `allocate(key, bytes)`; `get_or_create_gpu_allocation(key, device_id)` (sole VRAM authority)
   - `sync_cpu_chunk_states(key)` and range-based overload (already present)
@@ -160,7 +160,7 @@ sequenceDiagram
 
 ### 5.3 TransferService (new)
 - Responsibilities:
-  - Own staging buffer lifecycle for model instance
+  - Own staging buffer lifecycle for artifact instance
     - `ensure_streaming_buffer(capacity_chunks)` with DVMP/pool alignment checks
     - `release_streaming_buffer()`
   - Data paths:
@@ -171,8 +171,8 @@ sequenceDiagram
     - Range building and coalescing for chunk indices
     - Sink construction for CPU (`DVMPRegionSink` with injected `plan_direct_write_fn`) and GPU (`GPUMemorySink`)
 - Staging heuristics:
-  - Respect model’s `max_buffer_bytes_` cap from façade when sizing SPB
-  - GPU target default chunks: 8; CPU target default chunks: 2; both bounded by ceil(model_bytes/chunk_size)
+  - Respect artifact’s `max_buffer_bytes_` cap from façade when sizing SPB
+  - GPU target default chunks: 8; CPU target default chunks: 2; both bounded by ceil(artifact_size/chunk_size)
   - Validate alignment: pool chunk must divide DVMP chunk; pool chunk must be 4KiB multiple
 
 ### 5.4 ChunkExportService (new lightweight)
@@ -186,17 +186,17 @@ sequenceDiagram
   - Best-effort rollback on partial failures: unregister already-registered keys and release leases
   - Correct device_id propagation for GPU; CPU uses communicator CPU device type without hardcoded ordinal
 - Example API (internal):
-  - `absl::StatusOr<CommRegistrationInfo> export_chunks(const InstanceKey&, ModelLocation, absl::Span<const uint32_t> chunks, communicator::CommunicateEngine&)`
-  - `absl::Status unexport_chunks(const InstanceKey&, ModelLocation, communicator::CommunicateEngine&)`
+  - `absl::StatusOr<CommRegistrationInfo> export_chunks(const ReplicaKey&, MemoryLocation, absl::Span<const uint32_t> chunks, communicator::CommunicateEngine&)`
+  - `absl::Status unexport_chunks(const ReplicaKey&, MemoryLocation, communicator::CommunicateEngine&)`
 
 ### 5.5 File Layout
-- `core/store/model/transfer_service.{h,cc}`
-- `core/store/model/chunk_export_service.{h,cc}`
+- `core/store/replica/transfer_service.{h,cc}`
+- `core/store/replica/chunk_export_service.{h,cc}`
 - No HostStagingManager module; staging resides in `TransferService`
 
 ---
 
-## 6. State Model and Locking
+## 6. State Artifact and Locking
 - MemoryManager location-level states remain: UNALLOCATED → ALLOCATED → LOADING → LOADED/FAILED
 - UMA owns chunk-level states and DVMP-lock ordering
 - Lock ordering and rules:
@@ -228,7 +228,7 @@ sequenceDiagram
 ---
 
 ## 8. Backwards Compatibility
-- Public `Model` API remains unchanged
+- Public `Artifact` API remains unchanged
 - Callers of `MemoryManager` continue to use existing methods; behavior is preserved
 - Deprecations:
   - `MemoryManager::get_cpu_chunk_size()` → use `MemoryManager::get_chunk_size()` (UMA value)
@@ -259,7 +259,7 @@ sequenceDiagram
 
 ### 10.1 Metrics & Telemetry
 - Preserve/standardize counters:
-  - `model_chunk_state_transitions_total{location,state}` (UMA)
+  - `artifact{location,state}` (UMA)
   - `chunk_exports_total{location}` (ChunkExportService)
   - `transfer_bytes_total{direction}` and `transfer_latency_ms{path}` (TransferService)
 - Logs:
@@ -284,7 +284,7 @@ sequenceDiagram
 
 - Implemented (Phase 1 + parts of Phase 2/3/4)
   - TransferService
-    - Added `core/store/model/transfer_service.{h,cc}`
+    - Added `core/store/replica/transfer_service.{h,cc}`
     - Owns SPB lifecycle (`ensure_streaming_buffer`/`release_streaming_buffer`) with alignment checks
     - Delegated `MemoryManager::copy_data_async` CPU↔GPU copies与 `load_async_from_source` 的数据泵执行
     - Internalizes sink construction and chunk-range coalescing
@@ -298,16 +298,16 @@ sequenceDiagram
     - Removed direct DVMP reservation helpers (`allocate_pageable_cpu_region` / `reserve_dvmp_region_locked_`); CPU allocation now goes through UMA exclusively
     - `plan_direct_write(...)` now delegates to UMA `create_direct_write_token(...)`
   - ChunkExportService
-    - Added `core/store/model/chunk_export_service.{h,cc}`
+    - Added `core/store/replica/chunk_export_service.{h,cc}`
     - CPU/GPU export implemented; uses UMA for CPU direct-write token and CommunicateEngine registration
     - Implemented `unexport_chunks(...)` with precise unregister using `CommRegistrationInfo` and internal lease keepalive cache; dropping record releases leases
 - Build system
-  - Updated `core/store/model/BUILD` to include new libraries and fixed communicator label
+  - Updated `core/store/replica/BUILD` to include new libraries and fixed communicator label
   - Added UMA dependency on `//core/store:direct_write`
-  - Bazel build green: `bazel build //core/store/model:all`
+  - Bazel build green: `bazel build //core/store/replica:all`
 
 - Deviations / Partial items
-  - `ChunkExportService` currently caches by `(InstanceKey, Location)`. Idempotent re-export/unexport across overlapping chunk sets is out of scope for this step and can be extended later by per-range keys.
+  - `ChunkExportService` currently caches by `(ReplicaKey, Location)`. Idempotent re-export/unexport across overlapping chunk sets is out of scope for this step and can be extended later by per-range keys.
   - DVMP metadata snapshot via `MemoryManager::chunk_snapshot()` remains (read-only). All write/lease/evict operations now funnel through UMA/TransferService.
 
 - Locking and correctness

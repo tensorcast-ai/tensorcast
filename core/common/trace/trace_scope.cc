@@ -8,20 +8,20 @@
 
 namespace stepcast::store {
 
-TraceScope::TraceScope(const std::string& model, const std::string& stage)
-    : model_(model), request_id_(TraceManager::current_request_id()) {
-  id_ = TraceManager::instance().begin_span(model_, request_id_, stage);
+TraceScope::TraceScope(const std::string& replica, const std::string& stage)
+    : artifact_id_(replica), request_id_(TraceManager::current_request_id()) {
+  id_ = TraceManager::instance().begin_span(artifact_id_, request_id_, stage);
 }
 
 TraceScope::TraceScope(TraceScope&& other) noexcept
-    : model_(std::move(other.model_)), request_id_(std::move(other.request_id_)), id_(other.id_) {
+    : artifact_id_(std::move(other.artifact_id_)), request_id_(std::move(other.request_id_)), id_(other.id_) {
   other.id_ = kInvalidSpan;
 }
 
 TraceScope& TraceScope::operator=(TraceScope&& other) noexcept {
   if (this != &other) {
     Finish();
-    model_ = std::move(other.model_);
+    artifact_id_ = std::move(other.artifact_id_);
     request_id_ = std::move(other.request_id_);
     id_ = other.id_;
     other.id_ = kInvalidSpan;
@@ -35,7 +35,7 @@ TraceScope::~TraceScope() {
 
 void TraceScope::Finish() {
   if (id_ != kInvalidSpan) {
-    TraceManager::instance().end_span(model_, request_id_, id_);
+    TraceManager::instance().end_span(artifact_id_, request_id_, id_);
     id_ = kInvalidSpan;
   }
 }

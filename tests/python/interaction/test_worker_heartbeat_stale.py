@@ -14,7 +14,7 @@ from tests.python.interaction.utils import FakeContext
 # Helper
 # -----------------------------------------------------------------------------
 
-def _register_replica(gs, *, model_id: str, node_id: str, max_concurrency: int = 1):
+def _register_replica(gs, *, artifact_id: str, node_id: str, max_concurrency: int = 1):
     """Register a worker + GPU replica.  Returns the *worker_id*."""
 
     worker_req = global_store_pb2.RegisterWorkerRequest(
@@ -37,13 +37,13 @@ def _register_replica(gs, *, model_id: str, node_id: str, max_concurrency: int =
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model_id,
+    reg_req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact_id,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
     )
-    rep_resp = gs.RegisterModelReplica(reg_req, FakeContext())
+    rep_resp = gs.RegisterReplica(reg_req, FakeContext())
     assert rep_resp.status == global_store_pb2.Status.OK
 
     return worker_resp.worker_id
@@ -58,10 +58,10 @@ def test_worker_heartbeat_stale(global_store_service):
     """Replicas whose workers have stale heartbeats must not be scheduled (Scenario 8)."""
 
     gs = global_store_service
-    model = "stale-worker-model"
+    artifact = "stale-worker-artifact"
 
     # Register single replica
-    worker_id = _register_replica(gs, model_id=model, node_id="STALE")
+    worker_id = _register_replica(gs, artifact_id=artifact, node_id="STALE")
 
     # Mark the worker as stale – simulate heartbeat older than timeout
     # The repository helper sets `last_heartbeat` to 1970-01-01, well beyond any cutoff.
@@ -69,13 +69,13 @@ def test_worker_heartbeat_stale(global_store_service):
 
     # Attempt to request transport; should time out quickly because the only replica
     # belongs to the stale worker and thus is filtered out.
-    req = global_store_pb2.RequestModelReplicaTransportRequest(
-        model_id=model,
+    req = global_store_pb2.RequestReplicaTransportRequest(
+        artifact_id=artifact,
         wait_timeout_ms=10,  # small timeout to keep test fast
     )
 
     start = time.perf_counter()
-    resp = gs.RequestModelReplicaTransport(req, FakeContext())
+    resp = gs.RequestReplicaTransport(req, FakeContext())
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     assert resp.status == global_store_pb2.Status.TIMED_OUT

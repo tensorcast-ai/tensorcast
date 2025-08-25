@@ -28,12 +28,12 @@ from scstore.global_store.webui_backend.grpc_client import (
     GlobalStoreClientConfig,
 )
 from scstore.proto import global_store_pb2, global_store_pb2_grpc
-from tests.python.global_store.test_grpc_client import MockGlobalModelStoreServicer
+from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 console = Console()
 
 
-class PerformanceTestServicer(MockGlobalModelStoreServicer):
+class PerformanceTestServicer(MockGlobalStoreServicer):
     """Extended test servicer for performance testing."""
 
     def __init__(self, num_workers: int = 100, num_models: int = 50):
@@ -57,13 +57,13 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
                 )
             )
 
-        # Generate model replicas
+        # Generate artifact replicas
         self.replicas = {}
         for i in range(num_models):
-            model_id = f"model-{i}"
+            artifact_id = f"artifact-{i}"
             replicas = []
 
-            # Each model has 1-5 replicas
+            # Each artifact has 1-5 replicas
             num_replicas = 1 + (i % 5)
             for j in range(num_replicas):
                 # Map to enum values explicitly for type safety
@@ -85,7 +85,7 @@ class PerformanceTestServicer(MockGlobalModelStoreServicer):
                     )
                 )
 
-            self.replicas[model_id] = replicas
+            self.replicas[artifact_id] = replicas
 
 
 async def measure_latency(
@@ -100,9 +100,9 @@ async def measure_latency(
         if operation == "list_workers":
             await client.list_active_workers()
         elif operation == "list_replicas":
-            await client.list_model_replicas()
-        elif operation == "get_model":
-            await client.get_model_info("model-0")
+            await client.list_replicas()
+        elif operation == "get_artifact":
+            await client.get_artifact_info("artifact-0")
         elif operation == "summary":
             await client.get_summary_stats()
 
@@ -123,7 +123,7 @@ async def measure_throughput(
     client: GlobalStoreClient, duration: int = 10
 ) -> Dict[str, Any]:
     """Measure throughput over a duration."""
-    operations = ["list_workers", "list_replicas", "get_model", "summary"]
+    operations = ["list_workers", "list_replicas", "get_artifact", "summary"]
     counts = dict.fromkeys(operations, 0)
     errors = dict.fromkeys(operations, 0)
 
@@ -137,9 +137,9 @@ async def measure_throughput(
                 if op == "list_workers":
                     await client.list_active_workers()
                 elif op == "list_replicas":
-                    await client.list_model_replicas()
-                elif op == "get_model":
-                    await client.get_model_info(f"model-{counts[op] % 50}")
+                    await client.list_replicas()
+                elif op == "get_artifact":
+                    await client.get_artifact_info(f"artifact-{counts[op] % 50}")
                 elif op == "summary":
                     await client.get_summary_stats()
                 counts[op] += 1
@@ -176,7 +176,7 @@ async def run_performance_test():
             ("grpc.max_send_message_length", 50 * 1024 * 1024),
         ],
     )
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
     port = server.add_insecure_port("[::]:0")
     server.start()
     console.print(
@@ -202,7 +202,7 @@ async def run_performance_test():
         operations = [
             ("List Workers", "list_workers"),
             ("List Replicas", "list_replicas"),
-            ("Get Model Info", "get_model"),
+            ("Get Artifact Info", "get_artifact"),
             ("Get Summary", "summary"),
         ]
 
@@ -258,7 +258,7 @@ async def run_performance_test():
             tasks = []
             for i in range(level):
                 tasks.append(client.list_active_workers())
-                tasks.append(client.list_model_replicas())
+                tasks.append(client.list_replicas())
 
             await asyncio.gather(*tasks)
 
@@ -327,7 +327,7 @@ async def run_performance_test():
         rate_table.add_column("Rate (ops/sec)", style="yellow")
         rate_table.add_column("Errors", style="red")
 
-        for op in ["list_workers", "list_replicas", "get_model", "summary"]:
+        for op in ["list_workers", "list_replicas", "get_artifact", "summary"]:
             rate_table.add_row(
                 op.replace("_", " ").title(),
                 f"{throughput_stats['counts'][op]:,}",

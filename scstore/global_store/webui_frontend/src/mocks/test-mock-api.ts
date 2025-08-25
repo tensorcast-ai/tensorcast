@@ -35,7 +35,7 @@ export async function testAllMockEndpoints() {
     { name: 'Summary', path: '/summary' },
     { name: 'Workers', path: '/workers' },
     { name: 'Nodes', path: '/nodes' },
-    { name: 'Models', path: '/models' },
+    { name: 'Artifacts', path: '/artifacts' },
 
     // Paginated endpoint
     { name: 'Transports (page 1)', path: '/transports', params: { page: '1', page_size: '2' } },
@@ -44,11 +44,11 @@ export async function testAllMockEndpoints() {
     // Filtered endpoints
     { name: 'Replicas (all)', path: '/replicas' },
     { name: 'Replicas (by worker)', path: '/replicas', params: { worker_id: 'worker-1' } },
-    { name: 'Replicas (by model)', path: '/replicas', params: { model_id: 'mi2:inx1:data1' } },
+    { name: 'Replicas (by artifact)', path: '/replicas', params: { artifact_id: 'mi2:inx1:data1' } },
 
     // Single item endpoints
     { name: 'Single Worker', path: '/workers/worker-1' },
-    { name: 'Single Model', path: '/models/mi2:inx1:data1' },
+    { name: 'Single Artifact', path: '/artifacts/mi2:inx1:data1' },
     { name: 'Single Replica', path: '/replicas/replica-1' },
   ];
 

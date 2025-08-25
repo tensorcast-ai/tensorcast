@@ -15,9 +15,9 @@
 
 namespace stepcast::store::loader {
 
-absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& model_dir) {
+absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& artifact_dir) {
   namespace fs = std::filesystem;
-  fs::path dir(model_dir);
+  fs::path dir(artifact_dir);
   const fs::path index_path = dir / "tensor_index.json";
   if (!fs::exists(index_path)) {
     return absl::NotFoundError("tensor_index.json not found");

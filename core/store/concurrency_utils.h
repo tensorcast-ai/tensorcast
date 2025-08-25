@@ -43,7 +43,7 @@ inline void skip_if_insufficient_gpus(int required_gpus, const std::string& test
 }
 
 // Random utilities
-inline size_t random_model_size(size_t min_mb = 1, size_t max_mb = 100) {
+inline size_t random_artifact_size(size_t min_mb = 1, size_t max_mb = 100) {
   static thread_local std::mt19937 gen(
       std::random_device{}() ^ std::hash<std::thread::id>{}(std::this_thread::get_id()));
   std::uniform_int_distribution<size_t> dist(min_mb, max_mb);
@@ -57,7 +57,7 @@ inline int random_device_ordinal(int max_device = 3) {
   return dist(gen);
 }
 
-inline std::string generate_model_name(const std::string& prefix, int index) {
+inline std::string generate_artifact_id(const std::string& prefix, int index) {
   return prefix + "_" + std::to_string(index);
 }
 
@@ -77,7 +77,7 @@ class ThreadBarrier {
 // Verification helpers
 struct LoadResult {
   bool success;
-  std::string model_id;
+  std::string artifact_id;
   store::DeviceKey device;
   std::chrono::milliseconds load_time;
   std::string error_message;
@@ -110,32 +110,32 @@ class ConcurrentLoadTracker {
   std::vector<LoadResult> results_;
 };
 
-// Test fixture for creating temporary model files
-class TempModelFixture {
+// Test fixture for creating temporary artifact files
+class TempArtifactFixture {
  public:
-  explicit TempModelFixture(const std::string& test_name)
+  explicit TempArtifactFixture(const std::string& test_name)
       : root_path_(std::filesystem::temp_directory_path() / ("store_engine_" + test_name)) {
     std::filesystem::create_directories(root_path_);
   }
 
-  ~TempModelFixture() {
+  ~TempArtifactFixture() {
     std::error_code ec;
     std::filesystem::remove_all(root_path_, ec);
   }
 
-  std::filesystem::path create_model(const std::string& model_id, size_t size_bytes) {
-    auto model_dir = root_path_ / model_id;
-    std::filesystem::create_directories(model_dir);
-    auto data_file = model_dir / "tensor.data_0";
+  std::filesystem::path create_artifact(const std::string& artifact_id, size_t size_bytes) {
+    auto artifact_dir = root_path_ / artifact_id;
+    std::filesystem::create_directories(artifact_dir);
+    auto data_file = artifact_dir / "tensor.data_0";
     if (!create_dummy_file(data_file, size_bytes)) {
-      throw std::runtime_error("Failed to create dummy model file");
+      throw std::runtime_error("Failed to create dummy artifact file");
     }
     // Ensure RFC-0007 metadata so DiskLoader can initialize
-    auto st = write_rfc0007_descriptor_for_standard_model_dir(model_dir);
+    auto st = write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir);
     if (!st.ok()) {
       throw std::runtime_error(std::string("Failed to write descriptor/index: ") + std::string(st.message()));
     }
-    return model_dir;
+    return artifact_dir;
   }
 
   std::filesystem::path root() const {
@@ -167,8 +167,8 @@ inline store::DeviceKey make_gpu_key(int ordinal, const std::string& uuid = "") 
   return store::DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, .uuid = uuid};
 }
 
-inline store::InstanceKey make_instance_key(const std::string& model_id, int gpu_ordinal) {
-  return store::InstanceKey{.model_id = model_id, .device = make_gpu_key(gpu_ordinal), .replica = 0};
+inline store::ReplicaKey make_replica_key(const std::string& artifact_id, int gpu_ordinal) {
+  return store::ReplicaKey{.artifact_id = artifact_id, .device = make_gpu_key(gpu_ordinal), .replica = 0};
 }
 
 } // namespace stepcast::tests::store_engine

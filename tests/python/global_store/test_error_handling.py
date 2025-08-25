@@ -7,7 +7,7 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-from scstore.global_store.models import ModelReplica, Worker, MemoryType
+from scstore.global_store.models import Replica, Worker, MemoryType
 from scstore.global_store.exceptions import (
     NotFoundError,
     ValidationError,
@@ -24,8 +24,8 @@ class TestErrorHandling:
 
     def test_register_replica_invalid_memory_size(self, services):
         """Test registering replica with invalid memory size."""
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -36,13 +36,13 @@ class TestErrorHandling:
         )
 
         with pytest.raises(ValidationError) as exc_info:
-            services["model"].register_replica(replica)
+            services["artifact"].register_replica(replica)
         assert "memory_size must be positive" in str(exc_info.value)
 
     def test_register_replica_invalid_max_concurrency(self, services):
         """Test registering replica with invalid max concurrency."""
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -54,14 +54,14 @@ class TestErrorHandling:
         )
 
         with pytest.raises(ValidationError) as exc_info:
-            services["model"].register_replica(replica)
+            services["artifact"].register_replica(replica)
         assert "max_concurrency must be positive" in str(exc_info.value)
 
     def test_transport_request_no_replicas(self, services):
         """Test requesting transport when no replicas exist."""
         with pytest.raises(TimeoutError) as exc_info:
             services["transport"].request_transport(
-                model_id="nonexistent_model",
+                artifact_id="nonexistent_artifact",
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -74,8 +74,8 @@ class TestErrorHandling:
         # Create replicas with max_concurrency=1
         replicas = []
         for i in range(3):
-            replica = ModelReplica(
-                model_id="test_model",
+            replica = Replica(
+                artifact_id="test_artifact",
                 node_id=f"node{i}",
                 node_address=f"192.168.1.{i+1}",
                 node_port=8080 + i,
@@ -92,7 +92,7 @@ class TestErrorHandling:
         # Request should timeout when all replicas are at capacity
         with pytest.raises(TimeoutError) as exc_info:
             services["transport"].request_transport(
-                model_id="test_model",
+                artifact_id="test_artifact",
                 source_node_id="node1",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -144,8 +144,8 @@ class TestErrorHandling:
     def test_concurrent_replica_updates(self, services, repositories):
         """Test concurrent updates to the same replica."""
         # Create initial replica
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -154,13 +154,13 @@ class TestErrorHandling:
             device_id=0,
             worker_id="worker1",
         )
-        replica_id = services["model"].register_replica(replica)
+        replica_id = services["artifact"].register_replica(replica)
 
         # Function to update replica concurrently
         def update_replica(thread_id):
             try:
-                updated_replica = ModelReplica(
-                    model_id="test_model",
+                updated_replica = Replica(
+                    artifact_id="test_artifact",
                     node_id="node1",
                     node_address="192.168.1.1",
                     node_port=8080,
@@ -169,7 +169,7 @@ class TestErrorHandling:
                     device_id=0,
                     worker_id="worker1",
                 )
-                services["model"].register_replica(updated_replica)
+                services["artifact"].register_replica(updated_replica)
             except Exception as e:
                 pass  # Expected in concurrent scenarios
 
@@ -185,7 +185,7 @@ class TestErrorHandling:
             thread.join()
 
         # Verify replica exists and has valid state
-        replicas = services["model"].list_replicas(model_id="test_model")
+        replicas = services["artifact"].list_replicas(artifact_id="test_artifact")
         assert len(replicas) == 1
         assert replicas[0].memory_size > 0
 
@@ -193,7 +193,7 @@ class TestErrorHandling:
         """Test handling of invalid memory type in gRPC request."""
         # Create request with invalid memory type value
         # Note: protobuf enums will accept any integer value
-        request = global_store_pb2.RegisterModelReplicaRequest(
+        request = global_store_pb2.RegisterReplicaRequest(
             mem_info=global_store_pb2.MemoryInfo(
                 node_id="node1",
                 node_address="192.168.1.1",
@@ -202,12 +202,12 @@ class TestErrorHandling:
                 memory_type=999,  # Invalid enum value # type: ignore
                 device_id=0,
             ),
-            model_id="test_model",
+            artifact_id="test_artifact",
             worker_id=registered_worker,
         )
 
         # The servicer should reject unknown enum values
-        response = servicer.RegisterModelReplica(request, test_context)
+        response = servicer.RegisterReplica(request, test_context)
         # Should return an error status for invalid memory type
         assert response.status == global_store_pb2.Status.ERROR
         assert not response.replica_id  # No replica should be created
@@ -271,19 +271,19 @@ class TestEdgeCases:
         # Memory utilization calculation should handle large values
         assert large_worker.mem_pool_total_size == large_memory
 
-    def test_unicode_model_ids(self, services):
-        """Test handling of unicode characters in model names."""
+    def test_unicode_artifact_ids(self, services):
+        """Test handling of unicode characters in artifact names."""
         unicode_names = [
             "模型_测试",  # Chinese
             "モデル_テスト",  # Japanese
             "модель_тест",  # Russian
-            "🤖_model",  # Emoji
-            "model\u200b_test",  # Zero-width space
+            "🤖_artifact",  # Emoji
+            "artifact\u200b_test",  # Zero-width space
         ]
 
-        for model_id in unicode_names:
-            replica = ModelReplica(
-                model_id=model_id,
+        for artifact_id in unicode_names:
+            replica = Replica(
+                artifact_id=artifact_id,
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -293,13 +293,13 @@ class TestEdgeCases:
                 worker_id="worker1",
             )
 
-            replica_id = services["model"].register_replica(replica)
+            replica_id = services["artifact"].register_replica(replica)
             assert replica_id
 
             # Verify retrieval works
-            replicas = services["model"].list_replicas(model_id=model_id)
+            replicas = services["artifact"].list_replicas(artifact_id=artifact_id)
             assert len(replicas) == 1
-            assert replicas[0].model_id == model_id
+            assert replicas[0].artifact_id == artifact_id
 
     def test_rapid_heartbeat_updates(self, services, repositories):
         """Test rapid heartbeat updates don't cause issues."""
@@ -335,8 +335,8 @@ class TestEdgeCases:
     def test_zero_timeout_transport_request(self, services, repositories):
         """Test transport request with zero timeout."""
         # Create a replica with unique identifiers
-        replica = ModelReplica(
-            model_id="zero_timeout_model",
+        replica = Replica(
+            artifact_id="zero_timeout_artifact",
             node_id="zero_timeout_node",
             node_address="192.168.60.1",  # Unique address
             node_port=8180,
@@ -350,38 +350,38 @@ class TestEdgeCases:
         # Request with zero timeout should work if replica is immediately available
         try:
             selected_replica, transport_id = services["transport"].request_transport(
-                model_id="zero_timeout_model",
+                artifact_id="zero_timeout_artifact",
                 source_node_id="zero_timeout_source",
                 source_address="192.168.60.2",  # Different from replica address
                 source_port=8181,
                 wait_timeout_ms=0
             )
             assert transport_id
-            assert selected_replica.model_id == "zero_timeout_model"
+            assert selected_replica.artifact_id == "zero_timeout_artifact"
         except TimeoutError:
             # Zero timeout might fail if replica isn't immediately available
             # This is acceptable behavior for zero timeout
             pass
 
-    def test_model_id_with_special_characters(self, services):
-        """Test model names with special characters."""
+    def test_artifact_id_with_special_characters(self, services):
+        """Test artifact names with special characters."""
         special_names = [
-            "model/with/slashes",
-            "model\\with\\backslashes",
-            "model:with:colons",
-            "model|with|pipes",
-            "model?with?questions",
-            "model*with*asterisks",
-            "model\"with\"quotes",
-            "model'with'apostrophes",
-            "model<with>brackets",
-            "model\twith\ttabs",
-            "model\nwith\nnewlines",
+            "artifact/with/slashes",
+            "artifact\\with\\backslashes",
+            "artifact:with:colons",
+            "artifact|with|pipes",
+            "artifact?with?questions",
+            "artifact*with*asterisks",
+            "artifact\"with\"quotes",
+            "artifact'with'apostrophes",
+            "artifact<with>brackets",
+            "artifact\twith\ttabs",
+            "artifact\nwith\nnewlines",
         ]
 
-        for model_id in special_names:
-            replica = ModelReplica(
-                model_id=model_id,
+        for artifact_id in special_names:
+            replica = Replica(
+                artifact_id=artifact_id,
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
@@ -391,9 +391,9 @@ class TestEdgeCases:
             )
 
             try:
-                replica_id = services["model"].register_replica(replica)
+                replica_id = services["artifact"].register_replica(replica)
                 # If successful, verify retrieval
-                replicas = services["model"].list_replicas(model_id=model_id)
+                replicas = services["artifact"].list_replicas(artifact_id=artifact_id)
                 assert len(replicas) == 1
             except ValidationError:
                 # Some characters might be rejected by validation

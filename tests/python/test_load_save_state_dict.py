@@ -78,13 +78,13 @@ def compare_tensor_dicts(
 
 if __name__ == "__main__":
     # Example usage:
-    # Replace with actual paths to your model files
-    # Ensure the model files exist at these paths before running.
+    # Replace with actual paths to your artifact files
+    # Ensure the artifact files exist at these paths before running.
     path_to_torch_state_dict = (
-        "/data/workspace/model-store/test-models/Qwen/Qwen3-0.6B/state_dict.pth"
+        "/data/workspace/stepcast-store/test-models/Qwen/Qwen3-0.6B/state_dict.pth"
     )
     path_to_sc_model_dir = (
-        "/data/workspace/model-store/test-models/Qwen/Qwen3-0.6B"
+        "/data/workspace/stepcast-store/test-models/Qwen/Qwen3-0.6B"
     )
 
     try:
@@ -98,6 +98,6 @@ if __name__ == "__main__":
         #     print(f"{key}: {result}")
 
     except FileNotFoundError as e:
-        print(f"Error: Model file not found. Please check the paths. Details: {e}")
+        print(f"Error: Artifact file not found. Please check the paths. Details: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")

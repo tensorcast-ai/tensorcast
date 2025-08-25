@@ -1,6 +1,6 @@
 ---
 title: StepCast Store Documentation
-description: Comprehensive documentation for StepCast Store - a high-performance, distributed model storage and loading system
+description: Comprehensive documentation for StepCast Store - a high-performance, distributed artifact storage and loading system
 sidebar_position: 1
 ---
 
@@ -50,7 +50,7 @@ graph TB
 
 | Component | Purpose | Implementation |
 |-----------|---------|----------------|
-| **Global Store** | Centralized model registry and load balancer | Python gRPC service |
+| **Global Store** | Centralized artifact registry and load balancer | Python gRPC service |
 | **Store Daemon** | Distributed worker nodes with local storage | Python gRPC + C++ core |
 | **C++ Core** | High-performance checkpoint, storage, and P2P | C++ with PyTorch integration |
 | **User Process** | Application layer using models | Python with `scstore.torch_util` |

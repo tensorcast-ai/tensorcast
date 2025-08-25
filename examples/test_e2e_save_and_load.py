@@ -4,7 +4,7 @@ import torch
 
 from scstore.torch_util import load_dict, save_dict
 
-# sudo python examples/save_vllm_model.py --model-name DeepSeek-R1-0528 --local-model-path /mnt/host0/DeepSeek-R1-0528  --storage-path /mnt/host0/scstore --tensor-parallel-size 8
+# sudo python examples/save_vllm_model.py --artifact-name DeepSeek-R1-0528 --local-artifact-path /mnt/host0/DeepSeek-R1-0528  --storage-path /mnt/host0/scstore --tensor-parallel-size 8
 directory = "/mnt/host0/scstore/DeepSeek-R1-0528-layer-8-tp-1/rank_0"
 ori_path = f"{directory}/original_state_dict.pth"
 

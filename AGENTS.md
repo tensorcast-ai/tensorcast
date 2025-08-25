@@ -5,7 +5,7 @@ This document provides guidance to **AI coding agents** (e.g., GPT‑4/5 in Curs
 ---
 
 ## Purpose
-StepCast Store is a production-grade, high-performance distributed model storage system. Automated code generation must meet the same quality bar as human contributions. This guide distills the in-repo engineering rules (see `.cursor/rules/`) into a concise reference for AI agents.
+StepCast Store is a production-grade, high-performance distributed tensor storage system. Automated code generation must meet the same quality bar as human contributions. This guide distills the in-repo engineering rules (see `.cursor/rules/`) into a concise reference for AI agents.
 
 ---
 

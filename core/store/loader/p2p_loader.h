@@ -11,9 +11,9 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
+#include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
 #include "core/store/loader/loader.h"
-#include "core/store/model/model_location.h"
 
 // Forward declaration instead of include to avoid circular dependency
 
@@ -29,9 +29,9 @@ class SeekableSource;
 namespace stepcast::store {
 
 /**
- * @brief Loader implementation for fetching model data from a remote peer via RDMA or TCP.
+ * @brief Loader implementation for fetching replica data from a remote peer via RDMA or TCP.
  */
-class P2PLoader : public IModelLoader {
+class P2PLoader : public IArtifactLoader {
  public:
   /**
    * @brief Constructs a P2PLoader.
@@ -55,11 +55,11 @@ class P2PLoader : public IModelLoader {
   absl::Status initialize() override ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Gets the expected model size from the configuration.
+   * @brief Gets the expected artifact size from the configuration.
    * Requires the loader to be initialized first.
-   * @return absl::StatusOr<uint64_t> Model size or error if not initialized or not configured.
+   * @return absl::StatusOr<uint64_t> Artifact size or error if not initialized or not configured.
    */
-  absl::StatusOr<uint64_t> get_model_size() override ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::StatusOr<uint64_t> get_artifact_size() override ABSL_LOCKS_EXCLUDED(mutex_);
 
   // NEW: Provide the data source (possibly muxed with disk fallback)
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override ABSL_LOCKS_EXCLUDED(mutex_);

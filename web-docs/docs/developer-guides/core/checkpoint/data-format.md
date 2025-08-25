@@ -8,26 +8,26 @@ sidebar_position: 3
 
 ## Overview
 
-The checkpoint system stores model data in a partitioned binary format optimized for large-scale models. This document provides complete format specifications to enable custom checkpoint loaders.
+The checkpoint system stores replica data in a partitioned binary format optimized for large-scale models. This document provides complete format specifications to enable custom checkpoint loaders.
 
 ## File Structure
 
 A checkpoint consists of multiple files in a directory:
 
 ```
-model_checkpoint/
+artifact_dir/
 ├── tensor.data_0      # First partition (up to 10GB)
 ├── tensor.data_1      # Second partition (up to 10GB)
 ├── tensor.data_N      # Additional partitions as needed
 ├── tensor_index.json  # Tensor metadata and offsets
-└── verification.json  # Model integrity information (optional)
+└── verification.json  # Replica integrity information (optional)
 ```
 
 ### Backward Compatibility
 
 For single-file models (< 10GB), the system may use:
 ```
-model_checkpoint/
+artifact_dir/
 ├── tensor.data        # Single file (legacy format)
 └── tensor_index.json  # Tensor metadata
 ```
@@ -172,7 +172,7 @@ tensor.data_N    # Nth partition
 
 For backward compatibility, single files use `tensor.data` (no suffix).
 
-## Model Verification Format
+## Replica Verification Format
 
 ### Verification File (`verification.json`)
 
@@ -180,10 +180,10 @@ Optional integrity verification data:
 
 ```json
 {
-  "model_size": 21474836480,
+  "artifact_size": 21474836480,
   "partition_count": 3,
   "hash_algorithm": "sha256",
-  "full_model_hash": "abc123...",
+  "full_artifact_hash": "abc123...",
   "partition_hashes": [
     "def456...",
     "ghi789...",
@@ -209,9 +209,9 @@ PyTorch tensors can share underlying storage (e.g., views, slices). The checkpoi
 Example:
 ```json
 {
-  "model.weight": [0, 4194304, [1024, 1024], [1024, 1], "torch.float32", 0],
-  "model.weight_T": [0, 4194304, [1024, 1024], [1, 1024], "torch.float32", 0],
-  "model.weight_slice": [0, 4194304, [512, 1024], [1024, 1], "torch.float32", 0]
+  "replica.weight": [0, 4194304, [1024, 1024], [1024, 1], "torch.float32", 0],
+  "replica.weight_T": [0, 4194304, [1024, 1024], [1, 1024], "torch.float32", 0],
+  "replica.weight_slice": [0, 4194304, [512, 1024], [1024, 1], "torch.float32", 0]
 }
 ```
 

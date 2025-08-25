@@ -8,7 +8,7 @@ sidebar_label: Communicator
 
 The **Communicator** module is STEP AI's low-level, high-performance data-movement engine. It powers peer-to-peer tensor exchange between **Store Daemon**, **Global Store**, and user processes.
 
-This document explains its internal architecture, threading model, key abstractions, data-flow, and extension points.
+This document explains its internal architecture, threading replica, key abstractions, data-flow, and extension points.
 
 > The source lives under `core/communicator/`. All code samples and line numbers below refer to that directory unless stated otherwise.
 
@@ -67,7 +67,7 @@ flowchart TB
 
 ---
 
-## 2. Threading Model
+## 2. Threading Replica
 
 The Communicator is designed for **concurrent access from multiple application threads**. Here's the complete threading architecture:
 
@@ -517,7 +517,7 @@ export STEPCAST_COMM_TCP_CONN_COUNT=16
 
 **GPU-Specific Tips:**
 1. **Chunk Size**: Match staging chunk size to typical tensor dimensions
-2. **Buffer Count**: Increase for concurrent transfers (e.g., model parallel loading)
+2. **Buffer Count**: Increase for concurrent transfers (e.g., replica parallel loading)
 3. **CUDA Streams**: Each stager uses its own CUDA stream for overlap
 4. **Device Selection**: Ensure correct `device_id` to avoid cross-GPU copies
 

@@ -24,7 +24,7 @@ def serve(
     on_started: Callable | None = None,
 ) -> None:
     """
-    Start the gRPC server for model storage.
+    Start the gRPC server for replica storage.
 
     Args:
         config: StoreDaemonConfig instance containing all server parameters.

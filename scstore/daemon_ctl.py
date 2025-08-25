@@ -57,13 +57,13 @@ class DaemonCtl:
         # TODO: cleanup
         pass
 
-    def unload_from_cpu(self, model_path):
-        request = store_daemon_pb2.UnloadModelRequest(
-            model_path=model_path,
+    def unload_from_cpu(self, disk_path):
+        request = store_daemon_pb2.UnloadReplicaRequest(
+            disk_path=disk_path,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU,
         )
         try:
-            response = self.stub.UnloadModel(request)
+            response = self.stub.UnloadReplica(request)
         except grpc.RpcError as e:
             logger.error(f"Error: {e}")
             return False
@@ -72,14 +72,14 @@ class DaemonCtl:
 
     def load_into_gpu(
         self,
-        model_path: str,
+        disk_path: str,
         replica_uuid: str,
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
     ):
         logger.debug(
-            f"load_into_gpu: {model_path}, {replica_uuid}, wait_for_completion={wait_for_completion}"
+            f"load_into_gpu: {disk_path}, {replica_uuid}, wait_for_completion={wait_for_completion}"
         )
 
         # Choose between host PID and regular PID based on the parameter
@@ -89,9 +89,9 @@ class DaemonCtl:
         else:
             logger.debug(f"Using container PID: {pid}")
 
-        request = store_daemon_pb2.LoadModelRequest(
+        request = store_daemon_pb2.MaterializeReplicaRequest(
             pid=pid,
-            model_path=model_path,
+            disk_path=disk_path,
             replica_uuid=replica_uuid,
             device_uuid=device_uuid,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -99,10 +99,10 @@ class DaemonCtl:
             keep_for_global=False,
         )
         try:
-            response = self.stub.LoadModel(request, timeout=60)
+            response = self.stub.MaterializeReplica(request, timeout=60)
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.CANCELLED:
-                raise RuntimeError(f"Model not loaded {e}") from e
+                raise RuntimeError(f"Artifact not loaded {e}") from e
             elif e.code() == grpc.StatusCode.UNAVAILABLE:
                 raise RuntimeError(
                     f"Local StoreDaemon ({self.server_address}) is not available."
@@ -111,48 +111,53 @@ class DaemonCtl:
                 raise RuntimeError(f"Error: {e}") from e
 
         load_status = response.status
-        if load_status == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_FAILED:
-            raise RuntimeError(f"Model allocation failed for {model_path}")
+        if (
+            load_status
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+        ):
+            raise RuntimeError(f"Artifact allocation failed for {disk_path}")
 
         if not wait_for_completion:
             # In async mode, return both handle and status
             logger.info(
-                f"Model allocation initiated (async): {model_path}, {replica_uuid}"
+                f"Artifact allocation initiated (async): {disk_path}, {replica_uuid}"
             )
 
             assert response.mem_handle is not None
             return response.mem_handle.cuda_ipc_handle, load_status
 
         # In sync mode, wait for confirmation
-        logger.info(f"Model loaded: {model_path}, {replica_uuid}")
+        logger.info(f"Artifact loaded: {disk_path}, {replica_uuid}")
 
         # For sync mode with new async backend, we need to confirm
         if (
             response.status
-            == store_daemon_pb2.LoadModelStatus.LOAD_MODEL_STATUS_ALLOCATED
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            # Call ConfirmModel to wait for completion
-            success = self.confirm_model_loaded(model_path, replica_uuid)
+            # Wait for asynchronous loading to complete
+            success = self.confirm_replica_loaded(disk_path, replica_uuid)
             if not success:
-                raise RuntimeError(f"Failed to confirm model loading for {model_path}")
+                raise RuntimeError(
+                    f"Failed to confirm artifact loading for {disk_path}"
+                )
 
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
-    def confirm_model_loaded(self, model_path: str, replica_uuid: str) -> bool:
-        logger.info(f"confirm_model_loaded: {model_path}, {replica_uuid}")
-        request = store_daemon_pb2.ConfirmModelRequest(
-            model_path=model_path,
+    def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
+        logger.info(f"confirm_replica_loaded: {disk_path}, {replica_uuid}")
+        request = store_daemon_pb2.ConfirmReplicaRequest(
+            disk_path=disk_path,
             replica_uuid=replica_uuid,
             target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         )
         try:
-            _ = self.stub.ConfirmModel(request)
-            logger.info("Model loaded")
+            _ = self.stub.ConfirmReplica(request)
+            logger.info("Artifact loaded")
             return True
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.CANCELLED:
-                logger.error("Model not loaded")
+                logger.error("Artifact not loaded")
                 return False
             else:
                 logger.error(f"Error: {e}")
@@ -172,13 +177,13 @@ class DaemonCtl:
             }
 
     # ------------------------------------------------------------------
-    # Memory TensorDict registration (outer-layer client API)
+    # Memory Artifact registration (outer-layer client API)
     # ------------------------------------------------------------------
 
-    def begin_register_tensor_dict(
+    def begin_register_artifact(
         self,
         *,
-        model_id: str,
+        artifact_id: str,
         device_id: int,
         total_size_bytes: int,
         enable_p2p: bool = False,
@@ -194,16 +199,16 @@ class DaemonCtl:
         Returns a dict with keys: registration_id, daemon_ipc_handle, device_id, size_bytes.
         """
 
-        if not model_id or device_id < 0 or total_size_bytes <= 0:
-            raise ValueError("Invalid arguments for begin_register_tensor_dict")
+        if not artifact_id or device_id < 0 or total_size_bytes <= 0:
+            raise ValueError("Invalid arguments for begin_register_artifact")
 
         if not tensor_index_key and tensor_index_data is None:
             raise ValueError(
                 "Either tensor_index_key or tensor_index_data must be provided"
             )
 
-        req = store_daemon_pb2.BeginRegisterTensorDictRequest(
-            model_id=model_id,
+        req = store_daemon_pb2.BeginRegisterArtifactRequest(
+            artifact_id=artifact_id,
             device_id=int(device_id),
             total_size=int(total_size_bytes),
             enable_p2p=bool(enable_p2p),
@@ -226,7 +231,7 @@ class DaemonCtl:
             req.tensor_index_key = tensor_index_key or ""
 
         try:
-            resp = self.stub.BeginRegisterTensorDict(req, timeout=timeout_s)
+            resp = self.stub.BeginRegisterArtifact(req, timeout=timeout_s)
         except grpc.RpcError as e:
             code = e.code()
             if code == grpc.StatusCode.UNAVAILABLE:
@@ -241,7 +246,7 @@ class DaemonCtl:
                 raise TimeoutError(str(e)) from e
             # if code == grpc.StatusCode.NOT_FOUND:
             # raise FileNotFoundError(str(e)) from e
-            raise RuntimeError(f"BeginRegisterTensorDict failed: {e}") from e
+            raise RuntimeError(f"BeginRegisterArtifact failed: {e}") from e
 
         return {
             "registration_id": resp.registration_id,
@@ -250,7 +255,7 @@ class DaemonCtl:
             "size_bytes": int(resp.size),
         }
 
-    def commit_registered_tensor_dict(
+    def commit_registered_artifact(
         self,
         registration_id: str,
         *,
@@ -258,17 +263,17 @@ class DaemonCtl:
     ) -> dict:
         """Commit a previously begun tensor dict registration.
 
-        Returns a dict with keys: registration_id, model_id, device_id, size_bytes, descriptor.
+        Returns a dict with keys: registration_id, artifact_id, device_id, size_bytes, descriptor.
         """
 
         if not registration_id:
             raise ValueError("registration_id is required")
 
-        req = store_daemon_pb2.CommitRegisteredTensorDictRequest(
+        req = store_daemon_pb2.CommitRegisteredArtifactRequest(
             registration_id=registration_id
         )
         try:
-            resp = self.stub.CommitRegisteredTensorDict(req, timeout=timeout_s)
+            resp = self.stub.CommitRegisteredArtifact(req, timeout=timeout_s)
         except grpc.RpcError as e:
             code = e.code()
             if code == grpc.StatusCode.UNAVAILABLE:
@@ -281,12 +286,12 @@ class DaemonCtl:
                 raise KeyError(str(e)) from e
             if code == grpc.StatusCode.DEADLINE_EXCEEDED:
                 raise TimeoutError(str(e)) from e
-            raise RuntimeError(f"CommitRegisteredTensorDict failed: {e}") from e
+            raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
 
         desc = resp.descriptor
         assert desc is not None
         descriptor_dict = {
-            "model_id": desc.model_id,
+            "artifact_id": desc.artifact_id,
             "index_multihash": desc.index_multihash,
             "data_multihash": desc.data_multihash,
             "schema_version": desc.schema_version,
@@ -295,24 +300,24 @@ class DaemonCtl:
         }
         return {
             "registration_id": resp.registration_id,
-            "model_id": resp.model_id,
+            "artifact_id": resp.artifact_id,
             "device_id": int(resp.device_id),
             "size_bytes": int(resp.size),
             "descriptor": descriptor_dict,
         }
 
-    def abort_registered_tensor_dict(
+    def abort_registered_artifact(
         self, registration_id: str, *, timeout_s: float = 15.0
     ) -> bool:
         """Abort a pending tensor dict registration and free allocated memory."""
         if not registration_id:
             raise ValueError("registration_id is required")
 
-        req = store_daemon_pb2.AbortRegisteredTensorDictRequest(
+        req = store_daemon_pb2.AbortRegisteredArtifactRequest(
             registration_id=registration_id
         )
         try:
-            resp = self.stub.AbortRegisteredTensorDict(req, timeout=timeout_s)
+            resp = self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
         except grpc.RpcError as e:
             code = e.code()
             if code == grpc.StatusCode.UNAVAILABLE:
@@ -324,11 +329,11 @@ class DaemonCtl:
             if code == grpc.StatusCode.NOT_FOUND:
                 # Treat as already-aborted/missing
                 logger.warning(
-                    "AbortRegisteredTensorDict: registration not found: %s",
+                    "AbortRegisteredArtifact: registration not found: %s",
                     registration_id,
                 )
                 return False
-            raise RuntimeError(f"AbortRegisteredTensorDict failed: {e}") from e
+            raise RuntimeError(f"AbortRegisteredArtifact failed: {e}") from e
 
         return bool(resp.ok)
 
@@ -336,25 +341,25 @@ class DaemonCtl:
     # Verification helpers
     # ------------------------------------------------------------------
 
-    def wait_model_verification(
+    def wait_artifact_verification(
         self,
-        model_identifier: str,
+        artifact_identifier: str,
         replica_uuid: str,
         timeout_ms: int = 30000,
-    ) -> store_daemon_pb2.VerificationResponse | None:
+    ) -> store_daemon_pb2.ReplicaVerificationResponse | None:
         """Block until the daemon returns a PASSED/FAILED status or timeout."""
 
-        request = store_daemon_pb2.VerificationRequest(
-            model_identifier=model_identifier,
+        request = store_daemon_pb2.ReplicaVerificationRequest(
+            artifact_id=artifact_identifier,
             replica_uuid=replica_uuid,
             timeout_ms=timeout_ms,
         )
 
         try:
-            response = self.stub.WaitModelVerification(
+            response = self.stub.WaitReplicaVerification(
                 request, timeout=timeout_ms / 1000 + 5
             )
             return response
         except grpc.RpcError as e:
-            logger.error(f"wait_model_verification RPC failed: {e}")
+            logger.error(f"wait_artifact_verification RPC failed: {e}")
             return None

@@ -187,19 +187,6 @@ sc_cc_library(
     ],
 )
 
-# Alias targets for backward compatibility
-alias(
-    name = "tcp_transport_lib",
-    actual = ":tcp_lib",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "tcp_context_lib",
-    actual = ":tcp_lib",
-    visibility = ["//visibility:public"],
-)
-
 # MTCP is part of the engine layer since it depends on gpu_tcp_stager
 # We'll define it later with the engine components
 
@@ -224,19 +211,6 @@ sc_cc_library(
         ":utils_lib",
         "//core/common:cuda_api_lib",
     ],
-)
-
-# Alias targets for backward compatibility
-alias(
-    name = "rdma_transport_lib",
-    actual = ":rdma_lib",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "rdma_context_lib",
-    actual = ":rdma_lib",
-    visibility = ["//visibility:public"],
 )
 
 # ========== Engine layer ==========
@@ -355,37 +329,7 @@ sc_cc_library(
     }),
 )
 
-# Aggregate target for backward compatibility
-sc_cc_library(
-    name = "communicator",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":base_transport_lib",
-        ":channel_lib",
-        ":common_lib",
-        ":engine_lib",
-        ":envs_lib",
-        ":epoll_wrap_lib",
-        ":gpu_tcp_stager_lib",
-        ":ibv_wrap_lib",
-        ":map_lib",
-        ":message_lib",
-        ":metric_lib",
-        ":mtcp_transport_lib",
-        ":net_dev_lib",
-        ":partition_tensor_lib",
-        ":protocol_lib",
-        ":queue_lib",
-        ":rdma_context_lib",
-        ":rdma_transport_lib",
-        ":request_lib",
-        ":tcp_context_lib",
-        ":tcp_transport_lib",
-        ":transport_message_lib",
-        ":utils_lib",
-    ],
-    alwayslink = True,
-)
+# Aggregate target removed; depend on specific libs instead.
 
 # Tests
 cc_test(

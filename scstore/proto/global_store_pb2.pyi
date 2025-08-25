@@ -132,7 +132,7 @@ class WorkerHeartbeatRequest(_message.Message):
         "accepting_new_requests",
         "state_version",
         "state_checksum",
-        "registered_model_ids",
+        "registered_artifact_ids",
         "last_successful_sync",
         "global_store_status",
     )
@@ -141,7 +141,7 @@ class WorkerHeartbeatRequest(_message.Message):
     ACCEPTING_NEW_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     STATE_VERSION_FIELD_NUMBER: _ClassVar[int]
     STATE_CHECKSUM_FIELD_NUMBER: _ClassVar[int]
-    REGISTERED_MODEL_IDS_FIELD_NUMBER: _ClassVar[int]
+    REGISTERED_ARTIFACT_IDS_FIELD_NUMBER: _ClassVar[int]
     LAST_SUCCESSFUL_SYNC_FIELD_NUMBER: _ClassVar[int]
     GLOBAL_STORE_STATUS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
@@ -149,7 +149,7 @@ class WorkerHeartbeatRequest(_message.Message):
     accepting_new_requests: bool
     state_version: int
     state_checksum: str
-    registered_model_ids: _containers.RepeatedScalarFieldContainer[str]
+    registered_artifact_ids: _containers.RepeatedScalarFieldContainer[str]
     last_successful_sync: int
     global_store_status: ConnectionStatus
     def __init__(
@@ -159,7 +159,7 @@ class WorkerHeartbeatRequest(_message.Message):
         accepting_new_requests: bool = ...,
         state_version: _Optional[int] = ...,
         state_checksum: _Optional[str] = ...,
-        registered_model_ids: _Optional[_Iterable[str]] = ...,
+        registered_artifact_ids: _Optional[_Iterable[str]] = ...,
         last_successful_sync: _Optional[int] = ...,
         global_store_status: _Optional[_Union[ConnectionStatus, str]] = ...,
     ) -> None: ...
@@ -169,25 +169,25 @@ class WorkerHeartbeatResponse(_message.Message):
         "status",
         "state_sync_required",
         "expected_state_version",
-        "obsolete_models",
+        "obsolete_replicas",
         "server_timestamp",
     )
     STATUS_FIELD_NUMBER: _ClassVar[int]
     STATE_SYNC_REQUIRED_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_STATE_VERSION_FIELD_NUMBER: _ClassVar[int]
-    OBSOLETE_MODELS_FIELD_NUMBER: _ClassVar[int]
+    OBSOLETE_REPLICAS_FIELD_NUMBER: _ClassVar[int]
     SERVER_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     status: Status
     state_sync_required: bool
     expected_state_version: int
-    obsolete_models: _containers.RepeatedScalarFieldContainer[str]
+    obsolete_replicas: _containers.RepeatedScalarFieldContainer[str]
     server_timestamp: int
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
         state_sync_required: bool = ...,
         expected_state_version: _Optional[int] = ...,
-        obsolete_models: _Optional[_Iterable[str]] = ...,
+        obsolete_replicas: _Optional[_Iterable[str]] = ...,
         server_timestamp: _Optional[int] = ...,
     ) -> None: ...
 
@@ -293,20 +293,20 @@ class WorkerLocalState(_message.Message):
     worker_id: str
     state_version: int
     state_checksum: str
-    local_replicas: _containers.RepeatedCompositeFieldContainer[ModelReplicaInfo]
+    local_replicas: _containers.RepeatedCompositeFieldContainer[ReplicaInfo]
     last_update_timestamp: int
     def __init__(
         self,
         worker_id: _Optional[str] = ...,
         state_version: _Optional[int] = ...,
         state_checksum: _Optional[str] = ...,
-        local_replicas: _Optional[_Iterable[_Union[ModelReplicaInfo, _Mapping]]] = ...,
+        local_replicas: _Optional[_Iterable[_Union[ReplicaInfo, _Mapping]]] = ...,
         last_update_timestamp: _Optional[int] = ...,
     ) -> None: ...
 
-class ModelReplicaInfo(_message.Message):
+class ReplicaInfo(_message.Message):
     __slots__ = (
-        "model_id",
+        "artifact_id",
         "replica_id",
         "memory_info",
         "max_concurrency",
@@ -314,14 +314,14 @@ class ModelReplicaInfo(_message.Message):
         "is_available",
         "registered_timestamp",
     )
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
     MAX_CONCURRENCY_FIELD_NUMBER: _ClassVar[int]
     CURRENT_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     IS_AVAILABLE_FIELD_NUMBER: _ClassVar[int]
     REGISTERED_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     replica_id: str
     memory_info: MemoryInfo
     max_concurrency: int
@@ -330,7 +330,7 @@ class ModelReplicaInfo(_message.Message):
     registered_timestamp: int
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
         memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         max_concurrency: _Optional[int] = ...,
@@ -339,27 +339,27 @@ class ModelReplicaInfo(_message.Message):
         registered_timestamp: _Optional[int] = ...,
     ) -> None: ...
 
-class ModelDescriptor(_message.Message):
+class ArtifactDescriptor(_message.Message):
     __slots__ = (
-        "model_id",
+        "artifact_id",
         "index_multihash",
         "data_multihash",
         "schema_version",
         "encoding",
     )
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     INDEX_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
     DATA_MULTIHASH_FIELD_NUMBER: _ClassVar[int]
     SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
     ENCODING_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     index_multihash: str
     data_multihash: str
     schema_version: str
     encoding: str
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         index_multihash: _Optional[str] = ...,
         data_multihash: _Optional[str] = ...,
         schema_version: _Optional[str] = ...,
@@ -414,12 +414,12 @@ class StateChange(_message.Message):
     REPLICA_INFO_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     type: StateChange.ChangeType
-    replica_info: ModelReplicaInfo
+    replica_info: ReplicaInfo
     reason: str
     def __init__(
         self,
         type: _Optional[_Union[StateChange.ChangeType, str]] = ...,
-        replica_info: _Optional[_Union[ModelReplicaInfo, _Mapping]] = ...,
+        replica_info: _Optional[_Union[ReplicaInfo, _Mapping]] = ...,
         reason: _Optional[str] = ...,
     ) -> None: ...
 
@@ -448,25 +448,23 @@ class RequestFullStateSyncResponse(_message.Message):
     NEW_STATE_CHECKSUM_FIELD_NUMBER: _ClassVar[int]
     status: Status
     new_state_version: int
-    expected_replicas: _containers.RepeatedCompositeFieldContainer[ModelReplicaInfo]
+    expected_replicas: _containers.RepeatedCompositeFieldContainer[ReplicaInfo]
     new_state_checksum: str
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
         new_state_version: _Optional[int] = ...,
-        expected_replicas: _Optional[
-            _Iterable[_Union[ModelReplicaInfo, _Mapping]]
-        ] = ...,
+        expected_replicas: _Optional[_Iterable[_Union[ReplicaInfo, _Mapping]]] = ...,
         new_state_checksum: _Optional[str] = ...,
     ) -> None: ...
 
-class GetModelInfoByIdRequest(_message.Message):
-    __slots__ = ("model_id",)
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
-    def __init__(self, model_id: _Optional[str] = ...) -> None: ...
+class GetArtifactInfoByIdRequest(_message.Message):
+    __slots__ = ("artifact_id",)
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
+    artifact_id: str
+    def __init__(self, artifact_id: _Optional[str] = ...) -> None: ...
 
-class GetModelInfoByIdResponse(_message.Message):
+class GetArtifactInfoByIdResponse(_message.Message):
     __slots__ = ("status", "replicas")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     REPLICAS_FIELD_NUMBER: _ClassVar[int]
@@ -478,13 +476,13 @@ class GetModelInfoByIdResponse(_message.Message):
         replicas: _Optional[_Iterable[_Union[MemoryInfo, _Mapping]]] = ...,
     ) -> None: ...
 
-class GetModelIndexRequest(_message.Message):
+class GetArtifactIndexRequest(_message.Message):
     __slots__ = ("tensor_index_key",)
     TENSOR_INDEX_KEY_FIELD_NUMBER: _ClassVar[int]
     tensor_index_key: str
     def __init__(self, tensor_index_key: _Optional[str] = ...) -> None: ...
 
-class GetModelIndexResponse(_message.Message):
+class GetArtifactIndexResponse(_message.Message):
     __slots__ = ("status", "tensor_index_data", "encoding", "schema_version")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     TENSOR_INDEX_DATA_FIELD_NUMBER: _ClassVar[int]
@@ -502,27 +500,27 @@ class GetModelIndexResponse(_message.Message):
         schema_version: _Optional[str] = ...,
     ) -> None: ...
 
-class ListModelReplicasRequest(_message.Message):
+class ListReplicasRequest(_message.Message):
     __slots__ = (
         "node_id",
         "node_address",
         "node_port",
         "memory_type",
         "device_id",
-        "model_id",
+        "artifact_id",
     )
     NODE_ID_FIELD_NUMBER: _ClassVar[int]
     NODE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     NODE_PORT_FIELD_NUMBER: _ClassVar[int]
     MEMORY_TYPE_FIELD_NUMBER: _ClassVar[int]
     DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     node_id: str
     node_address: str
     node_port: str
     memory_type: MemoryType
     device_id: int
-    model_id: str
+    artifact_id: str
     def __init__(
         self,
         node_id: _Optional[str] = ...,
@@ -530,12 +528,12 @@ class ListModelReplicasRequest(_message.Message):
         node_port: _Optional[str] = ...,
         memory_type: _Optional[_Union[MemoryType, str]] = ...,
         device_id: _Optional[int] = ...,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
     ) -> None: ...
 
-class ListModelReplicasResponse(_message.Message):
-    __slots__ = ("model_replicas",)
-    class ModelReplicasEntry(_message.Message):
+class ListReplicasResponse(_message.Message):
+    __slots__ = ("artifact_replicas",)
+    class ArtifactReplicasEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -547,15 +545,15 @@ class ListModelReplicasResponse(_message.Message):
             value: _Optional[_Union[MemoryInfoList, _Mapping]] = ...,
         ) -> None: ...
 
-    MODEL_REPLICAS_FIELD_NUMBER: _ClassVar[int]
-    model_replicas: _containers.MessageMap[str, MemoryInfoList]
+    ARTIFACT_REPLICAS_FIELD_NUMBER: _ClassVar[int]
+    artifact_replicas: _containers.MessageMap[str, MemoryInfoList]
     def __init__(
-        self, model_replicas: _Optional[_Mapping[str, MemoryInfoList]] = ...
+        self, artifact_replicas: _Optional[_Mapping[str, MemoryInfoList]] = ...
     ) -> None: ...
 
-class RegisterModelReplicaRequest(_message.Message):
+class RegisterReplicaRequest(_message.Message):
     __slots__ = (
-        "model_id",
+        "artifact_id",
         "mem_info",
         "max_concurrency",
         "worker_id",
@@ -565,7 +563,7 @@ class RegisterModelReplicaRequest(_message.Message):
         "disk_path",
         "descriptor",
     )
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     MEM_INFO_FIELD_NUMBER: _ClassVar[int]
     MAX_CONCURRENCY_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -574,7 +572,7 @@ class RegisterModelReplicaRequest(_message.Message):
     SCHEMA_VERSION_FIELD_NUMBER: _ClassVar[int]
     DISK_PATH_FIELD_NUMBER: _ClassVar[int]
     DESCRIPTOR_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     mem_info: MemoryInfo
     max_concurrency: int
     worker_id: str
@@ -582,10 +580,10 @@ class RegisterModelReplicaRequest(_message.Message):
     encoding: str
     schema_version: str
     disk_path: str
-    descriptor: ModelDescriptor
+    descriptor: ArtifactDescriptor
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         mem_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         max_concurrency: _Optional[int] = ...,
         worker_id: _Optional[str] = ...,
@@ -593,60 +591,60 @@ class RegisterModelReplicaRequest(_message.Message):
         encoding: _Optional[str] = ...,
         schema_version: _Optional[str] = ...,
         disk_path: _Optional[str] = ...,
-        descriptor: _Optional[_Union[ModelDescriptor, _Mapping]] = ...,
+        descriptor: _Optional[_Union[ArtifactDescriptor, _Mapping]] = ...,
     ) -> None: ...
 
-class RegisterModelReplicaResponse(_message.Message):
-    __slots__ = ("status", "model_id", "replica_id")
+class RegisterReplicaResponse(_message.Message):
+    __slots__ = ("status", "artifact_id", "replica_id")
     STATUS_FIELD_NUMBER: _ClassVar[int]
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     status: Status
-    model_id: str
+    artifact_id: str
     replica_id: str
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
     ) -> None: ...
 
-class UpdateModelReplicaRequest(_message.Message):
-    __slots__ = ("model_id", "replica_id")
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+class UpdateReplicaRequest(_message.Message):
+    __slots__ = ("artifact_id", "replica_id")
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     replica_id: str
     def __init__(
-        self, model_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
+        self, artifact_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
     ) -> None: ...
 
-class UpdateModelReplicaResponse(_message.Message):
-    __slots__ = ("status", "model_id", "replica_id")
+class UpdateReplicaResponse(_message.Message):
+    __slots__ = ("status", "artifact_id", "replica_id")
     STATUS_FIELD_NUMBER: _ClassVar[int]
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
     status: Status
-    model_id: str
+    artifact_id: str
     replica_id: str
     def __init__(
         self,
         status: _Optional[_Union[Status, str]] = ...,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         replica_id: _Optional[str] = ...,
     ) -> None: ...
 
-class UnregisterModelReplicaRequest(_message.Message):
-    __slots__ = ("model_id", "replica_id")
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+class UnregisterReplicaRequest(_message.Message):
+    __slots__ = ("artifact_id", "replica_id")
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_ID_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     replica_id: str
     def __init__(
-        self, model_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
+        self, artifact_id: _Optional[str] = ..., replica_id: _Optional[str] = ...
     ) -> None: ...
 
-class UnregisterModelReplicaResponse(_message.Message):
+class UnregisterReplicaResponse(_message.Message):
     __slots__ = ("status",)
     STATUS_FIELD_NUMBER: _ClassVar[int]
     status: Status
@@ -715,22 +713,22 @@ class MemoryInfoList(_message.Message):
         self, list: _Optional[_Iterable[_Union[MemoryInfo, _Mapping]]] = ...
     ) -> None: ...
 
-class RequestModelReplicaTransportRequest(_message.Message):
+class RequestReplicaTransportRequest(_message.Message):
     __slots__ = (
-        "model_id",
+        "artifact_id",
         "local_memory_info",
         "wait_timeout_ms",
         "source_node_id",
         "source_address",
         "source_port",
     )
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     LOCAL_MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
     WAIT_TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     SOURCE_NODE_ID_FIELD_NUMBER: _ClassVar[int]
     SOURCE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     SOURCE_PORT_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     local_memory_info: MemoryInfo
     wait_timeout_ms: int
     source_node_id: str
@@ -738,7 +736,7 @@ class RequestModelReplicaTransportRequest(_message.Message):
     source_port: int
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         local_memory_info: _Optional[_Union[MemoryInfo, _Mapping]] = ...,
         wait_timeout_ms: _Optional[int] = ...,
         source_node_id: _Optional[str] = ...,
@@ -746,7 +744,7 @@ class RequestModelReplicaTransportRequest(_message.Message):
         source_port: _Optional[int] = ...,
     ) -> None: ...
 
-class RequestModelReplicaTransportResponse(_message.Message):
+class RequestReplicaTransportResponse(_message.Message):
     __slots__ = ("status", "remote_memory_info", "transport_id")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     REMOTE_MEMORY_INFO_FIELD_NUMBER: _ClassVar[int]
@@ -761,13 +759,13 @@ class RequestModelReplicaTransportResponse(_message.Message):
         transport_id: _Optional[str] = ...,
     ) -> None: ...
 
-class CompleteModelReplicaTransportRequest(_message.Message):
+class CompleteReplicaTransportRequest(_message.Message):
     __slots__ = ("transport_id",)
     TRANSPORT_ID_FIELD_NUMBER: _ClassVar[int]
     transport_id: str
     def __init__(self, transport_id: _Optional[str] = ...) -> None: ...
 
-class CompleteModelReplicaTransportResponse(_message.Message):
+class CompleteReplicaTransportResponse(_message.Message):
     __slots__ = ("status",)
     STATUS_FIELD_NUMBER: _ClassVar[int]
     status: Status
@@ -784,14 +782,14 @@ class HealthCheckResponse(_message.Message):
     def __init__(self, status: _Optional[_Union[Status, str]] = ...) -> None: ...
 
 class QueryChunkLocationsRequest(_message.Message):
-    __slots__ = ("model_id", "chunk_indices")
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("artifact_id", "chunk_indices")
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     CHUNK_INDICES_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     chunk_indices: _containers.RepeatedScalarFieldContainer[int]
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         chunk_indices: _Optional[_Iterable[int]] = ...,
     ) -> None: ...
 
@@ -847,20 +845,20 @@ class QueryChunkLocationsResponse(_message.Message):
     ) -> None: ...
 
 class ChunkStateUpdate(_message.Message):
-    __slots__ = ("model_id", "chunk_idx", "state", "device_uuid", "replica")
-    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("artifact_id", "chunk_idx", "state", "device_uuid", "replica")
+    ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     CHUNK_IDX_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     DEVICE_UUID_FIELD_NUMBER: _ClassVar[int]
     REPLICA_FIELD_NUMBER: _ClassVar[int]
-    model_id: str
+    artifact_id: str
     chunk_idx: int
     state: ChunkState
     device_uuid: str
     replica: int
     def __init__(
         self,
-        model_id: _Optional[str] = ...,
+        artifact_id: _Optional[str] = ...,
         chunk_idx: _Optional[int] = ...,
         state: _Optional[_Union[ChunkState, str]] = ...,
         device_uuid: _Optional[str] = ...,

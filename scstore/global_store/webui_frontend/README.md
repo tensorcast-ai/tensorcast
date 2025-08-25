@@ -1,14 +1,14 @@
 # Global Store Web UI
 
-A real-time monitoring dashboard for the Global Store distributed model storage system.
+A real-time monitoring dashboard for the Global Store distributed artifact storage system.
 
 ## Features
 
 - **Real-time Monitoring**: Live updates via WebSocket for worker heartbeats, replica changes, and transport operations
 - **Dashboard Overview**: Quick view of system health with key metrics
 - **Worker Management**: Monitor worker nodes, memory usage, and health status
-- **Replica Tracking**: View all model replicas with filtering by model, node, and memory type
-- **Model Analytics**: Detailed model statistics and distribution across nodes
+- **Replica Tracking**: View all artifact replicas with filtering by artifact, node, and memory type
+- **Artifact analytics**: Detailed artifact statistics and distribution across nodes
 - **Performance Visualization**: Charts for memory distribution, replica allocation, and load balancing
 
 ## Technology Stack
@@ -77,7 +77,7 @@ Environment variables:
 - `GET /api/summary` - Global metrics summary
 - `GET /api/workers` - List workers with pagination
 - `GET /api/replicas` - List replicas with filters
-- `GET /api/models` - List models with statistics
+- `GET /api/artifacts` - List artifacts with statistics
 - `GET /api/nodes` - Node aggregated data
 - `GET /api/transports` - Transport history
 

@@ -12,9 +12,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
+#include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
-#include "core/store/model/chunk_meta.h"
-#include "core/store/model/model_location.h"
+#include "core/store/replica/chunk_meta.h"
 #include "grpcpp/grpcpp.h"
 #include "proto/global_store.grpc.pb.h"
 #include "proto/global_store.pb.h"
@@ -30,13 +30,13 @@ struct GlobalStoreClientConfig {
   absl::Duration retry_backoff = absl::Milliseconds(100);
 };
 
-// Information about a remote model replica
+// Information about a remote replica replica
 struct RemoteReplicaInfo {
   std::string node_id;
   std::string node_address;
   uint32_t node_port;
   uint64_t memory_size;
-  ModelLocation memory_type;
+  MemoryLocation memory_type;
   uint32_t device_id;
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
@@ -73,18 +73,18 @@ class GlobalStoreClient {
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
 
-  // Model replica management
-  absl::StatusOr<std::string> register_model_replica(
-      std::string_view model_id,
+  // Replica management
+  absl::StatusOr<std::string> register_replica(
+      std::string_view artifact_id,
       std::string_view worker_id,
       const DeviceKey& device,
-      ModelLocation location,
+      MemoryLocation location,
       uint64_t memory_size,
       uint32_t max_concurrency = 1);
 
   // Register a GPU memory replica (in-memory tensor dict) with tensor index key.
   absl::StatusOr<std::string> register_memory_replica(
-      std::string_view model_id,
+      std::string_view artifact_id,
       std::string_view worker_id,
       const DeviceKey& device,
       uint64_t memory_size,
@@ -96,21 +96,20 @@ class GlobalStoreClient {
       std::string_view schema_version = "v2",
       uint32_t max_concurrency = 1);
 
-  absl::Status unregister_model_replica(std::string_view model_id, std::string_view replica_id);
+  absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id);
 
   // P2P transport coordination
-  absl::StatusOr<TransportSession> request_model_transport(
-      std::string_view model_id,
+  absl::StatusOr<TransportSession> request_replica_transport(
+      std::string_view artifact_id,
       std::string_view source_node_id,
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
       uint32_t wait_timeout_ms = 30000);
 
-  absl::Status complete_model_transport(std::string_view transport_id);
+  absl::Status complete_replica_transport(std::string_view transport_id);
 
-  // Model information queries
-  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_model_replicas(std::string_view model_id);
+  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id);
 
   // Chunk-level queries for unified memory management
   struct ChunkLocationInfo {
@@ -125,7 +124,7 @@ class GlobalStoreClient {
   };
 
   absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
-      std::string_view model_id,
+      std::string_view artifact_id,
       const std::vector<uint32_t>& chunk_indices);
 
   bool is_connected() const;
@@ -140,18 +139,18 @@ class GlobalStoreClient {
       const std::string& method_name);
 
   // Convert between internal types and proto types
-  static ::global_store::MemoryType convert_to_proto_memory_type(ModelLocation location);
-  static ModelLocation convert_from_proto_memory_type(::global_store::MemoryType type);
+  static ::global_store::MemoryType convert_to_proto_memory_type(MemoryLocation location);
+  static MemoryLocation convert_from_proto_memory_type(::global_store::MemoryType type);
   static void fill_memory_info(
       ::global_store::MemoryInfo* info,
       const DeviceKey& device,
-      ModelLocation location,
+      MemoryLocation location,
       uint64_t memory_size);
   static RemoteReplicaInfo convert_from_proto_memory_info(const ::global_store::MemoryInfo& info);
 
   GlobalStoreClientConfig config_;
   std::shared_ptr<grpc::Channel> channel_;
-  std::unique_ptr<::global_store::GlobalModelStore::Stub> stub_;
+  std::unique_ptr<::global_store::GlobalStore::Stub> stub_;
   std::string worker_id_;
   mutable std::mutex mutex_;
 };

@@ -4,21 +4,21 @@
 
 #include <string_view>
 #include "absl/status/status.h"
+#include "core/common/memory/memory_location.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
-#include "core/store/model/model_location.h"
 
 namespace stepcast::store {
 
 class ReplicaRegistrationHelper {
  public:
-  // Registers the current process' replica of the given model with Global Store.
-  // This is a thin wrapper around GlobalStoreClient::register_model_replica().
+  // Registers the current process' replica of the given artifact with Global Store.
+  // This is a thin wrapper around GlobalStoreClient::register_replica().
   static absl::Status register_local_replica(
       GlobalStoreClient* gs_client,
-      std::string_view model_id,
+      std::string_view artifact_id,
       const DeviceKey& device,
-      ModelLocation location,
+      MemoryLocation location,
       uint64_t size_bytes);
 };
 

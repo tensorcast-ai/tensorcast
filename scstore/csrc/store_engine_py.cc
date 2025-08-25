@@ -12,13 +12,13 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/common/logging_init.h"
+#include "core/common/memory/memory_location.h"
 #include "core/common/metrics/metrics_export.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/model/memory_state.h"
-#include "core/store/model/model_location.h"
+#include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 
@@ -43,13 +43,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::module_::import("warnings")
       .attr("warn")("CUDA not detected, running with FakeCuda backend. Only logical correctness is guaranteed.");
 #endif
-  // Bind ModelLocation enum
-  py::enum_<ModelLocation>(m, "ModelLocation")
-      .value("NONE", ModelLocation::NONE)
-      .value("DISK", ModelLocation::DISK)
-      .value("CPU", ModelLocation::PAGEABLE_CPU)
-      .value("GPU", ModelLocation::GPU)
-      .value("REMOTE", ModelLocation::REMOTE)
+  // Bind MemoryLocation enum
+  py::enum_<MemoryLocation>(m, "MemoryLocation")
+      .value("NONE", MemoryLocation::NONE)
+      .value("DISK", MemoryLocation::DISK)
+      .value("CPU", MemoryLocation::PAGEABLE_CPU)
+      .value("GPU", MemoryLocation::GPU)
+      .value("REMOTE", MemoryLocation::REMOTE)
       .export_values();
 
   // Bind MemoryState enum
@@ -66,7 +66,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Note: void* pointers are cast to uintptr_t for Python representation
   py::class_<CommRegistrationInfo>(m, "CommRegistrationInfo")
       .def(py::init<>())
-      .def_readwrite("model_size", &CommRegistrationInfo::model_size)
+      .def_readwrite("artifact_size", &CommRegistrationInfo::artifact_size)
       .def_readwrite("location", &CommRegistrationInfo::location)
       .def_readwrite("device_id", &CommRegistrationInfo::device_id)
       .def_readwrite("comm_dev_type", &CommRegistrationInfo::comm_dev_type)
@@ -83,7 +83,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("buffer_sizes", &CommRegistrationInfo::buffer_sizes)
       .def_readwrite("remote_memory_keys", &CommRegistrationInfo::remote_memory_keys)
       .def("__repr__", [](const CommRegistrationInfo& cri) {
-        std::string repr = "<CommRegistrationInfo model_size=" + std::to_string(cri.model_size) +
+        std::string repr = "<CommRegistrationInfo artifact_size=" + std::to_string(cri.artifact_size) +
             ", location=" + std::to_string(static_cast<int>(cri.location)) +
             ", device_id=" + std::to_string(cri.device_id) + ", buffer_addresses=[";
         bool first = true;
@@ -100,23 +100,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         return repr;
       });
 
-  // Bind ModelInfo struct
-  py::class_<StoreEngine::ModelInfo>(m, "ModelInfo")
+  // Bind ReplicaInfo struct
+  py::class_<StoreEngine::ReplicaInfo>(m, "ReplicaInfo")
       .def(py::init<>())
-      .def_readwrite("model_id", &StoreEngine::ModelInfo::model_id)
-      .def_readwrite("size_bytes", &StoreEngine::ModelInfo::size_bytes)
-      .def_readwrite("cpu_state", &StoreEngine::ModelInfo::cpu_state)
-      .def_readwrite("gpu_state", &StoreEngine::ModelInfo::gpu_state)
-      .def_readwrite("gpu_device_id", &StoreEngine::ModelInfo::gpu_device_id)
-      .def_readwrite("gpu_device_uuid", &StoreEngine::ModelInfo::gpu_device_uuid)
-      .def_readwrite("is_registered_for_comm", &StoreEngine::ModelInfo::is_registered_for_comm)
+      .def_readwrite("artifact_id", &StoreEngine::ReplicaInfo::artifact_id)
+      .def_readwrite("size_bytes", &StoreEngine::ReplicaInfo::size_bytes)
+      .def_readwrite("cpu_state", &StoreEngine::ReplicaInfo::cpu_state)
+      .def_readwrite("gpu_state", &StoreEngine::ReplicaInfo::gpu_state)
+      .def_readwrite("gpu_device_id", &StoreEngine::ReplicaInfo::gpu_device_id)
+      .def_readwrite("gpu_device_uuid", &StoreEngine::ReplicaInfo::gpu_device_uuid)
+      .def_readwrite("is_registered_for_comm", &StoreEngine::ReplicaInfo::is_registered_for_comm)
       .def_property_readonly(
           "last_access_timestamp",
-          [](const StoreEngine::ModelInfo& info) { return time_point_to_timestamp(info.last_access_time); })
+          [](const StoreEngine::ReplicaInfo& info) { return time_point_to_timestamp(info.last_access_time); })
       .def_property_readonly(
-          "load_timestamp", [](const StoreEngine::ModelInfo& info) { return time_point_to_timestamp(info.load_time); })
-      .def("__repr__", [](const StoreEngine::ModelInfo& info) {
-        std::string repr = "<ModelInfo model_id='" + info.model_id +
+          "load_timestamp",
+          [](const StoreEngine::ReplicaInfo& info) { return time_point_to_timestamp(info.load_time); })
+      .def("__repr__", [](const StoreEngine::ReplicaInfo& info) {
+        std::string repr = "<ReplicaInfo artifact_id='" + info.artifact_id +
             "', size_bytes=" + std::to_string(info.size_bytes) +
             ", cpu_state=" + std::to_string(static_cast<int>(info.cpu_state)) +
             ", gpu_state=" + std::to_string(static_cast<int>(info.gpu_state));
@@ -139,11 +140,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("NONE", DeviceType::NONE)
       .export_values();
 
-  // Bind PrepareMode enum
-  py::enum_<StoreEngine::PrepareMode>(m, "PrepareMode")
-      .value("AUTO", StoreEngine::PrepareMode::AUTO)
-      .value("COPY_ONLY", StoreEngine::PrepareMode::COPY_ONLY)
-      .value("LOAD_ONLY", StoreEngine::PrepareMode::LOAD_ONLY)
+  // Bind MaterializeMode enum
+  py::enum_<StoreEngine::MaterializeMode>(m, "MaterializeMode")
+      .value("AUTO", StoreEngine::MaterializeMode::AUTO)
+      .value("COPY_ONLY", StoreEngine::MaterializeMode::COPY_ONLY)
+      .value("LOAD_ONLY", StoreEngine::MaterializeMode::LOAD_ONLY)
       .export_values();
 
   // Bind DeviceKey struct
@@ -157,22 +158,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             ", ordinal=" + std::to_string(dk.ordinal) + ", uuid='" + dk.uuid + "'>";
       });
 
-  // NEW: Bind InstanceKey struct (multi-device identifier)
-  py::class_<InstanceKey>(m, "InstanceKey")
+  // NEW: Bind ReplicaKey struct (multi-device identifier)
+  py::class_<ReplicaKey>(m, "ReplicaKey")
       .def(py::init<>())
-      .def_readwrite("model_id", &InstanceKey::model_id)
-      .def_readwrite("device", &InstanceKey::device)
-      .def_readwrite("replica", &InstanceKey::replica)
-      .def("__repr__", [](const InstanceKey& ik) {
-        return "<InstanceKey model_id='" + ik.model_id + "', device=" + ik.device.to_string() +
+      .def_readwrite("artifact_id", &ReplicaKey::artifact_id)
+      .def_readwrite("device", &ReplicaKey::device)
+      .def_readwrite("replica", &ReplicaKey::replica)
+      .def("__repr__", [](const ReplicaKey& ik) {
+        return "<ReplicaKey artifact_id='" + ik.artifact_id + "', device=" + ik.device.to_string() +
             ", replica=" + std::to_string(ik.replica) + ">";
       });
 
-  // Minimal ModelHandle Python wrapper
-  py::class_<ModelHandle>(m, "ModelHandle")
+  // Minimal ReplicaHandle Python wrapper
+  py::class_<ReplicaHandle>(m, "ReplicaHandle")
       .def(
           "wait_ready",
-          [](ModelHandle& mh, int timeout_ms) {
+          [](ReplicaHandle& mh, int timeout_ms) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -183,25 +184,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
           })
       .def_property_readonly(
-          "gpu_ptr", [](const ModelHandle& mh) { return reinterpret_cast<uint64_t>(mh.gpu_base_ptr); })
+          "gpu_ptr", [](const ReplicaHandle& mh) { return reinterpret_cast<uint64_t>(mh.gpu_base_ptr); })
       .def_property_readonly(
           "ipc_handle_bytes",
-          [](const ModelHandle& mh) {
+          [](const ReplicaHandle& mh) {
             return py::bytes(mh.cuda_ipc_handle.bytes.data(), mh.cuda_ipc_handle.bytes.size());
           })
-      .def_property_readonly("instance_key", [](const ModelHandle& mh) {
-        const auto& k = mh.instance_key;
-        return std::string("InstanceKey{") + k.model_id + ", " + k.device.to_string() +
+      .def_property_readonly("replica_key", [](const ReplicaHandle& mh) {
+        const auto& k = mh.replica_key;
+        return std::string("ReplicaKey{") + k.artifact_id + ", " + k.device.to_string() +
             ", replica=" + std::to_string(k.replica) + "}";
       });
 
   auto ckpt_cls = py::class_<StoreEngine>(m, "StoreEngine");
   ckpt_cls
       .def(
-          "prepare",
+          "materialize_replica",
           [](StoreEngine& cs,
              const py::object& target_device_obj,
-             StoreEngine::PrepareMode mode,
+             StoreEngine::MaterializeMode mode,
              const py::kwargs& kwargs) {
             // Build DeviceKey from python input
             DeviceKey dev_key;
@@ -230,24 +231,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               PY_THROW_WITH_LOG(PyExc_TypeError, std::string("target_device must be DeviceKey, str, or int"));
             }
 
-            LoadingHints hints;
+            MaterializeHints hints;
             if (kwargs.contains("pinned_timeout_ms") && !kwargs["pinned_timeout_ms"].is_none()) {
               int t = kwargs["pinned_timeout_ms"].cast<int>();
               if (t > 0) {
                 hints.pinned_timeout = std::chrono::milliseconds(t);
               }
             }
-            if (kwargs.contains("model_id") && !kwargs["model_id"].is_none()) {
-              hints.model_id = kwargs["model_id"].cast<std::string>();
+            if (kwargs.contains("artifact_id") && !kwargs["artifact_id"].is_none()) {
+              hints.artifact_id = kwargs["artifact_id"].cast<std::string>();
             }
             if (kwargs.contains("disk_path") && !kwargs["disk_path"].is_none()) {
               hints.disk_path = kwargs["disk_path"].cast<std::string>();
             }
 
-            absl::StatusOr<ModelHandle> h_or;
+            absl::StatusOr<ReplicaHandle> h_or;
             {
               py::gil_scoped_release release;
-              h_or = cs.prepare(dev_key, mode, hints);
+              h_or = cs.materialize_replica(dev_key, mode, hints);
             }
             if (!h_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, h_or.status().ToString());
@@ -255,105 +256,105 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             return h_or.value();
           },
           py::arg("target_device") = std::string("gpu:0"),
-          py::arg("mode") = StoreEngine::PrepareMode::AUTO,
-          "Prepare a model instance on the specified device and return a ModelHandle.")
+          py::arg("mode") = StoreEngine::MaterializeMode::AUTO,
+          "Prepare a replica instance on the specified device and return a ReplicaHandle.")
       .def("clear_mem", &StoreEngine::clear_mem, "Clear all allocated memory.")
       .def("get_mem_pool_size", &StoreEngine::get_mem_pool_size, "Get the memory pool size.")
       .def("get_chunk_size", &StoreEngine::get_chunk_size, "Get the chunk size.")
       .def(
           "get_available_memory", &StoreEngine::get_available_memory, "Get available memory in the pinned memory pool.")
       .def(
-          "get_loaded_devices",
-          [](StoreEngine& cs, const std::string& model_id) {
+          "get_resident_devices",
+          [](StoreEngine& cs, const std::string& artifact_id) {
             py::gil_scoped_release release;
-            return cs.get_loaded_devices(model_id);
+            return cs.get_resident_devices(artifact_id);
           },
-          py::arg("model_id"),
-          "Return a list of DeviceKey where the given model is loaded.")
+          py::arg("artifact_id"),
+          "Return a list of DeviceKey where the given replica is loaded.")
       .def(
-          "list_device_models",
+          "list_device_replicas",
           [](StoreEngine& cs, const DeviceKey& device) {
             py::gil_scoped_release release;
-            return cs.list_device_models(device);
+            return cs.list_device_replicas(device);
           },
           py::arg("device"),
-          "Return a list of InstanceKey for models resident on the given device.")
+          "Return a list of ReplicaKey for replicas resident on the given device.")
       .def(
-          "wait_instance_ready",
-          [](StoreEngine& cs, const InstanceKey& key) {
+          "wait_replica_ready",
+          [](StoreEngine& cs, const ReplicaKey& key) {
             py::gil_scoped_release release;
-            return cs.wait_instance_ready(key);
+            return cs.wait_replica_ready(key);
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           "Block until the instance becomes ready. Returns 0 on success.")
       .def(
-          "unload_instance",
-          [](StoreEngine& cs, const InstanceKey& key) {
+          "unload_replica",
+          [](StoreEngine& cs, const ReplicaKey& key) {
             py::gil_scoped_release release;
-            return cs.unload_instance(key);
+            return cs.unload_replica(key);
           },
-          py::arg("instance_key"),
-          "Unload the specified model instance from memory.")
+          py::arg("replica_key"),
+          "Unload the specified replica instance from memory.")
       .def(
-          "get_instance_state",
-          [](StoreEngine& cs, const InstanceKey& key, DeviceType mem_type) {
+          "get_replica_state",
+          [](StoreEngine& cs, const ReplicaKey& key, DeviceType mem_type) {
             py::gil_scoped_release release;
-            return cs.get_instance_state(key, mem_type);
+            return cs.get_replica_state(key, mem_type);
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           py::arg("memory_type"),
           "Get the MemoryState of the specified instance and memory type.")
       .def(
-          "get_instance_gpu_ptr",
-          [](StoreEngine& cs, const InstanceKey& key) {
+          "get_replica_gpu_ptr",
+          [](StoreEngine& cs, const ReplicaKey& key) {
             absl::StatusOr<uint64_t> ptr_or;
             {
               py::gil_scoped_release release;
-              ptr_or = cs.get_instance_gpu_ptr(key);
+              ptr_or = cs.get_replica_gpu_ptr(key);
             }
             if (!ptr_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, ptr_or.status().ToString());
             }
             return ptr_or.value();
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           "Return the base GPU address for the given instance.")
       .def(
-          "enable_remote_instance_access",
-          [](StoreEngine& cs, const InstanceKey& key, ModelLocation loc) {
+          "enable_remote_replica_access",
+          [](StoreEngine& cs, const ReplicaKey& key, MemoryLocation loc) {
             absl::StatusOr<CommRegistrationInfo> info_or;
             {
               py::gil_scoped_release release;
-              info_or = cs.enable_remote_instance_access(key, loc);
+              info_or = cs.enable_remote_replica_access(key, loc);
             }
             if (!info_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, info_or.status().ToString());
             }
             return info_or.value();
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           py::arg("location"),
           "Enable remote memory access for the given instance and return registration info.")
       .def(
-          "disable_remote_instance_access",
-          [](StoreEngine& cs, const InstanceKey& key, ModelLocation loc) {
+          "disable_remote_replica_access",
+          [](StoreEngine& cs, const ReplicaKey& key, MemoryLocation loc) {
             absl::Status st;
             {
               py::gil_scoped_release release;
-              st = cs.disable_remote_instance_access(key, loc);
+              st = cs.disable_remote_replica_access(key, loc);
             }
             if (!st.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
             }
             return true;
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           py::arg("location"),
           "Disable remote memory access for the given instance.")
       .def(
-          "begin_register_tensor_dict",
+          "begin_register_artifact",
           [](StoreEngine& cs, const py::dict& reg_dict) {
-            StoreEngine::TensorDictRegistration reg;
+            StoreEngine::ArtifactRegistration reg;
             auto get_uint32 = [&](const char* key, uint32_t fb) -> uint32_t {
               if (reg_dict.contains(key) && !reg_dict[key].is_none()) {
                 return reg_dict[key].cast<uint32_t>();
@@ -391,7 +392,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               return fb;
             };
 
-            reg.model_id = get_str("model_id");
+            reg.artifact_id = get_str("artifact_id");
             reg.tensor_index_key = get_str("tensor_index_key");
             reg.tensor_index_data = get_opt_str("tensor_index_data");
             reg.schema_version = get_str("schema_version", "v2");
@@ -404,7 +405,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             absl::StatusOr<StoreEngine::RegistrationBeginResult> out_or;
             {
               py::gil_scoped_release release;
-              out_or = cs.begin_register_tensor_dict(reg);
+              out_or = cs.begin_register_artifact(reg);
             }
             if (!out_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, out_or.status().ToString());
@@ -422,12 +423,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("registration"),
           "Begin registering an in-memory tensor dict and return CUDA IPC handle bytes.")
       .def(
-          "commit_registered_tensor_dict",
+          "commit_registered_artifact",
           [](StoreEngine& cs, const std::string& registration_id) {
             absl::StatusOr<StoreEngine::RegistrationCommitResult> ok_or;
             {
               py::gil_scoped_release release;
-              ok_or = cs.commit_registered_tensor_dict(registration_id);
+              ok_or = cs.commit_registered_artifact(registration_id);
             }
             if (!ok_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, ok_or.status().ToString());
@@ -435,7 +436,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             const auto& r = ok_or.value();
             py::dict d;
             d["registration_id"] = r.registration_id;
-            d["model_id"] = r.model_id;
+            d["artifact_id"] = r.artifact_id;
             d["device_id"] = r.device_id;
             d["size_bytes"] = r.size_bytes;
             // RFC-0007: include descriptor components for callers
@@ -448,12 +449,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("registration_id"),
           "Commit a pending tensor dict registration.")
       .def(
-          "abort_registered_tensor_dict",
+          "abort_registered_artifact",
           [](StoreEngine& cs, const std::string& registration_id) {
             absl::Status st;
             {
               py::gil_scoped_release release;
-              st = cs.abort_registered_tensor_dict(registration_id);
+              st = cs.abort_registered_artifact(registration_id);
             }
             if (!st.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
@@ -464,7 +465,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Abort a pending tensor dict registration and release memory.")
       .def(
           "lock_chunks",
-          [](StoreEngine& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices) {
+          [](StoreEngine& cs, const ReplicaKey& key, const std::vector<uint32_t>& chunk_indices) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -475,12 +476,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
             return 0; // Return 0 on success
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           py::arg("chunk_indices"),
           "Lock chunks for H2D or P2P transfer to prevent concurrent eviction.")
       .def(
           "unlock_chunks",
-          [](StoreEngine& cs, const InstanceKey& key, const std::vector<uint32_t>& chunk_indices, bool copied_gpu) {
+          [](StoreEngine& cs, const ReplicaKey& key, const std::vector<uint32_t>& chunk_indices, bool copied_gpu) {
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -491,13 +492,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
             return 0; // Return 0 on success
           },
-          py::arg("instance_key"),
+          py::arg("replica_key"),
           py::arg("chunk_indices"),
           py::arg("copied_gpu"),
           "Unlock chunks after H2D or P2P transfer completion.")
       .def("__repr__", [](const StoreEngine& /*cs*/) { return "<StoreEngine>"; })
       .def(
-          "get_all_models_info", &StoreEngine::get_all_models_info, "Get detailed information about all loaded models.")
+          "get_all_replicas_info",
+          &StoreEngine::get_all_replicas_info,
+          "Get detailed information about all loaded replicas.")
       .def(
           "get_gpu_memory_stats",
           [](StoreEngine& /*cs*/) {

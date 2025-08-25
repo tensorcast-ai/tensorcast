@@ -25,7 +25,7 @@ from scstore.global_store.webui_backend.grpc_client import (
 from scstore.proto import global_store_pb2, global_store_pb2_grpc
 
 
-class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreServicer):
+class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
     """Test implementation of Global Store gRPC service."""
 
     def __init__(self):
@@ -56,9 +56,9 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
             ),
         ]
 
-        # Mock model replicas
+        # Mock artifact replicas
         self.replicas = {
-            "model-1": [
+            "artifact-1": [
                 global_store_pb2.MemoryInfo(
                     memory_type=global_store_pb2.MemoryType.GPU,
                     memory_size=1073741824,  # 1GB
@@ -76,7 +76,7 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
                     node_port=60053,
                 ),
             ],
-            "model-2": [
+            "artifact-2": [
                 global_store_pb2.MemoryInfo(
                     memory_type=global_store_pb2.MemoryType.DISK,
                     memory_size=2147483648,  # 2GB
@@ -122,15 +122,15 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
 
         return global_store_pb2.ListActiveWorkersResponse(workers=workers)
 
-    def ListModelReplicas(self, request, context):
-        """List model replicas with optional filters."""
-        self._maybe_fail(context, "ListModelReplicas")
+    def ListReplicas(self, request, context):
+        """List artifact replicas with optional filters."""
+        self._maybe_fail(context, "ListReplicas")
 
         # Apply filters
         result = {}
-        for model_id, replicas in self.replicas.items():
-            # Filter by content-addressed model_id (tests use simple names)
-            if request.HasField("model_id") and request.model_id and request.model_id != model_id:
+        for artifact_id, replicas in self.replicas.items():
+            # Filter by content-addressed artifact_id (tests use simple names)
+            if request.HasField("artifact_id") and request.artifact_id and request.artifact_id != artifact_id:
                 continue
 
             filtered_replicas = []
@@ -150,40 +150,40 @@ class MockGlobalModelStoreServicer(global_store_pb2_grpc.GlobalModelStoreService
                 filtered_replicas.append(replica)
 
             if filtered_replicas:
-                result[model_id] = global_store_pb2.MemoryInfoList(
+                result[artifact_id] = global_store_pb2.MemoryInfoList(
                     list=filtered_replicas
                 )
 
-        return global_store_pb2.ListModelReplicasResponse(model_replicas=result)
+        return global_store_pb2.ListReplicasResponse(artifact_replicas=result)
 
-    def GetModelInfoById(self, request, context):
-        """Get model information by content-addressed model_id."""
-        self._maybe_fail(context, "GetModelInfoById")
+    def GetArtifactInfoById(self, request, context):
+        """Get artifact information by content-addressed artifact_id."""
+        self._maybe_fail(context, "GetArtifactInfoById")
 
-        if request.model_id in self.replicas:
-            return global_store_pb2.GetModelInfoByIdResponse(
+        if request.artifact_id in self.replicas:
+            return global_store_pb2.GetArtifactInfoByIdResponse(
                 status=global_store_pb2.Status.OK,
-                replicas=self.replicas[request.model_id],
+                replicas=self.replicas[request.artifact_id],
             )
         else:
-            return global_store_pb2.GetModelInfoByIdResponse(
+            return global_store_pb2.GetArtifactInfoByIdResponse(
                 status=global_store_pb2.Status.NOT_FOUND,
             )
 
     # Add other required RPCs with minimal implementation
-    def RegisterModelReplica(self, request, context):
+    def RegisterReplica(self, request, context):
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Not implemented in test")
 
-    def UpdateModelReplica(self, request, context):
+    def UpdateReplica(self, request, context):
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Not implemented in test")
 
-    def UnregisterModelReplica(self, request, context):
+    def UnregisterReplica(self, request, context):
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Not implemented in test")
 
-    def RequestModelReplicaTransport(self, request, context):
+    def RequestReplicaTransport(self, request, context):
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Not implemented in test")
 
-    def CompleteModelReplicaTransport(self, request, context):
+    def CompleteReplicaTransport(self, request, context):
         context.abort(grpc.StatusCode.UNIMPLEMENTED, "Not implemented in test")
 
     def RegisterWorker(self, request, context):
@@ -214,7 +214,7 @@ class MockServer:
     """Test gRPC server wrapper."""
     server: grpc.Server
     port: int
-    servicer: MockGlobalModelStoreServicer
+    servicer: MockGlobalStoreServicer
     thread: threading.Thread
 
 
@@ -231,9 +231,9 @@ def start_test_server(port: int = 0) -> MockServer:
     MockServer
         Server information including actual port
     """
-    servicer = MockGlobalModelStoreServicer()
+    servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
 
     # Bind to port (0 means choose automatically)
     actual_port = server.add_insecure_port(f'127.0.0.1:{port}')
@@ -341,30 +341,30 @@ class TestGlobalStoreClient:
         assert any(w.worker_id == "worker-2" for w in workers)
 
     @pytest.mark.asyncio
-    async def test_list_model_replicas(self, client, test_server):
-        """Test listing model replicas with filters."""
+    async def test_list_replicas(self, client, test_server):
+        """Test listing artifact replicas with filters."""
         # Test without filters
-        replicas = await client.list_model_replicas()
+        replicas = await client.list_replicas()
         assert len(replicas) == 2
-        assert "model-1" in replicas
-        assert "model-2" in replicas
-        assert len(replicas["model-1"]) == 2
-        assert len(replicas["model-2"]) == 1
+        assert "artifact-1" in replicas
+        assert "artifact-2" in replicas
+        assert len(replicas["artifact-1"]) == 2
+        assert len(replicas["artifact-2"]) == 1
 
-        # Test with model id filter
-        replicas = await client.list_model_replicas(model_id="model-1")
+        # Test with artifact id filter
+        replicas = await client.list_replicas(artifact_id="artifact-1")
         assert len(replicas) == 1
-        assert "model-1" in replicas
+        assert "artifact-1" in replicas
 
         # Test with node_id filter
-        replicas = await client.list_model_replicas(node_id="node-1")
+        replicas = await client.list_replicas(node_id="node-1")
         assert all(
             any(r.node_id == "node-1" for r in replica_list)
             for replica_list in replicas.values()
         )
 
         # Test with memory_type filter
-        replicas = await client.list_model_replicas(
+        replicas = await client.list_replicas(
             memory_type=global_store_pb2.MemoryType.GPU
         )
         assert all(
@@ -373,23 +373,23 @@ class TestGlobalStoreClient:
         )
 
         # Test with device_id filter
-        replicas = await client.list_model_replicas(device_id=0)
+        replicas = await client.list_replicas(device_id=0)
         assert all(
             any(r.device_id == 0 for r in replica_list)
             for replica_list in replicas.values()
         )
 
     @pytest.mark.asyncio
-    async def test_get_model_info(self, client, test_server):
-        """Test getting model information."""
-        # Test existing model
-        model_info = await client.get_model_info("model-1")
-        assert model_info is not None
-        assert len(model_info) == 2
+    async def test_get_artifact_info(self, client, test_server):
+        """Test getting artifact information."""
+        # Test existing artifact
+        artifact_info = await client.get_artifact_info("artifact-1")
+        assert artifact_info is not None
+        assert len(artifact_info.available_replicas) == 2
 
-        # Test non-existing model
-        model_info = await client.get_model_info("model-nonexistent")
-        assert model_info is None
+        # Test non-existing artifact
+        artifact_info = await client.get_artifact_info("artifact-nonexistent")
+        assert artifact_info is None
 
     @pytest.mark.asyncio
     async def test_get_summary_stats(self, client, test_server):
@@ -398,7 +398,7 @@ class TestGlobalStoreClient:
 
         assert stats["total_workers"] == 2
         assert stats["active_workers"] == 1
-        assert stats["total_models"] == 2
+        assert stats["total_artifacts"] == 2
         assert stats["total_replicas"] == 3
         assert stats["gpu_replicas"] == 1
         assert stats["ram_replicas"] == 1
@@ -468,8 +468,8 @@ class TestGlobalStoreClient:
         # Make concurrent requests
         tasks = [
             client.list_active_workers(),
-            client.list_model_replicas(),
-            client.get_model_info("model-1"),
+            client.list_replicas(),
+            client.get_artifact_info("artifact-1"),
             client.get_summary_stats(),
         ]
 
@@ -478,13 +478,13 @@ class TestGlobalStoreClient:
         # Verify all requests succeeded
         assert len(results[0]) > 0  # workers
         assert len(results[1]) > 0  # replicas
-        assert results[2] is not None  # model info
+        assert results[2] is not None  # artifact info
         assert results[3]["total_workers"] > 0  # stats
 
         # Verify concurrent execution
         assert test_server.servicer.call_count["ListActiveWorkers"] >= 1  # Called by get_summary_stats too
-        assert test_server.servicer.call_count["ListModelReplicas"] >= 1  # Called by get_summary_stats too
-        assert test_server.servicer.call_count["GetModelInfoById"] >= 1
+        assert test_server.servicer.call_count["ListReplicas"] >= 1  # Called by get_summary_stats too
+        assert test_server.servicer.call_count["GetArtifactInfoById"] >= 1
 
     @pytest.mark.asyncio
     async def test_ensure_connected(self, test_server):
@@ -544,7 +544,7 @@ class TestEdgeCases:
     async def test_timeout_handling(self):
         """Test request timeout handling."""
         # Create a special servicer that always delays
-        class SlowServicer(MockGlobalModelStoreServicer):
+        class SlowServicer(MockGlobalStoreServicer):
             def ListActiveWorkers(self, request, context):
                 # This will block the server thread
                 time.sleep(0.5)  # 500ms delay
@@ -553,7 +553,7 @@ class TestEdgeCases:
         # Start a new server with the slow servicer
         servicer = SlowServicer()
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        global_store_pb2_grpc.add_GlobalModelStoreServicer_to_server(servicer, server)
+        global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
         port = server.add_insecure_port('127.0.0.1:0')
         server.start()
 

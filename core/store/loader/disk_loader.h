@@ -11,7 +11,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
-#include "core/common/model_verification.h"
+#include "core/common/artifact_verification.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loading/loading_spec.h" // For DiskSource
 // Forward declaration instead of including memory manager to avoid heavy deps
@@ -25,9 +25,9 @@ namespace stepcast::store {
 // MemoryManager is already defined in this namespace via included header.
 
 /**
- * @brief Loader implementation for reading model data partitions from disk.
+ * @brief Loader implementation for reading replica data partitions from disk.
  */
-class DiskLoader : public IModelLoader {
+class DiskLoader : public IArtifactLoader {
  public:
   /**
    * @brief Constructs a DiskLoader.
@@ -44,24 +44,24 @@ class DiskLoader : public IModelLoader {
   DiskLoader& operator=(DiskLoader&&) = delete;
 
   /**
-   * @brief Scans the configured directory to find partitions and calculate total model size.
-   * Must be called before get_model_size() if not implicitly called.
+   * @brief Scans the configured directory to find partitions and calculate total artifact size.
+   * Must be called before get_artifact_size() if not implicitly called.
    * Thread-safe.
    * @return absl::Status OkStatus on success, error otherwise (e.g., path not found).
    */
   absl::Status initialize() override ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Returns the total model size discovered during initialization.
+   * @brief Returns the total artifact size discovered during initialization.
    * Calls initialize() if not already done. Thread-safe.
-   * @return absl::StatusOr<uint64_t> Total model size in bytes or error status.
+   * @return absl::StatusOr<uint64_t> Total artifact size in bytes or error status.
    */
-  absl::StatusOr<uint64_t> get_model_size() override ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::StatusOr<uint64_t> get_artifact_size() override ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Returns the model verification information loaded from disk (if any).
+   * @brief Returns the replica verification information loaded from disk (if any).
    */
-  absl::StatusOr<ModelVerificationInfo> get_verification_info() const;
+  absl::StatusOr<ArtifactVerificationInfo> get_verification_info() const;
 
   // NEW: Provide disk-backed source for pumping
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override ABSL_LOCKS_EXCLUDED(mutex_);
@@ -70,7 +70,7 @@ class DiskLoader : public IModelLoader {
   mutable absl::Mutex mutex_; // Protects initialization state and partition info access
 
   DiskSource source_ ABSL_GUARDED_BY(mutex_);
-  uint64_t model_size_ = 0;
+  uint64_t artifact_size_ = 0;
   std::vector<std::filesystem::path> partition_paths_;
   std::vector<size_t> partition_sizes_;
   bool initialized_ = false;

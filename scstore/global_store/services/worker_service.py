@@ -8,7 +8,7 @@ import time
 from scstore.global_store.config import get_config
 from scstore.global_store.exceptions import ValidationError
 from scstore.global_store.models import Worker
-from scstore.global_store.repositories import ModelReplicaRepository, WorkerRepository
+from scstore.global_store.repositories import ReplicaRepository, WorkerRepository
 from scstore.logger import init_logger
 
 logger = init_logger(__name__)
@@ -20,7 +20,7 @@ class WorkerService:
     def __init__(
         self,
         worker_repository: WorkerRepository,
-        replica_repository: ModelReplicaRepository,
+        replica_repository: ReplicaRepository,
     ):
         """Initialize service with repositories."""
         self.worker_repository = worker_repository

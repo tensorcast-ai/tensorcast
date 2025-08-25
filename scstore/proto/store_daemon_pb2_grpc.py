@@ -17,20 +17,20 @@ class StoreDaemonStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.LoadModel = channel.unary_unary(
-            "/store_daemon.StoreDaemon/LoadModel",
-            request_serializer=store__daemon__pb2.LoadModelRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.LoadModelResponse.FromString,
+        self.MaterializeReplica = channel.unary_unary(
+            "/store_daemon.StoreDaemon/MaterializeReplica",
+            request_serializer=store__daemon__pb2.MaterializeReplicaRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.MaterializeReplicaResponse.FromString,
         )
-        self.ConfirmModel = channel.unary_unary(
-            "/store_daemon.StoreDaemon/ConfirmModel",
-            request_serializer=store__daemon__pb2.ConfirmModelRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.ConfirmModelResponse.FromString,
+        self.ConfirmReplica = channel.unary_unary(
+            "/store_daemon.StoreDaemon/ConfirmReplica",
+            request_serializer=store__daemon__pb2.ConfirmReplicaRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.ConfirmReplicaResponse.FromString,
         )
-        self.UnloadModel = channel.unary_unary(
-            "/store_daemon.StoreDaemon/UnloadModel",
-            request_serializer=store__daemon__pb2.UnloadModelRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.UnloadModelResponse.FromString,
+        self.UnloadReplica = channel.unary_unary(
+            "/store_daemon.StoreDaemon/UnloadReplica",
+            request_serializer=store__daemon__pb2.UnloadReplicaRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.UnloadReplicaResponse.FromString,
         )
         self.ClearMem = channel.unary_unary(
             "/store_daemon.StoreDaemon/ClearMem",
@@ -47,20 +47,20 @@ class StoreDaemonStub(object):
             request_serializer=store__daemon__pb2.GetWorkerStatusRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetWorkerStatusResponse.FromString,
         )
-        self.WaitModelVerification = channel.unary_unary(
-            "/store_daemon.StoreDaemon/WaitModelVerification",
-            request_serializer=store__daemon__pb2.VerificationRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.VerificationResponse.FromString,
+        self.WaitReplicaVerification = channel.unary_unary(
+            "/store_daemon.StoreDaemon/WaitReplicaVerification",
+            request_serializer=store__daemon__pb2.ReplicaVerificationRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.ReplicaVerificationResponse.FromString,
         )
         self.GetDetailedStatus = channel.unary_unary(
             "/store_daemon.StoreDaemon/GetDetailedStatus",
             request_serializer=store__daemon__pb2.GetDetailedStatusRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetDetailedStatusResponse.FromString,
         )
-        self.GetLoadedModels = channel.unary_unary(
-            "/store_daemon.StoreDaemon/GetLoadedModels",
-            request_serializer=store__daemon__pb2.GetLoadedModelsRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.GetLoadedModelsResponse.FromString,
+        self.GetLoadedReplicas = channel.unary_unary(
+            "/store_daemon.StoreDaemon/GetLoadedReplicas",
+            request_serializer=store__daemon__pb2.GetLoadedReplicasRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.GetLoadedReplicasResponse.FromString,
         )
         self.LockTransportChunks = channel.unary_unary(
             "/store_daemon.StoreDaemon/LockTransportChunks",
@@ -72,39 +72,39 @@ class StoreDaemonStub(object):
             request_serializer=store__daemon__pb2.UnlockChunksRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.UnlockChunksResponse.FromString,
         )
-        self.BeginRegisterTensorDict = channel.unary_unary(
-            "/store_daemon.StoreDaemon/BeginRegisterTensorDict",
-            request_serializer=store__daemon__pb2.BeginRegisterTensorDictRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.BeginRegisterTensorDictResponse.FromString,
+        self.BeginRegisterArtifact = channel.unary_unary(
+            "/store_daemon.StoreDaemon/BeginRegisterArtifact",
+            request_serializer=store__daemon__pb2.BeginRegisterArtifactRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.BeginRegisterArtifactResponse.FromString,
         )
-        self.CommitRegisteredTensorDict = channel.unary_unary(
-            "/store_daemon.StoreDaemon/CommitRegisteredTensorDict",
-            request_serializer=store__daemon__pb2.CommitRegisteredTensorDictRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.CommitRegisteredTensorDictResponse.FromString,
+        self.CommitRegisteredArtifact = channel.unary_unary(
+            "/store_daemon.StoreDaemon/CommitRegisteredArtifact",
+            request_serializer=store__daemon__pb2.CommitRegisteredArtifactRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.CommitRegisteredArtifactResponse.FromString,
         )
-        self.AbortRegisteredTensorDict = channel.unary_unary(
-            "/store_daemon.StoreDaemon/AbortRegisteredTensorDict",
-            request_serializer=store__daemon__pb2.AbortRegisteredTensorDictRequest.SerializeToString,
-            response_deserializer=store__daemon__pb2.AbortRegisteredTensorDictResponse.FromString,
+        self.AbortRegisteredArtifact = channel.unary_unary(
+            "/store_daemon.StoreDaemon/AbortRegisteredArtifact",
+            request_serializer=store__daemon__pb2.AbortRegisteredArtifactRequest.SerializeToString,
+            response_deserializer=store__daemon__pb2.AbortRegisteredArtifactResponse.FromString,
         )
 
 
 class StoreDaemonServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def LoadModel(self, request, context):
+    def MaterializeReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def ConfirmModel(self, request, context):
+    def ConfirmReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def UnloadModel(self, request, context):
+    def UnloadReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -128,15 +128,15 @@ class StoreDaemonServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def WaitModelVerification(self, request, context):
+    def WaitReplicaVerification(self, request, context):
         """------------------------------------------------------------------
-        Asynchronous model integrity verification support.  Each LoadModel
+        Asynchronous artifact integrity verification support.  Each MaterializeReplica
         request triggers a background verification task on the daemon side.
         Clients can poll/wait for the outcome via this RPC.
         ------------------------------------------------------------------
 
-        Wait until the daemon finishes verifying the specified model replica
-        (identified by the <model_identifier, replica_uuid> tuple) or the
+        Wait until the daemon finishes verifying the specified artifact replica
+        (identified by the <artifact_id, replica_uuid> tuple) or the
         provided timeout elapses.  The call returns the current verification
         status so that clients can decide whether to retry or abort.
         """
@@ -145,13 +145,13 @@ class StoreDaemonServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def GetDetailedStatus(self, request, context):
-        """获取详细状态信息"""
+        """获取详细状态信息（以 Artifact/Replica 术语为准）"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def GetLoadedModels(self, request, context):
-        """Get reference information for all loaded models"""
+    def GetLoadedReplicas(self, request, context):
+        """Get reference information for all loaded replicas"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -170,21 +170,21 @@ class StoreDaemonServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def BeginRegisterTensorDict(self, request, context):
-        """========== Memory TensorDict Registration ==========
-        Register in-memory tensor dict as memory replica without disk I/O
+    def BeginRegisterArtifact(self, request, context):
+        """========== Memory Artifact Registration ==========
+        New canonical RPC names
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def CommitRegisteredTensorDict(self, request, context):
+    def CommitRegisteredArtifact(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def AbortRegisteredTensorDict(self, request, context):
+    def AbortRegisteredArtifact(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -193,20 +193,20 @@ class StoreDaemonServicer(object):
 
 def add_StoreDaemonServicer_to_server(servicer, server):
     rpc_method_handlers = {
-        "LoadModel": grpc.unary_unary_rpc_method_handler(
-            servicer.LoadModel,
-            request_deserializer=store__daemon__pb2.LoadModelRequest.FromString,
-            response_serializer=store__daemon__pb2.LoadModelResponse.SerializeToString,
+        "MaterializeReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.MaterializeReplica,
+            request_deserializer=store__daemon__pb2.MaterializeReplicaRequest.FromString,
+            response_serializer=store__daemon__pb2.MaterializeReplicaResponse.SerializeToString,
         ),
-        "ConfirmModel": grpc.unary_unary_rpc_method_handler(
-            servicer.ConfirmModel,
-            request_deserializer=store__daemon__pb2.ConfirmModelRequest.FromString,
-            response_serializer=store__daemon__pb2.ConfirmModelResponse.SerializeToString,
+        "ConfirmReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.ConfirmReplica,
+            request_deserializer=store__daemon__pb2.ConfirmReplicaRequest.FromString,
+            response_serializer=store__daemon__pb2.ConfirmReplicaResponse.SerializeToString,
         ),
-        "UnloadModel": grpc.unary_unary_rpc_method_handler(
-            servicer.UnloadModel,
-            request_deserializer=store__daemon__pb2.UnloadModelRequest.FromString,
-            response_serializer=store__daemon__pb2.UnloadModelResponse.SerializeToString,
+        "UnloadReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.UnloadReplica,
+            request_deserializer=store__daemon__pb2.UnloadReplicaRequest.FromString,
+            response_serializer=store__daemon__pb2.UnloadReplicaResponse.SerializeToString,
         ),
         "ClearMem": grpc.unary_unary_rpc_method_handler(
             servicer.ClearMem,
@@ -223,20 +223,20 @@ def add_StoreDaemonServicer_to_server(servicer, server):
             request_deserializer=store__daemon__pb2.GetWorkerStatusRequest.FromString,
             response_serializer=store__daemon__pb2.GetWorkerStatusResponse.SerializeToString,
         ),
-        "WaitModelVerification": grpc.unary_unary_rpc_method_handler(
-            servicer.WaitModelVerification,
-            request_deserializer=store__daemon__pb2.VerificationRequest.FromString,
-            response_serializer=store__daemon__pb2.VerificationResponse.SerializeToString,
+        "WaitReplicaVerification": grpc.unary_unary_rpc_method_handler(
+            servicer.WaitReplicaVerification,
+            request_deserializer=store__daemon__pb2.ReplicaVerificationRequest.FromString,
+            response_serializer=store__daemon__pb2.ReplicaVerificationResponse.SerializeToString,
         ),
         "GetDetailedStatus": grpc.unary_unary_rpc_method_handler(
             servicer.GetDetailedStatus,
             request_deserializer=store__daemon__pb2.GetDetailedStatusRequest.FromString,
             response_serializer=store__daemon__pb2.GetDetailedStatusResponse.SerializeToString,
         ),
-        "GetLoadedModels": grpc.unary_unary_rpc_method_handler(
-            servicer.GetLoadedModels,
-            request_deserializer=store__daemon__pb2.GetLoadedModelsRequest.FromString,
-            response_serializer=store__daemon__pb2.GetLoadedModelsResponse.SerializeToString,
+        "GetLoadedReplicas": grpc.unary_unary_rpc_method_handler(
+            servicer.GetLoadedReplicas,
+            request_deserializer=store__daemon__pb2.GetLoadedReplicasRequest.FromString,
+            response_serializer=store__daemon__pb2.GetLoadedReplicasResponse.SerializeToString,
         ),
         "LockTransportChunks": grpc.unary_unary_rpc_method_handler(
             servicer.LockTransportChunks,
@@ -248,20 +248,20 @@ def add_StoreDaemonServicer_to_server(servicer, server):
             request_deserializer=store__daemon__pb2.UnlockChunksRequest.FromString,
             response_serializer=store__daemon__pb2.UnlockChunksResponse.SerializeToString,
         ),
-        "BeginRegisterTensorDict": grpc.unary_unary_rpc_method_handler(
-            servicer.BeginRegisterTensorDict,
-            request_deserializer=store__daemon__pb2.BeginRegisterTensorDictRequest.FromString,
-            response_serializer=store__daemon__pb2.BeginRegisterTensorDictResponse.SerializeToString,
+        "BeginRegisterArtifact": grpc.unary_unary_rpc_method_handler(
+            servicer.BeginRegisterArtifact,
+            request_deserializer=store__daemon__pb2.BeginRegisterArtifactRequest.FromString,
+            response_serializer=store__daemon__pb2.BeginRegisterArtifactResponse.SerializeToString,
         ),
-        "CommitRegisteredTensorDict": grpc.unary_unary_rpc_method_handler(
-            servicer.CommitRegisteredTensorDict,
-            request_deserializer=store__daemon__pb2.CommitRegisteredTensorDictRequest.FromString,
-            response_serializer=store__daemon__pb2.CommitRegisteredTensorDictResponse.SerializeToString,
+        "CommitRegisteredArtifact": grpc.unary_unary_rpc_method_handler(
+            servicer.CommitRegisteredArtifact,
+            request_deserializer=store__daemon__pb2.CommitRegisteredArtifactRequest.FromString,
+            response_serializer=store__daemon__pb2.CommitRegisteredArtifactResponse.SerializeToString,
         ),
-        "AbortRegisteredTensorDict": grpc.unary_unary_rpc_method_handler(
-            servicer.AbortRegisteredTensorDict,
-            request_deserializer=store__daemon__pb2.AbortRegisteredTensorDictRequest.FromString,
-            response_serializer=store__daemon__pb2.AbortRegisteredTensorDictResponse.SerializeToString,
+        "AbortRegisteredArtifact": grpc.unary_unary_rpc_method_handler(
+            servicer.AbortRegisteredArtifact,
+            request_deserializer=store__daemon__pb2.AbortRegisteredArtifactRequest.FromString,
+            response_serializer=store__daemon__pb2.AbortRegisteredArtifactResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -275,7 +275,7 @@ class StoreDaemon(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def LoadModel(
+    def MaterializeReplica(
         request,
         target,
         options=(),
@@ -290,9 +290,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/LoadModel",
-            store__daemon__pb2.LoadModelRequest.SerializeToString,
-            store__daemon__pb2.LoadModelResponse.FromString,
+            "/store_daemon.StoreDaemon/MaterializeReplica",
+            store__daemon__pb2.MaterializeReplicaRequest.SerializeToString,
+            store__daemon__pb2.MaterializeReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -304,7 +304,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def ConfirmModel(
+    def ConfirmReplica(
         request,
         target,
         options=(),
@@ -319,9 +319,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/ConfirmModel",
-            store__daemon__pb2.ConfirmModelRequest.SerializeToString,
-            store__daemon__pb2.ConfirmModelResponse.FromString,
+            "/store_daemon.StoreDaemon/ConfirmReplica",
+            store__daemon__pb2.ConfirmReplicaRequest.SerializeToString,
+            store__daemon__pb2.ConfirmReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -333,7 +333,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def UnloadModel(
+    def UnloadReplica(
         request,
         target,
         options=(),
@@ -348,9 +348,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/UnloadModel",
-            store__daemon__pb2.UnloadModelRequest.SerializeToString,
-            store__daemon__pb2.UnloadModelResponse.FromString,
+            "/store_daemon.StoreDaemon/UnloadReplica",
+            store__daemon__pb2.UnloadReplicaRequest.SerializeToString,
+            store__daemon__pb2.UnloadReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -449,7 +449,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def WaitModelVerification(
+    def WaitReplicaVerification(
         request,
         target,
         options=(),
@@ -464,9 +464,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/WaitModelVerification",
-            store__daemon__pb2.VerificationRequest.SerializeToString,
-            store__daemon__pb2.VerificationResponse.FromString,
+            "/store_daemon.StoreDaemon/WaitReplicaVerification",
+            store__daemon__pb2.ReplicaVerificationRequest.SerializeToString,
+            store__daemon__pb2.ReplicaVerificationResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -507,7 +507,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def GetLoadedModels(
+    def GetLoadedReplicas(
         request,
         target,
         options=(),
@@ -522,9 +522,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/GetLoadedModels",
-            store__daemon__pb2.GetLoadedModelsRequest.SerializeToString,
-            store__daemon__pb2.GetLoadedModelsResponse.FromString,
+            "/store_daemon.StoreDaemon/GetLoadedReplicas",
+            store__daemon__pb2.GetLoadedReplicasRequest.SerializeToString,
+            store__daemon__pb2.GetLoadedReplicasResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -594,7 +594,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def BeginRegisterTensorDict(
+    def BeginRegisterArtifact(
         request,
         target,
         options=(),
@@ -609,9 +609,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/BeginRegisterTensorDict",
-            store__daemon__pb2.BeginRegisterTensorDictRequest.SerializeToString,
-            store__daemon__pb2.BeginRegisterTensorDictResponse.FromString,
+            "/store_daemon.StoreDaemon/BeginRegisterArtifact",
+            store__daemon__pb2.BeginRegisterArtifactRequest.SerializeToString,
+            store__daemon__pb2.BeginRegisterArtifactResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -623,7 +623,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def CommitRegisteredTensorDict(
+    def CommitRegisteredArtifact(
         request,
         target,
         options=(),
@@ -638,9 +638,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/CommitRegisteredTensorDict",
-            store__daemon__pb2.CommitRegisteredTensorDictRequest.SerializeToString,
-            store__daemon__pb2.CommitRegisteredTensorDictResponse.FromString,
+            "/store_daemon.StoreDaemon/CommitRegisteredArtifact",
+            store__daemon__pb2.CommitRegisteredArtifactRequest.SerializeToString,
+            store__daemon__pb2.CommitRegisteredArtifactResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -652,7 +652,7 @@ class StoreDaemon(object):
         )
 
     @staticmethod
-    def AbortRegisteredTensorDict(
+    def AbortRegisteredArtifact(
         request,
         target,
         options=(),
@@ -667,9 +667,9 @@ class StoreDaemon(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/store_daemon.StoreDaemon/AbortRegisteredTensorDict",
-            store__daemon__pb2.AbortRegisteredTensorDictRequest.SerializeToString,
-            store__daemon__pb2.AbortRegisteredTensorDictResponse.FromString,
+            "/store_daemon.StoreDaemon/AbortRegisteredArtifact",
+            store__daemon__pb2.AbortRegisteredArtifactRequest.SerializeToString,
+            store__daemon__pb2.AbortRegisteredArtifactResponse.FromString,
             options,
             channel_credentials,
             insecure,

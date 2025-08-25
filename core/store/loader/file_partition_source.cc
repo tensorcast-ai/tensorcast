@@ -16,7 +16,7 @@
 namespace stepcast::store::loader {
 
 FilePartitionSource::FilePartitionSource(Options options) : options_(std::move(options)) {
-  // Use the provided use_direct_io flag, or auto-detect based on model size
+  // Use the provided use_direct_io flag, or auto-detect based on artifact size
   using_direct_io_ = options_.use_direct_io || (options_.total_size > 5ULL * 1024 * 1024 * 1024); // 5GB threshold
 
   // Allocate aligned buffer for O_DIRECT if needed

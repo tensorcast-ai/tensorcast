@@ -9,12 +9,12 @@ from enum import Enum
 # =======================
 
 
-class ModelLocation(Enum):
-    NONE: "ModelLocation"
-    DISK: "ModelLocation"
-    CPU: "ModelLocation"
-    GPU: "ModelLocation"
-    REMOTE: "ModelLocation"
+class MemoryLocation(Enum):
+    NONE: "MemoryLocation"
+    DISK: "MemoryLocation"
+    CPU: "MemoryLocation"
+    GPU: "MemoryLocation"
+    REMOTE: "MemoryLocation"
 
 
 class MemoryState(Enum):
@@ -40,8 +40,8 @@ class DeviceType(Enum):
 
 
 class CommRegistrationInfo:
-    model_size: int
-    location: ModelLocation
+    artifact: int
+    location: MemoryLocation
     device_id: int
     comm_dev_type: int
     buffer_addresses: List[int]  # Read-only property
@@ -61,8 +61,8 @@ class DeviceKey:
     def __repr__(self) -> str: ...
 
 
-class InstanceKey:
-    model_id: str
+class ReplicaKey:
+    artifact_id: str
     device: DeviceKey
     replica: int
 
@@ -70,11 +70,11 @@ class InstanceKey:
     def __repr__(self) -> str: ...
 
 
-class ModelInfo:
-    model_id: str
+class ReplicaInfo:
+    artifact_id: str
     size_bytes: int
-    cpu_state: ModelLocation
-    gpu_state: ModelLocation
+    cpu_state: MemoryLocation
+    gpu_state: MemoryLocation
     gpu_device_id: int
     gpu_device_uuid: str
     is_registered_for_comm: bool
@@ -85,13 +85,13 @@ class ModelInfo:
     def __repr__(self) -> str: ...
 
 
-class PrepareMode(Enum):
-    AUTO: "PrepareMode"
-    COPY_ONLY: "PrepareMode"
-    LOAD_ONLY: "PrepareMode"
+class MaterializeMode(Enum):
+    AUTO: "MaterializeMode"
+    COPY_ONLY: "MaterializeMode"
+    LOAD_ONLY: "MaterializeMode"
 
 
-class ModelHandle:
+class ReplicaHandle:
     def wait_ready(self, timeout_ms: int) -> None: ...
 
     @property
@@ -101,7 +101,7 @@ class ModelHandle:
     def ipc_handle_bytes(self) -> bytes: ...
 
     @property
-    def instance_key(self) -> str: ...
+    def replica_key(self) -> str: ...
 
 
 # =======================
@@ -110,35 +110,35 @@ class ModelHandle:
 
 
 class StoreEngine:
-    # ---- Unified prepare API ----
-    def prepare(
+    # ---- Unified materialize_replica API ----
+    def materialize_replica(
         self,
         target_device: Union[DeviceKey, str, int] = "gpu:0",
-        mode: PrepareMode = PrepareMode.AUTO,
+        mode: MaterializeMode = MaterializeMode.AUTO,
         *,
         pinned_timeout_ms: Optional[int] = None,
-        model_id: Optional[str] = None,
+        artifact_id: Optional[str] = None,
         disk_path: Optional[str] = None,
-    ) -> ModelHandle: ...
+    ) -> ReplicaHandle: ...
 
     # ---- Multi-device helpers ----
-    def get_loaded_devices(self, model_id: str) -> List[DeviceKey]: ...
+    def get_resident_devices(self, artifact_id: str) -> List[DeviceKey]: ...
 
-    def list_device_models(self, device: DeviceKey) -> List[InstanceKey]: ...
+    def list_device_replicas(self, device: DeviceKey) -> List[ReplicaKey]: ...
 
-    def wait_instance_ready(self, instance_key: InstanceKey) -> int: ...
+    def wait_replica_ready(self, replica_key: ReplicaKey) -> int: ...
 
-    def unload_instance(self, instance_key: InstanceKey) -> int: ...
+    def unload_replica(self, replica_key: ReplicaKey) -> int: ...
 
-    def get_instance_state(self, instance_key: InstanceKey, memory_type: DeviceType) -> MemoryState: ...
+    def get_replica_state(self, replica_key: ReplicaKey, memory_type: DeviceType) -> MemoryState: ...
 
-    def get_instance_gpu_ptr(self, instance_key: InstanceKey) -> int: ...
+    def get_replica_gpu_ptr(self, replica_key: ReplicaKey) -> int: ...
 
-    def get_instance_size(self, instance_key: InstanceKey) -> int: ...
+    def get_replica_size(self, replica_key: ReplicaKey) -> int: ...
 
-    # ---- Memory TensorDict Registration (RFC-0006 Phase A) ----
-    class TensorDictRegistration(TypedDict, total=False):
-        model_id: str
+    # ---- Memory Artifact Registration (RFC-0006 Phase A) ----
+    class ArtifactRegistration(TypedDict, total=False):
+        artifact_id: str
         tensor_index_key: str
         tensor_index_data: Optional[str]
         schema_version: str
@@ -156,7 +156,7 @@ class StoreEngine:
 
     class RegistrationCommitResult(TypedDict):
         registration_id: str
-        model_id: str
+        artifact_id: str
         device_id: int
         size_bytes: int
         # RFC-0007 descriptor fields (content-addressed identity)
@@ -165,42 +165,42 @@ class StoreEngine:
         schema_version: str
         encoding: str
 
-    def begin_register_tensor_dict(
+    def begin_register_artifact(
         self,
-        registration: TensorDictRegistration,
+        registration: ArtifactRegistration,
     ) -> RegistrationBeginResult: ...
 
-    def commit_registered_tensor_dict(
+    def commit_registered_artifact(
         self,
         registration_id: str,
     ) -> RegistrationCommitResult: ...
 
-    def abort_registered_tensor_dict(self, registration_id: str) -> bool: ...
+    def abort_registered_artifact(self, registration_id: str) -> bool: ...
 
     # ---- Distributed Memory Pool helpers ----
     def lock_chunks(
         self,
-        instance_key: InstanceKey,
+        replica_key: ReplicaKey,
         chunk_indices: List[int],
     ) -> int: ...
 
     def unlock_chunks(
         self,
-        instance_key: InstanceKey,
+        replica_key: ReplicaKey,
         chunk_indices: List[int],
         copied_gpu: bool,
     ) -> int: ...
 
-    def enable_remote_instance_access(
+    def enable_remote_replica_access(
         self,
-        instance_key: InstanceKey,
-        location: ModelLocation,
+        replica_key: ReplicaKey,
+        location: MemoryLocation,
     ) -> CommRegistrationInfo: ...
 
-    def disable_remote_instance_access(
+    def disable_remote_replica_access(
         self,
-        instance_key: InstanceKey,
-        location: ModelLocation,
+        replica_key: ReplicaKey,
+        location: MemoryLocation,
     ) -> bool: ...
 
     # ---- Memory / Metrics ----
@@ -212,7 +212,7 @@ class StoreEngine:
 
     def get_available_memory(self) -> int: ...
 
-    def get_all_models_info(self) -> List[ModelInfo]: ...
+    def get_all_replicas_info(self) -> List[ReplicaInfo]: ...
 
     def get_gpu_memory_stats(self) -> List[Tuple[int, int]]: ...
 

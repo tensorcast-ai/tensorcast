@@ -19,7 +19,8 @@ class TransportRepository(BaseRepository):
         """Find a transport by ID."""
         cursor = self.get_cursor()
         result = cursor.execute(
-            "SELECT * FROM model_transports WHERE transport_id = ?", [str(transport_id)]
+            "SELECT * FROM artifact_transports WHERE transport_id = ?",
+            [str(transport_id)],
         ).fetchone()
 
         if result:
@@ -32,8 +33,8 @@ class TransportRepository(BaseRepository):
 
         cursor.execute(
             """
-            INSERT INTO model_transports (
-                transport_id, replica_id, model_id, disk_path,
+            INSERT INTO artifact_transports (
+                transport_id, replica_id, artifact_id, disk_path,
                 source_node_id, source_address, source_port,
                 status
             )
@@ -42,7 +43,7 @@ class TransportRepository(BaseRepository):
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
-                transport.model_id,
+                transport.artifact_id,
                 transport.disk_path,
                 transport.source_node_id,
                 transport.source_address,
@@ -57,8 +58,8 @@ class TransportRepository(BaseRepository):
         """Create a new transport record using an existing cursor."""
         cursor.execute(
             """
-            INSERT INTO model_transports (
-                transport_id, replica_id, model_id, disk_path,
+            INSERT INTO artifact_transports (
+                transport_id, replica_id, artifact_id, disk_path,
                 source_node_id, source_address, source_port,
                 status
             )
@@ -67,7 +68,7 @@ class TransportRepository(BaseRepository):
             [
                 str(transport.transport_id),
                 str(transport.replica_id),
-                transport.model_id,
+                transport.artifact_id,
                 transport.disk_path,
                 transport.source_node_id,
                 transport.source_address,
@@ -84,7 +85,7 @@ class TransportRepository(BaseRepository):
 
         result = cursor.execute(
             """
-            DELETE FROM model_transports
+            DELETE FROM artifact_transports
             WHERE transport_id = ?
             RETURNING transport_id
             """,
@@ -100,7 +101,7 @@ class TransportRepository(BaseRepository):
         if completed_at:
             result = cursor.execute(
                 """
-                UPDATE model_transports
+                UPDATE artifact_transports
                 SET status = ?, completed_at = ?
                 WHERE transport_id = ?
                 RETURNING transport_id
@@ -110,7 +111,7 @@ class TransportRepository(BaseRepository):
         else:
             result = cursor.execute(
                 """
-                UPDATE model_transports
+                UPDATE artifact_transports
                 SET status = ?
                 WHERE transport_id = ?
                 RETURNING transport_id
@@ -126,7 +127,7 @@ class TransportRepository(BaseRepository):
         """List transports with optional filters and pagination."""
         cursor = self.get_cursor()
 
-        query = "SELECT * FROM model_transports"
+        query = "SELECT * FROM artifact_transports"
         params = []
 
         if status:
@@ -143,7 +144,7 @@ class TransportRepository(BaseRepository):
         """Count transports with optional filters."""
         cursor = self.get_cursor()
 
-        query = "SELECT COUNT(*) FROM model_transports"
+        query = "SELECT COUNT(*) FROM artifact_transports"
         params = []
 
         if status:
@@ -172,7 +173,7 @@ class TransportRepository(BaseRepository):
         return Transport(
             transport_id=transport_id,
             replica_id=replica_id,
-            model_id=row[2],
+            artifact_id=row[2],
             disk_path=row[3],
             source_node_id=row[4],
             source_address=row[5],

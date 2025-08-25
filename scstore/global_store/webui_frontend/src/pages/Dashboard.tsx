@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line } from 'recharts'
 import MetricCard from '@/components/MetricCard'
 import { api } from '@/api/endpoints'
-import { ModelSummary, NodeSummary } from '@/api/client'
+import { ArtifactSummary, NodeSummary } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useEffect, useState } from 'react'
 
@@ -42,10 +42,10 @@ const Dashboard = () => {
     },
   })
 
-  const { data: models } = useQuery({
-    queryKey: ['models'],
+  const { data: artifacts } = useQuery({
+    queryKey: ['artifacts'],
     queryFn: async () => {
-      const res = await api.getModels()
+      const res = await api.getArtifacts()
       return res.data.data
     },
   })
@@ -69,11 +69,11 @@ const Dashboard = () => {
   }
 
   // Prepare chart data
-  const replicaDistribution = models?.slice(0, 10).map((model: ModelSummary) => ({
-    name: model.model_id,
-    gpu: model.gpu_replicas,
-    ram: model.ram_replicas,
-    disk: model.disk_replicas,
+  const replicaDistribution = artifacts?.slice(0, 10).map((artifact: ArtifactSummary) => ({
+    name: artifact.artifact_id,
+    gpu: artifact.gpu_replicas,
+    ram: artifact.ram_replicas,
+    disk: artifact.disk_replicas,
   })) || []
 
   const nodeMemoryData = nodes?.map((node: NodeSummary) => ({
@@ -108,8 +108,8 @@ const Dashboard = () => {
         </Col>
         <Col xs={24} sm={12} md={6}>
           <MetricCard
-            title="Total Models"
-            value={metrics?.total_models || 0}
+            title="Total Artifacts"
+            value={metrics?.total_artifacts || 0}
             loading={isLoading}
           />
         </Col>
@@ -141,7 +141,7 @@ const Dashboard = () => {
 
       <Row gutter={[16, 16]} style={{ marginTop: 24 }}>
         <Col xs={24} lg={12}>
-          <Card title="Replica Distribution (Top 10 Models)">
+          <Card title="Replica Distribution (Top 10 Artifacts)">
             <div className="chart-container">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={replicaDistribution}>

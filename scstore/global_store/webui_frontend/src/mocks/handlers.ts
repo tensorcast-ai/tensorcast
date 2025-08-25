@@ -1,5 +1,5 @@
 import { rest, RestRequest, ResponseComposition, RestContext, DefaultBodyType } from 'msw'
-import { summary, workers, replicas, models, nodes, transports } from './data'
+import { summary, workers, replicas, artifacts, nodes, transports } from './data'
 
 // Helper function to wrap data in standard response format
 const envelope = <T>(data: T) => ({ data })
@@ -27,7 +27,7 @@ export const handlers = [
   rest.get('/api/replicas', (req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
     const url = new URL(req.url)
     const workerId = url.searchParams.get('worker_id')
-    const modelId = url.searchParams.get('model_id')
+    const modelId = url.searchParams.get('artifact_id')
     const nodeId = url.searchParams.get('node_id')
     const memoryType = url.searchParams.get('memory_type')
 
@@ -38,7 +38,7 @@ export const handlers = [
     }
     if (modelId) {
       filteredReplicas = filteredReplicas.filter(r =>
-        r.model_id.toLowerCase().includes(modelId.toLowerCase())
+        r.artifact_id.toLowerCase().includes(modelId.toLowerCase())
       )
     }
     if (nodeId) {
@@ -58,16 +58,16 @@ export const handlers = [
     return res(ctx.status(200), ctx.json(envelope(replica)))
   }),
 
-  // Models list
-  rest.get('/api/models', (_req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
-    return res(ctx.status(200), ctx.json(envelope(models)))
+  // Artifacts list
+  rest.get('/api/artifacts', (_req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
+    return res(ctx.status(200), ctx.json(envelope(artifacts)))
   }),
 
-  rest.get('/api/models/:modelName', (req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
-    const { modelName } = req.params as { modelName: string }
-    const model = models.find((m) => m.model_id === modelName)
-    if (!model) return res(ctx.status(404))
-    return res(ctx.status(200), ctx.json(envelope(model)))
+  rest.get('/api/artifacts/:artifactId', (req: RestRequest, res: ResponseComposition<DefaultBodyType>, ctx: RestContext) => {
+    const { artifactId } = req.params as { artifactId: string }
+    const artifact = artifacts.find((m) => m.artifact_id === artifactId)
+    if (!artifact) return res(ctx.status(404))
+    return res(ctx.status(200), ctx.json(envelope(artifact)))
   }),
 
   // Nodes summary
@@ -81,7 +81,7 @@ export const handlers = [
     const page = parseInt(url.searchParams.get('page') || '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') || '50', 10)
     const status = url.searchParams.get('status')
-    const modelId = url.searchParams.get('model_id')
+    const modelId = url.searchParams.get('artifact_id')
 
     // Filter transports based on query params
     let filteredTransports = [...transports]
@@ -90,7 +90,7 @@ export const handlers = [
     }
     if (modelId) {
       filteredTransports = filteredTransports.filter(t =>
-        t.model_id.toLowerCase().includes(modelId.toLowerCase())
+        t.artifact_id.toLowerCase().includes(modelId.toLowerCase())
       )
     }
 

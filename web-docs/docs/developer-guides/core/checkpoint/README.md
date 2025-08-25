@@ -8,14 +8,14 @@ sidebar_position: 1
 
 ## Overview
 
-The Checkpoint module provides efficient tensor serialization and deserialization capabilities for the StepCast Store. It's designed to handle large-scale model checkpoints with optimized I/O performance and memory management.
+The Checkpoint module provides efficient tensor serialization and deserialization capabilities for the StepCast Store. It's designed to handle large-scale replica checkpoints with optimized I/O performance and memory management.
 
 ## Key Features
 
 - **Efficient I/O**: Uses 4K-aligned buffers for optimal disk performance
 - **Partitioned Storage**: Automatically splits large models into manageable chunks (10GB per partition)
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
-- **Verification Support**: Built-in model integrity verification
+- **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)
 - **Python Bindings**: First-class PyTorch integration via `scstore.csrc.checkpoint_py` (zero-copy where possible)
 - **Memory Optimization**: Handles shared tensor storages to avoid duplication
@@ -52,14 +52,14 @@ std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> tensor_data;
 // ... populate tensor_data with (data_ptr, size) pairs
 
 // Save to disk
-auto offsets = stepcast::store::save_tensors(tensor_names, tensor_data, "/path/to/model");
+auto offsets = stepcast::store::save_tensors(tensor_names, tensor_data, "/path/to/replica");
 ```
 
 ### Loading Tensors
 ```cpp
 // Load from disk
-auto tensors = stepcast::store::restore_tensors_from_model_path(
-    meta_state_dict, "/path/to/model", tensor_offsets);
+auto tensors = stepcast::store::restore_tensors_from_disk(
+    meta_state_dict, "/path/to/replica", tensor_offsets);
 ```
 
 ### Streaming Save Example (GPU)
@@ -76,7 +76,7 @@ cfg.num_buffers = 4;
 cfg.buffer_size_mb = 256;
 
 // Instantiate and use the writer
-stepcast::store::StreamingTensorWriter writer("/path/to/model/tensor.data_0", cfg, nullptr);
+stepcast::store::StreamingTensorWriter writer("/path/to/replica/tensor.data_0", cfg, nullptr);
 SC_CHECK_OK(writer.initialize());
 SC_CHECK_OK(writer.write_tensor(gpu_tensor_ptr, num_bytes, /*is_gpu=*/true));
 SC_CHECK_OK(writer.finalize());
@@ -93,7 +93,7 @@ cfg = {
     "buffer_size_mb": 256,
     "enable_async_write": True,
 }
-offsets = scs.save_tensors_streaming(tensor_names, tensor_data, "/path/to/model", cfg)
+offsets = scs.save_tensors_streaming(tensor_names, tensor_data, "/path/to/replica", cfg)
 ```
 
 ## File Format Overview

@@ -7,19 +7,19 @@
 #include <string>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
-#include "core/common/model_hash.h"
 #include "core/store/loader/disk_dir_hash.h"
 
 struct option longOpts[] = {
-    {"actor", required_argument, 0, 'a'},
-    {"ip", required_argument, 0, 'i'},
-    {"port", required_argument, 0, 'p'},
-    {"count", required_argument, 0, 'c'},
-    {"gpu", required_argument, 0, 'g'},
-    {"chunk", required_argument, 0, 'k'},
-    {"rdma", no_argument, 0, 'r'},
-    {"help", no_argument, 0, 'h'},
+    {"actor", required_argument, nullptr, 'a'},
+    {"ip", required_argument, nullptr, 'i'},
+    {"port", required_argument, nullptr, 'p'},
+    {"count", required_argument, nullptr, 'c'},
+    {"gpu", required_argument, nullptr, 'g'},
+    {"chunk", required_argument, nullptr, 'k'},
+    {"rdma", no_argument, nullptr, 'r'},
+    {"help", no_argument, nullptr, 'h'},
 };
 
 static void printHelp(char* program_name) {
@@ -129,16 +129,16 @@ bool is_cuda_available() {
   return true;
 }
 
-absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesystem::path& model_dir) {
+absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::filesystem::path& artifact_dir) {
   using nlohmann::json;
   // Validate directory exists
-  if (!std::filesystem::exists(model_dir) || !std::filesystem::is_directory(model_dir)) {
-    return absl::NotFoundError("model_dir does not exist or is not a directory");
+  if (!std::filesystem::exists(artifact_dir) || !std::filesystem::is_directory(artifact_dir)) {
+    return absl::NotFoundError("artifact_dir does not exist or is not a directory");
   }
   // Enumerate partition files and compute total size as sum of file sizes.
   std::vector<std::filesystem::path> parts;
   uint64_t total_size = 0;
-  for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
     if (!entry.is_regular_file()) {
       continue;
     }
@@ -166,7 +166,7 @@ absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesyst
   entry.push_back(0); // storage_offset
   idx["__dummy__"] = std::move(entry);
 
-  const auto index_json_path = model_dir / "tensor_index.json";
+  const auto index_json_path = artifact_dir / "tensor_index.json";
   {
     std::ofstream of(index_json_path);
     if (!of.is_open()) {
@@ -175,19 +175,20 @@ absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesyst
     of << idx.dump();
   }
 
-  // 2) Compute multihashes via core/common/model_hash
-  auto index_mh_or = stepcast::store::model_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
+  // 2) Compute multihashes via core/common/artifact_hash
+  auto index_mh_or =
+      stepcast::store::artifact_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
-  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_disk_dir(model_dir.string());
+  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_disk_dir(artifact_dir.string());
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
 
-  // 3) Persist model_descriptor.json
+  // 3) Persist artifact_descriptor.json
   json desc;
-  desc["model_id"] = std::string("mi2:") + *index_mh_or + ":" + *data_mh_or;
+  desc["artifact_id"] = std::string("mi2:") + *index_mh_or + ":" + *data_mh_or;
   desc["index_multihash"] = *index_mh_or;
   desc["data_multihash"] = *data_mh_or;
   desc["schema_version"] = "v2";
@@ -198,11 +199,11 @@ absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesyst
   hp["fanout"] = 2;
   hp["algorithm"] = "sha2-256";
   desc["hash_params"] = hp;
-  const auto descriptor_path = model_dir / "model_descriptor.json";
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
   {
     std::ofstream of(descriptor_path);
     if (!of.is_open()) {
-      return absl::InternalError("failed to open model_descriptor.json for writing");
+      return absl::InternalError("failed to open artifact_descriptor.json for writing");
     }
     of << desc.dump(2);
   }

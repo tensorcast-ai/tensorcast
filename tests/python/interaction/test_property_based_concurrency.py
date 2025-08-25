@@ -9,7 +9,7 @@ sequences, ensuring that **current_requests never exceeds max_concurrency** for
 any replica and that, after the rule-based run, all counters return to zero.
 
 The approach uses Hypothesis' *RuleBasedStateMachine* to generate sequences of
-operations and invariants.  It focuses purely on the *GlobalModelStoreServicer*
+operations and invariants.  It focuses purely on the *GlobalStoreServicer*
 logic, without spinning up real Store-Daemons or P2P transfers – that layer is
 already mocked for interaction tests.
 """
@@ -42,7 +42,7 @@ from tests.python.interaction.utils import FakeContext
 # Helper – replica registration
 # ---------------------------------------------------------------------------
 
-def _register_replica(gs, model: str, node_id: str, max_concurrency: int) -> None:
+def _register_replica(gs, artifact: str, node_id: str, max_concurrency: int) -> None:
     """Register worker + GPU replica with *max_concurrency*."""
     # 1. Worker
     worker_req = global_store_pb2.RegisterWorkerRequest(
@@ -66,13 +66,13 @@ def _register_replica(gs, model: str, node_id: str, max_concurrency: int) -> Non
         memory_type=global_store_pb2.MemoryType.GPU,
         device_id=0,
     )
-    reg_req = global_store_pb2.RegisterModelReplicaRequest(
-        model_id=model,
+    reg_req = global_store_pb2.RegisterReplicaRequest(
+        artifact_id=artifact,
         mem_info=mem_info,
         max_concurrency=max_concurrency,
         worker_id=worker_resp.worker_id,
     )
-    rep_resp = gs.RegisterModelReplica(reg_req, FakeContext())
+    rep_resp = gs.RegisterReplica(reg_req, FakeContext())
     assert rep_resp.status == global_store_pb2.Status.OK
 
 
@@ -85,12 +85,12 @@ def test_property_based_concurrency(global_store_service):
     """Hypothesis-based state machine exercising Acquire/Complete behaviour."""
 
     gs = global_store_service
-    model_id = "hypothesis-llama"
+    artifact_id = "hypothesis-llama"
 
     # Register three replicas with varying capacities for richer state space
     capacities = {"A": 2, "B": 3, "C": 5}
     for node, cap in capacities.items():
-        _register_replica(gs, model_id, node_id=node, max_concurrency=cap)
+        _register_replica(gs, artifact_id, node_id=node, max_concurrency=cap)
 
     class ConcurrencySM(RuleBasedStateMachine):
         """Rule-based state machine driving transport Acquire / Complete."""
@@ -99,19 +99,19 @@ def test_property_based_concurrency(global_store_service):
         def __init__(self):
             super().__init__()
             self.gs = gs
-            self.model = model_id
+            self.artifact = artifact_id
             self.active_transport_ids: List[str] = []
 
         # ---------- Operations ----------
         @rule()
         def request_transport(self):
             """Attempt to acquire transport (may succeed or time-out)."""
-            req = global_store_pb2.RequestModelReplicaTransportRequest(
-                model_id=self.model,
+            req = global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id=self.artifact,
                 # Occasionally request with 1ms timeout to increase branching
                 wait_timeout_ms=1 if random.random() < 0.2 else 0,
             )
-            resp = self.gs.RequestModelReplicaTransport(req, FakeContext())
+            resp = self.gs.RequestReplicaTransport(req, FakeContext())
             if resp.status == global_store_pb2.Status.OK:
                 self.active_transport_ids.append(resp.transport_id)
 
@@ -122,23 +122,23 @@ def test_property_based_concurrency(global_store_service):
                 return  # Nothing to complete
             tid = random.choice(self.active_transport_ids)
             self.active_transport_ids.remove(tid)
-            comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(
+            comp_req = global_store_pb2.CompleteReplicaTransportRequest(
                 transport_id=tid
             )
-            self.gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+            self.gs.CompleteReplicaTransport(comp_req, FakeContext())
 
         # ---------- Invariants ----------
         @invariant()
         def counters_never_exceed_capacity(self):
             """current_requests must never exceed max_concurrency."""
-            for replica in self.gs.model_replica_repository.list_all_replicas():
+            for replica in self.gs.replica_repository.list_all_replicas():
                 assert replica.current_requests <= replica.max_concurrency
 
         @invariant()
         def outstanding_matches_db(self):
             """Sum of DB counters should equal in-memory list length."""
             total_active_db = sum(
-                r.current_requests for r in self.gs.model_replica_repository.list_all_replicas()
+                r.current_requests for r in self.gs.replica_repository.list_all_replicas()
             )
             assert total_active_db == len(self.active_transport_ids)
 
@@ -146,10 +146,10 @@ def test_property_based_concurrency(global_store_service):
         def teardown(self):  # Called automatically by Hypothesis
             # Ensure eventual cleanup so next test starts with clean slate
             for tid in list(self.active_transport_ids):
-                comp_req = global_store_pb2.CompleteModelReplicaTransportRequest(
+                comp_req = global_store_pb2.CompleteReplicaTransportRequest(
                     transport_id=tid
                 )
-                self.gs.CompleteModelReplicaTransport(comp_req, FakeContext())
+                self.gs.CompleteReplicaTransport(comp_req, FakeContext())
             self.active_transport_ids.clear()
 
     # Run the state machine with restrained settings for CI speed

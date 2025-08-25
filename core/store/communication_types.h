@@ -5,8 +5,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
-#include "core/store/model/model_location.h"
 
 namespace stepcast::communicator {
 class CommunicateEngine;
@@ -18,8 +18,8 @@ namespace stepcast::store {
  * @brief Holds information about memory registered for communication.
  */
 struct CommRegistrationInfo {
-  uint64_t model_size = 0;
-  ModelLocation location = ModelLocation::NONE;
+  uint64_t artifact_size = 0;
+  MemoryLocation location = MemoryLocation::NONE;
   int device_id = -1; // -1 for CPU, device id for GPU
   int comm_dev_type = 0; // Device type used for communicator registration
   std::vector<uint64_t> buffer_addresses; // Addresses (cast to uint64_t) of registered regions/chunks

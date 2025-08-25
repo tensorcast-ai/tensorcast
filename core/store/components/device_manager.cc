@@ -101,13 +101,13 @@ absl::Status DeviceManager::initialize() {
         i, metrics::Gauge("store_daemon_gpu_memory_bytes", {{"device_id", device_id_str}, {"memory_type", "total"}}));
     gpu_memory_free_gauges_.emplace(
         i, metrics::Gauge("store_daemon_gpu_memory_bytes", {{"device_id", device_id_str}, {"memory_type", "free"}}));
-    gpu_models_loaded_gauges_.emplace(
-        i, stepcast::metrics::Gauge("store_daemon_gpu_models_loaded", {{"device_id", device_id_str}}));
+    gpu_replicas_loaded_gauges_.emplace(
+        i, stepcast::metrics::Gauge("store_daemon_gpu_replicas_loaded", {{"device_id", device_id_str}}));
 
     // Set initial metric values
     gpu_memory_total_gauges_.at(i).set(static_cast<double>(total_mem));
     gpu_memory_free_gauges_.at(i).set(static_cast<double>(free_mem));
-    gpu_models_loaded_gauges_.at(i).set(0.0);
+    gpu_replicas_loaded_gauges_.at(i).set(0.0);
   }
 
   return absl::OkStatus();

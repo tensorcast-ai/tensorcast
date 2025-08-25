@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'StepCast Store',
-  tagline: 'High-performance, distributed model storage and loading system for ML inference and training',
+  tagline: 'High-performance, distributed artifact storage and loading system for ML inference and training',
   favicon: 'img/favicon.ico',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -23,7 +23,7 @@ const config: Config = {
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
   organizationName: 'stepcast', // Usually your GitHub org/user name.
-  projectName: 'model-store', // Usually your repo name.
+  projectName: 'stepcast-store', // Usually your repo name.
 
   onBrokenLinks: 'warn',
   onBrokenMarkdownLinks: 'warn',
@@ -82,7 +82,7 @@ const config: Config = {
           label: 'Reference',
         },
         {
-          href: 'https://gitlab.basemind.com/sys/stepcast/model-store',
+          href: 'https://gitlab.basemind.com/sys/stepcast/stepcast-store',
           label: 'Gitlab',
           position: 'right',
         },
@@ -113,7 +113,7 @@ const config: Config = {
           items: [
             {
               label: 'Gitlab',
-              href: 'http://gitlab.basemind.com/sys/stepcast/model-store',
+              href: 'http://gitlab.basemind.com/sys/stepcast/stepcast-store',
             },
           ],
         },

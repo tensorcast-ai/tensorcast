@@ -17,13 +17,13 @@ from scstore.torch_util import save_dict
 
 
 def create_example_model(size_gb: float = 1.0) -> dict[str, torch.Tensor]:
-    """Create an example model with specified size in GB."""
+    """Create an example artifact with specified size in GB."""
     # Calculate number of float32 elements for the target size
     bytes_per_float32 = 4
     total_bytes = int(size_gb * 1024 * 1024 * 1024)
     total_elements = total_bytes // bytes_per_float32
 
-    # Create multiple tensors to simulate a real model
+    # Create multiple tensors to simulate a real artifact
     tensors_per_layer = 4
     layers = 12
     elements_per_tensor = total_elements // (tensors_per_layer * layers)
@@ -115,17 +115,17 @@ def main():
     else:
         print("CUDA is not available. Using CPU tensors for demonstration.")
 
-    # Create example model
-    model_size_gb = 2.0  # Adjust based on available GPU memory
-    print(f"\nCreating example model ({model_size_gb} GB)...")
-    state_dict = create_example_model(model_size_gb)
+    # Create example artifact
+    artifact_size_gb = 2.0  # Adjust based on available GPU memory
+    print(f"\nCreating example artifact ({artifact_size_gb} GB)...")
+    state_dict = create_example_model(artifact_size_gb)
 
     # Calculate actual size
     total_bytes = sum(
         tensor.element_size() * tensor.nelement() for tensor in state_dict.values()
     )
     print(
-        f"Model created with {len(state_dict)} tensors, total size: {total_bytes / 1024**3:.2f} GB"
+        f"Artifact created with {len(state_dict)} tensors, total size: {total_bytes / 1024**3:.2f} GB"
     )
 
     # Compare save methods

@@ -7,8 +7,8 @@ cc_library(
     deps = [
         "//core/checkpoint",
         "//core/common",
-        "//core/communicator",
-        "//core/store",
+        "//core/communicator:engine_lib",
+        "//core/store:store_engine",
     ],
     alwayslink = True,
 )

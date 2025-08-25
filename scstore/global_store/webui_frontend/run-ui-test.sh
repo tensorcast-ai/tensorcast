@@ -73,7 +73,7 @@ echo -e "\n==========================================="
 if [ $TEST_RESULT -eq 0 ]; then
     echo -e "${GREEN}✅ All UI tests passed!${NC}"
     echo -e "\nThe following pages were tested:"
-    echo "  - /transports - Model transport history with pagination"
+    echo "  - /transports - Artifact transport history with pagination"
     echo "  - /nodes - Node overview with statistics"
     echo "  - /mock-test - Mock API testing dashboard"
     echo -e "\n${GREEN}Mock data is displaying correctly on all tested pages!${NC}"

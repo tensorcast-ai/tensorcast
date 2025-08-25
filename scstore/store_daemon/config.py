@@ -29,7 +29,7 @@ from pydantic import (
 )
 
 # ---------------------------------------------------------------------------
-# Section models
+# Section: artifact storage
 # ---------------------------------------------------------------------------
 
 
@@ -41,7 +41,8 @@ class ServerConfig(BaseModel):
         default=50052, ge=1, le=65535, description="gRPC port exposed to clients"
     )
     storage_path: Path = Field(
-        default=Path("/tmp/models"), description="Directory used to store model files"
+        default=Path("/tmp/models"),
+        description="Directory used to store artifact files",
     )
     num_threads: int = Field(default=10, ge=1, description="Worker thread pool size")
     chunk_size: ByteSize = Field(
@@ -57,7 +58,7 @@ class ServerConfig(BaseModel):
     )
     enable_p2p_access: bool = Field(
         default=True,
-        description="Require explicit registration before a model can be loaded",
+        description="Require explicit registration before a artifact can be loaded",
     )
     enable_rdma: bool = Field(
         default=False, description="Enable RDMA transport if supported"
@@ -98,7 +99,7 @@ class NetworkConfig(BaseModel):
 
 
 class LifecycleConfig(BaseModel):
-    """Model eviction & health-check parameters."""
+    """Artifact eviction & health-check parameters."""
 
     gpu_memory_limit_fraction: float = Field(
         default=0.75,
@@ -195,7 +196,7 @@ class HighAvailabilityConfig(BaseModel):
 
 
 class StoreDaemonConfig(BaseModel):
-    """Root configuration model – mirrors the YAML structure 1-for-1."""
+    """Root configuration artifact – mirrors the YAML structure 1-for-1."""
 
     server: ServerConfig = Field(default_factory=lambda: ServerConfig())
     network: NetworkConfig = Field(default_factory=lambda: NetworkConfig())

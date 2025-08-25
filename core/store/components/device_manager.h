@@ -92,7 +92,7 @@ class DeviceManager {
   // Metrics
   std::unordered_map<int, stepcast::metrics::Gauge> gpu_memory_total_gauges_;
   std::unordered_map<int, stepcast::metrics::Gauge> gpu_memory_free_gauges_;
-  std::unordered_map<int, stepcast::metrics::Gauge> gpu_models_loaded_gauges_;
+  std::unordered_map<int, stepcast::metrics::Gauge> gpu_replicas_loaded_gauges_;
 };
 
 } // namespace stepcast::store

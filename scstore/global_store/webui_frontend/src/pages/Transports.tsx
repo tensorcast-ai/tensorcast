@@ -8,7 +8,7 @@ import type { ColumnsType } from 'antd/es/table';
 interface Transport {
   transport_id: string;
   replica_id: string;
-  model_id: string;
+  artifact_id: string;
   source_node_id: string;
   source_address: string;
   source_port: number;
@@ -31,7 +31,7 @@ interface TransportResponse {
 const Transports: React.FC = () => {
   const [filters, setFilters] = React.useState({
     status: undefined as string | undefined,
-    model_id: undefined as string | undefined,
+    artifact_id: undefined as string | undefined,
     page: 1,
     page_size: 50,
   });
@@ -75,9 +75,9 @@ const Transports: React.FC = () => {
       ),
     },
     {
-      title: 'Model ID',
-      dataIndex: 'model_id',
-      key: 'model_id',
+      title: 'Artifact ID',
+      dataIndex: 'artifact_id',
+      key: 'artifact_id',
       width: 200,
     },
     {
@@ -140,7 +140,7 @@ const Transports: React.FC = () => {
 
   return (
     <div style={{ padding: '24px' }}>
-      <h1>Model Transports</h1>
+      <h1>Artifact Transports</h1>
 
       <Row gutter={16} style={{ marginBottom: '24px' }}>
         <Col span={6}>
@@ -201,10 +201,10 @@ const Transports: React.FC = () => {
 
           <Input.Search
             style={{ width: 200 }}
-            placeholder="Filter by model id"
+            placeholder="Filter by artifact id"
             allowClear
-            value={filters.model_id}
-            onChange={(e) => setFilters({ ...filters, model_id: e.target.value || undefined, page: 1 })}
+            value={filters.artifact_id}
+            onChange={(e) => setFilters({ ...filters, artifact_id: e.target.value || undefined, page: 1 })}
           />
         </Space>
 

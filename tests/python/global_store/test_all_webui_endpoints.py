@@ -11,8 +11,8 @@ from scstore.global_store.webui_backend.api import (
     get_worker,
     list_replicas,
     get_replica,
-    list_models,
-    get_model,
+    list_artifacts,
+    get_artifact,
     list_nodes,
     list_transports,
 )
@@ -67,19 +67,19 @@ def create_mock_client():
         memory_type=global_store_pb2.MemoryType.RAM,
         device_id=0,
     )
-    client.list_model_replicas.return_value = {
+    client.list_replicas.return_value = {
         "model1": [replica1],
         "model2": [replica2],
     }
 
-    # Mock model info: WebUI client returns list[MemoryInfo] for a model_id
-    client.get_model_info.return_value = [replica1]
+    # Mock artifact info: WebUI client returns list[MemoryInfo] for a artifact_id
+    client.get_artifact_info.return_value = [replica1]
 
     # Mock summary stats
     client.get_summary_stats.return_value = {
         "total_workers": 2,
         "active_workers": 2,
-        "total_models": 2,
+        "total_artifacts": 2,
         "total_replicas": 2,
         "gpu_replicas": 1,
         "ram_replicas": 1,
@@ -98,7 +98,7 @@ async def test_summary_endpoint():
 
     assert response.data.total_workers == 2
     assert response.data.active_workers == 2
-    assert response.data.total_models == 2
+    assert response.data.total_artifacts == 2
     assert response.data.total_replicas == 2
     assert response.data.total_memory_bytes == 21474836480  # 20GB total
 
@@ -130,7 +130,7 @@ async def test_replica_endpoints():
     # Test list replicas
     response = await list_replicas(
         client,
-        model_id=None,
+        artifact_id=None,
         node_id=None,
         memory_type=None,
         worker_id=None,
@@ -144,7 +144,7 @@ async def test_replica_endpoints():
     # Test list replicas with filters
     response = await list_replicas(
         client,
-        model_id="model1",
+        artifact_id="model1",
         node_id=None,
         memory_type=MemoryType.GPU,
         worker_id=None,
@@ -152,30 +152,30 @@ async def test_replica_endpoints():
         page_size=100
     )
     assert len(response.data) == 1
-    assert response.data[0]["model_id"] == "model1"
+    assert response.data[0]["artifact_id"] == "model1"
 
     # Test get specific replica
     response = await get_replica("replica-0", client)
     assert response.data["replica_id"] == "replica-0"
-    assert response.data["model_id"] == "model1"
+    assert response.data["artifact_id"] == "model1"
 
 
 @pytest.mark.asyncio
-async def test_model_endpoints():
-    """Test model-related endpoints."""
+async def test_artifact_endpoints():
+    """Test artifact-related endpoints."""
     client = create_mock_client()
 
-    # Test list models
-    response = await list_models(client)
+    # Test list artifacts
+    response = await list_artifacts(client)
     assert len(response.data) == 2
-    assert response.data[0]["model_id"] == "model1"
+    assert response.data[0]["artifact_id"] == "model1"
     assert response.data[0]["gpu_replicas"] == 1
-    assert response.data[1]["model_id"] == "model2"
+    assert response.data[1]["artifact_id"] == "model2"
     assert response.data[1]["ram_replicas"] == 1
 
-    # Test get specific model
-    response = await get_model("model1", client)
-    assert response.data["model_id"] == "model1"
+    # Test get specific artifact
+    response = await get_artifact("model1", client)
+    assert response.data["artifact_id"] == "model1"
     assert response.data["replica_count"] == 1
     assert len(response.data["nodes"]) == 1
 
@@ -203,7 +203,7 @@ async def test_transports_endpoint():
     response = await list_transports(
         client,
         status=None,
-        model_id=None,
+        artifact_id=None,
         page=1,
         page_size=50
     )
@@ -234,7 +234,7 @@ def test_all_endpoints_use_grpc():
 
         # Should have 'client' parameter for API endpoints
         if name in ["get_summary", "list_workers", "get_worker", "list_replicas",
-                    "get_replica", "list_models", "get_model", "list_nodes", "list_transports"]:
+                    "get_replica", "list_artifacts", "get_artifact", "list_nodes", "list_transports"]:
             assert "client" in param_names, f"Function {name} should have 'client' parameter"
 
 
@@ -251,8 +251,8 @@ if __name__ == "__main__":
     asyncio.run(test_replica_endpoints())
     print("✓ Replica endpoints work")
 
-    asyncio.run(test_model_endpoints())
-    print("✓ Model endpoints work")
+    asyncio.run(test_artifact_endpoints())
+    print("✓ Artifact endpoints work")
 
     asyncio.run(test_nodes_endpoint())
     print("✓ Nodes endpoint works")

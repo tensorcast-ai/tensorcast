@@ -66,7 +66,7 @@ class TestWebUIAPI:
             "active_workers": 1,
             "total_replicas": 3,
             "available_replicas": 2,
-            "total_models": 2,
+            "total_artifacts": 2,
             "active_transports": 0,
         }
 
@@ -104,7 +104,7 @@ class TestWebUIAPI:
         assert (
             data["available_replicas"] == 3
         )  # Based on the API code, this is set to total_replicas
-        assert data["total_models"] == 2
+        assert data["total_artifacts"] == 2
         assert data["active_transports"] == 0
         assert data["total_memory_bytes"] == 21474836480  # 20GB total
         assert data["available_memory_bytes"] == 5368709120  # 5GB available
@@ -187,7 +187,7 @@ class TestWebUIAPI:
         """)
 
         db_connection.execute(f"""
-            INSERT INTO model_replicas VALUES
+            INSERT INTO artifact_replicas VALUES
             ('{replica_id1}', 'model1', 'node1', '10.0.0.1', 50051, 1073741824, 'GPU', 0, 5, TRUE, NULL, NULL, 'w1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
             ('{replica_id2}', 'model2', 'node1', '10.0.0.1', 50051, 2147483648, 'RAM', 0, 5, TRUE, NULL, NULL, 'w1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """)
@@ -206,13 +206,13 @@ class TestWebUIAPI:
         assert len(data["data"]) == 2
         assert data["meta"]["total_count"] == 2
 
-        # Test with model filter (by model_id)
-        response = client.get("/api/replicas?model_id=model1")
+        # Test with artifact filter (by artifact_id)
+        response = client.get("/api/replicas?artifact_id=model1")
         assert response.status_code == 200
 
         data = response.json()
         assert len(data["data"]) == 1
-        assert data["data"][0]["model_id"] == "model1"
+        assert data["data"][0]["artifact_id"] == "model1"
 
         # Test with memory type filter
         response = client.get("/api/replicas?memory_type=GPU")
@@ -225,15 +225,15 @@ class TestWebUIAPI:
     @pytest.mark.skip(
         reason="Needs refactoring to use mocked gRPC client instead of direct DB access"
     )
-    def test_list_models(self, client, db_connection):
-        """Test list models endpoint."""
+    def test_list_artifacts(self, client, db_connection):
+        """Test list artifacts endpoint."""
         # Insert test data
         replica_id1 = str(uuid4())
         replica_id2 = str(uuid4())
         replica_id3 = str(uuid4())
 
         db_connection.execute(f"""
-            INSERT INTO model_replicas VALUES
+            INSERT INTO artifact_replicas VALUES
             ('{replica_id1}', 'model1', 'node1', '10.0.0.1', 50051, 1073741824, 'GPU', 0, 5, TRUE, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
             ('{replica_id2}', 'model1', 'node1', '10.0.0.1', 50051, 2147483648, 'RAM', 0, 5, TRUE, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
             ('{replica_id3}', 'model2', 'node2', '10.0.0.2', 50051, 536870912, 'DISK', 0, 10, FALSE, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -246,43 +246,43 @@ class TestWebUIAPI:
             ('{replica_id3}', 8, CURRENT_TIMESTAMP)
         """)
 
-        response = client.get("/api/models")
+        response = client.get("/api/artifacts")
         assert response.status_code == 200
 
-        models = response.json()["data"]
-        assert len(models) == 2
+        artifacts = response.json()["data"]
+        assert len(artifacts) == 2
 
         # Check model1
-        model1 = next(m for m in models if m["model_id"] == "model1")
-        assert model1["total_replicas"] == 2
-        assert model1["available_replicas"] == 2
-        assert model1["gpu_replicas"] == 1
-        assert model1["ram_replicas"] == 1
-        assert model1["disk_replicas"] == 0
-        assert model1["total_memory_size"] == 3221225472  # 3GB
-        assert model1["avg_load_ratio"] == pytest.approx(0.3)  # (3/5 + 0/5) / 2
+        artifact1 = next(m for m in artifacts if m["artifact_id"] == "model1")
+        assert artifact1["total_replicas"] == 2
+        assert artifact1["available_replicas"] == 2
+        assert artifact1["gpu_replicas"] == 1
+        assert artifact1["ram_replicas"] == 1
+        assert artifact1["disk_replicas"] == 0
+        assert artifact1["total_memory_size"] == 3221225472  # 3GB
+        assert artifact1["avg_load_ratio"] == pytest.approx(0.3)  # (3/5 + 0/5) / 2
 
     @pytest.mark.skip(
         reason="Needs refactoring to use mocked gRPC client instead of direct DB access"
     )
-    def test_get_model_detail(self, client, db_connection):
-        """Test get model detail endpoint."""
+    def test_get_artifact_detail(self, client, db_connection):
+        """Test get artifact detail endpoint."""
         replica_id = str(uuid4())
 
         db_connection.execute(f"""
-            INSERT INTO model_replicas VALUES
+            INSERT INTO artifact_replicas VALUES
             ('{replica_id}', 'model1', 'node1', '10.0.0.1', 50051, 1073741824, 'GPU', 0, 5, TRUE, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """)
 
-        response = client.get("/api/models/model1")
+        response = client.get("/api/artifacts/model1")
         assert response.status_code == 200
 
-        model = response.json()["data"]
-        assert model["model_id"] == "model1"
-        assert model["total_replicas"] == 1
+        artifact = response.json()["data"]
+        assert artifact["artifact_id"] == "model1"
+        assert artifact["total_replicas"] == 1
 
-        # Test non-existent model
-        response = client.get("/api/models/nonexistent")
+        # Test non-existent artifact
+        response = client.get("/api/artifacts/nonexistent")
         assert response.status_code == 404
 
     @pytest.mark.skip(
@@ -300,7 +300,7 @@ class TestWebUIAPI:
         """)
 
         db_connection.execute("""
-            INSERT INTO model_replicas VALUES
+            INSERT INTO artifact_replicas VALUES
             (gen_random_uuid(), 'model1', 'node1', '10.0.0.1', 50051, 1073741824, 'GPU', 0, 5, TRUE, NULL, NULL, 'w1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
             (gen_random_uuid(), 'model2', 'node1', '10.0.0.1', 50051, 2147483648, 'RAM', 0, 5, TRUE, NULL, NULL, 'w1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
             (gen_random_uuid(), 'model3', 'node2', '10.0.0.2', 50051, 536870912, 'DISK', 0, 5, TRUE, NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -330,7 +330,7 @@ class TestWebUIAPI:
         replica_id = str(uuid4())
 
         db_connection.execute(f"""
-            INSERT INTO model_transports VALUES
+            INSERT INTO artifact_transports VALUES
             ('{transport_id}', '{replica_id}', 'model1', 'node1', '10.0.0.1', 50051, CURRENT_TIMESTAMP, NULL, 'in_progress')
         """)
 
@@ -343,14 +343,14 @@ class TestWebUIAPI:
 
         transport = data["data"][0]
         assert transport["transport_id"] == transport_id
-        assert transport["model_id"] == "model1"
+        assert transport["artifact_id"] == "model1"
         assert transport["status"] == "in_progress"
 
     @pytest.mark.skip(
         reason="Needs refactoring to use mocked gRPC client instead of direct DB access"
     )
     def test_list_transports_with_filters(self, client, db_connection):
-        """Test list transports with status and model filters."""
+        """Test list transports with status and artifact filters."""
         # Insert test data with different statuses
         for i, status in enumerate(["in_progress", "completed", "failed"]):
             transport_id = str(uuid4())
@@ -358,8 +358,8 @@ class TestWebUIAPI:
             completed_at = "CURRENT_TIMESTAMP" if status == "completed" else "NULL"
 
             db_connection.execute(f"""
-                INSERT INTO model_transports VALUES
-                ('{transport_id}', '{replica_id}', 'model{i}', 'node1', '10.0.0.1', 50051,
+                INSERT INTO artifact_transports VALUES
+                ('{transport_id}', '{replica_id}', 'artifact{i}', NULL, 'node1', '10.0.0.1', 50051,
                  CURRENT_TIMESTAMP, {completed_at}, '{status}')
             """)
 
@@ -370,12 +370,12 @@ class TestWebUIAPI:
         assert len(data["data"]) == 1
         assert data["data"][0]["status"] == "completed"
 
-        # Test model_id filter
-        response = client.get("/api/transports?model_id=model0")
+        # Test artifact_id filter
+        response = client.get("/api/transports?artifact_id=model0")
         assert response.status_code == 200
         data = response.json()
         assert len(data["data"]) == 1
-        assert data["data"][0]["model_id"] == "model0"
+        assert data["data"][0]["artifact_id"] == "model0"
 
     @pytest.mark.skip(
         reason="Needs refactoring to use mocked gRPC client instead of direct DB access"

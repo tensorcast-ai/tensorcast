@@ -5,16 +5,16 @@ Date: 2025‑08‑08
 
 ## 0. Summary
 
-It defines DVMP 2.0 (per‑model handles and coherent state), DVMP‑owned IO (map/write), chunk‑scoped external exposure via pin leases, the unified loader architecture centered on a single positioned sink contract, and capability‑driven direct remote→DVMP writes. All items described here are implemented and integrated.
+It defines DVMP 2.0 (per‑artifact handles and coherent state), DVMP‑owned IO (map/write), chunk‑scoped external exposure via pin leases, the unified loader architecture centered on a single positioned sink contract, and capability‑driven direct remote→DVMP writes. All items described here are implemented and integrated.
 
 Key outcomes:
-- DVMP exposes per‑model region handles, reducing global lock contention.
+- DVMP exposes per‑artifact region handles, reducing global lock contention.
 - Single sink contract: all loader data paths use `PositionedSink`; `pump_ranges(...)` is the sole pumping API (the legacy `pump()` helper was removed).
 - CPU writes/mappings are owned by DVMP (`write_at`, `map_file_segments`).
 - Range pumping uses `PositionedSink::write_at(offset, ...)` to guarantee correctness.
 - Capability‑driven direct writes: negotiated via `DirectWritableSink` with automatic fallback to staged copies; no env flags or concrete type checks.
 - CPU remote exposure defaults to chunk‑scoped export with DVMP pin leases; GPU remains single‑range.
-- `DVMPRegionSink` operates with a per‑model `DvmpRegion` handle (no string lookups on each write).
+- `DVMPRegionSink` operates with a per‑artifact `DvmpRegion` handle (no string lookups on each write).
 - `UnifiedMemorySink` is removed from the hot path; loaders call `MemoryManager::finalize_load(...)` after `sink->close()`. UMA treats CPU state as a DVMP read‑through and remains the source of truth for GPU state.
 - Alignment policy is enforced once in the streaming buffer setup: the pool chunk must divide the DVMP chunk and be O_DIRECT‑friendly.
 
@@ -24,7 +24,7 @@ Key outcomes:
 - Scalable, testable loader pipeline with explicit ownership and back‑pressure.
 - Correctness under concurrency for partial/range loads.
 - Safe external exposure (RDMA/TCP) with clear lifetimes and eviction guarantees.
-- Reduce global mutex contention via per‑model locking.
+- Reduce global mutex contention via per‑artifact locking.
 
 ## 2. Architecture Overview
 
@@ -36,7 +36,7 @@ Storage/Remote ─► Source ─► Pump ─► Sink ─► DVMP VA
              StreamingPinnedBuffer (BufferPool)
 ```
 
-- DVMP reserves a contiguous CPU VA per model and tracks per‑chunk state.
+- DVMP reserves a contiguous CPU VA per artifact and tracks per‑chunk state.
 - The loader pipeline streams bytes via `StreamingPinnedBuffer` into `PositionedSink` implementations (`DVMPRegionSink`, `GPUMemorySink`).
 - All CPU writes/mappings go through DVMP to keep policy and metadata coherent.
 - External exposure (Communicator) uses DVMP pin leases to protect exported ranges.
@@ -47,20 +47,20 @@ Storage/Remote ─► Source ─► Pump ─► Sink ─► DVMP VA
 
 File: `core/common/memory/distributed_memory_pool.{h,cc}`
 
-- Allocation: `allocate(model_id, bytes)` reserves CPU VA with `PROT_READ|PROT_WRITE` and initializes per‑chunk metadata (256 MiB default chunk).
-- Snapshot: `absl::Span<const ChunkMeta> chunk_snapshot(model_id)` for zero‑copy inspection.
-- Transfer control: `lock_chunks(model_id, span)`, `unlock_chunks(model_id, span, copied_gpu)`; `mlock/munlock` are best‑effort (graceful on `ENOMEM|EPERM`).
+- Allocation: `allocate(artifact_id, bytes)` reserves CPU VA with `PROT_READ|PROT_WRITE` and initializes per‑chunk metadata (256 MiB default chunk).
+- Snapshot: `absl::Span<const ChunkMeta> chunk_snapshot(artifact_id)` for zero‑copy inspection.
+- Transfer control: `lock_chunks(artifact_id, span)`, `unlock_chunks(artifact_id, span, copied_gpu)`; `mlock/munlock` are best‑effort (graceful on `ENOMEM|EPERM`).
 - Residency and eviction: `ensure_chunk_resident`, `evict_tail_bytes`, `mark_preemptible` (uses `MADV_FREE`, fallback `MADV_DONTNEED`), `refresh_chunks`.
 - DVMP‑owned IO:
-  - `map_file_segments(model_id, [{path,file_offset,va_offset,length,populate}])` maps with `MAP_FIXED|PROT_READ` and marks chunks `HOT`.
-  - `write_at(model_id, va_offset, src, bytes)` ensures a writable mapping (mprotect→anonymous remap if needed), copies bytes, and marks chunks `HOT`.
-- Pin Leases: `ChunkResidencyLease pin_range(model_id, va_off, len, reason[, timeout])` increments per‑chunk pin refcounts, best‑effort `mlock`, and blocks DVMP eviction/preemption for leased chunks; destructor releases.
+  - `map_file_segments(artifact_id, [{path,file_offset,va_offset,length,populate}])` maps with `MAP_FIXED|PROT_READ` and marks chunks `HOT`.
+  - `write_at(artifact_id, va_offset, src, bytes)` ensures a writable mapping (mprotect→anonymous remap if needed), copies bytes, and marks chunks `HOT`.
+- Pin Leases: `ChunkResidencyLease pin_range(artifact_id, va_off, len, reason[, timeout])` increments per‑chunk pin refcounts, best‑effort `mlock`, and blocks DVMP eviction/preemption for leased chunks; destructor releases.
 - Metrics: `dvmp_write_bytes_total`, `dvmp_map_bytes_total`, `dvmp_pin_leases_total{reason}`.
 
-### 3.2 Per‑Model Handles (DvmpRegion)
+### 3.2 Per‑Artifact Handles (DvmpRegion)
 
-- API: `absl::StatusOr<DvmpRegion> open(model_id)`; `DvmpRegion` mirrors DVMP methods scoped to one model.
-- Implementation: the global mutex protects the `models_` map; a per‑model mutex in `ModelInfo` guards region operations, lowering contention under multi‑model load.
+- API: `absl::StatusOr<DvmpRegion> open(artifact_id)`; `DvmpRegion` mirrors DVMP methods scoped to one artifact.
+- Implementation: the global mutex protects the `models_` map; a per‑artifact mutex in `ReplicaInfo` guards region operations, lowering contention under multi‑artifact load.
 
 ### 3.3 Chunk State Machine
 
@@ -72,7 +72,7 @@ Lock→Copy→Unlock transitions report `HOT` or `COPIED_GPU` on unlock. Preempt
 
 ### 4.1 DVMP‑Owned IO and Pin Leases
 
-- Only DVMP performs `MAP_FIXED` mappings into model VA.
+- Only DVMP performs `MAP_FIXED` mappings into artifact VA.
 - `write_at` guarantees a writable destination (upgrades with `mprotect` or remaps anonymous for the subrange) and updates per‑chunk metadata.
 - Pin leases protect externally visible ranges from eviction/preemption, independent of transient transfer locks.
 
@@ -80,14 +80,14 @@ Lock→Copy→Unlock transitions report `HOT` or `COPIED_GPU` on unlock. Preempt
 
 - `PositionedSink::write_at(offset, ...)` is the destination contract for `pump_ranges` to ensure correct placement with concurrent producers.
 - Implementations:
-  - `DVMPRegionSink` uses a per‑model `DvmpRegion` to call DVMP `write_at`.
+  - `DVMPRegionSink` uses a per‑artifact `DvmpRegion` to call DVMP `write_at`.
   - `GPUMemorySink` computes `gpu_base + offset` and issues async H2D copies.
 - Finalization: after `sink->close()`, loaders call `MemoryManager::finalize_load(target, optional_chunk_list)` to apply UMA updates for GPU. CPU metadata is already authoritative in DVMP.
 
 ### 4.3 CPU→GPU Copy: Mandatory CPU Release
 
 After a successful CPU→GPU copy, CPU memory is released by policy:
-- DVMP evicts the model tail to reclaim physical pages while preserving VA mapping.
+- DVMP evicts the artifact tail to reclaim physical pages while preserving VA mapping.
 - Streaming pinned buffers and related CPU state are freed; CPU location becomes `UNALLOCATED`.
 
 This matches comments and behavior in `MemoryManager::copy_data_async` and associated helpers.
@@ -129,9 +129,9 @@ Files: `core/store/loader/*`
 
 ## 6. Mapping to Code
 
-- DVMP: `core/common/memory/distributed_memory_pool.{h,cc}` (per‑model lock, `write_at`, `map_file_segments`, `ChunkResidencyLease`).
-- UMA and state: `core/store/model/model_memory_coordinator.{h,cc}` (CPU read‑through via DVMP snapshot; UMA owns GPU state).
-- Memory manager: `core/store/model/memory_manager.{h,cc}` (unified allocation, CPU export APIs, DVMP accessors, mandatory CPU release after GPU copy, `finalize_load(...)`, `get_dvmp_region()` and `plan_direct_write(...)`).
+- DVMP: `core/common/memory/distributed_memory_pool.{h,cc}` (per‑artifact lock, `write_at`, `map_file_segments`, `ChunkResidencyLease`).
+- UMA and state: `core/store/replica/replica_memory_coordinator.{h,cc}` (CPU read‑through via DVMP snapshot; UMA owns GPU state).
+- Memory manager: `core/store/replica/memory_manager.{h,cc}` (unified allocation, CPU export APIs, DVMP accessors, mandatory CPU release after GPU copy, `finalize_load(...)`, `get_dvmp_region()` and `plan_direct_write(...)`).
 - Loader plumbing: `core/store/loader/{source.h, sink.h, pump.{h,cc}, dvmp_region_sink.{h,cc}, gpu_memory_sink.{h,cc}, remote_key_source.{h,cc}, mux_seekable_source.{h,cc}, streaming_buffer_adapter.{h,cc}}` (with `DirectWritableSink` declared in `sink.h`).
 
 ## 7. Success Criteria and Metrics
@@ -184,7 +184,7 @@ flowchart LR
   end
 
   subgraph Memory
-    UMA[ModelMemoryCoordinator]
+    UMA[ReplicaMemoryCoordinator]
     MM[MemoryManager]
     DVMP[DistributedVirtualMemoryPool]
   end
@@ -199,7 +199,7 @@ flowchart LR
 ```
 
 Key points:
-- Only DVMP performs mappings/writes into model VA; `DVMPRegionSink` calls `DvmpRegion::write_at`.
+- Only DVMP performs mappings/writes into artifact VA; `DVMPRegionSink` calls `DvmpRegion::write_at`.
 - Direct remote→DVMP writes are negotiated via the `DirectWritableSink` capability when supported by the source.
 - State updates occur after `sink->close()` via `MemoryManager::finalize_load(...)` (UMA CPU is read‑through; UMA owns GPU state).
 - `StreamingPinnedBuffer` is the sole BufferPool implementation used by Pump.
@@ -247,7 +247,7 @@ Notes:
 
 ```mermaid
 flowchart TD
-    A[write_at(model_id, va_off, src, len)] --> B{bounds check}
+    A[write_at(artifact_id, va_off, src, len)] --> B{bounds check}
     B -- out of range --> E[Error]
     B -- ok --> C[mprotect(target_range, RW)]
     C -- success --> D[memcpy(base+va_off, src, len)]
@@ -267,7 +267,7 @@ Policy:
 sequenceDiagram
     autonumber
     participant MM as MemoryManager
-    participant UMA as ModelMemoryCoordinator
+    participant UMA as ReplicaMemoryCoordinator
     participant DV as DVMP
     participant SB as StreamingPinnedBuffer
     participant GP as GPUMemorySink
@@ -280,7 +280,7 @@ sequenceDiagram
     MM->>UMA: update_chunk_states(..., COPIED_GPU)
     MM->>DV: unlock_chunks(list, copied_gpu=true)
     alt copy success & source is CPU
-        MM->>DV: evict_tail_bytes(model_bytes)
+        MM->>DV: evict_tail_bytes(artifact_size)
         MM-->>MM: release CPU resources, CPU state=UNALLOCATED
     end
 ```
@@ -298,7 +298,7 @@ sequenceDiagram
     participant CE as CommunicateEngine
 
     MM-->>MM: coalesce chunk indices → VA ranges
-    MM->>DV: pin_range(model, va_off, len, ExternalShare)
+    MM->>DV: pin_range(artifact, va_off, len, ExternalShare)
     DV-->>MM: ChunkResidencyLease
     MM->>CE: register_tensor(key, addr, len, CPU)
     CE-->>MM: ok (handle)
@@ -397,7 +397,7 @@ Completed
 - Capability: `DirectWritableSink` exists and `pump_ranges` negotiates direct writes when `SeekableSource::supports_direct_write()` is true. The old env/type‑gated branch has been removed.
 - Single sink contract: All loader paths run through `PositionedSink` (`DVMPRegionSink`, `GPUMemorySink`); `pump()` has been removed; `pump_ranges()` is the sole pumping API.
 - DVMP sink: `DVMPRegionSink` writes via `DistributedVirtualMemoryPool::DvmpRegion::write_at()` and implements `DirectWritableSink` delegating token planning to `MemoryManager::plan_direct_write()`.
-- Memory manager: Introduced internal pods to group CPU/GPU state with clear locking; added `finalize_load(ModelLocation, optional chunk span)` and `get_dvmp_region()`. `finalize_load()` updates UMA only for GPU (CPU is DVMP authoritative) and passes the correct device id.
+- Memory manager: Introduced internal pods to group CPU/GPU state with clear locking; added `finalize_load(MemoryLocation, optional chunk span)` and `get_dvmp_region()`. `finalize_load()` updates UMA only for GPU (CPU is DVMP authoritative) and passes the correct device id.
 - Alignment policy: Enforced once in `ensure_streaming_buffer(...)` (pool chunk must divide DVMP chunk and be 4 KiB‑aligned).
 - Loaders: Disk and P2P loaders no longer wrap sinks with `UnifiedMemorySink`; they close sinks and call `memory_manager->finalize_load(...)` explicitly for full and chunked flows.
 - UMA: CPU mutation during finalize is no‑op; CPU state remains a DVMP read‑through. GPU states continue to be owned by UMA.

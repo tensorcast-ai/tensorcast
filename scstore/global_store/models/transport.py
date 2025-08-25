@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, StepCast Team.
 
-"""Transport domain model."""
+"""Transport domain artifact."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,12 +10,12 @@ from uuid import UUID, uuid4
 
 @dataclass
 class Transport:
-    """Represents an active model transport between nodes."""
+    """Represents an active artifact transport between nodes."""
 
     # Identity
     transport_id: UUID = field(default_factory=uuid4)
     replica_id: UUID = field(default_factory=uuid4)
-    model_id: str = ""  # content-addressed ID
+    artifact_id: str = ""  # content-addressed ID
     disk_path: str | None = None
 
     # Source information

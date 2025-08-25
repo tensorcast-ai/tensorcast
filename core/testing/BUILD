@@ -31,7 +31,7 @@ sc_cc_library(
     hdrs = ["test_helpers.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/communicator",
+        "//core/communicator:engine_lib",
         "@catch2//:catch2_main",
     ],
 )

@@ -16,7 +16,7 @@ worker_management:
   default_heartbeat_interval_ms: 5000 # 默认心跳间隔
 
 # 模型副本管理
-model_replicas:
+artifact:
   load_balancing_enabled: true       # 是否启用负载均衡
 
 # 监控配置

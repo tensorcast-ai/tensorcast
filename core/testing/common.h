@@ -37,11 +37,11 @@ std::vector<char> read_file_content(const std::filesystem::path& path);
 bool is_cuda_available();
 
 // RFC-0007 test helper: generate minimal canonical `tensor_index.json` and
-// `model_descriptor.json` for a standard partition model directory that
+// `artifact_descriptor.json` for a standard partition replica directory that
 // contains `tensor.data` or `tensor.data_*` files. This enables DiskLoader's
 // descriptor gate in unit tests without requiring full Python save flows.
 // Returns OK on success.
-absl::Status write_rfc0007_descriptor_for_standard_model_dir(const std::filesystem::path& model_dir);
+absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::filesystem::path& artifact_dir);
 
 } // namespace stepcast::tests
 

@@ -4,16 +4,16 @@
 
 import pytest
 
-from scstore.global_store.models import ModelReplica, Worker, Transport, MemoryType
+from scstore.global_store.models import Replica, Worker, Transport, MemoryType
 
 
 class TestModels:
     """Test domain models."""
 
-    def test_model_replica_creation(self):
-        """Test ModelReplica creation and properties."""
-        replica = ModelReplica(
-            model_id="test_model",
+    def test_artifact_replica_creation(self):
+        """Test Replica creation and properties."""
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -24,24 +24,24 @@ class TestModels:
             current_requests=5,
         )
 
-        assert replica.model_id == "test_model"
+        assert replica.artifact_id == "test_artifact"
         assert replica.memory_type == MemoryType.GPU
         assert replica.load_ratio == 0.5
         assert replica.has_capacity is True
 
-    def test_model_replica_increment_requests(self):
+    def test_artifact_replica_increment_requests(self):
         """Test request counting."""
-        replica = ModelReplica(max_concurrency=2, current_requests=1)
+        replica = Replica(max_concurrency=2, current_requests=1)
 
         assert replica.increment_requests() is True
         assert replica.current_requests == 2
         assert replica.has_capacity is False
         assert replica.increment_requests() is False
 
-    def test_model_replica_no_capacity(self):
+    def test_artifact_replica_no_capacity(self):
         """Test replica at max capacity."""
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -55,10 +55,10 @@ class TestModels:
         assert replica.has_capacity is False
         assert replica.load_ratio == 1.0
 
-    def test_model_replica_zero_concurrency(self):
+    def test_artifact_replica_zero_concurrency(self):
         """Test replica with zero max concurrency."""
-        replica = ModelReplica(
-            model_id="test_model",
+        replica = Replica(
+            artifact_id="test_artifact",
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
@@ -141,13 +141,13 @@ class TestModels:
         transport = Transport(
             transport_id="transport_1",
             replica_id="replica_1",
-            model_id="test_model",
+            artifact_id="test_artifact",
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
         )
 
-        assert transport.model_id == "test_model"
+        assert transport.artifact_id == "test_artifact"
         assert transport.source_node_id == "source_node"
         assert transport.source_address == "192.168.1.2"
         assert transport.source_port == 9000

@@ -121,7 +121,7 @@ class GlobalStoreClient:
         """
         self.config = config
         self._channel: Optional[grpc.Channel] = None
-        self._stub: Optional[global_store_pb2_grpc.GlobalModelStoreStub] = None
+        self._stub: Optional[global_store_pb2_grpc.GlobalStoreStub] = None
         self._connect_lock = asyncio.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4)
 
@@ -135,7 +135,7 @@ class GlobalStoreClient:
 
             def _sync_connect():
                 channel = grpc.insecure_channel(self.config.address)
-                stub = global_store_pb2_grpc.GlobalModelStoreStub(channel)
+                stub = global_store_pb2_grpc.GlobalStoreStub(channel)
 
                 # Use dedicated HealthCheck RPC for connectivity verification
                 request = global_store_pb2.HealthCheckRequest()
@@ -237,21 +237,21 @@ class GlobalStoreClient:
 
         return await self._execute_with_retry(_call) or []
 
-    # Model Replica Methods
+    # Artifact Replica Methods
 
-    async def list_model_replicas(
+    async def list_replicas(
         self,
-        model_id: Optional[str] = None,
+        artifact_id: Optional[str] = None,
         node_id: Optional[str] = None,
         memory_type: Optional[int] = None,  # Use int instead of proto enum
         device_id: Optional[int] = None,
     ) -> dict[str, list[global_store_pb2.MemoryInfo]]:
-        """List model replicas with optional filters.
+        """List artifact replicas with optional filters.
 
         Parameters
         ----------
-        model_id : str, optional
-                Filter by content-addressed model ID (mi2:...)
+        artifact_id : str, optional
+                Filter by content-addressed artifact ID (mi2:...)
         node_id : str, optional
                 Filter by node ID
         memory_type : MemoryType, optional
@@ -262,14 +262,14 @@ class GlobalStoreClient:
         Returns
         -------
         dict[str, list[MemoryInfo]]
-                Map of model_id to their replica memory info
+                Map of artifact_id to their replica memory info
         """
 
         def _call():
-            request = global_store_pb2.ListModelReplicasRequest()
+            request = global_store_pb2.ListReplicasRequest()
 
-            if model_id is not None:
-                request.model_id = model_id
+            if artifact_id is not None:
+                request.artifact_id = artifact_id
             if node_id is not None:
                 request.node_id = node_id
             if memory_type is not None:
@@ -277,47 +277,57 @@ class GlobalStoreClient:
             if device_id is not None:
                 request.device_id = device_id
 
-            response = self._stub.ListModelReplicas(  # type: ignore[union-attr]
+            response = self._stub.ListReplicas(  # type: ignore[union-attr]
                 request, timeout=self.config.timeout
             )
 
             # Convert to Python dict
             result = {}
-            for mid, mem_list in response.model_replicas.items():
+            for mid, mem_list in response.artifact_replicas.items():
                 result[mid] = list(mem_list.list)
             return result
 
         return await self._execute_with_retry(_call) or {}
 
-    async def get_model_info(
-        self, model_id: str
-    ) -> Optional[list[global_store_pb2.MemoryInfo]]:
-        """Get replicas information for a specific content-addressed model.
+    @dataclass
+    class ArtifactInfo:
+        """Container for artifact replica information."""
+
+        available_replicas: list[global_store_pb2.MemoryInfo]
+
+    async def get_artifact_info(
+        self, artifact_id: str
+    ) -> Optional["GlobalStoreClient.ArtifactInfo"]:
+        """Get replicas information for a specific content-addressed artifact.
 
         Parameters
         ----------
-        model_id : str
-                Content-addressed model ID (mi2:...)
+        artifact_id : str
+                Content-addressed artifact ID (mi2:...)
 
         Returns
         -------
-        list[MemoryInfo] or None
-                Replica memory info list if found
+        ArtifactInfo or None
+                Container with available replicas if found
         """
 
         def _call():
-            request = global_store_pb2.GetModelInfoByIdRequest(model_id=model_id)
-            response = self._stub.GetModelInfoById(  # type: ignore[union-attr]
+            request = global_store_pb2.GetArtifactInfoByIdRequest(
+                artifact_id=artifact_id
+            )
+            response = self._stub.GetArtifactInfoById(  # type: ignore[union-attr]
                 request, timeout=self.config.timeout
             )
 
             if response.status == global_store_pb2.Status.OK:
-                return list(response.replicas)
+                return GlobalStoreClient.ArtifactInfo(
+                    available_replicas=list(response.replicas)
+                )
             elif response.status == global_store_pb2.Status.NOT_FOUND:
                 return None
             else:
                 raise RuntimeError(
-                    f"Failed to get model info by id: status={response.status}"
+                    f"Failed to get artifact info by id: status={response.status}"
                 )
 
         return await self._execute_with_retry(_call)
@@ -355,7 +365,7 @@ class GlobalStoreClient:
         active_workers = [w for w in workers if w.accepting_new_requests]
 
         # Get all replicas
-        all_replicas = await self.list_model_replicas()
+        all_replicas = await self.list_replicas()
 
         # Calculate statistics
         total_replicas = sum(len(replicas) for replicas in all_replicas.values())
@@ -375,13 +385,18 @@ class GlobalStoreClient:
         return {
             "total_workers": len(workers),
             "active_workers": len(active_workers),
-            "total_models": len(all_replicas),
+            "total_artifacts": len(all_replicas),
             "total_replicas": total_replicas,
             "gpu_replicas": gpu_replicas,
             "ram_replicas": ram_replicas,
             "disk_replicas": disk_replicas,
             "active_transports": 0,  # TODO: Implement when available
         }
+
+    # Legacy test alias for backwards-compatibility inside test suite only
+    async def list_model_replicas(self, *args, **kwargs):
+        """Alias to list_replicas for older tests."""
+        return await self.list_replicas(*args, **kwargs)
 
 
 # Singleton instance

@@ -8,7 +8,7 @@ import grpc
 import scstore.proto.global_store_pb2 as global__store__pb2
 
 
-class GlobalModelStoreStub(object):
+class GlobalStoreStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -17,140 +17,140 @@ class GlobalModelStoreStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.RegisterModelReplica = channel.unary_unary(
-            "/global_store.GlobalModelStore/RegisterModelReplica",
-            request_serializer=global__store__pb2.RegisterModelReplicaRequest.SerializeToString,
-            response_deserializer=global__store__pb2.RegisterModelReplicaResponse.FromString,
+        self.RegisterReplica = channel.unary_unary(
+            "/global_store.GlobalStore/RegisterReplica",
+            request_serializer=global__store__pb2.RegisterReplicaRequest.SerializeToString,
+            response_deserializer=global__store__pb2.RegisterReplicaResponse.FromString,
         )
-        self.UpdateModelReplica = channel.unary_unary(
-            "/global_store.GlobalModelStore/UpdateModelReplica",
-            request_serializer=global__store__pb2.UpdateModelReplicaRequest.SerializeToString,
-            response_deserializer=global__store__pb2.UpdateModelReplicaResponse.FromString,
+        self.UpdateReplica = channel.unary_unary(
+            "/global_store.GlobalStore/UpdateReplica",
+            request_serializer=global__store__pb2.UpdateReplicaRequest.SerializeToString,
+            response_deserializer=global__store__pb2.UpdateReplicaResponse.FromString,
         )
-        self.UnregisterModelReplica = channel.unary_unary(
-            "/global_store.GlobalModelStore/UnregisterModelReplica",
-            request_serializer=global__store__pb2.UnregisterModelReplicaRequest.SerializeToString,
-            response_deserializer=global__store__pb2.UnregisterModelReplicaResponse.FromString,
+        self.UnregisterReplica = channel.unary_unary(
+            "/global_store.GlobalStore/UnregisterReplica",
+            request_serializer=global__store__pb2.UnregisterReplicaRequest.SerializeToString,
+            response_deserializer=global__store__pb2.UnregisterReplicaResponse.FromString,
         )
-        self.RequestModelReplicaTransport = channel.unary_unary(
-            "/global_store.GlobalModelStore/RequestModelReplicaTransport",
-            request_serializer=global__store__pb2.RequestModelReplicaTransportRequest.SerializeToString,
-            response_deserializer=global__store__pb2.RequestModelReplicaTransportResponse.FromString,
+        self.RequestReplicaTransport = channel.unary_unary(
+            "/global_store.GlobalStore/RequestReplicaTransport",
+            request_serializer=global__store__pb2.RequestReplicaTransportRequest.SerializeToString,
+            response_deserializer=global__store__pb2.RequestReplicaTransportResponse.FromString,
         )
-        self.CompleteModelReplicaTransport = channel.unary_unary(
-            "/global_store.GlobalModelStore/CompleteModelReplicaTransport",
-            request_serializer=global__store__pb2.CompleteModelReplicaTransportRequest.SerializeToString,
-            response_deserializer=global__store__pb2.CompleteModelReplicaTransportResponse.FromString,
+        self.CompleteReplicaTransport = channel.unary_unary(
+            "/global_store.GlobalStore/CompleteReplicaTransport",
+            request_serializer=global__store__pb2.CompleteReplicaTransportRequest.SerializeToString,
+            response_deserializer=global__store__pb2.CompleteReplicaTransportResponse.FromString,
         )
-        self.ListModelReplicas = channel.unary_unary(
-            "/global_store.GlobalModelStore/ListModelReplicas",
-            request_serializer=global__store__pb2.ListModelReplicasRequest.SerializeToString,
-            response_deserializer=global__store__pb2.ListModelReplicasResponse.FromString,
+        self.ListReplicas = channel.unary_unary(
+            "/global_store.GlobalStore/ListReplicas",
+            request_serializer=global__store__pb2.ListReplicasRequest.SerializeToString,
+            response_deserializer=global__store__pb2.ListReplicasResponse.FromString,
         )
-        self.GetModelInfoById = channel.unary_unary(
-            "/global_store.GlobalModelStore/GetModelInfoById",
-            request_serializer=global__store__pb2.GetModelInfoByIdRequest.SerializeToString,
-            response_deserializer=global__store__pb2.GetModelInfoByIdResponse.FromString,
+        self.GetArtifactInfoById = channel.unary_unary(
+            "/global_store.GlobalStore/GetArtifactInfoById",
+            request_serializer=global__store__pb2.GetArtifactInfoByIdRequest.SerializeToString,
+            response_deserializer=global__store__pb2.GetArtifactInfoByIdResponse.FromString,
         )
-        self.GetModelIndex = channel.unary_unary(
-            "/global_store.GlobalModelStore/GetModelIndex",
-            request_serializer=global__store__pb2.GetModelIndexRequest.SerializeToString,
-            response_deserializer=global__store__pb2.GetModelIndexResponse.FromString,
+        self.GetArtifactIndex = channel.unary_unary(
+            "/global_store.GlobalStore/GetArtifactIndex",
+            request_serializer=global__store__pb2.GetArtifactIndexRequest.SerializeToString,
+            response_deserializer=global__store__pb2.GetArtifactIndexResponse.FromString,
         )
         self.RegisterWorker = channel.unary_unary(
-            "/global_store.GlobalModelStore/RegisterWorker",
+            "/global_store.GlobalStore/RegisterWorker",
             request_serializer=global__store__pb2.RegisterWorkerRequest.SerializeToString,
             response_deserializer=global__store__pb2.RegisterWorkerResponse.FromString,
         )
         self.WorkerHeartbeat = channel.unary_unary(
-            "/global_store.GlobalModelStore/WorkerHeartbeat",
+            "/global_store.GlobalStore/WorkerHeartbeat",
             request_serializer=global__store__pb2.WorkerHeartbeatRequest.SerializeToString,
             response_deserializer=global__store__pb2.WorkerHeartbeatResponse.FromString,
         )
         self.UnregisterWorker = channel.unary_unary(
-            "/global_store.GlobalModelStore/UnregisterWorker",
+            "/global_store.GlobalStore/UnregisterWorker",
             request_serializer=global__store__pb2.UnregisterWorkerRequest.SerializeToString,
             response_deserializer=global__store__pb2.UnregisterWorkerResponse.FromString,
         )
         self.ListActiveWorkers = channel.unary_unary(
-            "/global_store.GlobalModelStore/ListActiveWorkers",
+            "/global_store.GlobalStore/ListActiveWorkers",
             request_serializer=global__store__pb2.ListActiveWorkersRequest.SerializeToString,
             response_deserializer=global__store__pb2.ListActiveWorkersResponse.FromString,
         )
         self.SynchronizeWorkerState = channel.unary_unary(
-            "/global_store.GlobalModelStore/SynchronizeWorkerState",
+            "/global_store.GlobalStore/SynchronizeWorkerState",
             request_serializer=global__store__pb2.SynchronizeWorkerStateRequest.SerializeToString,
             response_deserializer=global__store__pb2.SynchronizeWorkerStateResponse.FromString,
         )
         self.RequestFullStateSync = channel.unary_unary(
-            "/global_store.GlobalModelStore/RequestFullStateSync",
+            "/global_store.GlobalStore/RequestFullStateSync",
             request_serializer=global__store__pb2.RequestFullStateSyncRequest.SerializeToString,
             response_deserializer=global__store__pb2.RequestFullStateSyncResponse.FromString,
         )
         self.HealthCheck = channel.unary_unary(
-            "/global_store.GlobalModelStore/HealthCheck",
+            "/global_store.GlobalStore/HealthCheck",
             request_serializer=global__store__pb2.HealthCheckRequest.SerializeToString,
             response_deserializer=global__store__pb2.HealthCheckResponse.FromString,
         )
         self.QueryChunkLocations = channel.unary_unary(
-            "/global_store.GlobalModelStore/QueryChunkLocations",
+            "/global_store.GlobalStore/QueryChunkLocations",
             request_serializer=global__store__pb2.QueryChunkLocationsRequest.SerializeToString,
             response_deserializer=global__store__pb2.QueryChunkLocationsResponse.FromString,
         )
         self.BatchUpdateChunkStates = channel.unary_unary(
-            "/global_store.GlobalModelStore/BatchUpdateChunkStates",
+            "/global_store.GlobalStore/BatchUpdateChunkStates",
             request_serializer=global__store__pb2.BatchUpdateChunkStatesRequest.SerializeToString,
             response_deserializer=global__store__pb2.BatchUpdateChunkStatesResponse.FromString,
         )
 
 
-class GlobalModelStoreServicer(object):
+class GlobalStoreServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def RegisterModelReplica(self, request, context):
+    def RegisterReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def UpdateModelReplica(self, request, context):
+    def UpdateReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def UnregisterModelReplica(self, request, context):
+    def UnregisterReplica(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def RequestModelReplicaTransport(self, request, context):
+    def RequestReplicaTransport(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def CompleteModelReplicaTransport(self, request, context):
+    def CompleteReplicaTransport(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def ListModelReplicas(self, request, context):
+    def ListReplicas(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def GetModelInfoById(self, request, context):
-        """Content-addressed query by model_id (mi2:...)"""
+    def GetArtifactInfoById(self, request, context):
+        """Content-addressed query by artifact_id (mi2:...)"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
-    def GetModelIndex(self, request, context):
-        """Get model tensor index data by key"""
+    def GetArtifactIndex(self, request, context):
+        """Get artifact tensor index data by key"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -212,47 +212,47 @@ class GlobalModelStoreServicer(object):
         raise NotImplementedError("Method not implemented!")
 
 
-def add_GlobalModelStoreServicer_to_server(servicer, server):
+def add_GlobalStoreServicer_to_server(servicer, server):
     rpc_method_handlers = {
-        "RegisterModelReplica": grpc.unary_unary_rpc_method_handler(
-            servicer.RegisterModelReplica,
-            request_deserializer=global__store__pb2.RegisterModelReplicaRequest.FromString,
-            response_serializer=global__store__pb2.RegisterModelReplicaResponse.SerializeToString,
+        "RegisterReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.RegisterReplica,
+            request_deserializer=global__store__pb2.RegisterReplicaRequest.FromString,
+            response_serializer=global__store__pb2.RegisterReplicaResponse.SerializeToString,
         ),
-        "UpdateModelReplica": grpc.unary_unary_rpc_method_handler(
-            servicer.UpdateModelReplica,
-            request_deserializer=global__store__pb2.UpdateModelReplicaRequest.FromString,
-            response_serializer=global__store__pb2.UpdateModelReplicaResponse.SerializeToString,
+        "UpdateReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.UpdateReplica,
+            request_deserializer=global__store__pb2.UpdateReplicaRequest.FromString,
+            response_serializer=global__store__pb2.UpdateReplicaResponse.SerializeToString,
         ),
-        "UnregisterModelReplica": grpc.unary_unary_rpc_method_handler(
-            servicer.UnregisterModelReplica,
-            request_deserializer=global__store__pb2.UnregisterModelReplicaRequest.FromString,
-            response_serializer=global__store__pb2.UnregisterModelReplicaResponse.SerializeToString,
+        "UnregisterReplica": grpc.unary_unary_rpc_method_handler(
+            servicer.UnregisterReplica,
+            request_deserializer=global__store__pb2.UnregisterReplicaRequest.FromString,
+            response_serializer=global__store__pb2.UnregisterReplicaResponse.SerializeToString,
         ),
-        "RequestModelReplicaTransport": grpc.unary_unary_rpc_method_handler(
-            servicer.RequestModelReplicaTransport,
-            request_deserializer=global__store__pb2.RequestModelReplicaTransportRequest.FromString,
-            response_serializer=global__store__pb2.RequestModelReplicaTransportResponse.SerializeToString,
+        "RequestReplicaTransport": grpc.unary_unary_rpc_method_handler(
+            servicer.RequestReplicaTransport,
+            request_deserializer=global__store__pb2.RequestReplicaTransportRequest.FromString,
+            response_serializer=global__store__pb2.RequestReplicaTransportResponse.SerializeToString,
         ),
-        "CompleteModelReplicaTransport": grpc.unary_unary_rpc_method_handler(
-            servicer.CompleteModelReplicaTransport,
-            request_deserializer=global__store__pb2.CompleteModelReplicaTransportRequest.FromString,
-            response_serializer=global__store__pb2.CompleteModelReplicaTransportResponse.SerializeToString,
+        "CompleteReplicaTransport": grpc.unary_unary_rpc_method_handler(
+            servicer.CompleteReplicaTransport,
+            request_deserializer=global__store__pb2.CompleteReplicaTransportRequest.FromString,
+            response_serializer=global__store__pb2.CompleteReplicaTransportResponse.SerializeToString,
         ),
-        "ListModelReplicas": grpc.unary_unary_rpc_method_handler(
-            servicer.ListModelReplicas,
-            request_deserializer=global__store__pb2.ListModelReplicasRequest.FromString,
-            response_serializer=global__store__pb2.ListModelReplicasResponse.SerializeToString,
+        "ListReplicas": grpc.unary_unary_rpc_method_handler(
+            servicer.ListReplicas,
+            request_deserializer=global__store__pb2.ListReplicasRequest.FromString,
+            response_serializer=global__store__pb2.ListReplicasResponse.SerializeToString,
         ),
-        "GetModelInfoById": grpc.unary_unary_rpc_method_handler(
-            servicer.GetModelInfoById,
-            request_deserializer=global__store__pb2.GetModelInfoByIdRequest.FromString,
-            response_serializer=global__store__pb2.GetModelInfoByIdResponse.SerializeToString,
+        "GetArtifactInfoById": grpc.unary_unary_rpc_method_handler(
+            servicer.GetArtifactInfoById,
+            request_deserializer=global__store__pb2.GetArtifactInfoByIdRequest.FromString,
+            response_serializer=global__store__pb2.GetArtifactInfoByIdResponse.SerializeToString,
         ),
-        "GetModelIndex": grpc.unary_unary_rpc_method_handler(
-            servicer.GetModelIndex,
-            request_deserializer=global__store__pb2.GetModelIndexRequest.FromString,
-            response_serializer=global__store__pb2.GetModelIndexResponse.SerializeToString,
+        "GetArtifactIndex": grpc.unary_unary_rpc_method_handler(
+            servicer.GetArtifactIndex,
+            request_deserializer=global__store__pb2.GetArtifactIndexRequest.FromString,
+            response_serializer=global__store__pb2.GetArtifactIndexResponse.SerializeToString,
         ),
         "RegisterWorker": grpc.unary_unary_rpc_method_handler(
             servicer.RegisterWorker,
@@ -301,17 +301,17 @@ def add_GlobalModelStoreServicer_to_server(servicer, server):
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-        "global_store.GlobalModelStore", rpc_method_handlers
+        "global_store.GlobalStore", rpc_method_handlers
     )
     server.add_generic_rpc_handlers((generic_handler,))
 
 
 # This class is part of an EXPERIMENTAL API.
-class GlobalModelStore(object):
+class GlobalStore(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def RegisterModelReplica(
+    def RegisterReplica(
         request,
         target,
         options=(),
@@ -326,9 +326,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/RegisterModelReplica",
-            global__store__pb2.RegisterModelReplicaRequest.SerializeToString,
-            global__store__pb2.RegisterModelReplicaResponse.FromString,
+            "/global_store.GlobalStore/RegisterReplica",
+            global__store__pb2.RegisterReplicaRequest.SerializeToString,
+            global__store__pb2.RegisterReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -340,7 +340,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def UpdateModelReplica(
+    def UpdateReplica(
         request,
         target,
         options=(),
@@ -355,9 +355,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/UpdateModelReplica",
-            global__store__pb2.UpdateModelReplicaRequest.SerializeToString,
-            global__store__pb2.UpdateModelReplicaResponse.FromString,
+            "/global_store.GlobalStore/UpdateReplica",
+            global__store__pb2.UpdateReplicaRequest.SerializeToString,
+            global__store__pb2.UpdateReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -369,7 +369,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def UnregisterModelReplica(
+    def UnregisterReplica(
         request,
         target,
         options=(),
@@ -384,9 +384,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/UnregisterModelReplica",
-            global__store__pb2.UnregisterModelReplicaRequest.SerializeToString,
-            global__store__pb2.UnregisterModelReplicaResponse.FromString,
+            "/global_store.GlobalStore/UnregisterReplica",
+            global__store__pb2.UnregisterReplicaRequest.SerializeToString,
+            global__store__pb2.UnregisterReplicaResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -398,7 +398,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def RequestModelReplicaTransport(
+    def RequestReplicaTransport(
         request,
         target,
         options=(),
@@ -413,9 +413,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/RequestModelReplicaTransport",
-            global__store__pb2.RequestModelReplicaTransportRequest.SerializeToString,
-            global__store__pb2.RequestModelReplicaTransportResponse.FromString,
+            "/global_store.GlobalStore/RequestReplicaTransport",
+            global__store__pb2.RequestReplicaTransportRequest.SerializeToString,
+            global__store__pb2.RequestReplicaTransportResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -427,7 +427,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def CompleteModelReplicaTransport(
+    def CompleteReplicaTransport(
         request,
         target,
         options=(),
@@ -442,9 +442,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/CompleteModelReplicaTransport",
-            global__store__pb2.CompleteModelReplicaTransportRequest.SerializeToString,
-            global__store__pb2.CompleteModelReplicaTransportResponse.FromString,
+            "/global_store.GlobalStore/CompleteReplicaTransport",
+            global__store__pb2.CompleteReplicaTransportRequest.SerializeToString,
+            global__store__pb2.CompleteReplicaTransportResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -456,7 +456,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def ListModelReplicas(
+    def ListReplicas(
         request,
         target,
         options=(),
@@ -471,9 +471,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/ListModelReplicas",
-            global__store__pb2.ListModelReplicasRequest.SerializeToString,
-            global__store__pb2.ListModelReplicasResponse.FromString,
+            "/global_store.GlobalStore/ListReplicas",
+            global__store__pb2.ListReplicasRequest.SerializeToString,
+            global__store__pb2.ListReplicasResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -485,7 +485,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def GetModelInfoById(
+    def GetArtifactInfoById(
         request,
         target,
         options=(),
@@ -500,9 +500,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/GetModelInfoById",
-            global__store__pb2.GetModelInfoByIdRequest.SerializeToString,
-            global__store__pb2.GetModelInfoByIdResponse.FromString,
+            "/global_store.GlobalStore/GetArtifactInfoById",
+            global__store__pb2.GetArtifactInfoByIdRequest.SerializeToString,
+            global__store__pb2.GetArtifactInfoByIdResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -514,7 +514,7 @@ class GlobalModelStore(object):
         )
 
     @staticmethod
-    def GetModelIndex(
+    def GetArtifactIndex(
         request,
         target,
         options=(),
@@ -529,9 +529,9 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/GetModelIndex",
-            global__store__pb2.GetModelIndexRequest.SerializeToString,
-            global__store__pb2.GetModelIndexResponse.FromString,
+            "/global_store.GlobalStore/GetArtifactIndex",
+            global__store__pb2.GetArtifactIndexRequest.SerializeToString,
+            global__store__pb2.GetArtifactIndexResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -558,7 +558,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/RegisterWorker",
+            "/global_store.GlobalStore/RegisterWorker",
             global__store__pb2.RegisterWorkerRequest.SerializeToString,
             global__store__pb2.RegisterWorkerResponse.FromString,
             options,
@@ -587,7 +587,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/WorkerHeartbeat",
+            "/global_store.GlobalStore/WorkerHeartbeat",
             global__store__pb2.WorkerHeartbeatRequest.SerializeToString,
             global__store__pb2.WorkerHeartbeatResponse.FromString,
             options,
@@ -616,7 +616,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/UnregisterWorker",
+            "/global_store.GlobalStore/UnregisterWorker",
             global__store__pb2.UnregisterWorkerRequest.SerializeToString,
             global__store__pb2.UnregisterWorkerResponse.FromString,
             options,
@@ -645,7 +645,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/ListActiveWorkers",
+            "/global_store.GlobalStore/ListActiveWorkers",
             global__store__pb2.ListActiveWorkersRequest.SerializeToString,
             global__store__pb2.ListActiveWorkersResponse.FromString,
             options,
@@ -674,7 +674,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/SynchronizeWorkerState",
+            "/global_store.GlobalStore/SynchronizeWorkerState",
             global__store__pb2.SynchronizeWorkerStateRequest.SerializeToString,
             global__store__pb2.SynchronizeWorkerStateResponse.FromString,
             options,
@@ -703,7 +703,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/RequestFullStateSync",
+            "/global_store.GlobalStore/RequestFullStateSync",
             global__store__pb2.RequestFullStateSyncRequest.SerializeToString,
             global__store__pb2.RequestFullStateSyncResponse.FromString,
             options,
@@ -732,7 +732,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/HealthCheck",
+            "/global_store.GlobalStore/HealthCheck",
             global__store__pb2.HealthCheckRequest.SerializeToString,
             global__store__pb2.HealthCheckResponse.FromString,
             options,
@@ -761,7 +761,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/QueryChunkLocations",
+            "/global_store.GlobalStore/QueryChunkLocations",
             global__store__pb2.QueryChunkLocationsRequest.SerializeToString,
             global__store__pb2.QueryChunkLocationsResponse.FromString,
             options,
@@ -790,7 +790,7 @@ class GlobalModelStore(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            "/global_store.GlobalModelStore/BatchUpdateChunkStates",
+            "/global_store.GlobalStore/BatchUpdateChunkStates",
             global__store__pb2.BatchUpdateChunkStatesRequest.SerializeToString,
             global__store__pb2.BatchUpdateChunkStatesResponse.FromString,
             options,

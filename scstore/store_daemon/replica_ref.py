@@ -8,22 +8,22 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ReplicaKey:
-    """Immutable key for identifying a unique model replica.
+    """Immutable key for identifying a unique replica replica.
 
-    A replica is uniquely identified by the combination of model_id,
+    A replica is uniquely identified by the combination of artifact_id,
     and device_id.
     """
 
-    model_id: str
+    artifact_id: str
     device_id: int
 
     def __str__(self) -> str:
-        return f"{self.model_id}@device_{self.device_id}"
+        return f"{self.artifact_id}@device_{self.device_id}"
 
 
 @dataclass
 class ReplicaRefInfo:
-    """Mutable information about a model replica's references and state.
+    """Mutable information about a replica replica's references and state.
 
     Tracks which processes (PIDs) are using the replica, reference counts,
     and metadata for eviction decisions.

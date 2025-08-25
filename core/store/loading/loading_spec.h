@@ -16,16 +16,16 @@
 
 #include "core/store/communication_types.h"
 #include "core/store/device_types.h"
-#include "core/store/model/memory_state.h"
+#include "core/store/replica/memory_state.h"
 
 namespace stepcast::store {
 
 // ══════════════════════════════════════════════════════════════════════════
-// Model Sources - Describe where data comes from
+// Replica Sources - Describe where data comes from
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * @brief Load model from disk
+ * @brief Load replica from disk
  */
 struct DiskSource {
   std::filesystem::path path;
@@ -33,7 +33,7 @@ struct DiskSource {
 };
 
 /**
- * @brief Load model from memory buffer (for testing or small models)
+ * @brief Load replica from memory buffer (for testing or small artifacts)
  */
 struct InlineBufferSource {
   std::shared_ptr<const void> data;
@@ -41,9 +41,9 @@ struct InlineBufferSource {
 };
 
 /**
- * @brief Unified source type for model loading
+ * @brief Unified source type for replica loading
  */
-using ModelSource = std::variant<
+using ArtifactSource = std::variant<
     DiskSource,
     P2PSource,
     InlineBufferSource
@@ -51,13 +51,13 @@ using ModelSource = std::variant<
     >;
 
 // ══════════════════════════════════════════════════════════════════════════
-// Model Target - Describe where data goes
+// Replica Target - Describe where data goes
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * @brief Target location for model loading
+ * @brief Target location for replica loading
  */
-struct ModelTarget {
+struct ReplicaTarget {
   Location location;
 };
 
@@ -66,22 +66,22 @@ struct ModelTarget {
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * @brief Collection of tuning parameters for model loading
+ * @brief Collection of tuning parameters for replica loading
  */
-struct LoadingHints {
+struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
   uint32_t pipeline_concurrency = 4;
   // Content-addressed identity (mi2:...) when available.
-  std::string model_id;
+  std::string artifact_id;
   // Optional: explicitly provide a disk path as a source hint.
   // When non-empty and content-addressed routing is unavailable, the loader
   // may use this path via DiskLoader as an explicit override.
   std::string disk_path;
 
-  // Hint: Prefer loading the model into the Pageable-Chunk CPU Cache (UPC-Cache)
+  // Hint: Prefer loading the replica into the Pageable-Chunk CPU Cache (UPC-Cache)
   // instead of the traditional pinned host memory path. When set to true the
-  // StoreEngine and Loader pipeline should attempt to allocate the model
+  // StoreEngine and Loader pipeline should attempt to allocate the replica
   // in PAGEABLE_CPU memory if the underlying components support it.
   bool prefer_pageable_cpu{false};
 
@@ -90,34 +90,34 @@ struct LoadingHints {
 };
 
 /**
- * @brief Complete loading specification for a model
+ * @brief Complete loading specification for a replica
  */
-struct ModelLoadSpec {
+struct ReplicaLoadSpec {
   std::string identifier;
-  ModelSource source;
-  ModelTarget target;
-  LoadingHints hints;
+  ArtifactSource source;
+  ReplicaTarget target;
+  MaterializeHints hints;
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// Model Instance Management
+// Replica Instance Management
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * @brief A globally-unique key for a single model replica bound to a device.
+ * @brief A globally-unique key for a single replica replica bound to a device.
  */
-struct InstanceKey {
-  std::string model_id; // e.g. "llama-7b"
+struct ReplicaKey {
+  std::string artifact_id; // e.g. "llama-7b"
   DeviceKey device; // physical placement
   uint32_t replica{0}; // multiple replicas on the same device
 
-  bool operator==(const InstanceKey&) const = default;
+  bool operator==(const ReplicaKey&) const = default;
 };
 
-// Stream operator for convenient logging: LOG(INFO) << instance_key;
-inline std::ostream& operator<<(std::ostream& os, const InstanceKey& key) {
-  os << "InstanceKey{"
-     << "model_id=" << key.model_id << ", device=";
+// Stream operator for convenient logging: LOG(INFO) << replica_key;
+inline std::ostream& operator<<(std::ostream& os, const ReplicaKey& key) {
+  os << "ReplicaKey{"
+     << "artifact_id=" << key.artifact_id << ", device=";
   switch (key.device.type) {
     case DeviceType::GPU:
       os << "GPU";
@@ -138,27 +138,27 @@ inline std::ostream& operator<<(std::ostream& os, const InstanceKey& key) {
 }
 
 /**
- * @brief Hash functor so we can use InstanceKey in absl::flat_hash_map.
+ * @brief Hash functor so we can use ReplicaKey in absl::flat_hash_map.
  */
-struct InstanceKeyHash {
-  size_t operator()(const InstanceKey& k) const {
-    return absl::HashOf(k.model_id, static_cast<int>(k.device.type), k.device.ordinal, k.replica);
+struct ReplicaKeyHash {
+  size_t operator()(const ReplicaKey& k) const {
+    return absl::HashOf(k.artifact_id, static_cast<int>(k.device.type), k.device.ordinal, k.replica);
   }
 };
 
 /**
- * @brief Handle returned from model loading operations
+ * @brief Handle returned from replica loading operations
  */
-struct ModelHandle {
-  InstanceKey instance_key;
+struct ReplicaHandle {
+  ReplicaKey replica_key;
   std::shared_future<absl::Status> ready_future;
   MemoryState cpu_state{MemoryState::UNINITIALIZED};
   MemoryState gpu_state{MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
   CudaIpcHandle cuda_ipc_handle;
 
-  [[nodiscard]] const InstanceKey& key() const {
-    return instance_key;
+  [[nodiscard]] const ReplicaKey& key() const {
+    return replica_key;
   }
   [[nodiscard]] MemoryState state(DeviceType type) const;
   absl::Status wait_ready(std::chrono::milliseconds timeout);
