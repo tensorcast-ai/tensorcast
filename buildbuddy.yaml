@@ -9,4 +9,10 @@ actions:
         branches:
           - "*"
     steps:
-      - run: CUDA_HOME=/usr/local/cuda bazel test //core/... --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) --config=remote
+      - run: |
+          CUDA_HOME=/usr/local/cuda \
+          bazel test //core/... \
+            --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
+            --define use_fake_cuda=true \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
