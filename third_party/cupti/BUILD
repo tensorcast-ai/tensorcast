@@ -5,6 +5,6 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "cupti",
     srcs = [
-        "lib/libcupti.so.12",
+        "nvidia/cuda_cupti/lib/libcupti.so.12",
     ],
 )

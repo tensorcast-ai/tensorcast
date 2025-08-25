@@ -18,32 +18,25 @@ cc_library(
 
 cc_library(
     name = "torch",
-    srcs = select({
-        ":windows": [
-            "lib/torch.lib",
-            "lib/torch_cpu.lib",
-            "lib/torch_cuda.lib",
-        ],
-        "//conditions:default": glob(["lib/libgomp-*.so.1"]) + [
-            "lib/libtorch.so",
-            "lib/libtorch_cpu.so",
-            "lib/libtorch_cuda.so",
-            "lib/libtorch_global_deps.so",
-        ],
-    }),
+    srcs = glob(["torch/lib/libgomp-*.so.1"]) + [
+        "torch/lib/libtorch.so",
+        "torch/lib/libtorch_cpu.so",
+        "torch/lib/libtorch_cuda.so",
+        "torch/lib/libtorch_global_deps.so",
+    ],
     hdrs = glob(
         [
-            "include/torch/**/*.h",
+            "torch/include/torch/**/*.h",
         ],
         exclude = [
-            "include/torch/csrc/api/include/**/*.h",
+            "torch/include/torch/csrc/api/include/**/*.h",
         ],
     ) + glob([
-        "include/torch/csrc/api/include/**/*.h",
+        "torch/include/torch/csrc/api/include/**/*.h",
     ]),
     includes = [
-        "include",
-        "include/torch/csrc/api/include/",
+        "torch/include",
+        "torch/include/torch/csrc/api/include/",
     ],
     deps = [
         ":ATen",
@@ -53,14 +46,11 @@ cc_library(
 
 cc_library(
     name = "c10_cuda",
-    srcs = select({
-        ":windows": ["lib/c10_cuda.lib"],
-        "//conditions:default": ["lib/libc10_cuda.so"],
-    }),
+    srcs = ["torch/lib/libc10_cuda.so"],
     hdrs = glob([
-        "include/c10/**/*.h",
+        "torch/include/c10/**/*.h",
     ]),
-    strip_include_prefix = "include",
+    strip_include_prefix = "torch/include",
     deps = [
         ":c10",
     ],
@@ -68,36 +58,28 @@ cc_library(
 
 cc_library(
     name = "c10",
-    srcs = select({
-        ":windows": ["lib/c10.lib"],
-        "//conditions:default": ["lib/libc10.so"],
-    }),
+    srcs = ["torch/lib/libc10.so"],
     hdrs = glob([
-        "include/c10/**/*.h",
+        "torch/include/c10/**/*.h",
     ]),
-    strip_include_prefix = "include",
+    strip_include_prefix = "torch/include",
 )
 
 cc_library(
     name = "ATen",
     hdrs = glob([
-        "include/ATen/**/*.h",
+        "torch/include/ATen/**/*.h",
     ]),
-    strip_include_prefix = "include",
+    strip_include_prefix = "torch/include",
 )
 
 cc_library(
     name = "caffe2",
-    srcs = select({
-        ":windows": [
-            "lib/caffe2_nvrtc.lib",
-        ],
-        "//conditions:default": [
-            "lib/libcaffe2_nvrtc.so",
-        ],
-    }),
+    srcs = [
+        "torch/lib/libcaffe2_nvrtc.so",
+    ],
     hdrs = glob([
-        "include/caffe2/**/*.h",
+        "torch/include/caffe2/**/*.h",
     ]),
-    strip_include_prefix = "include",
+    strip_include_prefix = "torch/include",
 )

@@ -4,14 +4,14 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "cudnn_headers",
-    hdrs = glob(["include/cudnn*.h"]),
-    includes = ["include/"],
+    hdrs = glob(["nvidia/cudnn/include/cudnn*.h"]),
+    includes = ["nvidia/cudnn/include/"],
     visibility = ["//visibility:private"],
 )
 
 cc_import(
     name = "cudnn_lib",
-    shared_library = "lib/libcudnn.so.9",
+    shared_library = "nvidia/cudnn/lib/libcudnn.so.9",
     visibility = ["//visibility:private"],
 )
 

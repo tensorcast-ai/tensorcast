@@ -29,38 +29,83 @@ protoc.toolchain(
     version = "v31.1",
 )
 
-new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+# new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 
 # CUDA repo now provided by module extension reading CUDA_PATH/CUDA_HOME
 cuda_ext = use_extension("//tools/extensions:cuda.bzl", "cuda_env")
 use_repo(cuda_ext, "cuda")
 
-new_local_repository(
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# new_local_repository(
+#     name = "cudnn",
+#     build_file = "@//third_party/cudnn/archive:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "nccl",
+#     build_file = "@//third_party/nccl:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "libtorch",
+#     build_file = "@//third_party/libtorch:BUILD",
+#     path = ".venv/lib/python3.10/site-packages",
+# )
+
+# new_local_repository(
+#     name = "cusparselt",
+#     build_file = "@//third_party/cusparselt:BUILD",
+#     path = ".venv/lib/python3.10/site-packages/cusparselt",
+# )
+
+# new_local_repository(
+#     name = "cupti",
+#     build_file = "@//third_party/cupti:BUILD",
+#     path = ".venv/lib/python3.10/site-packages/nvidia/cuda_cupti",
+# )
+
+http_archive(
     name = "cudnn",
     build_file = "@//third_party/cudnn/archive:BUILD",
-    path = ".venv/lib/python3.10/site-packages/nvidia/cudnn",
+    urls = [
+        "https://files.pythonhosted.org/packages/py3/n/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.12.0.46-py3-none-manylinux_2_27_x86_64.whl",
+    ],
 )
 
-new_local_repository(
+http_archive(
     name = "nccl",
     build_file = "@//third_party/nccl:BUILD",
-    path = ".venv/lib/python3.10/site-packages/nvidia/nccl",
+    urls = [
+        "https://files.pythonhosted.org/packages/py3/n/nvidia-nccl-cu12/nvidia_nccl_cu12-2.21.5-py3-none-manylinux2014_x86_64.whl",
+    ],
 )
 
-new_local_repository(
+# python tools/pypi_fetch.py torch 2.6.0 --match cp310 --match manylinux1_x86_64 --first
+http_archive(
     name = "libtorch",
     build_file = "@//third_party/libtorch:BUILD",
-    path = ".venv/lib/python3.10/site-packages/torch",
+    urls = [
+        "https://files.pythonhosted.org/packages/37/81/aa9ab58ec10264c1abe62c8b73f5086c3c558885d6beecebf699f0dbeaeb/torch-2.6.0-cp310-cp310-manylinux1_x86_64.whl",
+    ],
 )
 
-new_local_repository(
-    name = "cuparselt",
+# python tools/pypi_fetch.py nvidia-cusparselt-cu12 0.6.2 --match py3 --match manylinux2014_x86_64 --first
+http_archive(
+    name = "cusparselt",
     build_file = "@//third_party/cusparselt:BUILD",
-    path = ".venv/lib/python3.10/site-packages/cusparselt",
+    urls = [
+        "https://files.pythonhosted.org/packages/78/a8/bcbb63b53a4b1234feeafb65544ee55495e1bb37ec31b999b963cbccfd1d/nvidia_cusparselt_cu12-0.6.2-py3-none-manylinux2014_x86_64.whl",
+    ],
 )
 
-new_local_repository(
+# python tools/pypi_fetch.py nvidia-cuda-cupti-cu12 12.4.127 --match py3 --match manylinux2014_x86_64 --first
+http_archive(
     name = "cupti",
     build_file = "@//third_party/cupti:BUILD",
-    path = ".venv/lib/python3.10/site-packages/nvidia/cuda_cupti",
+    urls = [
+        "https://files.pythonhosted.org/packages/67/42/f4f60238e8194a3106d06a058d494b18e006c10bb2b915655bd9f6ea4cb1/nvidia_cuda_cupti_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+    ],
 )

@@ -32,8 +32,8 @@ sc_cc_library(
         "@cuda//:cusparse",
         "@cuda//:nvJitLink",
         "@cudnn",
-        "@cuparselt//:cusparselt",
         "@cupti",
+        "@cusparselt",
         "@nccl",
     ] + select({
         ":use_fake_cuda": [],
