@@ -14,5 +14,4 @@ actions:
           bazel test //core/... \
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
             --define use_fake_cuda=true \
-            --config=remote \
-            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
+            --config=remote
