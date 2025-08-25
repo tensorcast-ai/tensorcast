@@ -14,4 +14,5 @@ actions:
           bazel test //core/... \
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
             --define use_fake_cuda=true \
-            --config=remote
+            --config=remote \
+            --host_platform=//:docker_image_platform
