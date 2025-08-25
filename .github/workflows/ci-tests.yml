@@ -63,7 +63,8 @@ jobs:
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed \
-            --test_timeout=500
+            --test_timeout=500 \
+            --config=remote
 
       - name: Run stress C++ tests
         timeout-minutes: 30
@@ -75,7 +76,8 @@ jobs:
             --test_output=errors \
             --test_summary=detailed \
             --test_timeout=600 \
-            --local_test_jobs=1
+            --local_test_jobs=1 \
+            --config=remote
 
   python-tests:
     name: Python Tests
@@ -135,7 +137,7 @@ jobs:
 
       - name: Build C++ extensions with fake CUDA
         run: |
-          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+          USE_REMOTE=1 USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
       - name: Run Python tests
         run: |
