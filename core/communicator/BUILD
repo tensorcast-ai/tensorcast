@@ -325,7 +325,7 @@ sc_cc_library(
         "@abseil-cpp//absl/log:check",
     ] + select({
         ":use_fake_cuda": [],
-        "//conditions:default": ["@cuda//:cudart"],
+        "//conditions:default": ["@cudart"],
     }),
 )
 

@@ -91,7 +91,8 @@ sc_cc_library(
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [
-            "@cuda//:cublas",
+            "@cublas",
+            "@cublas//:cublasLt",
         ],
     }),
 )

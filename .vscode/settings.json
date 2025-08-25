@@ -11,7 +11,6 @@
         "**/__pycache__": true,
         "scstore.egg-info": true,
         ".*.txt": true,
-        "*.lock": true,
     },
     "files.associations": {
         "*.cc": "cpp"

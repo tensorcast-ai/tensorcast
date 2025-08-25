@@ -15,7 +15,7 @@ jobs:
   cpp-tests:
     name: C++ Tests
     runs-on: ubuntu-latest-m
-    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
@@ -85,7 +85,7 @@ jobs:
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest-m
-    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
