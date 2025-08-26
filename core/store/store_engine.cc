@@ -22,6 +22,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/trace/trace_macros.h"
@@ -335,6 +336,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   std::optional<std::string> computed_index_mh;
   std::optional<std::string> existing_index_mh;
   std::optional<std::string> existing_data_mh;
+  uint64_t logical_total_size = 0;
   std::filesystem::path artifact_path = resolved_source.path;
   bool is_safetensors = false;
   {
@@ -422,6 +424,20 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             artifact_hash::compute_index_multihash(std::optional<std::string>(index_bytes_or.value()), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
+          // Determine logical total size from canonical index bytes
+          try {
+            nlohmann::json idx_json = nlohmann::json::parse(index_bytes_or.value(), nullptr, true);
+            for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+              const auto& arr = it.value();
+              if (!arr.is_array() || arr.size() < 2)
+                continue;
+              uint64_t off = arr[0].get<uint64_t>();
+              uint64_t sz = arr[1].get<uint64_t>();
+              logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+            }
+          } catch (const std::exception& e) {
+            LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
+          }
         } else {
           LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
         }
@@ -430,18 +446,12 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       }
     }
   } else {
-    // Standard partition format – read tensor_index.(json|cbor) and canonicalize bytes via nlohmann::json
+    // Standard partition format – read tensor_index.json and canonicalize bytes via nlohmann::json
     const auto index_json_path = artifact_path / "tensor_index.json";
-    const auto index_cbor_path = artifact_path / "tensor_index.cbor";
     try {
-      // Read canonical index (CBOR preferred), then rebuild with stable grouping
+      // Read canonical index (JSON), then rebuild with stable grouping
       std::string raw_json;
-      if (std::filesystem::exists(index_cbor_path)) {
-        std::ifstream f(index_cbor_path, std::ios::binary);
-        std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        nlohmann::json j = nlohmann::json::from_cbor(buf);
-        raw_json = j.dump();
-      } else if (std::filesystem::exists(index_json_path)) {
+      if (std::filesystem::exists(index_json_path)) {
         std::ifstream f(index_json_path);
         nlohmann::json j;
         f >> j;
@@ -454,12 +464,26 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         auto index_mh_or = artifact_hash::compute_index_multihash(std::optional<std::string>(canonical_json), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
+          // Determine logical total size from canonical index JSON
+          try {
+            nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
+            for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+              const auto& arr = it.value();
+              if (!arr.is_array() || arr.size() < 2)
+                continue;
+              uint64_t off = arr[0].get<uint64_t>();
+              uint64_t sz = arr[1].get<uint64_t>();
+              logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+            }
+          } catch (const std::exception& e) {
+            LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
+          }
         } else {
           LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
         }
       }
     } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to read/parse tensor_index.(json|cbor): " << e.what();
+      LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
     }
   }
 
@@ -470,8 +494,126 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     }
   }
 
-  // If safetensors path lacks descriptor, write it back when we have both hashes
+  // Default post-load lightweight verification when descriptor is present
+  if (std::filesystem::exists(descriptor_path)) {
+    try {
+      // Attempt to load optional verification.json and verify at SEGMENT_HASHES level
+      const auto verification_path = artifact_path / "verification.json";
+      if (std::filesystem::exists(verification_path)) {
+        std::ifstream vf(verification_path);
+        if (vf.is_open()) {
+          std::stringstream vbuf;
+          vbuf << vf.rdbuf();
+          vf.close();
+          auto ver_or = ArtifactVerificationInfo::from_json(vbuf.str());
+          if (ver_or.ok()) {
+            std::vector<void*> ptrs;
+            std::vector<size_t> sizes;
+            int dev_id = -1;
+            uint64_t sz_for_verify = logical_total_size;
+            if (sz_for_verify == 0) {
+              if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+                sz_for_verify = *sz_or;
+            }
+            if (target_location == MemoryLocation::GPU) {
+              const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+              if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && sz_for_verify > 0) {
+                ptrs.push_back(gpu_ptrs[0]);
+                sizes.push_back(static_cast<size_t>(sz_for_verify));
+                dev_id = target_device_id;
+              }
+            } else {
+              const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+              if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
+                ptrs.push_back(cpu_ptrs[0]);
+                sizes.push_back(static_cast<size_t>(sz_for_verify));
+                dev_id = -1;
+              }
+            }
+            if (!ptrs.empty()) {
+              absl::Status vstatus = ArtifactVerifier::verify_artifact_data(
+                  ptrs, sizes, *ver_or, VerificationLevel::SEGMENT_HASHES, dev_id);
+              if (!vstatus.ok()) {
+                return absl::DataLossError(
+                    std::string("ARTIFACT_ID_MISMATCH: verification failed: ") + vstatus.message());
+              }
+            }
+          }
+        }
+      } else {
+        // No verification info persisted yet: generate at SEGMENT_HASHES level and persist for future fast checks
+        std::vector<void*> ptrs;
+        std::vector<size_t> sizes;
+        int dev_id = -1;
+        uint64_t sz_for_verify = logical_total_size;
+        if (sz_for_verify == 0) {
+          if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+            sz_for_verify = *sz_or;
+        }
+        if (target_location == MemoryLocation::GPU) {
+          const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+          if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && sz_for_verify > 0) {
+            ptrs.push_back(gpu_ptrs[0]);
+            sizes.push_back(static_cast<size_t>(sz_for_verify));
+            dev_id = target_device_id;
+          }
+        } else {
+          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+          if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
+            ptrs.push_back(cpu_ptrs[0]);
+            sizes.push_back(static_cast<size_t>(sz_for_verify));
+            dev_id = -1;
+          }
+        }
+        if (!ptrs.empty()) {
+          auto gen_or =
+              ArtifactVerifier::generate_verification_info(ptrs, sizes, dev_id, VerificationLevel::SEGMENT_HASHES);
+          if (gen_or.ok()) {
+            try {
+              std::ofstream vf(verification_path);
+              if (vf.is_open()) {
+                vf << gen_or->to_json();
+                vf.close();
+              }
+            } catch (const std::exception& e) {
+              LOG(WARNING) << "Failed to persist verification.json: " << e.what();
+            }
+          }
+        }
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Post-load verification skipped due to error: " << e.what();
+    }
+  }
+
+  // If safetensors path lacks descriptor, write it back computing hashes as needed
   if (is_safetensors && !std::filesystem::exists(descriptor_path)) {
+    // Ensure data multihash is computed even when FULL_DIGEST is not requested
+    if (!computed_data_mh.has_value()) {
+      uint64_t total = logical_total_size;
+      if (total == 0) {
+        if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+          total = *sz_or;
+      }
+      if (total > 0) {
+        if (target_location == MemoryLocation::GPU) {
+          const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+          if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+            auto mh_or = loader::compute_data_multihash_from_gpu_memory(gpu_ptrs[0], total, target_device_id);
+            if (mh_or.ok())
+              computed_data_mh = *mh_or;
+          }
+        } else {
+          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+          if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+            auto mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_ptrs[0], total);
+            if (mh_or.ok())
+              computed_data_mh = *mh_or;
+          }
+        }
+      }
+    }
+
     if (computed_index_mh.has_value() && computed_data_mh.has_value()) {
       try {
         // 1) Persist artifact_descriptor.json
@@ -480,8 +622,10 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         j["index_multihash"] = *computed_index_mh;
         j["data_multihash"] = *computed_data_mh;
         j["schema_version"] = "v2";
+        // Encoding is JSON only per project decision
+        const auto index_json_path = artifact_path / "tensor_index.json";
         j["encoding"] = "json";
-        j["total_size"] = verify_size;
+        j["total_size"] = (logical_total_size > 0) ? logical_total_size : verify_size;
         nlohmann::json hp;
         hp["chunk_size"] = 4 * 1024 * 1024;
         hp["fanout"] = 2;
@@ -493,10 +637,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         }
         of << j.dump(2);
 
-        // 2) Optionally persist canonical index (CBOR preferred) if not already present
-        const auto index_json_path = artifact_path / "tensor_index.json";
-        const auto index_cbor_path = artifact_path / "tensor_index.cbor";
-        if (!std::filesystem::exists(index_cbor_path) && !std::filesystem::exists(index_json_path)) {
+        // 2) Optionally persist canonical index (JSON) if not already present
+        if (!std::filesystem::exists(index_json_path)) {
           // Rebuild canonical index bytes from safetensors headers
           std::vector<std::filesystem::path> st_files;
           for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
@@ -509,15 +651,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           }
           auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
           if (index_bytes_or.ok()) {
-            // Parse to JSON then write CBOR bytes
-            nlohmann::json idx_json = nlohmann::json::parse(index_bytes_or.value(), nullptr, true);
-            std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(idx_json);
-            std::ofstream oc(index_cbor_path, std::ios::binary);
-            if (!oc.is_open()) {
-              return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write tensor_index.cbor");
+            // Write JSON index directly
+            std::ofstream oj(index_json_path);
+            if (!oj.is_open()) {
+              return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write tensor_index.json");
             }
-            oc.write(reinterpret_cast<const char*>(cbor.data()), static_cast<std::streamsize>(cbor.size()));
-            oc.close();
+            oj << index_bytes_or.value();
+            oj.close();
           }
         }
       } catch (const std::exception& e) {

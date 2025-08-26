@@ -210,6 +210,7 @@ sc_cc_library(
         ":store_engine_options",
         "//core/checkpoint:checkpoint_lib",
         "//core/common:artifact_hash_lib",
+        "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:pinned_memory_pool_lib",
@@ -357,6 +358,39 @@ cc_test(
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "store_engine_verification_default_test",
+    srcs = ["store_engine_verification_default_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["store_engine"],
+    deps = [
+        ":store_engine",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "store_engine_safetensors_backfill_test",
+    srcs = ["store_engine_safetensors_backfill_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["store_engine"],
+    deps = [
+        ":store_engine",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
     ],
 )
 
