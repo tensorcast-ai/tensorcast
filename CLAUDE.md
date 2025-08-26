@@ -25,9 +25,9 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 # Build and run tests
 # Tests are now colocated with their implementation
 # Examples:
-tools/bazel test //core/store:store_engine_test
-tools/bazel test //core/communicator/engine:tcp_engine_test
-tools/bazel test //core/store/loader:disk_loader_streaming_buffer_test
+bazel test //core/store:store_engine_test
+bazel test //core/communicator/engine:tcp_engine_test
+bazel test //core/store/loader:disk_loader_streaming_buffer_test
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
@@ -39,8 +39,8 @@ USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
 # Example for specific component tests:
-tools/bazel test //core/store:store_engine_test --define use_fake_cuda=true
-tools/bazel test //core/communicator/engine:gpu_ce_test --define use_fake_cuda=true
+bazel test //core/store:store_engine_test --define use_fake_cuda=true
+bazel test //core/communicator/engine:gpu_ce_test --define use_fake_cuda=true
 ```
 
 **Fake CUDA Mode Features:**
@@ -80,7 +80,7 @@ This updates generated Python code in `./scstore/proto/` directory.
 
 1. **Protocol buffer changes not reflected**: Always run `bash tools/build_proto_python.sh` after modifying `.proto` files
 2. **C++ changes not visible in Python**: Ensure both `BUILD_CORE=1` and `BUILD_EXTENSION=1` are set
-3. **Clean build needed**: Run `tools/bazel clean --expunge` and `rm -rf build/` for a complete clean build
+3. **Clean build needed**: Run `bazel clean --expunge` and `rm -rf build/` for a complete clean build
 
 
 ## Additional Development Resources
@@ -262,7 +262,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - **Explicit file lists** - Never use `glob()`, list all files explicitly
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
 - Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
-- CLI: Use `tools/bazel` instead of raw `bazel` in the command line.
+- CLI: Use `bazel` instead of raw `bazel` in the command line.
 
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)

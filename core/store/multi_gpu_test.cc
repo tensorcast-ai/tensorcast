@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -119,6 +120,38 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   REQUIRE(available_memory <= store->get_mem_pool_size());
 }
 
+// B2: COPY_ONLY requires artifact_id
+TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]") {
+  skip_if_insufficient_gpus(2, "B2");
+
+  const std::string artifact_id = "gpu_copy_require_id_b2";
+  const size_t artifact_size = 16 * 1024 * 1024; // 16MB
+
+  TempArtifactFixture fixture("multi_gpu_b2");
+  fixture.create_artifact(artifact_id, artifact_size);
+
+  auto store = make_test_store(fixture.root());
+
+  // Load to GPU 0 first via LOAD_ONLY (using disk_path)
+  {
+    stepcast::store::MaterializeHints hints;
+    hints.disk_path = artifact_id;
+    auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    REQUIRE(handle0_or.ok());
+    auto handle0 = std::move(handle0_or).value();
+    REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
+  }
+
+  // Now try COPY_ONLY to GPU 1 WITHOUT setting artifact_id → should fail with InvalidArgument
+  {
+    stepcast::store::MaterializeHints hints; // intentionally leave artifact_id empty
+    auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
+    REQUIRE_FALSE(handle1_or.ok());
+    // Error message should clearly indicate missing artifact_id
+    REQUIRE(handle1_or.status().message().find("requires hints.artifact_id") != std::string::npos);
+  }
+}
+
 // B3: GPU-to-GPU copy
 TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   skip_if_insufficient_gpus(2, "B3");
@@ -151,7 +184,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   auto copy_start = std::chrono::high_resolution_clock::now();
   {
     stepcast::store::MaterializeHints hints;
-
+    hints.artifact_id = artifact_id; // Needed by COPY_ONLY to locate source instance
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(handle1_or.ok());
     auto handle1 = std::move(handle1_or).value();

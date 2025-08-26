@@ -5,6 +5,6 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "cusparselt",
     srcs = [
-        "lib/libcusparseLt.so.0",
+        "cusparselt/lib/libcusparseLt.so.0",
     ],
 )

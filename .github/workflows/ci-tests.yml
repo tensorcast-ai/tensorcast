@@ -15,7 +15,7 @@ jobs:
   cpp-tests:
     name: C++ Tests
     runs-on: ubuntu-latest-m
-    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
@@ -25,6 +25,7 @@ jobs:
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     permissions:
       contents: read
       pull-requests: read
@@ -52,35 +53,39 @@ jobs:
 
       - name: Create symlink to external packages
         run: |
-          ln -s $(tools/bazel.sh info output_base)/external external
+          ln -s $(bazel info output_base)/external external
 
       - name: Run non-stress C++ tests
         timeout-minutes: 30
         shell: bash
         run: |
-          tools/bazel.sh test //core/... \
+          bazel test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed \
-            --test_timeout=500
+            --test_timeout=500 \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Run stress C++ tests
         timeout-minutes: 30
         shell: bash
         run: |
-          tools/bazel.sh test //core/... \
+          bazel test //core/... \
             --test_tag_filters="stress" \
             --define use_fake_cuda=true \
             --test_output=errors \
             --test_summary=detailed \
             --test_timeout=600 \
-            --local_test_jobs=1
+            --local_test_jobs=1 \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
   python-tests:
     name: Python Tests
     runs-on: ubuntu-latest-m
-    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
@@ -90,6 +95,7 @@ jobs:
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     permissions:
       contents: read
       pull-requests: read
@@ -127,7 +133,7 @@ jobs:
 
       - name: Create symlink to external packages
         run: |
-          ln -s $(tools/bazel.sh info output_base)/external external
+          ln -s $(bazel info output_base)/external external
 
       - name: Generate Protocol Buffers
         run: |
@@ -135,7 +141,7 @@ jobs:
 
       - name: Build C++ extensions with fake CUDA
         run: |
-          USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+          USE_REMOTE=1 USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
       - name: Run Python tests
         run: |

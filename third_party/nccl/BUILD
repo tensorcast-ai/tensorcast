@@ -4,7 +4,7 @@ package(default_visibility = ["//visibility:public"])
 
 cc_import(
     name = "nccl_lib",
-    shared_library = "lib/libnccl.so.2",
+    shared_library = "nvidia/nccl/lib/libnccl.so.2",
     visibility = ["//visibility:private"],
 )
 

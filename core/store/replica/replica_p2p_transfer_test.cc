@@ -1,22 +1,20 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
 // Multi-process test for loading Replica via P2P
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "core/common/cuda_api.h" // Use unified CUDA API
 #include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/testing/common.h"
+#include "core/testing/test_helpers.h"
 
 // #include "absl/log/check.h" // Avoid macro conflict with Catch2
 #include "absl/log/globals.h"
@@ -459,8 +457,12 @@ class P2PTestClient {
     // Create a communication manager without initializing a server
     LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
     auto client_comm_engine = std::make_shared<stepcast::communicator::CommunicateEngine>(false);
-    // Bind to a dedicated client port to facilitate P2P connections
-    absl::Status client_engine_status = client_comm_engine->init("127.0.0.1", static_cast<uint16_t>(server_port + 1));
+    // Bind to a dedicated, available client port to facilitate P2P connections
+    int client_port = stepcast::communicator::test::find_available_port(server_port + 1);
+    if (client_port <= 0 || client_port == server_port) {
+      client_port = server_port + 1; // fallback
+    }
+    absl::Status client_engine_status = client_comm_engine->init("127.0.0.1", static_cast<uint16_t>(client_port));
     if (!client_engine_status.ok()) {
       LOG(ERROR) << "Failed to initialize client communication engine: " << client_engine_status.message();
       resources.cleanup();
@@ -804,7 +806,11 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
     }
 
     P2PTestConfig config;
-    config.server_port = 50062;
+    {
+      int port = stepcast::communicator::test::find_available_port(50060);
+      REQUIRE(port > 0);
+      config.server_port = port;
+    }
     config.artifact_id = "p2p_gpu_to_gpu_test";
     config.gpu_id = 0;
     config.artifact_size_mb = 16;
@@ -829,7 +835,11 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
     }
 
     P2PTestConfig config;
-    config.server_port = 50064;
+    {
+      int port = stepcast::communicator::test::find_available_port(50070);
+      REQUIRE(port > 0);
+      config.server_port = port;
+    }
     config.artifact_id = "p2p_small_artifact_test";
     config.gpu_id = 0;
     config.artifact_size_mb = 1; // 1MB replica
@@ -854,7 +864,11 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
     }
 
     P2PTestConfig config;
-    config.server_port = 50065;
+    {
+      int port = stepcast::communicator::test::find_available_port(50100);
+      REQUIRE(port > 0);
+      config.server_port = port;
+    }
     config.artifact_id = "p2p_large_artifact_test";
     config.gpu_id = 0;
     config.artifact_size_mb = 64; // 64MB replica

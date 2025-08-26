@@ -124,6 +124,7 @@ RELEASE = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
 USE_FAKE_CUDA = False
+USE_REMOTE = False
 
 if os.environ.get("RELEASE") == "1":
     RELEASE = True
@@ -152,6 +153,15 @@ if "--use-fake-cuda" in sys.argv:
     USE_FAKE_CUDA = True
     print("Using fake CUDA backend")
     sys.argv.remove("--use-fake-cuda")
+
+if os.environ.get("USE_REMOTE") == "1":
+    USE_REMOTE = True
+    print("USE_REMOTE is set to True")
+
+if "--use-remote" in sys.argv:
+    USE_REMOTE = True
+    print("Using remote build configuration")
+    sys.argv.remove("--use-remote")
 
 if (release_env_var := os.environ.get("RELEASE")) is not None:
     if release_env_var == "1":
@@ -202,15 +212,47 @@ else:
     __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
 
 
-BAZEL_EXE = os.path.join(dir_path, "tools", "bazel.sh")
-
-if not os.path.exists(BAZEL_EXE):
-    BAZEL_EXE = which("bazelisk") or which("bazel")
-    if BAZEL_EXE is None and BUILD_EXTENSION:
-        sys.exit("Could not find bazel wrapper or bazel in PATH")
+# Resolve bazel from PATH; do not use repo-local bazel wrapper
+BAZEL_EXE = which("bazelisk") or which("bazel")
+if BAZEL_EXE is None:
+    if BUILD_EXTENSION or BUILD_CORE:
+        sys.exit("Could not find 'bazelisk' or 'bazel' in PATH")
+    else:
+        BAZEL_EXE = None
 
 
 # New: ensure proto headers are generated before compiling extensions
+
+
+def ensure_external_symlink() -> None:
+    """Ensure repo-root 'external' symlink points to Bazel output_base/external.
+
+    This mirrors the instruction in README to run:
+      ln -s $(bazel info output_base)/external external
+    """
+    try:
+        root_dir: Path = get_root_dir()
+        link_path: Path = root_dir / "external"
+
+        # Only act if link/dir doesn't exist
+        if link_path.exists():
+            return
+
+        if BAZEL_EXE is None:
+            return
+
+        output_base = (
+            subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
+        )
+        target_path = Path(output_base) / "external"
+
+        os.symlink(str(target_path), str(link_path))
+        print(f"Created symlink: {link_path} -> {target_path}")
+    except Exception as e:
+        # Non-fatal: print guidance and continue
+        print(f"Warning: Failed to create 'external' symlink automatically: {e}")
+        print("You can create it manually with:")
+        print("  ln -s $(bazel info output_base)/external external")
 
 
 def build_libscstore_cxx11_abi(
@@ -218,6 +260,7 @@ def build_libscstore_cxx11_abi(
     use_dist_dir=False,
     pre_cxx11_abi=False,
     use_fake_cuda=False,
+    use_remote=False,
 ):
     if not BUILD_CORE:
         return
@@ -237,6 +280,15 @@ def build_libscstore_cxx11_abi(
         cmd.append("use_fake_cuda=true")
         print("Building with fake CUDA backend")
 
+    if use_remote:
+        api_key = os.environ.get("BUILDBUDDY_API_KEY")
+        if not api_key:
+            sys.exit("BUILDBUDDY_API_KEY environment variable must be set when USE_REMOTE=1")
+        cmd.append("--config=remote")
+        cmd.append(f"--remote_header=x-buildbuddy-api-key={api_key}")
+        cmd.append("--build_metadata=ROLE=CI")
+        cmd.append("--jobs=16")
+
     # get cuda path from CUDA_HOME or CUDA_PATH
     cmd.append(f"--repo_env=CUDA_HOME={CUDA_DIR}")
 
@@ -249,11 +301,19 @@ def build_libscstore_cxx11_abi(
 
     # cmd.append("--config=linux")
 
-    print(f"building libscstore {cmd=}")
+    # Avoid printing sensitive values like remote API keys
+    display_cmd = list(cmd)
+    if use_remote:
+        for i, arg in enumerate(display_cmd):
+            if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
+                display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
+    print(f"building libscstore cmd={display_cmd}")
     status_code = subprocess.run(cmd).returncode
 
     if status_code != 0:
         sys.exit(status_code)
+    # After a successful core build, ensure 'external' symlink exists
+    ensure_external_symlink()
 
 
 def gen_version_file():
@@ -302,7 +362,7 @@ class DevelopCommand(develop):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
+        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libscstore(debug=True)
 
         gen_version_file()
@@ -316,7 +376,7 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
+        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libscstore(debug=True)
         BuildExtension.run(self)
         copy_extensions()
@@ -337,6 +397,7 @@ class InstallCommand(install):
             develop=False,
             pre_cxx11_abi=PRE_CXX11_ABI,
             use_fake_cuda=USE_FAKE_CUDA,
+            use_remote=USE_REMOTE,
         )
         copy_libscstore(debug=False)
 
@@ -355,7 +416,7 @@ class BdistCommand(bdist_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
+        build_libscstore_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libscstore(debug=False)
 
         gen_version_file()
@@ -373,7 +434,7 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA)
+        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         gen_version_file()
         copy_libscstore(debug=True)
         editable_wheel.run(self)

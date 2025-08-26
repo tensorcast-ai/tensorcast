@@ -23,6 +23,7 @@ struct FakeAllocation {
   std::unique_ptr<uint8_t[]> buffer;
   size_t size;
   bool is_pinned;
+  int device_id; // device where the allocation was performed
 };
 
 // Global state for fake CUDA runtime
@@ -40,7 +41,7 @@ struct FakeCudaState {
 
   // Simulated device properties
   static constexpr int kNumDevices = 4;
-  static constexpr size_t kDeviceMemorySize = 8ULL * 1024 * 1024 * 1024; // 8GB
+  static constexpr size_t kDeviceMemorySize = 2ULL * 1024 * 1024 * 1024; // 2GB
   size_t allocated_bytes[kNumDevices] ABSL_GUARDED_BY(mutex) = {0};
 };
 
@@ -63,22 +64,22 @@ std::string generate_random_handle() {
 
 } // namespace
 
-absl::Status set_device(int device_id) {
-  auto& state = get_state();
-  absl::MutexLock lock(&state.mutex);
+// Thread-local current device to avoid cross-thread interference
+static thread_local int tls_current_device = 0;
 
+absl::Status set_device(int device_id) {
   if (device_id < 0 || device_id >= FakeCudaState::kNumDevices) {
     return absl::InvalidArgumentError(absl::StrCat("Invalid device ID: ", device_id));
   }
-
-  state.current_device = device_id;
+  tls_current_device = device_id;
   return absl::OkStatus();
 }
 
 absl::Status get_device(int* device_id) {
-  auto& state = get_state();
-  absl::MutexLock lock(&state.mutex);
-  *device_id = state.current_device;
+  if (device_id == nullptr) {
+    return absl::InvalidArgumentError("device_id is null");
+  }
+  *device_id = tls_current_device;
   return absl::OkStatus();
 }
 
@@ -86,8 +87,10 @@ absl::Status malloc(void** ptr, size_t bytes) {
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);
 
+  const int device_id = tls_current_device;
+
   // Check if we have enough "GPU memory"
-  if (state.allocated_bytes[state.current_device] + bytes > FakeCudaState::kDeviceMemorySize) {
+  if (state.allocated_bytes[device_id] + bytes > FakeCudaState::kDeviceMemorySize) {
     return absl::ResourceExhaustedError("Out of GPU memory");
   }
 
@@ -95,8 +98,9 @@ absl::Status malloc(void** ptr, size_t bytes) {
   auto buffer = std::make_unique<uint8_t[]>(bytes);
   void* raw_ptr = buffer.get();
 
-  state.allocations[raw_ptr] = FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = false};
-  state.allocated_bytes[state.current_device] += bytes;
+  state.allocations[raw_ptr] =
+      FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = false, .device_id = device_id};
+  state.allocated_bytes[device_id] += bytes;
 
   *ptr = raw_ptr;
   return absl::OkStatus();
@@ -110,7 +114,8 @@ absl::Status malloc_host(void** ptr, size_t bytes) {
   auto buffer = std::make_unique<uint8_t[]>(bytes);
   void* raw_ptr = buffer.get();
 
-  state.allocations[raw_ptr] = FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = true};
+  state.allocations[raw_ptr] =
+      FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = true, .device_id = tls_current_device};
 
   *ptr = raw_ptr;
   return absl::OkStatus();
@@ -130,7 +135,9 @@ absl::Status free(void* ptr) {
   }
 
   if (!it->second.is_pinned) {
-    state.allocated_bytes[state.current_device] -= it->second.size;
+    const int dev = it->second.device_id;
+    size_t& used = state.allocated_bytes[dev];
+    used = (used >= it->second.size) ? (used - it->second.size) : 0;
   }
 
   state.allocations.erase(it);
@@ -276,7 +283,7 @@ absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr) {
   }
 
   if (device)
-    *device = state.current_device;
+    *device = it->second.device_id;
   if (device_ptr)
     *device_ptr = ptr; // In fake backend, host and device pointers are the same
   return absl::OkStatus();
@@ -294,7 +301,7 @@ absl::Status pointer_get_attributes_full(void* ptr, cudaPointerAttributes* attrs
   // Fill in attributes for fake backend
   attrs->devicePointer = ptr;
   attrs->hostPointer = ptr;
-  attrs->device = state.current_device;
+  attrs->device = it->second.device_id;
   attrs->type = cudaMemoryTypeDevice;
 #ifdef USE_FAKE_CUDA
   // These legacy fields are only present in the fake CUDA runtime we define

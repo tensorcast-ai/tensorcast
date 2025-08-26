@@ -99,8 +99,13 @@ static inline void STRCPY(char* t, const std::string& str) {
 }
 
 static inline void STRNCPY(char* t, const std::string& str, size_t size) {
-  strncpy(t, str.c_str(), std::min(str.size(), size));
-  t[str.size()] = '\0';
+  if (size == 0)
+    return;
+  const size_t n = std::min(str.size(), size - 1);
+  if (n > 0) {
+    std::memcpy(t, str.data(), n);
+  }
+  t[n] = '\0';
 }
 
 inline bool NEED_HUGEPAGE(size_t size) {
