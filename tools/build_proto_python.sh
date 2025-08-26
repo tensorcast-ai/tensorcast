@@ -31,7 +31,7 @@ current_dir=$(dirname "$0")
 root_dir=$(dirname "$current_dir")
 # build proto
 # build proto
-if ! $root_dir/tools/bazel.sh build //proto:global_store_grpc; then
+if ! bazel build //proto:global_store_grpc; then
     echo "Error: Failed to build proto target" >&2
     exit 1
 fi

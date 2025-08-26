@@ -212,7 +212,7 @@ else:
     __version__ = f"{get_base_version()}.dev0+{get_git_revision_short_hash()}.{torch_suffix}"
 
 
-# Resolve bazel from PATH; do not use repo-local tools/bazel wrapper
+# Resolve bazel from PATH; do not use repo-local bazel wrapper
 BAZEL_EXE = which("bazelisk") or which("bazel")
 if BAZEL_EXE is None:
     if BUILD_EXTENSION or BUILD_CORE:

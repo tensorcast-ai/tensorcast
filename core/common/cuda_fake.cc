@@ -40,7 +40,7 @@ struct FakeCudaState {
 
   // Simulated device properties
   static constexpr int kNumDevices = 4;
-  static constexpr size_t kDeviceMemorySize = 8ULL * 1024 * 1024 * 1024; // 8GB
+  static constexpr size_t kDeviceMemorySize = 2ULL * 1024 * 1024 * 1024; // 2GB
   size_t allocated_bytes[kNumDevices] ABSL_GUARDED_BY(mutex) = {0};
 };
 

@@ -55,9 +55,8 @@ common:remote --remote_cache=grpcs://remote.buildbuddy.io
 common:remote --remote_timeout=10m
 common:remote --remote_cache_compression
 common:remote --experimental_remote_cache_compression_threshold=100
-common:remote --define=use_fake_cuda=true
 
-common:remote --remote_executor=grpcs://remote.buildbuddy.io
-common:remote --host_platform=//:docker_image_platform
+# common:remote --remote_executor=grpcs://remote.buildbuddy.io
+# common:remote --host_platform=//:docker_image_platform
 
-common:remote --build_metadata=REPO_URL=https://github.com/stepcast-ai/stepcast-store.git
+common:remote --build_metadata=REPO_URL=https://github.com/StepCastAI/stepcast-store.git

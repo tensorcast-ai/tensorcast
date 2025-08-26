@@ -33,7 +33,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a large GPU tensor
-    const std::size_t tensor_size = 64 * 1024 * 1024; // 64MB
+    const std::size_t tensor_size = 64 * 1024; // 64KB
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
@@ -106,7 +106,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    const std::size_t tensor_size = 128 * 1024 * 1024; // 128MB - large to ensure slow transfer
+    const std::size_t tensor_size = 128 * 1024; // 128KB - large to ensure slow transfer
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
@@ -161,9 +161,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     };
 
     std::vector<TransferSpec> transfers = {
-        {"gpu_to_gpu", 16 * 1024 * 1024, COMMUNICATE_ENGINE_DEV_GPU, COMMUNICATE_ENGINE_DEV_GPU, 10},
-        {"gpu_to_cpu", 8 * 1024 * 1024, COMMUNICATE_ENGINE_DEV_GPU, COMMUNICATE_ENGINE_DEV_CPU, 20},
-        {"cpu_to_cpu", 4 * 1024 * 1024, COMMUNICATE_ENGINE_DEV_CPU, COMMUNICATE_ENGINE_DEV_CPU, 30},
+        {"gpu_to_gpu", 16 * 1024, COMMUNICATE_ENGINE_DEV_GPU, COMMUNICATE_ENGINE_DEV_GPU, 10},
+        {"gpu_to_cpu", 8 * 1024, COMMUNICATE_ENGINE_DEV_GPU, COMMUNICATE_ENGINE_DEV_CPU, 20},
+        {"cpu_to_cpu", 4 * 1024, COMMUNICATE_ENGINE_DEV_CPU, COMMUNICATE_ENGINE_DEV_CPU, 30},
     };
 
     // Create engines
@@ -258,8 +258,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a moderately sized GPU tensor
-    const std::size_t tensor_size = 32 * 1024 * 1024; // 32MB
-    // Note: Default staging chunk size is 64MB
+    const std::size_t tensor_size = 32 * 1024; // 32KB
+    // Note: Default staging chunk size is 64KB (reduced for low-memory env)
 
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
@@ -386,14 +386,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    const std::size_t tensor_size = 128 * 1024 * 1024; // 128MB
+    const std::size_t tensor_size = 128 * 1024; // 128KB
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Fill with different patterns in different regions
     std::vector<uint8_t> test_data(tensor_size);
-    for (size_t i = 0; i < tensor_size; i += 1024 * 1024) {
-      std::fill(test_data.begin() + i, test_data.begin() + i + 1024 * 1024, static_cast<uint8_t>(i / (1024 * 1024)));
+    for (size_t i = 0; i < tensor_size; i += 1024) {
+      std::fill(test_data.begin() + i, test_data.begin() + i + 1024, static_cast<uint8_t>(i / 1024));
     }
     REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
@@ -411,10 +411,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     };
 
     std::vector<ReadSpec> read_specs = {
-        {0, 4 * 1024 * 1024, 0},
-        {10 * 1024 * 1024, 8 * 1024 * 1024, 10},
-        {50 * 1024 * 1024, 16 * 1024 * 1024, 50},
-        {100 * 1024 * 1024, 4 * 1024 * 1024, 100},
+        {0, 4 * 1024, 0},
+        {10 * 1024, 8 * 1024, 10},
+        {50 * 1024, 16 * 1024, 50},
+        {100 * 1024, 4 * 1024, 100},
     };
 
     std::vector<std::future<bool>> futures;
@@ -457,8 +457,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         // Verify the pattern
         uint8_t* data = static_cast<uint8_t*>(buffers[i]);
         bool pattern_correct = true;
-        for (size_t j = 0; j < read_specs[i].size; j += 1024 * 1024) {
-          uint8_t expected = static_cast<uint8_t>((read_specs[i].offset + j) / (1024 * 1024));
+        for (size_t j = 0; j < read_specs[i].size; j += 1024) {
+          uint8_t expected = static_cast<uint8_t>((read_specs[i].offset + j) / 1024);
           if (data[j] != expected) {
             LOG(ERROR) << "Pattern mismatch at offset " << j << ": expected " << (int)expected << ", got "
                        << (int)data[j];
@@ -501,7 +501,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    const std::size_t tensor_size = 16 * 1024 * 1024; // 16MB
+    const std::size_t tensor_size = 16 * 1024; // 16KB
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
@@ -594,6 +594,10 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
   SECTION("Concurrent GPU-to-GPU transfers with staging buffer contention") {
     LOG(INFO) << "Test: Concurrent GPU-to-GPU transfers with staging buffer contention";
 
+    // Preserve current CUDA device and restore on exit to avoid leaking device
+    int original_device = -1;
+    REQUIRE(stepcast::cuda::get_device(&original_device).ok());
+
     // Check if we have at least 2 GPUs
     int device_count = 0;
     REQUIRE(stepcast::cuda::get_device_count(&device_count).ok());
@@ -609,7 +613,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensors on different GPUs
-    const std::size_t tensor_size = 32 * 1024 * 1024; // 32MB
+    const std::size_t tensor_size = 32 * 1024; // 32KB
     std::vector<void*> gpu_ptrs;
 
     for (int gpu_id = 0; gpu_id < std::min(2, device_count); ++gpu_id) {
@@ -725,10 +729,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       REQUIRE(stepcast::cuda::set_device(gpu_id).ok());
       REQUIRE(stepcast::cuda::free(gpu_ptrs[gpu_id]).ok());
     }
+
+    // Restore original device for subsequent sections
+    REQUIRE(stepcast::cuda::set_device(original_device).ok());
   }
 
   SECTION("Memory pressure and error recovery") {
     LOG(INFO) << "Test: Memory pressure and error recovery";
+
+    // Ensure tests run on a stable default device
+    REQUIRE(stepcast::cuda::set_device(0).ok());
 
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
@@ -737,7 +747,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create multiple large tensors to stress memory
-    const std::size_t tensor_size = 64 * 1024 * 1024; // 64MB each
+    const std::size_t tensor_size = 64 * 1024; // 64KB each
     const int num_tensors = 3;
     std::vector<void*> gpu_ptrs;
 
@@ -745,7 +755,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       void* gpu_ptr;
       auto alloc_status = stepcast::cuda::malloc(&gpu_ptr, tensor_size);
       if (!alloc_status.ok()) {
-        LOG(WARNING) << "Failed to allocate tensor " << i << " - testing with " << i << " tensors";
+        LOG(WARNING) << "Failed to allocate tensor " << i << " - testing with " << i << " tensors"
+                     << ", msg: " << alloc_status.message();
         break;
       }
 
@@ -844,6 +855,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
   SECTION("Deadlock prevention - all staging buffers occupied") {
     LOG(INFO) << "Test: Deadlock prevention with all staging buffers occupied";
 
+    // Ensure tests run on a stable default device
+    REQUIRE(stepcast::cuda::set_device(0).ok());
+
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
@@ -851,7 +865,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensor that requires exactly one staging buffer
-    const std::size_t chunk_size = 64 * 1024 * 1024; // Default staging chunk size
+    const std::size_t chunk_size = 64 * 1024; // Default staging chunk size (KB for low-memory env)
     const std::size_t tensor_size = chunk_size; // Exactly one chunk
 
     void* gpu_ptr;
@@ -988,6 +1002,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
   SECTION("Chunk boundary alignment stress test") {
     LOG(INFO) << "Test: Chunk boundary alignment stress test";
 
+    // Ensure tests run on a stable default device
+    REQUIRE(stepcast::cuda::set_device(0).ok());
+
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
@@ -995,7 +1012,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Test various sizes around chunk boundaries
-    const std::size_t chunk_size = 64 * 1024 * 1024; // Default staging chunk size
+    const std::size_t chunk_size = 64 * 1024; // Default staging chunk size (KB)
     std::vector<std::size_t> test_sizes = {
         chunk_size - 1, // Just under one chunk
         chunk_size, // Exactly one chunk
@@ -1107,13 +1124,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
   SECTION("Tensor registration/unregistration during active transfers") {
     LOG(INFO) << "Test: Tensor registration/unregistration during active transfers";
 
+    // Ensure tests run on a stable default device
+    REQUIRE(stepcast::cuda::set_device(0).ok());
+
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    const std::size_t tensor_size = 32 * 1024 * 1024; // 32MB
+    const std::size_t tensor_size = 32 * 1024; // 32KB
     const int num_tensors = 5;
 
     // Create initial tensors
@@ -1249,6 +1269,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
   SECTION("ScopedStagedBuffer RAII and exception safety") {
     LOG(INFO) << "Test: ScopedStagedBuffer RAII and exception safety";
 
+    // Ensure tests run on a stable default device
+    REQUIRE(stepcast::cuda::set_device(0).ok());
+
     // This test verifies that staged buffers are properly released even when
     // exceptions occur or when ScopedStagedBuffer goes out of scope early
 
@@ -1258,7 +1281,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    const std::size_t tensor_size = 32 * 1024 * 1024; // 32MB
+    const std::size_t tensor_size = 32 * 1024; // 32KB
     void* gpu_ptr;
     REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 

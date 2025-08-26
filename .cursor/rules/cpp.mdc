@@ -69,7 +69,7 @@ alwaysApply: false
 - Include usage examples in header comments
 
 ## Bazel BUILD Rules
-Use `tools/bazel` instead of raw `bazel` in the command line.
+Use `bazel` instead of raw `bazel` in the command line.
 
 ### Core Principles
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`

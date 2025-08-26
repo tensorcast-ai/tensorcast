@@ -878,6 +878,12 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         return absl::InvalidArgumentError("COPY_ONLY mode requires a GPU target device");
       }
 
+      // Require an explicit artifact identifier so we can locate a source instance.
+      // This avoids implicit coupling to disk_path or other hints and keeps COPY_ONLY semantics clear.
+      if (hints.artifact_id.empty()) {
+        return absl::InvalidArgumentError("COPY_ONLY requires hints.artifact_id to locate the source GPU instance");
+      }
+
       const auto candidates = replica_registry_->find_by_artifact(hints.artifact_id);
       for (const auto& cand_key : candidates) {
         if (cand_key.device.type != DeviceType::GPU) {
@@ -941,7 +947,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         }
         return handle;
       }
-      return absl::FailedPreconditionError("No suitable source instance for COPY_ONLY mode");
+      return absl::FailedPreconditionError(
+          absl::StrCat("No suitable source instance for COPY_ONLY mode (artifact_id=", hints.artifact_id, ")"));
     }
 
     case MaterializeMode::LOAD_ONLY: {

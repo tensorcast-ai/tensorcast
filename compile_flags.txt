@@ -24,6 +24,7 @@
 
 -I.venv/lib/python3.10/site-packages/torch/include
 -I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include
+-I.venv/lib64/python3.10/site-packages/triton/backends/nvidia/include
 
 -I/usr/include/python3.10
 
