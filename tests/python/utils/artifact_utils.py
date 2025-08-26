@@ -59,20 +59,21 @@ def create_dummy_artifact(storage_root: Path, disk_path: str, size_bytes: int = 
 
     # Write a minimal artifact descriptor with required fields only
     descriptor_path = artifact_dir / "artifact_descriptor.json"
-    if not descriptor_path.exists():
-        # Only required keys are validated by DiskLoader at this stage.
-        # Keep values simple/placeholders to avoid heavy hashing in tests.
-        descriptor = {
-            "artifact_id": str(disk_path),
-            "index_multihash": "mh:dummy_index",
-            "data_multihash": "mh:dummy_data",
-            # Helpful extras for completeness
-            "schema_version": "1",
-            "encoding": "raw",
-            "total_size": int(size_bytes),
-        }
-        with descriptor_path.open("w") as fp:
-            json.dump(descriptor, fp)
+    # Always write/overwrite descriptor to ensure compliance with current loader rules
+    # and avoid stale descriptors from previous runs
+    descriptor = {
+        # Per RFC-0007 and DiskLoader validation, artifact_id must be content-addressed (mi2:...)
+        # Use fixed dummy multihashes suitable for tests.
+        "artifact_id": "mi2:dummy_index:dummy_data",
+        "index_multihash": "mh:dummy_index",
+        "data_multihash": "mh:dummy_data",
+        # Helpful extras for completeness
+        "schema_version": "1",
+        "encoding": "raw",
+        "total_size": int(size_bytes),
+    }
+    with descriptor_path.open("w") as fp:
+        json.dump(descriptor, fp)
 
 
 def create_dummy_safetensors(storage_root: Path, disk_path: str) -> None:
