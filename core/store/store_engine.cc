@@ -429,8 +429,9 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             nlohmann::json idx_json = nlohmann::json::parse(index_bytes_or.value(), nullptr, true);
             for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
               const auto& arr = it.value();
-              if (!arr.is_array() || arr.size() < 2)
+              if (!arr.is_array() || arr.size() < 2) {
                 continue;
+              }
               uint64_t off = arr[0].get<uint64_t>();
               uint64_t sz = arr[1].get<uint64_t>();
               logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
@@ -469,8 +470,9 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
             for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
               const auto& arr = it.value();
-              if (!arr.is_array() || arr.size() < 2)
+              if (!arr.is_array() || arr.size() < 2) {
                 continue;
+              }
               uint64_t off = arr[0].get<uint64_t>();
               uint64_t sz = arr[1].get<uint64_t>();
               logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
@@ -512,8 +514,9 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             int dev_id = -1;
             uint64_t sz_for_verify = logical_total_size;
             if (sz_for_verify == 0) {
-              if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+              if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
                 sz_for_verify = *sz_or;
+              }
             }
             if (target_location == MemoryLocation::GPU) {
               const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
@@ -535,7 +538,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
                   ptrs, sizes, *ver_or, VerificationLevel::SEGMENT_HASHES, dev_id);
               if (!vstatus.ok()) {
                 return absl::DataLossError(
-                    std::string("ARTIFACT_ID_MISMATCH: verification failed: ") + vstatus.message());
+                    absl::StrCat("ARTIFACT_ID_MISMATCH: verification failed: ", vstatus.message()));
               }
             }
           }
@@ -547,8 +550,9 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         int dev_id = -1;
         uint64_t sz_for_verify = logical_total_size;
         if (sz_for_verify == 0) {
-          if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+          if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
             sz_for_verify = *sz_or;
+          }
         }
         if (target_location == MemoryLocation::GPU) {
           const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
@@ -592,23 +596,26 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     if (!computed_data_mh.has_value()) {
       uint64_t total = logical_total_size;
       if (total == 0) {
-        if (auto sz_or = replica->get_artifact_size(); sz_or.ok())
+        if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
           total = *sz_or;
+        }
       }
       if (total > 0) {
         if (target_location == MemoryLocation::GPU) {
           const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
           if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
             auto mh_or = loader::compute_data_multihash_from_gpu_memory(gpu_ptrs[0], total, target_device_id);
-            if (mh_or.ok())
+            if (mh_or.ok()) {
               computed_data_mh = *mh_or;
+            }
           }
         } else {
           const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
           if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
             auto mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_ptrs[0], total);
-            if (mh_or.ok())
+            if (mh_or.ok()) {
               computed_data_mh = *mh_or;
+            }
           }
         }
       }
@@ -625,7 +632,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         // Encoding is JSON only per project decision
         const auto index_json_path = artifact_path / "tensor_index.json";
         j["encoding"] = "json";
-        j["total_size"] = (logical_total_size > 0) ? logical_total_size : verify_size;
+        uint64_t total_for_desc = logical_total_size;
+        if (total_for_desc == 0) {
+          if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
+            total_for_desc = *sz_or;
+          }
+        }
+        j["total_size"] = total_for_desc;
         nlohmann::json hp;
         hp["chunk_size"] = 4 * 1024 * 1024;
         hp["fanout"] = 2;
