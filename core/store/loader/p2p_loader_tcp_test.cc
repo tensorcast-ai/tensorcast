@@ -23,9 +23,16 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
   SKIP_IF_NO_CUDA();
 
   SECTION("Remote GPU to Local GPU via TCP") {
+    // Find available ports for GPU to GPU P2P communication
+    int source_port = find_available_port();
+    REQUIRE(source_port > 0);
+
+    int target_port = find_available_port(source_port + 1);
+    REQUIRE(target_port > 0);
+
     // Set up source engine with GPU tensor
     auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-    REQUIRE(source_engine->init("127.0.0.1", 50061).ok());
+    REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
     void* source_gpu_ptr;
@@ -48,13 +55,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Create target engine for loader
     auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
-    REQUIRE(target_engine->init("127.0.0.1", 50062).ok());
+    REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Create P2PLoader with GPU source configuration (updated API)
     P2PSource source_config;
     source_config.size_bytes = artifact_size;
     source_config.ip = "127.0.0.1";
-    source_config.port = 50061;
+    source_config.port = source_port;
     source_config.memory_keys = {"artifact_key"};
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU;

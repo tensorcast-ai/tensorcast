@@ -19,6 +19,7 @@ sc_cc_library(
     hdrs = ["common.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":test_helpers",
         "//core/common:cuda_api_lib",
         "//core/store/loader:disk_dir_hash",
         "@nlohmann_json//:json",
