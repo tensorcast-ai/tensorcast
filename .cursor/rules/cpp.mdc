@@ -15,6 +15,7 @@ alwaysApply: false
 - **Classes/Structs**: `PascalCase`
 - **Constants/Macros**: `ALL_CAPS`
 - **Files**: `snake_case` (e.g., `store_engine.cc`)
+- **Constants**: `k` prefix for constants(`kNumSegments`)
 
 ## Code Style
 - **Headers**: Use `#pragma once` for header guards
@@ -67,9 +68,6 @@ alwaysApply: false
 - Use Doxygen style for public APIs
 - Document preconditions and postconditions
 - Include usage examples in header comments
-
-## Bazel BUILD Rules
-Use `bazel` instead of raw `bazel` in the command line.
 
 ### Core Principles
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`

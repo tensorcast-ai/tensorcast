@@ -169,39 +169,62 @@ absl::Status ArtifactVerifier::read_data_chunk(
     size_t global_offset,
     size_t read_size,
     int device_id) {
+  // Basic validation
+  if (dest == nullptr) {
+    return absl::InvalidArgumentError("Destination pointer is null");
+  }
+  if (data_ptrs.empty() || data_sizes.empty()) {
+    return absl::InvalidArgumentError("Empty data pointers or sizes");
+  }
+  if (data_ptrs.size() != data_sizes.size()) {
+    return absl::InvalidArgumentError("data_ptrs and data_sizes length mismatch");
+  }
+
+  const uint64_t total_size = std::accumulate(data_sizes.begin(), data_sizes.end(), 0ULL);
+  if (read_size == 0) {
+    return absl::OkStatus();
+  }
+  if (global_offset >= total_size) {
+    return absl::OutOfRangeError("Global offset exceeds total data size");
+  }
+
   // Find which buffer contains the offset
   size_t current_offset = 0;
   size_t buffer_idx = 0;
+  bool found = false;
 
   for (size_t i = 0; i < data_sizes.size(); ++i) {
-    if (global_offset < current_offset + data_sizes[i]) {
+    const size_t seg_size = data_sizes[i];
+    if (global_offset < current_offset + seg_size) {
       buffer_idx = i;
+      found = true;
       break;
     }
-    current_offset += data_sizes[i];
+    current_offset += seg_size;
   }
-
-  if (buffer_idx >= data_ptrs.size()) {
-    return absl::OutOfRangeError("Global offset exceeds total data size");
+  if (!found) {
+    // Should not happen due to the global_offset check above, but be defensive
+    return absl::OutOfRangeError("Failed to locate buffer for requested offset");
   }
 
   size_t bytes_read = 0;
   auto* dest_ptr = static_cast<uint8_t*>(dest);
 
   while (bytes_read < read_size && buffer_idx < data_ptrs.size()) {
-    size_t local_offset = global_offset - current_offset;
-    size_t bytes_to_read = std::min(read_size - bytes_read, data_sizes[buffer_idx] - local_offset);
-
-    if (bytes_to_read == 0) {
-      buffer_idx++;
-      if (buffer_idx < data_sizes.size()) {
-        current_offset += data_sizes[buffer_idx - 1];
-        local_offset = 0;
-        bytes_to_read = std::min(read_size - bytes_read, data_sizes[buffer_idx]);
-      } else {
-        break;
-      }
+    if (data_ptrs[buffer_idx] == nullptr) {
+      return absl::FailedPreconditionError("Null source pointer in data_ptrs");
     }
+
+    const size_t local_offset = global_offset - current_offset;
+    if (local_offset >= data_sizes[buffer_idx]) {
+      // Move to next buffer if local offset at end (defensive)
+      current_offset += data_sizes[buffer_idx];
+      ++buffer_idx;
+      continue;
+    }
+
+    const size_t remaining_in_buffer = data_sizes[buffer_idx] - local_offset;
+    size_t bytes_to_read = std::min(read_size - bytes_read, remaining_in_buffer);
 
     const uint8_t* src_ptr = static_cast<const uint8_t*>(data_ptrs[buffer_idx]) + local_offset;
 
@@ -216,12 +239,17 @@ absl::Status ArtifactVerifier::read_data_chunk(
         return memcpy_status;
       }
     } else {
-      // CPU memory copy
       std::memcpy(dest_ptr + bytes_read, src_ptr, bytes_to_read);
     }
 
     bytes_read += bytes_to_read;
     global_offset += bytes_to_read;
+
+    if (bytes_to_read == remaining_in_buffer) {
+      // Move to next buffer
+      current_offset += data_sizes[buffer_idx];
+      ++buffer_idx;
+    }
   }
 
   if (bytes_read < read_size) {
@@ -311,8 +339,8 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerifier::generate_verification
 
   // 3. Segment hashes / full hash (only if required)
   if (max_level >= VerificationLevel::SEGMENT_HASHES) {
-    // Use smaller buffer for GPU to minimize memory usage
-    size_t buffer_size = (device_id >= 0) ? (256 * 1024) : CHUNK_SIZE; // 256KB for GPU, 1MB for CPU
+    // Use a fixed buffer size for segment hashing across generation and verification
+    size_t buffer_size = ArtifactVerifier::SEGMENT_HASH_BUFFER_SIZE;
     std::vector<uint8_t> buffer(buffer_size);
     size_t segment_size = info.artifact_size / NUM_SEGMENTS;
     uint64_t rolling_hash = 0;
@@ -450,7 +478,8 @@ absl::Status ArtifactVerifier::verify_artifact_data(
 
   // Verify segment hashes
   if (level >= VerificationLevel::SEGMENT_HASHES) {
-    std::vector<uint8_t> buffer(CHUNK_SIZE);
+    // Use the same fixed buffer size as generation
+    std::vector<uint8_t> buffer(ArtifactVerifier::SEGMENT_HASH_BUFFER_SIZE);
     size_t segment_size = expected_info.artifact_size / NUM_SEGMENTS;
 
     for (size_t seg = 0; seg < NUM_SEGMENTS; ++seg) {
@@ -461,7 +490,7 @@ absl::Status ArtifactVerifier::verify_artifact_data(
       size_t offset = seg_start;
 
       while (offset < seg_end) {
-        size_t chunk_size = std::min(CHUNK_SIZE, seg_end - offset);
+        size_t chunk_size = std::min(buffer.size(), seg_end - offset);
         status = read_data_chunk(buffer.data(), data_ptrs, data_sizes, offset, chunk_size, device_id);
         if (!status.ok()) {
           return status;

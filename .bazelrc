@@ -60,3 +60,5 @@ common:remote --experimental_remote_cache_compression_threshold=100
 # common:remote --host_platform=//:docker_image_platform
 
 common:remote --build_metadata=REPO_URL=https://github.com/StepCastAI/stepcast-store.git
+
+import user.bazelrc

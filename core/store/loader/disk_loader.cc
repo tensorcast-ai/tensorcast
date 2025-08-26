@@ -225,6 +225,13 @@ absl::Status DiskLoader::initialize() {
           return absl::InvalidArgumentError(
               "Invalid artifact_descriptor.json: missing required fields (artifact_id, index_multihash, data_multihash)");
         }
+        if (!j["artifact_id"].is_string() || !j["index_multihash"].is_string() || !j["data_multihash"].is_string()) {
+          return absl::InvalidArgumentError("Invalid artifact_descriptor.json: fields must be strings");
+        }
+        const std::string artifact_id = j["artifact_id"].get<std::string>();
+        if (artifact_id.rfind("mi2:", 0) != 0) {
+          return absl::InvalidArgumentError("Invalid artifact_descriptor.json: artifact_id must start with 'mi2:'");
+        }
       } catch (const std::exception& e) {
         return absl::InvalidArgumentError(absl::StrFormat("Failed to parse artifact_descriptor.json: %s", e.what()));
       }

@@ -31,9 +31,7 @@ bash tools/build_proto_python.sh
 ### Testing
 ```bash
 # C++ tests
-bazel test //tests/cpp:test_name
-bazel test //tests/cpp:test_name --define use_fake_cuda=true  # Without GPU
-
+bazel test //core/ --define use_fake_cuda=true  # Without GPU
 # Python tests
 python -m pytest tests/python/test_name
 ```

@@ -57,15 +57,15 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 #### 4.1 Global Store (Keyed by `artifact_id`)
 
 - Tables:
-  - `models(artifact_id PK, index_multihash, data_multihash, schema_version, encoding, hash_params_json, created_at, ...)`
+  - `artifacts(artifact_id PK, index_multihash, data_multihash, schema_version, encoding, hash_params_json, created_at, ...)`
   - `artifact_index(index_multihash PK, schema_version, encoding, size_bytes, index_data BLOB, created_at, ...)`
   - `replicas(id PK, artifact_id FK, source_type ENUM('DISK','MEMORY','P2P'), location|disk_path, device_id, created_at, ...)`
-- RPCs: `RegisterReplica(artifact_id, ...)`, `GetArtifactInfoById(artifact_id)`, `GetModelIndex(index_key)`.
+- RPCs: `RegisterReplica(artifact_id, ...)`, `GetArtifactInfoById(artifact_id)`, `GetArtifactIndex(index_key)`.
 
 #### 4.2 Local Store / StoreDaemon
 
 - Begin: create in-memory-only artifact, allocate device memory, return `registration_id + cuda_ipc_handle`.
-- Commit: compute `index_multihash` and `data_multihash` inside daemon/core, build `mi2`, return `ModelDescriptor`; register replica in GS at the same time.
+- Commit: compute `index_multihash` and `data_multihash` inside daemon/core, build `mi2`, return `ArtifactDescriptor`; register replica in GS at the same time.
 - Prepare (single entry point): `materialize_replica(DeviceKey, mode, hints)` supports `hints.artifact_id` (content addressing) and `hints.disk_path` (explicit disk). Never interpret `mi2:` as a filesystem path.
 
 #### 4.3 Python API
@@ -73,7 +73,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 - `register_artifact(state_dict, ...) -> (state_dict, commit_info)`; `commit_info.artifact_id` starts with `mi2:`.
 - Helpers: `generate_artifact_id_from_state_dict(...)`, `generate_artifact_id_from_path(...)` (for audit and migration).
 
-### 5. ModelDescriptor (Returned by Commit)
+### 5. ArtifactDescriptor (Returned by Commit)
 
 - Fields (minimal set):
   - `artifact_id` (`mi2:...`), `index_multihash`, `data_multihash`
@@ -88,7 +88,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 
 - A: Canonical Index (CBOR) with stable grouping/layout; define the linear space.
 - B: Tree hash and Multihash wrapper; GPU-first, CPU fallback.
-- C: Commit returns `ModelDescriptor`; align Python/Proto.
+- C: Commit returns `ArtifactDescriptor`; align Python/Proto.
 - D: GS/DB: key by `artifact_id`; `replicas.artifact_id` as FK; switch RPCs.
 - E: StoreEngine: `materialize_replica(..., artifact_id=...)` routes via GS; light runtime verification; migration tool backfills IDs.
 
@@ -97,7 +97,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 - Completed (matches current repo implementation):
   - C++ (hashing and pipeline):
     - Added `core/store/loader/source_hash.{h,cc}`: unified tree hashing over `SeekableSource` (4 MiB leaves → Merkle root → multibase32 multihash).
-    - Added `core/store/loader/disk_dir_hash.{h,cc}`: data multihash for standard partitioned directories (`tensor.data*`) via `FilePartitionSource` and the unified pipeline.
+    - Added `core/store/loader/disk_dir_hash.{h,cc}`: data multihash for standard partitioned directories (`FilePartitionSource` and the unified pipeline).
     - `core/common/artifact_hash.{h,cc}` now retains only GPU buffer data hashing (`compute_data_multihash_from_gpu(...)`) and Index multihash (`compute_index_multihash(...)`); directory hashing moved to the loader layer.
     - Unified P2P and memory (CPU/GPU) sources:
       - P2P uses `RemoteKeySource`; memory uses a minimal local source wrapper inside `source_hash.cc` (no new public classes/targets).
@@ -121,7 +121,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
     - Replace single-stream CPU reduction with multi-stream/multi-core GPU tree hashing; keep CPU/PCIe fallback.
     - Change leaf-digest "collect-all → reduce" into streaming reduction to reduce peak memory.
   - Standard-partition gate and strong verification (DiskLoader):
-    - Gate is implemented: standard directories must contain `artifact_descriptor.json` and `tensor_index.(cbor|json)`; otherwise return `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)` (`DiskLoader::initialize`).
+    - Gate is implemented: standard directories must contain `artifact_descriptor.json` and `tensor_index.(cbor|json)`; otherwise return `FailedPrecondition(ARTIFACT_DESCRIPTOR_REQUIRED)` (`DiskLoader::initialize`).
   - Commit/Prepare path hardening:
     - Unify Canonical Index and `mi2` generation fully inside Commit (partially landed); refine AUTO routing and GS-side dedupe/aggregation; add strict verification switch (FULL/Merkle proof).
   - `safetensors` Canonical Index (C++):
@@ -137,7 +137,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 
 ### 9. Risks and Mitigations
 
-- Historical models with unstable ordering: treat as different `artifact_id`s. Provide batch normalization and backfill tools.
+- Historical artifacts with unstable ordering: treat as different `artifact_id`s. Provide batch normalization and backfill tools.
 - Commit overhead: support GPU-first/CPU fallback and async backfill; block only when strong consistency is required.
 - Negative stride / mixed dtype / multi-device: covered by v2 semantics; stable grouping and 8B alignment are hard constraints.
 
@@ -180,7 +180,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 #### 13.2 Load Side (DiskLoader)
 
 - Standard partitions (see “Data File Format Specification”):
-  - Directory requirements (target behavior): `artifact_descriptor.json` and `tensor_index.(cbor|json)` must exist; missing files return `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)`.
+  - Directory requirements (target behavior): `artifact_descriptor.json` and `tensor_index.(cbor|json)` must exist; missing files return `FailedPrecondition(ARTIFACT_DESCRIPTOR_REQUIRED)`.
   - Current implementation (transition period): if `artifact_descriptor.json` is missing, allow computing and writing it "after load completes"; will be tightened to hard gate.
   - Loading flow: read partitions by file-name order, build linear stream, and complete memory mapping.
   - Post-load verification (ensure ID matches data):
@@ -199,7 +199,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 
 - Never interpret `mi2:` as a filesystem path.
 - Suggested error codes:
-  - `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)`: standard data directory is missing descriptor
+  - `FailedPrecondition(ARTIFACT_DESCRIPTOR_REQUIRED)`: standard data directory is missing descriptor
   - `DataCorruption(ARTIFACT_ID_MISMATCH)`: post-load verification mismatches `artifact_id`
   - `PermissionDenied(DESCRIPTOR_NOT_WRITABLE)`: cannot generate/persist descriptor
 
@@ -216,7 +216,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 - Disk loading (C++, unified verification and backfill) — completed
   - Files: `core/store/loader/disk_loader.cc` / `disk_loader.h`
     - `DiskLoader::initialize()`:
-      - Standard partitions: require `artifact_descriptor.json` + `tensor_index.(json|cbor)`; missing files return `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)`; otherwise read and cache descriptor.
+      - Standard partitions: require `artifact_descriptor.json` + `tensor_index.(json|cbor)`; missing files return `FailedPrecondition(ARTIFACT_DESCRIPTOR_REQUIRED)`; otherwise read and cache descriptor.
       - `safetensors`: allow missing `artifact_descriptor.json` (backfilled later).
   - File: `core/store/store_engine.cc`
     - `StoreEngine::ingest_from_disk_internal(...)` (constructs `ReplicaHandle` after `LOADED`):
@@ -282,10 +282,68 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 
 - Docs and runtime gates
   - Docs: clearly state "Python must not compute `index_multihash`/`data_multihash` or write `artifact_descriptor.json`".
-  - Runtime: `DiskLoader` enforces descriptor presence for standard partitions; missing files return `FailedPrecondition(MODEL_DESCRIPTOR_REQUIRED)`; `safetensors` directories may be backfilled (with write permission).
+  - Runtime: `DiskLoader` enforces descriptor presence for standard partitions; missing files return `FailedPrecondition(ARTIFACT_DESCRIPTOR_REQUIRED)`; `safetensors` directories may be backfilled (with write permission).
   - Web docs: remove the outdated `load_dict_pure_local` developer guide from the sidebar to avoid confusion (done).
 
 - Timeline
   - vNext (current branch): remove Python duplication and deprecated C++ symbols.
   - vNext+1: continue consolidating remaining entry points and docs.
   - vNext+2: eliminate all transitional text and comments.
+
+## Review History
+
+### 2025-08-25 – Review of core/ vs RFC-0007 (Shortcomings Only)
+
+1) Missing default KEY_POINTS/SEGMENT verification after load
+- Identify: No lightweight verification executed post-load by default
+- Explain: RFC requires immediate KEY_POINTS/SEGMENT checks; code only computes full digests when hints.verify==FULL or force flag
+- Suggest: Invoke a lightweight verification routine after load completion when descriptor is present; integrate with artifact_verification in StoreEngine::ingest_from_disk_internal at core/store/store_engine.cc:332-401
+- Priority: High
+
+2) Safetensors backfill gated on FULL_DIGEST
+- Identify: Descriptor backfill occurs only if both hashes are computed, which happens only under FULL_DIGEST/force
+- Explain: RFC states backfill after load; current logic skips backfill in default mode
+- Suggest: Unconditionally compute data multihash for safetensors backfill using source_hash over file(s) or CPU memory and persist descriptor; adjust logic at core/store/store_engine.cc:473-526
+- Priority: High
+
+3) disk_dir_hash ignores tensor_index.cbor
+- Identify: Only tensor_index.json is parsed
+- Explain: RFC allows CBOR; directories saved per spec may omit JSON
+- Suggest: Support CBOR by preferring tensor_index.cbor, falling back to JSON; update core/store/loader/disk_dir_hash.cc:21-47
+- Priority: Medium
+
+4) Descriptor encoding field hardcoded to "json"
+- Identify: "encoding" written as "json" regardless of index encoding
+- Explain: RFC recommends encoding reflect index format (cbor preferred)
+- Suggest: Set encoding to "cbor" when writing CBOR index, otherwise "json"; see core/store/store_engine.cc:482
+- Priority: Medium
+
+5) total_size may be written as 0 during safetensors backfill
+- Identify: total_size sourced from verify_size which is only set in FULL_DIGEST path
+- Explain: When not computing digest, total_size becomes 0 in descriptor
+- Suggest: Derive logical total_size from Canonical Index or aggregate safetensors headers; fix at core/store/store_engine.cc:374-385 and use in 484
+- Priority: High
+
+6) Descriptor validation is minimal in DiskLoader::initialize
+- Identify: Only presence checks and basic field existence
+- Explain: RFC expects stronger validation over time (e.g., format, prefix)
+- Suggest: Validate artifact_id format (mi2:), and optionally ensure fields are strings; consider lazy full verification elsewhere; adjust core/store/loader/disk_loader.cc:216-231
+ - Priority: Low
+
+### 2025-08-26 – Implementation Updates (Applied)
+
+- Default lightweight verification after load: Implemented in `core/store/store_engine.cc`. When a directory has an `artifact_descriptor.json`, the engine now performs post-load verification:
+  - If `verification.json` exists, verifies at `SEGMENT_HASHES` level against loaded memory (GPU or CPU).
+  - If missing, generates `verification.json` at `SEGMENT_HASHES` level from the loaded data and persists it for future loads.
+
+- Safetensors backfill not gated on FULL_DIGEST: Implemented. For safetensors directories without a descriptor, the engine now computes `data_multihash` unconditionally (from GPU/CPU memory) and writes `artifact_descriptor.json`, alongside a JSON canonical index if missing. `total_size` is derived from the canonical index.
+
+- Descriptor `encoding` accuracy: Implemented. Backfilled descriptors set `encoding` to `json` (project decision: no CBOR for now).
+
+- `total_size` correctness during backfill: Implemented. `total_size` is derived from the canonical index (or falls back to loaded size), avoiding zero values.
+
+- Stronger descriptor validation in `DiskLoader::initialize`: Implemented. Validates presence and types of required fields and enforces `artifact_id` prefix `mi2:`.
+
+- Tests added:
+  - `core/store/store_engine_verification_default_test.cc`: covers post-load verification generation and enforcement.
+  - `core/store/store_engine_safetensors_backfill_test.cc`: validates safetensors descriptor/index backfill and descriptor fields (JSON index, encoding=json).
