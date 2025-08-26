@@ -287,6 +287,7 @@ def build_libscstore_cxx11_abi(
         cmd.append("--config=remote")
         cmd.append(f"--remote_header=x-buildbuddy-api-key={api_key}")
         cmd.append("--build_metadata=ROLE=CI")
+        cmd.append("--jobs=16")
 
     # get cuda path from CUDA_HOME or CUDA_PATH
     cmd.append(f"--repo_env=CUDA_HOME={CUDA_DIR}")

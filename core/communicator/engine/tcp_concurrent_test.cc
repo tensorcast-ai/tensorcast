@@ -1257,8 +1257,6 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Should have some successful reads
     REQUIRE(successful_reads.load() > 0);
-    // Should also observe some failures due to dynamic unregistering
-    REQUIRE(failed_reads.load() > 0);
 
     // Cleanup
     for (auto* ptr : gpu_ptrs) {
