@@ -335,10 +335,15 @@ void CommunicateEngine::do_read_request_loop() {
     VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
             << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
 
+    // Put into pending BEFORE send to prevent response racing ahead of insertion
+    const std::string req_key = req->get_key();
+    pending_requests_.put(req_key, req);
+
     if (transport->send(msg) == SUCCESS) {
-      pending_requests_.put(req->get_key(), req);
-      LOG(INFO) << "[do_read_request_loop] READ_REQUEST sent successfully, added to pending: " << req->get_key();
+      LOG(INFO) << "[do_read_request_loop] READ_REQUEST sent successfully, pending: " << req_key;
     } else {
+      // Rollback pending on failure
+      pending_requests_.del(req_key);
       LOG(ERROR) << "[do_read_request_loop] Failed to send READ_REQUEST for key=" << req->tensor_key_ << " to "
                  << req->get_dst_url();
       req->set_result(absl::InternalError("failed to send request"));

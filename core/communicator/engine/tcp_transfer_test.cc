@@ -1,6 +1,8 @@
 // Copyright (c) 2025, StepCast Team. All rights reserved.
 
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -71,6 +73,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
         "127.0.0.1",
         source_port);
 
+    REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     auto result = future.get();
     CAPTURE(result.status.message());
     REQUIRE(result.status.ok());
@@ -140,6 +143,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
         "127.0.0.1",
         source_port);
 
+    REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     auto result = future.get();
     CAPTURE(result.status.message());
     REQUIRE(result.status.ok());
@@ -219,6 +223,7 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
         "127.0.0.1",
         source_port);
 
+    REQUIRE(future.wait_for(std::chrono::seconds(120)) == std::future_status::ready);
     auto result = future.get();
     CAPTURE(result.status.message());
     REQUIRE(result.status.ok());
