@@ -1,6 +1,8 @@
 actions:
   - name: "Test C++ targets"
     container_image: "ubuntu-22.04"
+    resource_requests:
+      disk: "50GB"
     triggers:
       push:
         branches:
@@ -9,7 +11,7 @@ actions:
         branches:
           - "*"
     steps:
-      - run: sudo apt-get update && sudo apt-get install -y git libxml2
+      # - run: sudo apt-get update && sudo apt-get install -y git libxml2
       - run: |
           CUDA_HOME=/usr/local/cuda \
           bazel test //core/... \

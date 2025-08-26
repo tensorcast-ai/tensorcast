@@ -6,6 +6,7 @@ platform(
         # "@bazel_tools//tools/cpp:clang",
     ],
     exec_properties = {
+        "EstimatedFreeDiskBytes": "50GB",
         "OSFamily": "Linux",
         "container-image": "docker://yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04",
         "dockerNetwork": "off",

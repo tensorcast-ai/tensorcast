@@ -506,7 +506,7 @@ def register_artifact(
     Returns a tuple ``(state_dict, commit_info)`` where:
     - ``state_dict``: tensors reference the daemon-owned memory
     - ``commit_info``: includes ``registration_id``, ``artifact_id`` (mi2:...),
-      ``device_id``, ``size_bytes``, and ``descriptor`` (RFC-0007 ModelDescriptor)
+      ``device_id``, ``size_bytes``, and ``descriptor`` (RFC-0007 ArtifactDescriptor)
     """
     if not artifact:
         raise ValueError("artifact must not be empty")
