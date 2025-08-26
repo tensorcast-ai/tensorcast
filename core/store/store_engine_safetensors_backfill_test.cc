@@ -86,6 +86,12 @@ TEST_CASE("Safetensors backfill writes descriptor and CBOR index", "[store_engin
   hints.disk_path = artifact;
   auto handle_or =
       store.materialize_replica(cpu_key(), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+
+  // If there is an error, log it and continue
+  if (!handle_or.ok()) {
+    LOG(ERROR) << "Materialize failed: " << handle_or.status().message();
+  }
+
   REQUIRE(handle_or.ok());
   auto handle = std::move(*handle_or);
   REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());

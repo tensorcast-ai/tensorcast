@@ -11,7 +11,9 @@ This document summarizes the lightweight replica integrity verification solution
 ## Design Philosophy
 
 - **Zero-Copy Design**: Directly verify loaded replica memory to avoid additional memory allocation
-- **Chunked Streaming Computation**: Process large replica data chunk by chunk using small buffers (1MB)
+- **Chunked Streaming Computation**: Process large replica data chunk by chunk using a fixed buffer size
+  - Protocol: segment hashing uses a fixed buffer size of 256KB (constexpr `SEGMENT_HASH_BUFFER_SIZE`)
+  - This constant is used in both generation and verification paths to guarantee determinism
 - **Memory-Friendly**: Use minimal temporary memory
 - **Multi-Level Verification**: From fast key-point verification to complete hash verification
 - **Millisecond Performance**: Overall verification time controlled at millisecond level, supporting ultra-large models
@@ -30,6 +32,7 @@ This document summarizes the lightweight replica integrity verification solution
 
 ### 3. Segment Verification (SEGMENT_HASHES)
 - Divide replica into 8 segments, calculate independent checksum for each segment
+- Fixed buffer policy: both generation and verification read data using 256KB chunks
 - Default recommended level, balancing performance and accuracy
 - Time complexity: O(n)
 
@@ -165,9 +168,23 @@ source.verification_info = verification_info;
 ## Performance Characteristics
 
 - **Key Points Verification**: < 1ms (any artifact size)
-- **Segment Verification**: ~10ms (67B parameter replica)
+- **Segment Verification**: ~10ms (67B parameter replica) using 256KB chunks
 - **Full Verification**: ~100ms (67B parameter replica)
-- **Memory Overhead**: < 1MB (1MB processing buffer)
+- **Memory Overhead**: ~256KB (fixed segment hashing buffer)
+
+## Why a fixed chunk size?
+
+- **Determinism across code paths**: The current segment hashing uses repeated xxhash64 with the previous result as the seed per chunk. This composition is not equivalent to the official streaming algorithm; the hash outcome becomes sensitive to chunk boundaries. A fixed chunk size guarantees the same boundaries are used during both generation and verification, avoiding false mismatches.
+- **Protocol guarantee**: By fixing the buffer at 256KB via a single constexpr (`SEGMENT_HASH_BUFFER_SIZE`), all implementations (CPU/GPU, save/load, P2P) agree on the same segmentation behavior without per-site configuration drift.
+- **Cross-device parity**: Ensures GPU-generated `verification.json` matches GPU/CPU verification paths even when execution environments differ.
+
+## Optimization directions
+
+- **Adopt streaming hashing**: Switch segment hashing to a true streaming xxhash64 implementation (or equivalent) so results are chunk-size invariant. This would allow dynamic buffers without affecting outcomes.
+- **Embed metadata in `verification.json`**: Record `hash_algo`, `algo_version`, and `chunk_size_bytes` for forward compatibility. Verifiers can respect legacy records while migrating algorithms.
+- **Parallelize per-segment hashing**: Each of the 8 segments can be hashed concurrently; aggregate into the final record to reduce wall-clock time on large artifacts.
+- **Hardware-accelerated paths**: Explore CUDA kernels or vendor intrinsics for hashing on GPU-resident data to reduce PCIe copies and improve throughput.
+- **Robust fallback levels**: If segment-level verification fails due to legacy records, optionally auto-downgrade to `KEY_POINTS`/`SPARSE_SAMPLING` with clear telemetry, while surfacing a remediation hint.
 - **Storage Overhead**: < 1KB (`verification.json`)
 
 ## Error Handling

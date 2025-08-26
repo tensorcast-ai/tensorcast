@@ -16,7 +16,6 @@
 namespace fs = std::filesystem;
 using stepcast::DeviceType;
 using stepcast::store::DeviceKey;
-using stepcast::store::ReplicaKey;
 using stepcast::store::StoreEngine;
 using stepcast::store::StoreEngineOptions;
 
@@ -60,6 +59,9 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   auto handle_or =
       store.materialize_replica(cpu_key(), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(handle_or.ok());
+  if (!handle_or.ok()) {
+    LOG(ERROR) << "Materialize failed: " << handle_or.status().message();
+  }
   auto handle = std::move(*handle_or);
   REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());
 

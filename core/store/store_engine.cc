@@ -951,15 +951,14 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
   // Validate target device early to avoid entering CUDA paths with
   // invalid ordinals or unsupported device types.
   // ────────────────────────────────────────────────────────────────────
-  if (target_device.type == DeviceType::CPU) {
-    return absl::InvalidArgumentError("CPU target device is not supported by materialize_replica()");
-  }
   if (target_device.type == DeviceType::GPU) {
     const int num_gpus = device_manager_->get_num_gpus();
     if (target_device.ordinal < 0 || target_device.ordinal >= num_gpus) {
       return absl::InvalidArgumentError(
           std::string("Invalid GPU device ordinal: ") + std::to_string(target_device.ordinal));
     }
+  } else if (target_device.type == DeviceType::CPU) {
+    // CPU is supported – no additional validation required.
   } else {
     // For REMOTE/NONE/DISK etc. reject in this implementation.
     return absl::InvalidArgumentError("Unsupported target device type for materialize_replica()");
