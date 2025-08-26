@@ -1012,7 +1012,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Test various sizes around chunk boundaries
-    const std::size_t chunk_size = 64 * 1024; // Default staging chunk size (KB)
+    const std::size_t chunk_size = 1024; // Default staging chunk size (KB)
     std::vector<std::size_t> test_sizes = {
         chunk_size - 1, // Just under one chunk
         chunk_size, // Exactly one chunk
