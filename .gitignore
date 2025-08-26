@@ -2,6 +2,7 @@ cmake-build-debug
 .idea
 MODULE.bazel.lock
 bazel-*
+user.bazelrc
 
 scstore/_version.py
 scstore/lib
