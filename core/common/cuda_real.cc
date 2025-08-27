@@ -285,12 +285,8 @@ absl::Status stream_add_callback(
 }
 
 absl::Status launch_host_func(cudaStream_t stream, void (*func)(void*), void* user_data) {
-#if CUDART_VERSION >= 10010
   SC_RETURN_IF_CUDA_ERROR(cudaLaunchHostFunc(stream, func, user_data));
   return absl::OkStatus();
-#else
-  return absl::UnimplementedError("cudaLaunchHostFunc requires CUDA 10.1 or later");
-#endif
 }
 
 // Event management

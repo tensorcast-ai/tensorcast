@@ -28,10 +28,10 @@ build --cxxopt="-Werror=thread-safety-analysis"
 build --cxxopt="-Werror=unused-result"
 build --cxxopt="-Werror=switch"
 build --cxxopt="-fdiagnostics-color=always"
-build --cxxopt=-stdlib=libstdc++
-build --linkopt="-lstdc++"
 build --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
+build --cxxopt="-stdlib=libstdc++"
+build --linkopt=-lstdc++
 
 build:asan --copt=-fsanitize=address
 build:asan --linkopt=-fsanitize=address
@@ -59,6 +59,6 @@ common:remote --experimental_remote_cache_compression_threshold=100
 # common:remote --remote_executor=grpcs://remote.buildbuddy.io
 # common:remote --host_platform=//:docker_image_platform
 
-common:remote --build_metadata=REPO_URL=https://github.com/StepCastAI/stepcast-store.git
+common:remote --build_metadata=REPO_URL=https://github.com/tensorcast-ai/tensorcast.git
 
-import user.bazelrc
+try-import user.bazelrc

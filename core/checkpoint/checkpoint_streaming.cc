@@ -112,11 +112,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
       auto attr_status =
           cuda::pointer_get_attributes_full(const_cast<void*>(reinterpret_cast<const void*>(data_ptr)), &attr);
       if (attr_status.ok()) {
-#if CUDART_VERSION >= 10000
         is_device_ptr = (attr.type == cudaMemoryTypeDevice);
-#else
-        is_device_ptr = (attr.memoryType == cudaMemoryTypeDevice);
-#endif
       } else {
         ABSL_CHECK_OK(cuda::get_last_error());
       }

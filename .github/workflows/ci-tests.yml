@@ -41,7 +41,7 @@ jobs:
 
       - name: confirm repository checkout
         run: |
-          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
+          git config --global --add safe.directory /__w/tensorcast/tensorcast
           git status
 
       - name: Create credentials file
@@ -111,7 +111,7 @@ jobs:
 
       - name: confirm repository checkout
         run: |
-          git config --global --add safe.directory /__w/stepcast-store/stepcast-store
+          git config --global --add safe.directory /__w/tensorcast/tensorcast
           git status
 
       - name: Create credentials file
