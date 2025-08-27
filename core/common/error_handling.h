@@ -52,11 +52,7 @@ static inline const char* cuda_error_name(cudaError_t err) {
       return "cudaErrorUnknown";
   }
 #else // Real CUDA runtime
-#if CUDART_VERSION >= 11000
   return cudaGetErrorName(err);
-#else
-  return "CUDAError";
-#endif
 #endif
 }
 

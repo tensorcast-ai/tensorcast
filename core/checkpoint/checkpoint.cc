@@ -18,10 +18,6 @@
 //  ----------------------------------------------------------------------------
 #include "checkpoint.h"
 
-#ifndef USE_FAKE_CUDA
-#include <cublas_v2.h>
-#include <nvml.h>
-#endif
 #include <endian.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -178,11 +174,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
       auto attr_status =
           cuda::pointer_get_attributes_full(const_cast<void*>(static_cast<const void*>(data_ptr)), &attr);
       if (attr_status.ok()) {
-#if CUDART_VERSION >= 10000
         is_device_ptr = (attr.type == cudaMemoryTypeDevice);
-#else
-        is_device_ptr = (attr.memoryType == cudaMemoryTypeDevice);
-#endif
       } else {
         // Clear sticky error to avoid poisoning later CUDA calls (and reset).
         ABSL_CHECK_OK(cuda::get_last_error());

@@ -178,6 +178,7 @@ test-models
 *.pth
 .nfs*
 =*
+*.tar.xz
 
 _vendor/google/protobuf
 external

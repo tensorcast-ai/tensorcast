@@ -7,18 +7,32 @@
 ## Prerequisites
 
 ```bash
+# Install uv & pre-commit
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv tool install pre-commit --with pre-commit-uv
+
+# Install bazel
 ./tools/install-bazel.sh
 
-sudo apt install libtinfo5
+# Dependency that need for compile
+sudo apt-get install -y libxml2
 
 pre-commit install
 ```
 
+### LLVM download fallback (Bazel init)
+If Bazel fails to download LLVM during the initialization stage, you can pre-download it locally and update `MODULE.bazel` automatically:
+
+```bash
+bash tools/download_and_set_local_llvm.sh
+```
+
+Then re-run your Bazel command.
+
 ### Python Environment
 
 ```bash
-# Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Create virtual environment
 uv venv

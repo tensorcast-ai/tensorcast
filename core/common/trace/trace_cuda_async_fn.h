@@ -23,7 +23,6 @@ struct CudaTracePayload {
 };
 
 inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* payload) {
-#if CUDART_VERSION >= 10010
   auto status = stepcast::cuda::launch_host_func(
       stream,
       [](void* user_data) {
@@ -35,20 +34,6 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
         delete p;
       },
       payload);
-#else
-  auto status = stepcast::cuda::stream_add_callback(
-      stream,
-      [](cudaStream_t /*unused*/, cudaError_t /*status*/, void* user_data) {
-        auto* p = static_cast<CudaTracePayload*>(user_data);
-        TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
-        if (p->on_complete) {
-          p->on_complete();
-        }
-        delete p;
-      },
-      payload,
-      /*flags=*/0);
-#endif
   if (!status.ok()) {
     // Fallback: end span immediately to avoid leaks and execute on_complete.
     TraceManager::instance().end_span(payload->artifact_id, payload->request_id, payload->span_id);

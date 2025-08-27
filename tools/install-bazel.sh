@@ -8,6 +8,15 @@ BAZELISK_VERSION="v1.16.0"
 
 platform="unknown"
 
+# Returns 0 if the given directory is present as a full path entry in PATH, 1 otherwise
+path_contains_dir() {
+  local dir="$1"
+  case ":$PATH:" in
+    *":${dir}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "${OSTYPE}" in
   msys)
     echo "Platform is Windows."
@@ -66,9 +75,7 @@ if [[ "${BAZEL_CONFIG_ONLY-}" != "1" ]]; then
       INSTALL_USER=0
     # User
     else
-      mkdir -p "$HOME/bin"
       INSTALL_USER=1
-      export PATH=$PATH:"$HOME/bin"
     fi
 
     if [[ "${HOSTTYPE}" == "aarch64" || "${HOSTTYPE}" = "arm64" ]]; then
@@ -82,13 +89,74 @@ if [[ "${BAZEL_CONFIG_ONLY-}" != "1" ]]; then
     fi
 
     if [[ "$INSTALL_USER" == "1" ]]; then
-      target="$HOME/bin/bazel"
+      # Prefer user install dir that is already in PATH.
+      user_bin_dir=""
+      if path_contains_dir "$HOME/.local/bin"; then
+        user_bin_dir="$HOME/.local/bin"
+      elif path_contains_dir "$HOME/bin"; then
+        user_bin_dir="$HOME/bin"
+      else
+        echo "error: No suitable user bin directory in PATH."
+        echo "Please add either '$HOME/.local/bin' or '$HOME/bin' to PATH, or run with --system."
+        echo "Current PATH: $PATH"
+        exit 1
+      fi
+
+      mkdir -p "$user_bin_dir"
+      target="$user_bin_dir/bazel"
       curl -f -s -L -R -o "${target}" "${url}"
       chmod +x "${target}"
     else
       target="/bin/bazel"
+      if ! path_contains_dir "/bin"; then
+        echo "error: /bin is not in PATH. Please ensure /bin is in PATH or choose a different install mode."
+        echo "Current PATH: $PATH"
+        exit 1
+      fi
       sudo curl -f -s -L -R -o "${target}" "${url}"
       sudo chmod +x "${target}"
+    fi
+
+    # Install bazel-lsp (Linux x86_64 only) with logic similar to Bazelisk
+    if [[ "${platform}" == "linux" && "${HOSTTYPE}" == "x86_64" ]]; then
+      lsp_url="https://github.com/cameron-martin/bazel-lsp/releases/download/v0.6.4/bazel-lsp-0.6.4-linux-amd64"
+      if [[ "$INSTALL_USER" == "1" ]]; then
+        lsp_target="$user_bin_dir/bazel-lsp"
+        wget -q -O "${lsp_target}" "${lsp_url}"
+        chmod +x "${lsp_target}"
+      else
+        lsp_target="/bin/bazel-lsp"
+        if ! path_contains_dir "/bin"; then
+          echo "error: /bin is not in PATH. Please ensure /bin is in PATH or choose a different install mode."
+          echo "Current PATH: $PATH"
+          exit 1
+        fi
+        sudo wget -q -O "${lsp_target}" "${lsp_url}"
+        sudo chmod +x "${lsp_target}"
+      fi
+    else
+      echo "Skipping bazel-lsp install: unsupported platform (${platform}) or architecture (${HOSTTYPE})."
+    fi
+
+    # Install buildifier (Linux x86_64 only) with logic similar to Bazelisk/bazel-lsp
+    if [[ "${platform}" == "linux" && "${HOSTTYPE}" == "x86_64" ]]; then
+      buildifier_url="https://github.com/bazelbuild/buildtools/releases/download/v8.2.1/buildifier-linux-amd64"
+      if [[ "$INSTALL_USER" == "1" ]]; then
+        buildifier_target="$user_bin_dir/buildifier"
+        wget -q -O "${buildifier_target}" "${buildifier_url}"
+        chmod +x "${buildifier_target}"
+      else
+        buildifier_target="/bin/buildifier"
+        if ! path_contains_dir "/bin"; then
+          echo "error: /bin is not in PATH. Please ensure /bin is in PATH or choose a different install mode."
+          echo "Current PATH: $PATH"
+          exit 1
+        fi
+        sudo wget -q -O "${buildifier_target}" "${buildifier_url}"
+        sudo chmod +x "${buildifier_target}"
+      fi
+    else
+      echo "Skipping buildifier install: unsupported platform (${platform}) or architecture (${HOSTTYPE})."
     fi
   fi
 fi
