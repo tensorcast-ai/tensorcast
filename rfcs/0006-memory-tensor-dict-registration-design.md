@@ -23,7 +23,7 @@ Success criteria:
 v2 format reference:
 
 ```cxx
-86:106:/data/workspace/github-stepcast-store/web-docs/docs/developer-guides/core/checkpoint/data-format.md
+86:106:web-docs/docs/developer-guides/core/checkpoint/data-format.md
 {
   "tensor_name": [offset, size, shape, stride, dtype, storage_offset]
 }
