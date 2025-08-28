@@ -65,7 +65,8 @@ jobs:
         run: |
           bazel build //core:libstore_engine.so \
             --define use_fake_cuda=true \
-            --config=remote
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Upload libstore_engine.so artifact
         uses: actions/upload-artifact@v4
