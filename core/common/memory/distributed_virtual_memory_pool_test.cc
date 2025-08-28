@@ -292,6 +292,7 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
     const int iterations = 100;
     std::vector<std::thread> threads;
     std::atomic<int> success_count{0};
+    std::atomic<int> unlock_failure_count{0};
 
     threads.reserve(num_threads);
     for (int t = 0; t < num_threads; ++t) {
@@ -309,8 +310,11 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
             std::this_thread::sleep_for(std::chrono::microseconds(10));
 
             auto unlock_status = dvmp.unlock_chunks("concurrent_test", chunks, i % 2 == 0);
-            REQUIRE(unlock_status.ok());
-            success_count++;
+            if (!unlock_status.ok()) {
+              ++unlock_failure_count;
+            } else {
+              ++success_count;
+            }
           }
         }
       });
@@ -322,6 +326,8 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
 
     // Should have some successful operations
     REQUIRE(success_count > 0);
+    // All successful locks should be matched by successful unlocks
+    REQUIRE(unlock_failure_count == 0);
 
     // Verify final state consistency
     auto snapshot = dvmp.chunk_snapshot("concurrent_test");
