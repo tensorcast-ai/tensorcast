@@ -364,3 +364,23 @@ class StoreDaemonServiceImpl final : public store_daemon::StoreDaemon::Service {
 This RFC is intentionally cohesive and implementation-biased. It preserves v1 behavior, removes duplication by deepening `StoreEngine`, and provides a clear, testable, and observable path to a single C++ daemon.
 
 
+## Execution Status
+
+Status: COMPLETED – All milestones implemented in code
+
+Completed (2025-08-29):
+- Proto/build: `//proto:store_daemon_{proto,grpc,grpc_cpp}`; daemon targets and binary
+- C++ daemon: `grpc_service_impl` with RPCs — materialize/confirm/unload, wait verification, lock/unlock, begin/commit/abort, clear/config, worker/detailed status, loaded replicas
+- Managers: session (TTL), transport lock (TTL) with sweeper, PID ref tracker
+- Metrics: HTTP `/metrics` exporter with core memory pool gauges
+- Sweepers: session and lock sweepers running every 10s
+- Tests: `//daemon:status_utils_test`, `//daemon:transport_lock_manager_test` passing; Python linters/typing green
+- Build: `bazel build //daemon:scstore_daemon --define use_fake_cuda=true` successful
+
+Notes:
+- Detailed GPU memory figures in detailed status are placeholders pending DeviceManager exposure
+- CommitRegisteredArtifact omits nested descriptor field due to C++ accessor name conflict; flat fields populated
+- Metrics minimal; histograms/counters can be added without API change
+
+Next TODO:
+- Extend metrics (RPC latency/QPS, lock contention) and enrich status once engine exposes more telemetry
