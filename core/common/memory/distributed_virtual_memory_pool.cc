@@ -5,11 +5,13 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -26,6 +28,14 @@ DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : 
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
   // Ensure capabilities are detected early even if communicator is not constructed.
   (void)common::SystemCapabilities::instance();
+  // Warn once per process if mlock/munlock are unavailable so later paths can be quiet.
+  static std::once_flag warn_once;
+  std::call_once(warn_once, []() {
+    if (!common::SystemCapabilities::instance().mlock_enabled()) {
+      LOG(WARNING)
+          << "DVMP: mlock/munlock unavailable; page pinning is disabled. unlock() will not physically unpin pages.";
+    }
+  });
 }
 
 DistributedVirtualMemoryPool::~DistributedVirtualMemoryPool() {
@@ -124,16 +134,29 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
   // Convenience lambda to roll back any chunks that were already transitioned to
   // LOCKED_TX and to emit a warning with contextual information.
   auto rollback_and_log = [&](const absl::Status& status, std::optional<uint32_t> fail_idx) -> absl::Status {
+    const bool expected_contention = status.code() == absl::StatusCode::kResourceExhausted;
     if (fail_idx.has_value()) {
-      LOG(WARNING) << "lock_chunks rollback for replica " << key << ", chunk " << *fail_idx << ": " << status.message();
+      if (expected_contention) {
+        VLOG(1) << "lock_chunks contention rollback for replica " << key << ", chunk " << *fail_idx << ": "
+                << status.message();
+      } else {
+        LOG(WARNING) << "lock_chunks rollback for replica " << key << ", chunk " << *fail_idx << ": "
+                     << status.message();
+      }
     } else {
-      LOG(WARNING) << "lock_chunks rollback for replica " << key << ": " << status.message();
+      if (expected_contention) {
+        VLOG(1) << "lock_chunks contention rollback for replica " << key << ": " << status.message();
+      } else {
+        LOG(WARNING) << "lock_chunks rollback for replica " << key << ": " << status.message();
+      }
     }
     for (const auto& [j_idx, prev] : locked) {
       info.metadata[j_idx].state.store(prev, std::memory_order_release);
       void* j_addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(j_idx) * chunk_size_;
-      if (::munlock(j_addr, chunk_size_) != 0) {
-        PLOG(WARNING) << "munlock failed during rollback for chunk " << j_idx;
+      if (common::SystemCapabilities::instance().mlock_enabled()) {
+        if (::munlock(j_addr, chunk_size_) != 0) {
+          VLOG(1) << "munlock failed during rollback for chunk " << j_idx;
+        }
       }
     }
     return status;
@@ -173,8 +196,12 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
       // them HOT after the unlock dance, allowing the system to reclaim them if
       // necessary. For other error types we still perform a full rollback.
       if (err == ENOMEM || err == EPERM) {
-        // Use WARNING level instead of ERROR for expected failures in CI/container environments
-        PLOG(WARNING) << "mlock failed for chunk " << i << " — proceeding without page lock";
+        // Warn once and disable mlock globally to avoid repeated spam in noisy environments.
+        static std::atomic<bool> warned_demote{false};
+        if (!warned_demote.exchange(true, std::memory_order_acq_rel)) {
+          PLOG(WARNING) << "mlock failed (EPERM/ENOMEM) — disabling page pinning; proceeding without mlock/munlock";
+        }
+        common::SystemCapabilities::instance().set_mlock_enabled(false);
       } else {
         // Failed to lock pages, rollback this chunk and any previously locked ones.
         meta.state.store(expected, std::memory_order_release); // revert to previous state for this chunk
@@ -233,7 +260,7 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
       void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
       int rc = ::munlock(addr, chunk_size_);
       if (rc != 0) {
-        PLOG(WARNING) << "munlock failed for chunk " << i;
+        VLOG(1) << "munlock failed for chunk " << i;
       }
     }
 
