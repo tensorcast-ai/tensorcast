@@ -180,6 +180,7 @@ sc_cc_library(
         ":cuda_api_lib",
         ":error_handling_lib",
         ":metric_objects_lib",
+        ":system_capabilities_lib",
         "//core/store/replica:chunk_meta",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
@@ -361,6 +362,7 @@ sc_cc_library(
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",
+        ":system_capabilities_lib",
         ":trace_ctx_lib",
         ":trace_cuda_async_fn_lib",
         ":trace_macros_lib",
@@ -369,4 +371,14 @@ sc_cc_library(
         "@gsl",
     ],
     alwayslink = True,
+)
+
+sc_cc_library(
+    name = "system_capabilities_lib",
+    srcs = ["system_capabilities.cc"],
+    hdrs = ["system_capabilities.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/log:absl_log",
+    ],
 )

@@ -8,7 +8,12 @@
 #include <thread>
 #include <vector>
 
+#define private public
+#define protected public
 #include "core/common/memory/distributed_virtual_memory_pool.h"
+#undef private
+#undef protected
+#include "core/common/system_capabilities.h"
 #include "core/store/replica/chunk_meta.h"
 
 using namespace stepcast::memory;
@@ -439,5 +444,45 @@ TEST_CASE("DistributedVirtualMemoryPool error handling", "[dvmp]") {
 
     status = dvmp.unlock_chunks("empty_test", empty_indices, false);
     REQUIRE(status.ok()); // Empty operation succeeds
+  }
+}
+
+TEST_CASE("DVMP mlock refcount integrates locks and leases", "[dvmp][mlock]") {
+  common::SystemCapabilities::instance().set_mlock_enabled(true);
+  DistributedVirtualMemoryPool dvmp(4096); // 4 KiB chunks
+  auto region_or = dvmp.allocate("mlock_refcnt", 8192);
+  REQUIRE(region_or.ok());
+
+  auto lease_or = dvmp.pin_range("mlock_refcnt", 0, 4096, "test");
+  REQUIRE(lease_or.ok());
+  DistributedVirtualMemoryPool::ChunkResidencyLease lease = std::move(*lease_or);
+
+  auto info_sp_or = dvmp.get_artifact_info("mlock_refcnt");
+  REQUIRE(info_sp_or.ok());
+  auto info_sp = *info_sp_or;
+  {
+    std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
+    REQUIRE(info_sp->pin_refcnt[0].load() == 1);
+    REQUIRE(info_sp->mlock_refcnt[0].load() == 1);
+  }
+
+  REQUIRE(dvmp.lock_chunks("mlock_refcnt", {0}).ok());
+  {
+    std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
+    REQUIRE(info_sp->mlock_refcnt[0].load() == 2);
+  }
+
+  REQUIRE(dvmp.unlock_chunks("mlock_refcnt", {0}, false).ok());
+  {
+    std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
+    REQUIRE(info_sp->mlock_refcnt[0].load() == 1);
+    REQUIRE(info_sp->pin_refcnt[0].load() == 1);
+  }
+
+  lease = {};
+  {
+    std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
+    REQUIRE(info_sp->mlock_refcnt[0].load() == 0);
+    REQUIRE(info_sp->pin_refcnt[0].load() == 0);
   }
 }

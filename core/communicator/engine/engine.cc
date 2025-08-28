@@ -9,6 +9,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 
+#include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/engine/message.h"
@@ -32,6 +33,8 @@ CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_s
       enable_rdma_(enable_rdma),
       mtcp_conn_count_(kMTcpConnCount),
       channel_expire_(channel_expire_sec) {
+  // Record RDMA availability globally for capability-driven code paths.
+  common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
 

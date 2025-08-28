@@ -156,6 +156,8 @@ class DistributedVirtualMemoryPool {
     size_t chunk_count{0};
     // Per-chunk pin refcounts used by ChunkResidencyLease API
     std::unique_ptr<std::atomic<uint32_t>[]> pin_refcnt;
+    // Per-chunk mlock refcounts tracking both transfer locks and pin leases
+    std::unique_ptr<std::atomic<uint32_t>[]> mlock_refcnt;
     // Per-replica mutex guarding replica-local state; global mutex_ only protects
     // the models_ map and retrieval of shared_ptrs.
     // Per-replica mutex guarding replica-local state

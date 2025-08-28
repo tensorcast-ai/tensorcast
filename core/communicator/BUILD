@@ -321,6 +321,7 @@ sc_cc_library(
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
         "//core/common:pinned_memory_pool_lib",
+        "//core/common:system_capabilities_lib",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
     ] + select({
