@@ -15,7 +15,7 @@ cc_library(
 
 # Main shared library target
 cc_binary(
-    name = "libscstore.so",
+    name = "libstore_engine.so",
     linkshared = True,
     linkstatic = True,
     visibility = ["//visibility:public"],

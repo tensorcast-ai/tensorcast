@@ -64,11 +64,11 @@ mypy .
 # Build core and Python extension together
 BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop
 
-# libscstore.so used for Python (DEBUG + PRE_CXX_ABI)
-bazel build //core:libscstore.so --compilation_mode=opt --config=linux
+# libstore_engine.so used for Python (DEBUG + PRE_CXX_ABI)
+bazel build //core:libstore_engine.so --compilation_mode=opt --config=linux
 
-# libscstore.so used for Server (DEBUG + CXX_ABI)
-bazel build //core:libscstore.so --compilation_mode=dbg --config=linux
+# libstore_engine.so used for Server (DEBUG + CXX_ABI)
+bazel build //core:libstore_engine.so --compilation_mode=dbg --config=linux
 
 # Build tests
 bazel build //tests/cpp:gpu_ce_test

@@ -54,7 +54,7 @@ def get_daemon_address() -> str:
     return _global_daemon_address
 
 
-ctypes.CDLL(os.path.join(os.path.dirname(__file__), "lib/libscstore.so"))
+ctypes.CDLL(os.path.join(os.path.dirname(__file__), "lib/libstore_engine.so"))
 from scstore._C import (  # noqa: E402
     build_canonical_index_from_safetensors,
     get_cuda_memory_ptr,

@@ -266,7 +266,7 @@ def build_libscstore_cxx11_abi(
         return
 
     cmd = [BAZEL_EXE, "build"]
-    cmd.append("//core:libscstore.so")
+    cmd.append("//core:libstore_engine.so")
 
     if develop:
         cmd.append("--compilation_mode=dbg")
@@ -333,15 +333,15 @@ def copy_libscstore(debug: bool):
     if not os.path.exists(dir_path + "/scstore/lib"):
         os.makedirs(dir_path + "/scstore/lib")
 
-    target = dir_path + "/scstore/lib/libscstore.so"
+    target = dir_path + "/scstore/lib/libstore_engine.so"
     if os.path.exists(target):
         print(f"Removing {target}")
         os.remove(target)
 
 
-    print(f"Copying {dir_path + '/bazel-bin/core/libscstore.so'} to {target}")
+    print(f"Copying {dir_path + '/bazel-bin/core/libstore_engine.so'} to {target}")
     copyfile(
-            dir_path + "/bazel-bin/core/libscstore.so",
+            dir_path + "/bazel-bin/core/libstore_engine.so",
             target
     )
 

@@ -40,7 +40,7 @@ python -m pytest tests/python/test_name
 
 ### Core Library (`BUILD_CORE=1`)
 - **Location**: `/core/` directory
-- **Output**: `libscstore.so`
+- **Output**: `libstore_engine.so`
 - **Includes**: checkpoint, store, communicator modules
 
 ### Python Extension (`BUILD_EXTENSION=1`)

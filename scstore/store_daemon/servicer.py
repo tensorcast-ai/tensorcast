@@ -141,7 +141,9 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             # torch is required for the Store Engine C++ extension
             import torch  # noqa: F401
 
-            ctypes.CDLL(os.path.join(os.path.dirname(__file__), "../lib/libscstore.so"))
+            ctypes.CDLL(
+                os.path.join(os.path.dirname(__file__), "../lib/libstore_engine.so")
+            )
             import scstore._store_engine as _cs
         except OSError as e:
             logger.error(f"Failed to load C++ extension: {e}")
