@@ -534,8 +534,9 @@ if BUILD_EXTENSION:
                 sources,
                 library_dirs=[
                     (dir_path + "/scstore/lib"),
+                    (dir_path + "/.venv/lib/python3.10/site-packages/nvidia/cuda_runtime/lib"),
                 ],
-                libraries=["scstore"],
+                libraries=["store_engine"],
                 include_dirs=_include_dirs,
                 extra_compile_args=(
                     [
