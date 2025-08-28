@@ -18,6 +18,7 @@
 
 using namespace stepcast::memory;
 using namespace stepcast::store;
+using namespace stepcast::common;
 
 namespace {
 // Check if we're running in a CI environment with limited resources
@@ -448,7 +449,7 @@ TEST_CASE("DistributedVirtualMemoryPool error handling", "[dvmp]") {
 }
 
 TEST_CASE("DVMP mlock refcount integrates locks and leases", "[dvmp][mlock]") {
-  common::SystemCapabilities::instance().set_mlock_enabled(true);
+  SystemCapabilities::instance().set_mlock_enabled(true);
   DistributedVirtualMemoryPool dvmp(4096); // 4 KiB chunks
   auto region_or = dvmp.allocate("mlock_refcnt", 8192);
   REQUIRE(region_or.ok());
@@ -459,7 +460,7 @@ TEST_CASE("DVMP mlock refcount integrates locks and leases", "[dvmp][mlock]") {
 
   auto info_sp_or = dvmp.get_artifact_info("mlock_refcnt");
   REQUIRE(info_sp_or.ok());
-  auto info_sp = *info_sp_or;
+  const auto& info_sp = *info_sp_or;
   {
     std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
     REQUIRE(info_sp->pin_refcnt[0].load() == 1);
