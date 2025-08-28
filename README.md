@@ -52,15 +52,27 @@ uv run scstore-cli --help
 
 # Run specific file
 uv run xxx/xxx.py
-```
 
-### Development Setup
+### StoreDaemon (C++)
+
+The StoreDaemon service is implemented in C++ and launched by the Python CLI.
+
+- Development (from source):
+  - Build once with Bazel: `bazel build //daemon:scstore_daemon`
+  - Start background: `uv run -q python -m scstore.cli start --non-blocking --host 127.0.0.1 --port 8073`
+  - Stop: `uv run -q python -m scstore.cli stop`
+  - The CLI automatically locates the binary from `bazel-bin/daemon/scstore_daemon`.
+
+- Packaged (wheel) usage:
+  - The wheel packages the daemon at `scstore/bin/scstore_daemon` and the CLI will use it automatically.
+  - To override, set `SCSTORE_DAEMON_BIN` to an absolute path to a `scstore_daemon` executable.
+
+
 ```bash
 # Create a symlink to external packages for header files
 # Run this on the root directory of the project
 ln -s $(bazel info output_base)/external external
 ```
-
 
 ## Run test
 

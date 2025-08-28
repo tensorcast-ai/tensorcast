@@ -194,10 +194,21 @@ def stop(pid_file: Path, force: bool):
     default=DEFAULT_PID_FILE,
     help=f"PID file location (default: {DEFAULT_PID_FILE})",
 )
-def status(pid_file: Path):
+@click.option(
+    "--host",
+    default=None,
+    help="Optional host override for status RPC (default: config/default)",
+)
+@click.option(
+    "--port",
+    default=None,
+    type=int,
+    help="Optional port override for status RPC (default: config/default)",
+)
+def status(pid_file: Path, host: str | None, port: int | None):
     """Check the status of StoreDaemon service."""
     try:
-        check_service_status(pid_file)
+        check_service_status(pid_file, host=host, port=port)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

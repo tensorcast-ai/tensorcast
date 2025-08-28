@@ -345,6 +345,52 @@ def copy_libstore_engine(debug: bool):
             target
     )
 
+def find_bazel_daemon_binary() -> Path | None:
+    candidate = Path(dir_path) / "bazel-bin" / "daemon" / "scstore_daemon"
+    return candidate if candidate.exists() else None
+
+def build_daemon_binary(use_fake_cuda: bool = False) -> None:
+    if BAZEL_EXE is None:
+        print("Bazell not available; skipping daemon build")
+        return
+    cmd = [BAZEL_EXE, "build", "//daemon:scstore_daemon"]
+    if use_fake_cuda:
+        cmd += ["--define", "use_fake_cuda=true"]
+    print(f"building scstore_daemon cmd={cmd}")
+    rc = subprocess.run(cmd).returncode
+    if rc != 0:
+        sys.exit(rc)
+
+def copy_daemon_binary() -> None:
+    """Copy daemon binary into package at scstore/bin/scstore_daemon.
+
+    Source precedence: SCSTORE_DAEMON_BIN env -> bazel-bin output.
+    """
+    target_dir = Path(dir_path) / "scstore" / "bin"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "scstore_daemon"
+    if target.exists():
+        try:
+            target.unlink()
+        except Exception:
+            pass
+
+    src_env = os.environ.get("SCSTORE_DAEMON_BIN")
+    if src_env and Path(src_env).exists():
+        print(f"Copying {src_env} -> {target}")
+        copyfile(src_env, target)
+        os.chmod(target, 0o755)
+        return
+
+    bazel_bin = find_bazel_daemon_binary()
+    if bazel_bin is not None:
+        print(f"Copying {bazel_bin} -> {target}")
+        copyfile(bazel_bin, target)
+        os.chmod(target, 0o755)
+        return
+
+    print("Warning: scstore_daemon binary not found; package will not include daemon binary.")
+
 def copy_extensions():
     files = glob.glob(dir_path + "/build/lib.linux-*/scstore/*.so")
     for file in files:
@@ -364,6 +410,8 @@ class DevelopCommand(develop):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libstore_engine(debug=True)
+        # For development, just copy existing daemon binary if present
+        copy_daemon_binary()
 
         gen_version_file()
         develop.run(self)
@@ -380,6 +428,7 @@ class BuildExtensionCommand(BuildExtension):
         copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
+        copy_daemon_binary()
 
 
 class InstallCommand(install):
@@ -400,6 +449,12 @@ class InstallCommand(install):
             use_remote=USE_REMOTE,
         )
         copy_libstore_engine(debug=False)
+        # Ensure daemon binary is built and copied for installed package
+        try:
+            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
+        except Exception as e:
+            print(f"Warning: daemon build failed: {e}")
+        copy_daemon_binary()
 
         gen_version_file()
         install.run(self)
@@ -418,6 +473,12 @@ class BdistCommand(bdist_wheel):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_libstore_engine_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libstore_engine(debug=False)
+        # Wheel should contain the daemon binary
+        try:
+            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
+        except Exception as e:
+            print(f"Warning: daemon build failed: {e}")
+        copy_daemon_binary()
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -437,6 +498,7 @@ class EditableWheelCommand(editable_wheel):
         build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         gen_version_file()
         copy_libstore_engine(debug=True)
+        copy_daemon_binary()
         editable_wheel.run(self)
 
 
@@ -670,7 +732,7 @@ setup(
     zip_safe=False,
     packages=find_packages(exclude=["*.csrc.*"]),
     # include_package_data=False,
-    package_data={"": ["*.so", "lib/*.so"]},
+    package_data={"": ["*.so", "lib/*.so", "bin/*"]},
     exclude_package_data={
         # "scstore": [
         #     "scstore/csrc/*.cc",

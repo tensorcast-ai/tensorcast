@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import click
+import grpc
 
 from scstore.cli_utils.config_loader import (
     ConfigError,
@@ -18,18 +21,15 @@ from scstore.cli_utils.config_loader import (
     print_config_summary,
     validate_config,
 )
-from scstore.cli_utils.daemon import daemonize
 from scstore.cli_utils.pid_manager import (
-    PidManagerError,
     cleanup_pid_file,
     get_process_info,
     is_process_running,
     read_pid_file,
     stop_process,
-    write_pid_file,
 )
 from scstore.logger import init_logger, setup_logging
-from scstore.proto import store_daemon_pb2
+from scstore.proto import store_daemon_pb2, store_daemon_pb2_grpc
 from scstore.store_daemon.config import StoreDaemonConfig
 
 logger = init_logger(__name__)
@@ -97,10 +97,9 @@ def start_service(
     # Setup signal handlers
     _setup_signal_handlers(pid_file)
 
-    # Start the service
-    _start_daemon_service(
+    # Start the C++ daemon service
+    _start_cpp_daemon_service(
         config=config,
-        config_file=config_file,
         pid_file=pid_file,
         log_file=log_file,
         blocking=blocking,
@@ -281,7 +280,9 @@ def _display_detailed_status(
     click.echo("")  # Empty line at the end
 
 
-def check_service_status(pid_file: Path) -> None:
+def check_service_status(
+    pid_file: Path, *, host: str | None = None, port: int | None = None
+) -> None:
     """
     Check the status of StoreDaemon service.
 
@@ -306,10 +307,14 @@ def check_service_status(pid_file: Path) -> None:
         from scstore.cli_utils.config_loader import load_config
         from scstore.proto import store_daemon_pb2, store_daemon_pb2_grpc
 
-        config = load_config(None, {})  # Load default config
+        # Resolve address preference: explicit host/port -> config default
+        if host is None or port is None:
+            config = load_config(None, {})  # default config
+            host = host or "127.0.0.1"
+            port = port or config.server.port
 
         # Connect to the daemon
-        channel = grpc.insecure_channel(f"127.0.0.1:{config.server.port}")
+        channel = grpc.insecure_channel(f"{host}:{port}")
         stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
 
         # Get detailed status
@@ -382,125 +387,126 @@ def _setup_signal_handlers(pid_file: Path) -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
 
-def _start_daemon_service(
+def _ensure_cpp_daemon_binary() -> Path:
+    """Locate the C++ daemon binary without performing any build actions.
+
+    Resolution order:
+    - SCSTORE_DAEMON_BIN env var (absolute path)
+    - Installed package resource: scstore/bin/scstore_daemon
+    - Development workspace: <repo-root>/bazel-bin/daemon/scstore_daemon
+    """
+    # 1) Explicit override via env
+    env_path = os.environ.get("SCSTORE_DAEMON_BIN")
+    if env_path:
+        p = Path(env_path)
+        if p.exists() and os.access(p, os.X_OK):
+            return p
+        raise ServiceError(f"SCSTORE_DAEMON_BIN set but not executable: {p}")
+
+    # 2) Packaged binary under scstore/bin/
+    try:
+        import importlib.resources as ir  # py3.9+
+
+        pkg = ir.files("scstore").joinpath("bin", "scstore_daemon")
+        p = Path(str(pkg))
+        if p.exists() and os.access(p, os.X_OK):
+            return p
+    except Exception:
+        pass
+
+    # 3) Development workspace bazel-bin
+    repo_root = Path(__file__).resolve().parents[2]
+    candidate = repo_root / "bazel-bin" / "daemon" / "scstore_daemon"
+    if candidate.exists() and os.access(candidate, os.X_OK):
+        return candidate
+
+    raise ServiceError(
+        "scstore_daemon binary not found. Set SCSTORE_DAEMON_BIN, install a package containing scstore/bin/scstore_daemon, or build it via Bazel in development (bazel build //daemon:scstore_daemon)."
+    )
+
+
+def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
+    """Translate StoreDaemonConfig to C++ daemon flags."""
+    listen = f"{config.server.host}:{config.server.port}"
+    mem_pool = int(config.server.mem_pool_size)
+    chunk = int(config.server.chunk_size)
+    return [
+        f"--listen_addr={listen}",
+        f"--storage_path={str(config.server.storage_path)}",
+        f"--p2p_port={config.network.p2p_port}",
+        f"--mem_pool_size={mem_pool}",
+        f"--chunk_size={chunk}",
+        f"--io_threads={config.server.num_threads}",
+        f"--metrics_port={config.network.metrics_port}",
+    ]
+
+
+def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:
+    """Poll GetServerConfig until the daemon responds or times out."""
+    deadline = time.time() + timeout_s
+    addr = f"{host}:{port}"
+    while time.time() < deadline:
+        try:
+            channel = grpc.insecure_channel(addr)
+            stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+            stub.GetServerConfig(store_daemon_pb2.GetServerConfigRequest(), timeout=1.0)
+            channel.close()
+            return True
+        except Exception:
+            time.sleep(0.2)
+    return False
+
+
+def _start_cpp_daemon_service(
+    *,
     config: StoreDaemonConfig,
-    config_file: Path | None,
     pid_file: Path,
     log_file: Path,
     blocking: bool,
     verbose: bool,
 ) -> None:
-    """Start the actual daemon service.
-
-    For non-blocking mode we now perform *all* daemonisation **before** the
-    gRPC server starts.  We use a pipe to let the daemon process inform the
-    original CLI process when the server is ready so that the latter only
-    exits after a successful start-up – mimicking the previous UX while
-    avoiding the undefined behaviour of forking after the server has already
-    created threads.
-    """
-
-    # ------------------------------------------------------------------
-    # Foreground mode – write PID file so that helper commands (e.g.,
-    # `scstore-cli status`) can locate the running process just like in
-    # background mode.
-    # ------------------------------------------------------------------
+    """Start the C++ daemon binary in foreground or background without waiting for readiness."""
+    bin_path = _ensure_cpp_daemon_binary()
+    args = [str(bin_path), *_cpp_daemon_args(config)]
 
     if blocking:
+        # Foreground: run binary attached to this terminal, write child PID, wait, cleanup.
         try:
-            write_pid_file(pid_file)
-        except PidManagerError as e:
-            logger.error("Failed to write PID file: %s", e)
-            raise ServiceError("Could not write PID file") from e
-
-        from scstore.store_daemon import serve
-
+            proc = subprocess.Popen(args)
+        except Exception as e:
+            raise ServiceError(f"Failed to start daemon: {e}") from e
         try:
-            serve(
-                config=config,
-            )
+            # Write child PID for discoverability
+            try:
+                pid_file.parent.mkdir(parents=True, exist_ok=True)
+                pid_file.write_text(str(proc.pid))
+                logger.info("PID %d written to %s", proc.pid, pid_file)
+            except Exception as e:
+                proc.terminate()
+                raise ServiceError(f"Could not write PID file: {e}") from e
+            proc.wait()
         finally:
-            # Ensure the PID file is removed when the process exits for any
-            # reason to prevent stale files from lingering.
             cleanup_pid_file(pid_file)
-
         return
 
-    # ------------------------------------------------------------------
-    # Non-blocking (background) mode – new implementation.
-    # ------------------------------------------------------------------
-    # Create a pipe so the daemon can notify us when the server is ready
-    read_fd, write_fd = os.pipe()
-
-    pid = os.fork()
-    if pid > 0:
-        # ------------------------------
-        # Parent – wait for notification
-        # ------------------------------
-        os.close(write_fd)
-        try:
-            # Wait (blocking) for exactly one byte from the daemon indicating
-            # successful start-up.  EOF or any other value is treated as a
-            # failure.
-            started_flag = os.read(read_fd, 1)
-        finally:
-            os.close(read_fd)
-
-        if started_flag == b"1":
-            click.echo(
-                "StoreDaemon started successfully. Use 'scstore-cli stop' to stop the daemon"
-            )
-            sys.exit(0)
-
-        click.echo("Failed to start StoreDaemon. Check logs for details.", err=True)
-        sys.exit(1)
-
-    # ------------------------------------------------------------------
-    # Child – will become the daemon.
-    # ------------------------------------------------------------------
-    os.close(read_fd)
+    # Background: spawn and detach IO to log file and return immediately
     try:
-        # Perform the classic double-fork.
-        daemonize(log_file)
-
-        # Write the PID file *after* daemonisation so it contains the daemon PID
-        try:
-            write_pid_file(pid_file)
-        except PidManagerError as e:
-            logger.error(f"Failed to write PID file: {e}")
-            os.write(write_fd, b"0")
-            os.close(write_fd)
-            sys.exit(1)
-
-        # Import here to avoid unnecessarily importing heavy modules in the
-        # original CLI process.
-        from scstore.store_daemon import serve
-
-        def on_server_started() -> None:
-            """Notify the original process that the server is ready."""
-            try:
-                os.write(write_fd, b"1")
-            finally:
-                # Close our copy of the write-end; the original process will
-                # get EOF once we are done writing.
-                os.close(write_fd)
-
-        # Start the server (this call blocks until termination).
-        serve(
-            config=config,
-            on_started=on_server_started,
-        )
-    except KeyboardInterrupt:
-        click.echo("\nReceived interrupt signal, shutting down...")
-        cleanup_pid_file(pid_file)
-        sys.exit(0)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a", buffering=1) as log_fd:
+            proc = subprocess.Popen(
+                args, stdout=log_fd, stderr=log_fd, stdin=subprocess.DEVNULL
+            )
     except Exception as e:
-        logger.exception("Error starting StoreDaemon")
-        # Notify parent about the failure if possible
-        try:
-            os.write(write_fd, b"0")
-            os.close(write_fd)
-        except Exception:  # pragma: no cover – best-effort cleanup
-            pass
-        cleanup_pid_file(pid_file)
-        raise ServiceError(f"Failed to start service: {e}") from e
+        raise ServiceError(f"Failed to start daemon (background): {e}") from e
+
+    # Record PID and exit without readiness wait to avoid blocking callers.
+    try:
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid))
+        logger.info("(bg) PID %d written to %s", proc.pid, pid_file)
+    except Exception as e:
+        click.echo(f"Warning: failed to write PID file: {e}", err=True)
+
+    click.echo(
+        "StoreDaemon launched in background. Use 'scstore status' to check readiness, 'scstore stop' to stop it."
+    )
