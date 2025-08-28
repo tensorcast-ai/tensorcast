@@ -78,10 +78,12 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
   info->metadata = std::make_unique<store::ChunkMeta[]>(num_chunks);
   info->chunk_count = num_chunks;
   info->pin_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
+  info->mlock_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
   for (size_t i = 0; i < num_chunks; ++i) {
     info->metadata[i].state.store(store::ChunkState::COLD, std::memory_order_relaxed);
     info->metadata[i].last_touch_s.store(0, std::memory_order_relaxed);
     info->pin_refcnt[i].store(0, std::memory_order_relaxed);
+    info->mlock_refcnt[i].store(0, std::memory_order_relaxed);
   }
 
   artifacts_.emplace(key, std::move(info));
@@ -127,8 +129,13 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     // No-op for empty input per test expectation
     return absl::OkStatus();
   }
-  // Track successfully locked indices and their previous states for rollback if needed.
-  std::vector<std::pair<uint32_t, store::ChunkState>> locked;
+  // Track successfully locked indices, their previous states, and whether mlock succeeded
+  struct LockedChunk {
+    uint32_t idx;
+    store::ChunkState prev_state;
+    bool mlocked;
+  };
+  std::vector<LockedChunk> locked;
   locked.reserve(idx.size());
 
   // Convenience lambda to roll back any chunks that were already transitioned to
@@ -150,12 +157,15 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
         LOG(WARNING) << "lock_chunks rollback for replica " << key << ": " << status.message();
       }
     }
-    for (const auto& [j_idx, prev] : locked) {
-      info.metadata[j_idx].state.store(prev, std::memory_order_release);
-      void* j_addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(j_idx) * chunk_size_;
-      if (common::SystemCapabilities::instance().mlock_enabled()) {
-        if (::munlock(j_addr, chunk_size_) != 0) {
-          VLOG(1) << "munlock failed during rollback for chunk " << j_idx;
+    for (const auto& lc : locked) {
+      info.metadata[lc.idx].state.store(lc.prev_state, std::memory_order_release);
+      void* j_addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(lc.idx) * chunk_size_;
+      if (lc.mlocked) {
+        auto prev_m = info.mlock_refcnt[lc.idx].fetch_sub(1, std::memory_order_acq_rel);
+        if (prev_m == 1) {
+          if (::munlock(j_addr, chunk_size_) != 0) {
+            VLOG(1) << "munlock failed during rollback for chunk " << lc.idx;
+          }
         }
       }
     }
@@ -187,6 +197,7 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
 
     // Attempt to lock the corresponding memory pages so they cannot be reclaimed.
     void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
+    bool mlocked = false;
     if (common::SystemCapabilities::instance().mlock_enabled() && ::mlock(addr, chunk_size_) != 0) {
       const int err = errno;
       // If the failure is due to insufficient mlock limit or permissions, degrade
@@ -207,6 +218,9 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
         meta.state.store(expected, std::memory_order_release); // revert to previous state for this chunk
         return rollback_and_log(absl::ErrnoToStatus(err, "mlock failed while locking chunk memory"), i);
       }
+    } else if (common::SystemCapabilities::instance().mlock_enabled()) {
+      info.mlock_refcnt[i].fetch_add(1, std::memory_order_acq_rel);
+      mlocked = true;
     }
     // If mlock globally disabled, opportunistically prefetch to reduce first-touch stalls
     if (!common::SystemCapabilities::instance().mlock_enabled() &&
@@ -215,7 +229,7 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     }
 
     meta.last_touch_s.store(now_s(), std::memory_order_relaxed);
-    locked.emplace_back(i, expected);
+    locked.push_back(LockedChunk{.idx = i, .prev_state = expected, .mlocked = mlocked});
   }
   return absl::OkStatus();
 }
@@ -255,12 +269,15 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
     auto& meta = info.metadata[i];
     meta.state.store(new_state, std::memory_order_release);
 
-    // Release page lock if we actually used mlock.
-    if (common::SystemCapabilities::instance().mlock_enabled()) {
-      void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
-      int rc = ::munlock(addr, chunk_size_);
-      if (rc != 0) {
-        VLOG(1) << "munlock failed for chunk " << i;
+    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
+    auto pin_cnt = info.pin_refcnt[i].load(std::memory_order_acquire);
+    auto m_cnt = info.mlock_refcnt[i].load(std::memory_order_acquire);
+    if (m_cnt > pin_cnt) {
+      auto prev = info.mlock_refcnt[i].fetch_sub(1, std::memory_order_acq_rel);
+      if (prev == 1) {
+        if (::munlock(addr, chunk_size_) != 0) {
+          VLOG(1) << "munlock failed for chunk " << i;
+        }
       }
     }
 
@@ -585,15 +602,20 @@ void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, 
     if (i >= info.chunk_count) {
       continue;
     }
-    // Decrement refcount and best-effort munlock
+    // Decrement pin lease refcount
     auto cnt = info.pin_refcnt[i].load(std::memory_order_acquire);
     if (cnt > 0) {
       info.pin_refcnt[i].store(cnt - 1, std::memory_order_release);
     }
-    void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
-    if (common::SystemCapabilities::instance().mlock_enabled()) {
-      if (::munlock(addr, chunk_size_) != 0) {
-        // Ignore errors; best-effort only
+    // Decrement mlock refcount and munlock when it reaches zero
+    auto m_cnt = info.mlock_refcnt[i].load(std::memory_order_acquire);
+    if (m_cnt > 0) {
+      auto prev = info.mlock_refcnt[i].fetch_sub(1, std::memory_order_acq_rel);
+      if (prev == 1) {
+        void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
+        if (::munlock(addr, chunk_size_) != 0) {
+          // Ignore errors; best-effort only
+        }
       }
     }
   }
@@ -639,7 +661,18 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
     info.pin_refcnt[i].store(prev + 1, std::memory_order_release);
     void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     if (common::SystemCapabilities::instance().mlock_enabled()) {
-      ::mlock(addr, chunk_size_);
+      if (::mlock(addr, chunk_size_) == 0) {
+        info.mlock_refcnt[i].fetch_add(1, std::memory_order_acq_rel);
+      } else {
+        const int err = errno;
+        if (err == ENOMEM || err == EPERM) {
+          static std::atomic<bool> warned_demote{false};
+          if (!warned_demote.exchange(true, std::memory_order_acq_rel)) {
+            PLOG(WARNING) << "mlock failed (EPERM/ENOMEM) — disabling page pinning; proceeding without mlock/munlock";
+          }
+          common::SystemCapabilities::instance().set_mlock_enabled(false);
+        }
+      }
     }
   }
   // Calculate expiry time if timeout is specified
