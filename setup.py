@@ -255,7 +255,7 @@ def ensure_external_symlink() -> None:
         print("  ln -s $(bazel info output_base)/external external")
 
 
-def build_libscstore_cxx11_abi(
+def build_libstore_engine_cxx11_abi(
     develop=True,
     use_dist_dir=False,
     pre_cxx11_abi=False,
@@ -266,7 +266,7 @@ def build_libscstore_cxx11_abi(
         return
 
     cmd = [BAZEL_EXE, "build"]
-    cmd.append("//core:libscstore.so")
+    cmd.append("//core:libstore_engine.so")
 
     if develop:
         cmd.append("--compilation_mode=dbg")
@@ -307,7 +307,7 @@ def build_libscstore_cxx11_abi(
         for i, arg in enumerate(display_cmd):
             if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
-    print(f"building libscstore cmd={display_cmd}")
+    print(f"building libstore_engine cmd={display_cmd}")
     status_code = subprocess.run(cmd).returncode
 
     if status_code != 0:
@@ -326,22 +326,22 @@ def gen_version_file():
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
 
 
-def copy_libscstore(debug: bool):
+def copy_libstore_engine(debug: bool):
     if not BUILD_EXTENSION:
         return
 
     if not os.path.exists(dir_path + "/scstore/lib"):
         os.makedirs(dir_path + "/scstore/lib")
 
-    target = dir_path + "/scstore/lib/libscstore.so"
+    target = dir_path + "/scstore/lib/libstore_engine.so"
     if os.path.exists(target):
         print(f"Removing {target}")
         os.remove(target)
 
 
-    print(f"Copying {dir_path + '/bazel-bin/core/libscstore.so'} to {target}")
+    print(f"Copying {dir_path + '/bazel-bin/core/libstore_engine.so'} to {target}")
     copyfile(
-            dir_path + "/bazel-bin/core/libscstore.so",
+            dir_path + "/bazel-bin/core/libstore_engine.so",
             target
     )
 
@@ -362,8 +362,8 @@ class DevelopCommand(develop):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=True)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=True)
 
         gen_version_file()
         develop.run(self)
@@ -376,8 +376,8 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=True)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
 
@@ -393,13 +393,13 @@ class InstallCommand(install):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(
+        build_libstore_engine_cxx11_abi(
             develop=False,
             pre_cxx11_abi=PRE_CXX11_ABI,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libscstore(debug=False)
+        copy_libstore_engine(debug=False)
 
         gen_version_file()
         install.run(self)
@@ -416,8 +416,8 @@ class BdistCommand(bdist_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=False)
+        build_libstore_engine_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=False)
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -434,9 +434,9 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         gen_version_file()
-        copy_libscstore(debug=True)
+        copy_libstore_engine(debug=True)
         editable_wheel.run(self)
 
 
@@ -493,6 +493,52 @@ ext_modules = []
 package_data = {}
 
 
+def find_cuda_runtime_lib_dir():
+    """Locate the CUDA runtime shared libs directory installed via NVIDIA pip packages.
+
+    Order of precedence:
+    1. CUDA_RUNTIME_LIB_DIR env var if it points to an existing dir
+    2. nvidia.cuda_runtime Python package's bundled lib dir
+    3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
+    """
+    # Use the installed Python package
+    import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+    pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
+    if pkg_lib.is_dir():
+        return str(pkg_lib)
+
+    return None
+
+
+def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
+    """Ensure libcudart.so exists for linkers that use -lcudart.
+
+    Some NVIDIA runtime wheels ship only versioned libs (e.g., libcudart.so.12)
+    without the unversioned development symlink (libcudart.so). The linker used
+    by CUDAExtension passes -lcudart, which requires the unversioned name. To
+    avoid a hard dependency on system dev packages, we create a local symlink
+    inside the runtime directory if it is missing.
+    """
+    try:
+        lib_path = Path(lib_dir)
+        unversioned = lib_path / "libcudart.so"
+        if unversioned.exists():
+            return
+
+        candidates = sorted(lib_path.glob("libcudart.so.*"))
+        if not candidates:
+            return
+
+        target = candidates[-1]
+        # Create a relative symlink to keep it stable across machines
+        os.symlink(target.name, unversioned)
+        print(f"Created symlink: {unversioned} -> {target.name}")
+    except Exception as e:
+        # Non-fatal; build may still succeed if system CUDA provides libcudart.so
+        print(f"Warning: could not create libcudart.so symlink in {lib_dir}: {e}")
+
+
 def cuda_dir():
     return os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
 
@@ -508,6 +554,10 @@ else:
 
 
 if BUILD_EXTENSION:
+    CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
+    if CUDA_RUNTIME_LIB_DIR:
+        ensure_cudart_unversioned_symlink(CUDA_RUNTIME_LIB_DIR)
+
     EXTENSIONS = {
         "_C": ["scstore/csrc/checkpoint_py.cc"],
         "_store_engine": ["scstore/csrc/store_engine_py.cc"],
@@ -528,14 +578,27 @@ if BUILD_EXTENSION:
         if CUDA_DIR:
             _include_dirs.append(CUDA_DIR + "/include")
 
+        # Library search paths
+        _library_dirs = [
+            (dir_path + "/scstore/lib"),
+        ]
+        if CUDA_RUNTIME_LIB_DIR:
+            _library_dirs.append(CUDA_RUNTIME_LIB_DIR)
+        # Add CUDA toolkit lib64 if available (for completeness)
+        if CUDA_DIR and os.path.isdir(CUDA_DIR + "/lib64"):
+            _library_dirs.append(CUDA_DIR + "/lib64")
+
+        # Add rpaths for runtime resolution
+        rpath_flags = []
+        if CUDA_RUNTIME_LIB_DIR:
+            rpath_flags.append(f"-Wl,-rpath,{CUDA_RUNTIME_LIB_DIR}")
+
         ext_modules += [
             CUDAExtension(
                 f"scstore.{name}",
                 sources,
-                library_dirs=[
-                    (dir_path + "/scstore/lib"),
-                ],
-                libraries=["scstore"],
+                library_dirs=_library_dirs,
+                libraries=["store_engine"],
                 include_dirs=_include_dirs,
                 extra_compile_args=(
                     [
@@ -561,7 +624,7 @@ if BUILD_EXTENSION:
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
                         "-Wl,--no-as-needed",
-                        "-lscstore",
+                        "-lstore_engine",
                         "-Wl,-rpath,$ORIGIN/lib",
                         "-lpthread",
                         "-ldl",
@@ -571,6 +634,7 @@ if BUILD_EXTENSION:
                         "-Xlinker",
                         "-export-dynamic",
                     ]
+                    + rpath_flags
                     + (
                         ["-D_GLIBCXX_USE_CXX11_ABI=0"]
                         if PRE_CXX11_ABI

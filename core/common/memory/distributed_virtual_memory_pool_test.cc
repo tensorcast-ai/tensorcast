@@ -18,6 +18,7 @@
 
 using namespace stepcast::memory;
 using namespace stepcast::store;
+using namespace stepcast::common;
 
 namespace {
 // Check if we're running in a CI environment with limited resources
@@ -291,6 +292,7 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
     const int iterations = 100;
     std::vector<std::thread> threads;
     std::atomic<int> success_count{0};
+    std::atomic<int> unlock_failure_count{0};
 
     threads.reserve(num_threads);
     for (int t = 0; t < num_threads; ++t) {
@@ -308,8 +310,11 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
             std::this_thread::sleep_for(std::chrono::microseconds(10));
 
             auto unlock_status = dvmp.unlock_chunks("concurrent_test", chunks, i % 2 == 0);
-            REQUIRE(unlock_status.ok());
-            success_count++;
+            if (!unlock_status.ok()) {
+              ++unlock_failure_count;
+            } else {
+              ++success_count;
+            }
           }
         }
       });
@@ -321,6 +326,8 @@ TEST_CASE("DistributedVirtualMemoryPool concurrent operations", "[dvmp]") {
 
     // Should have some successful operations
     REQUIRE(success_count > 0);
+    // All successful locks should be matched by successful unlocks
+    REQUIRE(unlock_failure_count == 0);
 
     // Verify final state consistency
     auto snapshot = dvmp.chunk_snapshot("concurrent_test");
@@ -448,7 +455,7 @@ TEST_CASE("DistributedVirtualMemoryPool error handling", "[dvmp]") {
 }
 
 TEST_CASE("DVMP mlock refcount integrates locks and leases", "[dvmp][mlock]") {
-  common::SystemCapabilities::instance().set_mlock_enabled(true);
+  SystemCapabilities::instance().set_mlock_enabled(true);
   DistributedVirtualMemoryPool dvmp(4096); // 4 KiB chunks
   auto region_or = dvmp.allocate("mlock_refcnt", 8192);
   REQUIRE(region_or.ok());
@@ -459,7 +466,7 @@ TEST_CASE("DVMP mlock refcount integrates locks and leases", "[dvmp][mlock]") {
 
   auto info_sp_or = dvmp.get_artifact_info("mlock_refcnt");
   REQUIRE(info_sp_or.ok());
-  auto info_sp = *info_sp_or;
+  const auto& info_sp = *info_sp_or;
   {
     std::lock_guard<std::mutex> guard(info_sp->artifact_mutex);
     REQUIRE(info_sp->pin_refcnt[0].load() == 1);

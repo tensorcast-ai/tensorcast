@@ -105,7 +105,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps -e .
 
-ADD scstore/lib/libscstore.so /app/scstore/lib/libscstore.so
+ADD scstore/lib/libstore_engine.so /app/scstore/lib/libstore_engine.so
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"

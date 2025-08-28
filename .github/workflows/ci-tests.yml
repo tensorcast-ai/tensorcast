@@ -15,7 +15,6 @@ jobs:
   cpp-tests:
     name: C++ Tests
     runs-on: ubuntu-latest-m
-    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
@@ -30,9 +29,9 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update && apt-get install -y git libxml2
+      # - name: Install system dependencies
+        # run: |
+          # sudo apt-get update && sudo apt-get install -y git libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -48,12 +47,57 @@ jobs:
         run: |
           printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
 
-      - name: Setup Build Environment
-        uses: ./.github/actions/setup-environment
+      # - name: Setup Build Environment
+      #   uses: ./.github/actions/setup-environment
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+          bazelisk-version: 1.16.0
 
       - name: Create symlink to external packages
         run: |
           ln -s $(bazel info output_base)/external external
+
+      - name: Build libstore_engine.so
+        run: |
+          bazel build //core:libstore_engine.so \
+            --define use_fake_cuda=true \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
+
+      - name: Upload libstore_engine.so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libstore_engine-so
+          path: bazel-bin/core/libstore_engine.so
+          if-no-files-found: error
+
+      - name: Restore Bazel external headers cache
+        id: cache-externals
+        uses: actions/cache@v4
+        with:
+          path: bazel-external-includes.tar.gz
+          key: bazel-external-includes-${{ hashFiles('MODULE.bazel') }}
+
+      - name: Archive Bazel external headers
+        if: steps.cache-externals.outputs.cache-hit != 'true'
+        run: |
+          tar -czf bazel-external-includes.tar.gz --dereference \
+            external/abseil-cpp+ \
+            external/grpc+/include \
+            external/protobuf+/src \
+            external/gsl+ \
+            external/nlohmann_json+/include
+
+      - name: Upload Bazel external headers artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-external-includes
+          path: bazel-external-includes.tar.gz
+          if-no-files-found: error
 
       - name: Run non-stress C++ tests
         timeout-minutes: 30
@@ -84,8 +128,8 @@ jobs:
 
   python-tests:
     name: Python Tests
+    needs: cpp-tests
     runs-on: ubuntu-latest-m
-    container: yuchuluo/stepcast-cuda:12.4.0-devel-ubuntu22.04
     defaults:
       run:
         shell: bash
@@ -100,10 +144,6 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update && apt-get install -y git libxml2
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -118,8 +158,23 @@ jobs:
         run: |
           printf '%s' '${{ secrets.GCLOUD_SERVICE_ACCOUNT }}' > credentials.json
 
-      - name: Setup Build Environment
-        uses: ./.github/actions/setup-environment
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.11"
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Set up Python
+        shell: bash
+        run: uv python install
+
+      - name: Install Python dependencies
+        shell: bash
+        run: uv sync --locked --all-extras --dev
 
       - name: Run Python linting
         run: |
@@ -131,18 +186,59 @@ jobs:
           uv run pyright ./scstore
           uv run mypy ./scstore
 
-      - name: Create symlink to external packages
-        run: |
-          ln -s $(bazel info output_base)/external external
+      - name: Download libstore_engine.so artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libstore_engine-so
+          path: .
 
-      - name: Generate Protocol Buffers
+      - name: Stage libstore_engine.so for setup.py
         run: |
-          bash tools/build_proto_python.sh
+          mkdir -p bazel-bin/core
+          cp -f libstore_engine.so bazel-bin/core/libstore_engine.so
+
+      - name: Restore Bazel external headers cache
+        id: cache-externals
+        uses: actions/cache@v4
+        with:
+          path: bazel-external-includes.tar.gz
+          key: bazel-external-includes-${{ hashFiles('MODULE.bazel') }}
+
+      - name: Download Bazel external headers artifact
+        uses: actions/download-artifact@v4
+        if: steps.cache-externals.outputs.cache-hit != 'true'
+        with:
+          name: bazel-external-includes
+          path: .
+
+      - name: Extract Bazel external headers
+        run: |
+          tar -xzf bazel-external-includes.tar.gz
+
+      - name: Generate Python Protocol Buffers (no Bazel)
+        run: |
+          uv run python -m grpc_tools.protoc \
+              --python_out=scstore/proto \
+              --pyi_out=scstore/proto \
+              --grpc_python_out=scstore/proto \
+              --proto_path=proto \
+              proto/store_daemon.proto
+          uv run python -m grpc_tools.protoc \
+              --python_out=scstore/proto \
+              --pyi_out=scstore/proto \
+              --grpc_python_out=scstore/proto \
+              --proto_path=proto \
+              proto/global_store.proto
+          sed -i 's/^import store_daemon_pb2/import scstore.proto.store_daemon_pb2/' scstore/proto/store_daemon_pb2_grpc.py
+          sed -i 's/^import global_store_pb2/import scstore.proto.global_store_pb2/' scstore/proto/global_store_pb2_grpc.py
 
       - name: Build C++ extensions with fake CUDA
         run: |
-          USE_REMOTE=1 USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+          USE_FAKE_CUDA=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
       - name: Run Python tests
         run: |
           uv run pytest tests/python/ -v --tb=short
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/scstore/lib:${{ env.LD_LIBRARY_PATH }}
+        shell: bash

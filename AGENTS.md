@@ -112,7 +112,7 @@ Acceptance: bazel test //tests/cpp:all passes; no data races under TSAN.
 
 ## Project Structure & Module Organization
 - `scstore/`: Python package and CLI (`scstore-cli`), daemon utilities, `global_store/`, and C++ extension shims in `csrc/`
-- `core/`: C++20 core library (Bazel target `//core:libscstore.so`)
+- `core/`: C++20 core library (Bazel target `//core:libstore_engine.so`)
 - `tests/python/`, `tests/cpp/`: Python and C++ tests
 - `proto/`: Protobuf definitions; Python stubs under `scstore/proto/`
 - `tools/`, `examples/`, `web-docs/`: Scripts, examples, and developer docs
@@ -140,7 +140,7 @@ uv run mypy ./scstore
 ### Run tests
 ```bash
 uv run pytest tests/python/**.py
-bazel build //core:libscstore.so
+bazel build //core:libstore_engine.so
 bazel test //tests/cpp:all
 ```
 

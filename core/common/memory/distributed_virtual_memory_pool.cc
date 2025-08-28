@@ -553,29 +553,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
 
 // ChunkResidencyLease impl --------------------------------------------------------------
 DistributedVirtualMemoryPool::ChunkResidencyLease::~ChunkResidencyLease() {
-  if (!impl_) {
-    return;
-  }
-
-  // Check if the lease has expired before releasing pins
-  if (is_expired()) {
-    LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for replica: " << impl_->artifact_id;
-  }
-
-  gsl::not_null<DistributedVirtualMemoryPool*> dvmp = impl_->dvmp;
-  if (!dvmp) {
-    return;
-  }
-  auto info_sp_or = dvmp->get_artifact_info(impl_->artifact_id);
-  if (!info_sp_or.ok()) {
-    return;
-  }
-  const auto& info_sp = *info_sp_or;
-  if (!info_sp) {
-    return;
-  }
-  std::lock_guard<std::mutex> artifact(info_sp->artifact_mutex);
-  dvmp->release_pins_unlocked(*info_sp, impl_->chunks);
+  release();
 }
 
 bool DistributedVirtualMemoryPool::ChunkResidencyLease::is_expired() const {
@@ -591,9 +569,40 @@ DistributedVirtualMemoryPool::ChunkResidencyLease::ChunkResidencyLease(ChunkResi
 DistributedVirtualMemoryPool::ChunkResidencyLease& DistributedVirtualMemoryPool::ChunkResidencyLease::operator=(
     ChunkResidencyLease&& other) noexcept {
   if (this != &other) {
+    // Release any currently held lease before taking ownership
+    release();
     impl_ = std::move(other.impl_);
   }
   return *this;
+}
+
+void DistributedVirtualMemoryPool::ChunkResidencyLease::release() noexcept {
+  if (!impl_) {
+    return;
+  }
+  // Warn if expired before release (debug signal only)
+  if (is_expired()) {
+    LOG(WARNING) << "ChunkResidencyLease expired before being destroyed for replica: " << impl_->artifact_id;
+  }
+
+  gsl::not_null<DistributedVirtualMemoryPool*> dvmp = impl_->dvmp;
+  if (!dvmp) {
+    impl_.reset();
+    return;
+  }
+  auto info_sp_or = dvmp->get_artifact_info(impl_->artifact_id);
+  if (!info_sp_or.ok()) {
+    impl_.reset();
+    return;
+  }
+  const auto& info_sp = *info_sp_or;
+  if (!info_sp) {
+    impl_.reset();
+    return;
+  }
+  std::lock_guard<std::mutex> artifact(info_sp->artifact_mutex);
+  dvmp->release_pins_unlocked(*info_sp, impl_->chunks);
+  impl_.reset();
 }
 
 void DistributedVirtualMemoryPool::release_pins_unlocked(DvmpRegionState& info, absl::Span<const uint32_t> chunks)

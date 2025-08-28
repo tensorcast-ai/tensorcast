@@ -123,6 +123,8 @@ class DistributedVirtualMemoryPool {
 
    private:
     friend class DistributedVirtualMemoryPool;
+    // Release the currently held lease, if any. Safe to call multiple times.
+    void release() noexcept;
     struct Impl {
       gsl::not_null<DistributedVirtualMemoryPool*> dvmp;
       std::string artifact_id;
