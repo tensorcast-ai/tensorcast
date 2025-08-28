@@ -493,6 +493,52 @@ ext_modules = []
 package_data = {}
 
 
+def find_cuda_runtime_lib_dir():
+    """Locate the CUDA runtime shared libs directory installed via NVIDIA pip packages.
+
+    Order of precedence:
+    1. CUDA_RUNTIME_LIB_DIR env var if it points to an existing dir
+    2. nvidia.cuda_runtime Python package's bundled lib dir
+    3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
+    """
+    # Use the installed Python package
+    import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+    pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
+    if pkg_lib.is_dir():
+        return str(pkg_lib)
+
+    return None
+
+
+def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
+    """Ensure libcudart.so exists for linkers that use -lcudart.
+
+    Some NVIDIA runtime wheels ship only versioned libs (e.g., libcudart.so.12)
+    without the unversioned development symlink (libcudart.so). The linker used
+    by CUDAExtension passes -lcudart, which requires the unversioned name. To
+    avoid a hard dependency on system dev packages, we create a local symlink
+    inside the runtime directory if it is missing.
+    """
+    try:
+        lib_path = Path(lib_dir)
+        unversioned = lib_path / "libcudart.so"
+        if unversioned.exists():
+            return
+
+        candidates = sorted(lib_path.glob("libcudart.so.*"))
+        if not candidates:
+            return
+
+        target = candidates[-1]
+        # Create a relative symlink to keep it stable across machines
+        os.symlink(target.name, unversioned)
+        print(f"Created symlink: {unversioned} -> {target.name}")
+    except Exception as e:
+        # Non-fatal; build may still succeed if system CUDA provides libcudart.so
+        print(f"Warning: could not create libcudart.so symlink in {lib_dir}: {e}")
+
+
 def cuda_dir():
     return os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
 
@@ -508,6 +554,10 @@ else:
 
 
 if BUILD_EXTENSION:
+    CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
+    if CUDA_RUNTIME_LIB_DIR:
+        ensure_cudart_unversioned_symlink(CUDA_RUNTIME_LIB_DIR)
+
     EXTENSIONS = {
         "_C": ["scstore/csrc/checkpoint_py.cc"],
         "_store_engine": ["scstore/csrc/store_engine_py.cc"],
@@ -528,14 +578,26 @@ if BUILD_EXTENSION:
         if CUDA_DIR:
             _include_dirs.append(CUDA_DIR + "/include")
 
+        # Library search paths
+        _library_dirs = [
+            (dir_path + "/scstore/lib"),
+        ]
+        if CUDA_RUNTIME_LIB_DIR:
+            _library_dirs.append(CUDA_RUNTIME_LIB_DIR)
+        # Add CUDA toolkit lib64 if available (for completeness)
+        if CUDA_DIR and os.path.isdir(CUDA_DIR + "/lib64"):
+            _library_dirs.append(CUDA_DIR + "/lib64")
+
+        # Add rpaths for runtime resolution
+        rpath_flags = []
+        if CUDA_RUNTIME_LIB_DIR:
+            rpath_flags.append(f"-Wl,-rpath,{CUDA_RUNTIME_LIB_DIR}")
+
         ext_modules += [
             CUDAExtension(
                 f"scstore.{name}",
                 sources,
-                library_dirs=[
-                    (dir_path + "/scstore/lib"),
-                    (dir_path + "/.venv/lib/python3.10/site-packages/nvidia/cuda_runtime/lib"),
-                ],
+                library_dirs=_library_dirs,
                 libraries=["store_engine"],
                 include_dirs=_include_dirs,
                 extra_compile_args=(
@@ -572,6 +634,7 @@ if BUILD_EXTENSION:
                         "-Xlinker",
                         "-export-dynamic",
                     ]
+                    + rpath_flags
                     + (
                         ["-D_GLIBCXX_USE_CXX11_ABI=0"]
                         if PRE_CXX11_ABI
