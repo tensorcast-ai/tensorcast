@@ -255,7 +255,7 @@ def ensure_external_symlink() -> None:
         print("  ln -s $(bazel info output_base)/external external")
 
 
-def build_libscstore_cxx11_abi(
+def build_libstore_engine_cxx11_abi(
     develop=True,
     use_dist_dir=False,
     pre_cxx11_abi=False,
@@ -307,7 +307,7 @@ def build_libscstore_cxx11_abi(
         for i, arg in enumerate(display_cmd):
             if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
-    print(f"building libscstore cmd={display_cmd}")
+    print(f"building libstore_engine cmd={display_cmd}")
     status_code = subprocess.run(cmd).returncode
 
     if status_code != 0:
@@ -326,7 +326,7 @@ def gen_version_file():
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
 
 
-def copy_libscstore(debug: bool):
+def copy_libstore_engine(debug: bool):
     if not BUILD_EXTENSION:
         return
 
@@ -362,8 +362,8 @@ class DevelopCommand(develop):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=True)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=True)
 
         gen_version_file()
         develop.run(self)
@@ -376,8 +376,8 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=True)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
 
@@ -393,13 +393,13 @@ class InstallCommand(install):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(
+        build_libstore_engine_cxx11_abi(
             develop=False,
             pre_cxx11_abi=PRE_CXX11_ABI,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libscstore(debug=False)
+        copy_libstore_engine(debug=False)
 
         gen_version_file()
         install.run(self)
@@ -416,8 +416,8 @@ class BdistCommand(bdist_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
-        copy_libscstore(debug=False)
+        build_libstore_engine_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        copy_libstore_engine(debug=False)
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -434,9 +434,9 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libscstore_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         gen_version_file()
-        copy_libscstore(debug=True)
+        copy_libstore_engine(debug=True)
         editable_wheel.run(self)
 
 
@@ -561,7 +561,7 @@ if BUILD_EXTENSION:
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
                         "-Wl,--no-as-needed",
-                        "-lscstore",
+                        "-lstore_engine",
                         "-Wl,-rpath,$ORIGIN/lib",
                         "-lpthread",
                         "-ldl",
