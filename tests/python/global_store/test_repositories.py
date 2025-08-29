@@ -4,7 +4,7 @@
 
 import pytest
 
-from scstore.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import Replica, Worker, MemoryType
 
 
 class TestRepositories:
@@ -282,7 +282,7 @@ class TestRepositories:
         created_replica = replica_repo.create(replica)
 
         # Create transport
-        from scstore.global_store.models import Transport
+        from tensorcast.global_store.models import Transport
         transport = Transport(
             replica_id=created_replica.replica_id,
             artifact_id="test_artifact",

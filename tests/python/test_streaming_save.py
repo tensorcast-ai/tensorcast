@@ -9,7 +9,7 @@ import os
 import pytest
 import torch
 
-from scstore.torch_util import save_dict, load_dict_from_disk
+from tensorcast.torch_util import save_dict, load_dict_from_disk
 
 
 @pytest.fixture

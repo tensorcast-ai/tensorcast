@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from scstore.global_store.webui_backend.api import (
+from tensorcast.global_store.webui_backend.api import (
     get_summary,
     list_workers,
     get_worker,
@@ -16,9 +16,9 @@ from scstore.global_store.webui_backend.api import (
     list_nodes,
     list_transports,
 )
-from scstore.global_store.webui_backend.models import MemoryType
-from scstore.proto import global_store_pb2
-from scstore.global_store.webui_backend.grpc_client import WorkerInfoWrapper
+from tensorcast.global_store.webui_backend.models import MemoryType
+from tensorcast.proto import global_store_pb2
+from tensorcast.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
 def create_mock_client():
@@ -216,7 +216,7 @@ async def test_transports_endpoint():
 def test_all_endpoints_use_grpc():
     """Verify all endpoints are refactored to use gRPC."""
     import inspect
-    from scstore.global_store.webui_backend import api
+    from tensorcast.global_store.webui_backend import api
 
     # Get all functions in the api module
     functions = inspect.getmembers(api, inspect.isfunction)

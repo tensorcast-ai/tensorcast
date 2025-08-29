@@ -62,7 +62,7 @@ high_availability:
 ### Starting Global Store with HA
 
 ```python
-from scstore.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
 
 # Start with persistent database for recovery
 global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
@@ -73,8 +73,8 @@ global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 ### Starting Store Daemon with HA
 
 ```python
-from scstore.store_daemon.servicer import StoreDaemonServicer
-from scstore.store_daemon.config import StoreDaemonConfig
+from tensorcast.store_daemon.servicer import StoreDaemonServicer
+from tensorcast.store_daemon.config import StoreDaemonConfig
 
 # Configure with HA enabled
 config = StoreDaemonConfig(

@@ -31,7 +31,7 @@
   - use `uv run xxx.py` to run python scripts instead of `python xxx.py`
 - **Testing**: pytest (destination: `tests/python/`); use `uv run pytest tests/python/xxxx` to run tests.
 - **Type Checking**: pyright & mypy & ruff
-  - `uv run mypy ./scstore`
+  - `uv run mypy ./tensorcast`
   - `uv run ruff check .`
   - `uv run ruff format .`
 - **Data Modeling**: Pydantic

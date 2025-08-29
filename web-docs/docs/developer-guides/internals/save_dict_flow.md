@@ -1,12 +1,12 @@
 ---
 title: save_dict Workflow
-description: Detailed explanation of how scstore persists PyTorch state_dict using save_dict
+description: Detailed explanation of how tensorcast persists PyTorch state_dict using save_dict
 sidebar_position: 2
 ---
 
 # `save_dict` Workflow
 
-This document explains how **scstore** persists a PyTorch `state_dict` using the Python helper `save_dict` and the underlying C++ Checkpoint subsystem.
+This document explains how **tensorcast** persists a PyTorch `state_dict` using the Python helper `save_dict` and the underlying C++ Checkpoint subsystem.
 
 ---
 
@@ -23,8 +23,8 @@ This document explains how **scstore** persists a PyTorch `state_dict` using the
 
 | Layer | Function | File |
 |-------|----------|------|
-| Python API | `save_dict` | `scstore/torch_util.py` |
-| PyBind11 wrapper | `save_tensors_streaming_wrapper` (or `save_tensors_wrapper`) | `scstore/csrc/checkpoint_py.cc` |
+| Python API | `save_dict` | `tensorcast/torch_util.py` |
+| PyBind11 wrapper | `save_tensors_streaming_wrapper` (or `save_tensors_wrapper`) | `tensorcast/csrc/checkpoint_py.cc` |
 | C++ Checkpoint API | `save_tensors_streaming` / `save_tensors` | `core/checkpoint/checkpoint.h` |
 | Streaming writer | `StreamingTensorWriter::write_tensor` | `core/checkpoint/streaming_tensor_writer.h` |
 | Low-level I/O | `AlignedBuffer::write_data` | `core/checkpoint/aligned_buffer.h` |
@@ -38,7 +38,7 @@ This document explains how **scstore** persists a PyTorch `state_dict` using the
 sequenceDiagram
     autonumber
     participant U as "User code"
-    participant PY as "save_dict()\nscstore/torch_util.py"
+    participant PY as "save_dict()\ntensorcast/torch_util.py"
     participant CPP as "save_tensors_streaming_wrapper\ncheckpoint_py.cc"
     participant API as "save_tensors_streaming\ncheckpoint.h"
     participant TW as "StreamingTensorWriter"

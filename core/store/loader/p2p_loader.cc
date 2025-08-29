@@ -109,8 +109,8 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       .total_size = source_.size_bytes};
   auto remote_src = std::make_shared<store::loader::RemoteKeySource>(src_opts);
 
-  // Optional disk fallback via env var SCSTORE_FALLBACK_MODEL_DIR
-  const char* fb_dir_env = ::getenv("SCSTORE_FALLBACK_MODEL_DIR");
+  // Optional disk fallback via env var TENSORCAST_FALLBACK_MODEL_DIR
+  const char* fb_dir_env = ::getenv("TENSORCAST_FALLBACK_MODEL_DIR");
   if (fb_dir_env != nullptr && std::strlen(fb_dir_env) > 0) {
     auto disk_opts_or = build_fallback_disk_source_opts(fb_dir_env, 128 * 1024 * 1024, source_.size_bytes);
     if (disk_opts_or.ok()) {

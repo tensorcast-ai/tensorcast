@@ -4,9 +4,9 @@ import pytest
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import grpc
-from scstore.proto import global_store_pb2_grpc
-from scstore.global_store.grpc_service import GlobalStoreServicer
-from scstore.store_daemon import health_check as _health_check  # pylint: disable=import-error
+from tensorcast.proto import global_store_pb2_grpc
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.store_daemon import health_check as _health_check  # pylint: disable=import-error
 from typing import Iterator
 
 

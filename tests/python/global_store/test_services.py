@@ -4,8 +4,8 @@
 
 import pytest
 
-from scstore.global_store.models import Replica, Worker, MemoryType
-from scstore.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
+from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
 
 
 class TestServices:

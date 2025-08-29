@@ -13,7 +13,7 @@ alwaysApply: false
 uv sync --all-extras --all-groups
 
 # Build all. BUILD_CORE means cxx files in core/
-#  BUILD_EXTENSION means cxx files in scstore/csrc
+#  BUILD_EXTENSION means cxx files in tensorcast/csrc
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
@@ -44,8 +44,8 @@ python -m pytest tests/python/test_name
 - **Includes**: checkpoint, store, communicator modules
 
 ### Python Extension (`BUILD_EXTENSION=1`)
-- **Location**: `/scstore/csrc/` directory
-- **Output**: `scstore._store_engine`, `scstore._C`
+- **Location**: `/tensorcast/csrc/` directory
+- **Output**: `tensorcast._store_engine`, `tensorcast._C`
 - **Purpose**: Python bindings for C++ core
 
 ### Fake CUDA Backend (`USE_FAKE_CUDA=1`)

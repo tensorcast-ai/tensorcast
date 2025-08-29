@@ -2,7 +2,7 @@
 
 import torch
 from typing import Any
-from scstore.torch_util import load_dict
+from tensorcast.torch_util import load_dict
 
 
 def compare_tensor_dicts(

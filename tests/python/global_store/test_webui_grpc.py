@@ -5,12 +5,12 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from scstore.global_store.webui_backend.grpc_client import (
+from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from scstore.proto import global_store_pb2
-from scstore.global_store.webui_backend.grpc_client import WorkerInfoWrapper
+from tensorcast.proto import global_store_pb2
+from tensorcast.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ async def test_grpc_client_connection():
     # The implementation relies on the *blocking* (non-aio) API, so patch that
     # instead of ``grpc.aio`` to avoid real network traffic during the unit test.
     with patch("grpc.insecure_channel") as mock_channel, patch(
-        "scstore.global_store.webui_backend.grpc_client.global_store_pb2_grpc.GlobalStoreStub"
+        "tensorcast.global_store.webui_backend.grpc_client.global_store_pb2_grpc.GlobalStoreStub"
     ) as mock_stub:
         # Mock channel instance returned by grpc.insecure_channel
         mock_channel_instance = MagicMock()
@@ -93,7 +93,7 @@ async def test_grpc_client_connection():
 @pytest.mark.asyncio
 async def test_api_endpoints_with_grpc(mock_grpc_client):
     """Test API endpoints using gRPC client."""
-    from scstore.global_store.webui_backend.api import get_summary, list_workers, list_artifacts
+    from tensorcast.global_store.webui_backend.api import get_summary, list_workers, list_artifacts
 
     # Test summary endpoint
     summary_response = await get_summary(mock_grpc_client)
@@ -120,7 +120,7 @@ async def test_api_endpoints_with_grpc(mock_grpc_client):
 @pytest.mark.asyncio
 async def test_websocket_polling(mock_grpc_client):
     """Test WebSocket polling mechanism."""
-    from scstore.global_store.webui_backend.websocket import WebSocketManager
+    from tensorcast.global_store.webui_backend.websocket import WebSocketManager
 
     ws_manager = WebSocketManager()
     ws_manager.set_grpc_client(mock_grpc_client)

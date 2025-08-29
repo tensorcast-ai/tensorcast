@@ -13,7 +13,7 @@ This guide provides detailed information for developers working on the Global St
 The Global Store follows a clean, layered architecture for maintainability and testability:
 
 ```
-scstore/global_store/
+tensorcast/global_store/
 ├── __init__.py           # Package initialization
 ├── __main__.py           # Entry point
 ├── grpc_service.py       # gRPC service implementation
@@ -262,7 +262,7 @@ Global Store exposes Prometheus metrics on `:8000/metrics`:
 
 ### Metric Implementation
 ```python
-from scstore.global_store.metrics import (
+from tensorcast.global_store.metrics import (
     REPLICA_GAUGE,
     TRANSPORT_COUNTER,
     record_transport_wait_time
@@ -304,7 +304,7 @@ tests/python/global_store/
 pytest tests/python/global_store/ -v
 
 # With coverage
-pytest tests/python/global_store/ --cov=scstore.global_store
+pytest tests/python/global_store/ --cov=tensorcast.global_store
 
 # Specific test file
 pytest tests/python/global_store/test_services.py -v

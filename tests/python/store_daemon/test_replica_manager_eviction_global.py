@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from scstore.store_daemon.replica_manager import ReplicaManager
-from scstore.store_daemon.replica_ref import ReplicaKey
+from tensorcast.store_daemon.replica_manager import ReplicaManager
+from tensorcast.store_daemon.replica_ref import ReplicaKey
 
 
 class MockServicer:

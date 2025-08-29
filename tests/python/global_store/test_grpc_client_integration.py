@@ -17,11 +17,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from scstore.global_store.webui_backend.grpc_client import (
+from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from scstore.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
 from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 console = Console()

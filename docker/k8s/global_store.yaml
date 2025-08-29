@@ -65,7 +65,7 @@ spec:
       - name: global-store
         image: hub.i.basemind.com/tensorcast/global-store:2025.07.08-61f0f
         imagePullPolicy: IfNotPresent
-        command: ["python", "-m", "scstore.global_store"]
+        command: ["python", "-m", "tensorcast.global_store"]
         env:
         # Database configuration
         - name: GLOBAL_STORE_DB_PATH

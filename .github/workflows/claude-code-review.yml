@@ -7,8 +7,8 @@ on:
     paths:
       - "core/**/*.cc"
       - "core/**/*.h"
-      - "scstore/**/*.py"
-      - "scstore/csrc/*.cc"
+      - "tensorcast/**/*.py"
+      - "tensorcast/csrc/*.cc"
       - "proto/*.proto"
       - "**/BUILD"
 

@@ -4,7 +4,7 @@
 import torch
 from transformers import AutoModelForCausalLM
 
-# from scstore.transformers_util import save_model
+# from tensorcast.transformers_util import save_model
 
 # parser = argparse.ArgumentParser(description="Save a artifact from HuggingFace artifact hub.")
 # parser.add_argument(

@@ -59,7 +59,7 @@ class GlobalStoreRecoveryService:
         """Synchronize worker states with database."""
 ```
 
-The `RecoveryService` class in `scstore/global_store/services/recovery_service.py` implements these features with additional methods:
+The `RecoveryService` class in `tensorcast/global_store/services/recovery_service.py` implements these features with additional methods:
 - `initiate_recovery()` - Main recovery entry point
 - `handle_worker_recovery_registration()` - Handles worker recovery scenarios
 - `synchronize_worker_state()` - Performs state synchronization

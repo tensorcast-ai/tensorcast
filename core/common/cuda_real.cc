@@ -131,8 +131,8 @@ absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
   *handle = ss.str();
 
   // Record mapping for same-process fallback (unit tests) only when enabled
-  // via explicit env var SCSTORE_ENABLE_IPC_SAME_PROCESS_FALLBACK=1
-  if (const char* en = std::getenv("SCSTORE_ENABLE_IPC_SAME_PROCESS_FALLBACK");
+  // via explicit env var TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK=1
+  if (const char* en = std::getenv("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK");
       en && (en[0] == '1' || en[0] == 'T' || en[0] == 't' || en[0] == 'Y' || en[0] == 'y')) {
     absl::MutexLock lock(&g_ipc_map_mu);
     int current_device = -1;
@@ -168,7 +168,7 @@ absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
     auto it = g_exported_ipc_map.find(handle);
     if (it != g_exported_ipc_map.end()) {
       // Only allow fallback when explicitly enabled via env var
-      const char* enable_env = std::getenv("SCSTORE_ENABLE_IPC_SAME_PROCESS_FALLBACK");
+      const char* enable_env = std::getenv("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK");
       if (!enable_env ||
           (enable_env[0] != '1' && enable_env[0] != 'T' && enable_env[0] != 't' && enable_env[0] != 'Y' &&
            enable_env[0] != 'y')) {

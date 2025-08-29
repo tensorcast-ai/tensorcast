@@ -5,7 +5,7 @@
 import time
 import pytest
 
-from scstore.store_daemon.replica_ref import ReplicaKey, ReplicaRefInfo
+from tensorcast.store_daemon.replica_ref import ReplicaKey, ReplicaRefInfo
 
 
 class TestReplicaKey:

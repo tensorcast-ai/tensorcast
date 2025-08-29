@@ -5,8 +5,8 @@ import gc
 import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
-from scstore import init
-from scstore.torch_util import register_artifact
+from tensorcast import init
+from tensorcast.torch_util import register_artifact
 
 init()
 
