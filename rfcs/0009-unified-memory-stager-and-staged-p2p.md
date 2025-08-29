@@ -201,21 +201,11 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
 
 ## 5. Code References (current)
 
-- CPU export registering DVMP ranges as communicator tensors:
-```69:99:/workspace/core/store/replica/chunk_export_service.cc
-```
-- RDMA register on registration:
-```134:189:/workspace/core/communicator/engine/engine.cc
-```
-- RDMA READ uses tensor MR directly:
-```456:466:/workspace/core/communicator/engine/engine.cc
-```
-- GPU TCP staging exists:
-```33:92:/workspace/core/communicator/engine/gpu_tcp_stager.cc
-```
-- Pinned pool (host) without RDMA MR cache:
-```26:67:/workspace/core/common/memory/pinned_memory_pool.cc
-```
+- CPU export registering DVMP ranges as communicator tensors: 69:99:/workspace/core/store/replica/chunk_export_service.cc
+- RDMA register on registration: 134:189:/workspace/core/communicator/engine/engine.cc
+- RDMA READ uses tensor MR directly: 456:466:/workspace/core/communicator/engine/engine.cc
+- GPU TCP staging exists: 33:92:/workspace/core/communicator/engine/gpu_tcp_stager.cc
+- Pinned pool (host) without RDMA MR cache: 26:67:/workspace/core/common/memory/pinned_memory_pool.cc
 
 ## 6. Implementation Plan
 
@@ -294,16 +284,42 @@ sequenceDiagram
 ```
 
 ### 8.3 CPU/GPU → TCP (staged)
+#### CPU (DVMP) → TCP (staged)
 ```mermaid
 sequenceDiagram
   participant Sv as Server
-  participant ST as MemoryStager
+  participant ST as DRAMStager
+  participant DV as DVMP
   participant MTCP as MTcpTransport
 
-  Sv->>ST: stage(off,len)
+  Sv->>ST: stage(offset,len)
+  ST->>DV: pin_range(offset,len)
+  DV-->>ST: lease_token
+  ST->>ST: memcpy(DVMP VA → pinned_pool)
+  ST-->>DV: release lease_token
+  Note over DV,ST: Lease held only during memcpy
   ST-->>Sv: StageToken{host_ptr,len}
-  Sv->>MTCP: enqueue(host_ptr,len)
-  MTCP-->>ST: send_done → complete()
+  Sv->>MTCP: enqueue(host_ptr,len, token)
+  MTCP->>MTCP: send over sockets
+  MTCP-->>ST: send_done(token) → complete()
+```
+
+#### GPU → TCP (staged)
+```mermaid
+sequenceDiagram
+  participant Sv as Server
+  participant ST as GpuNetStager
+  participant CU as CUDA
+  participant MTCP as MTcpTransport
+
+  Sv->>ST: stage(offset,len)
+  ST->>CU: cudaMemcpyAsync(D2H, stream)
+  CU-->>ST: event_complete
+  ST-->>Sv: StageToken{host_ptr,len}
+  Sv->>MTCP: enqueue(host_ptr,len, token)
+  MTCP->>MTCP: send over sockets
+  MTCP-->>ST: send_done(token) → complete()
+  Note over ST,MTCP: RAII returns buffer to pool on send completion
 ```
 
 ## 9. Alternatives Considered
