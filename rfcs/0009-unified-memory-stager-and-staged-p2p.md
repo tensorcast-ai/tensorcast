@@ -140,12 +140,15 @@ sequenceDiagram
 - No per-transfer `ibv_reg_mr` churn. MR lookup by `(pd, buffer_ptr)` maps to a cached `ibv_mr*`.
 - For multi-NIC: per-PD MR registries.
 
-### 3.4 NUMA-aware pinned pools
-- Create per-domain pools: `pool[by_nic]`, `pool[by_gpu]`, or `pool[fixed_node]` per policy.
-- Selection:
-  - GPU staging: pool near GPU (minimize D2H)
-  - CPU staging for RDMA: pool near NIC PD
-  - CPU staging for MTCP: pool near sending CPU cores or NIC
+### 3.4 Simple NUMA mapping (initial)
+- Configure a small set of NUMA nodes (typically 2) explicitly in config.
+- For each NUMA node, list the NICs and GPUs that are considered local/affine.
+- The system creates one pinned pool per configured NUMA node.
+- Selection rule:
+  - GPU staging: choose the pool for the NUMA node that lists the GPU id.
+  - CPU staging for RDMA: choose the pool for the NUMA node that lists the NIC name.
+  - CPU staging for MTCP: fall back to the default NUMA node (configurable), or NIC-local if set.
+- No auto-discovery or distance scoring in the initial version; misconfig simply falls back to the default node.
 
 ### 3.5 Registration layering and coordination
 - Application-level registration (PartitionTensor in store): Identify logical source (DVMP VA or GPU base), key, size, device type. No requirement to have an MR.
@@ -165,7 +168,7 @@ This guarantees large artifacts are never pinned as a whole.
 
 ### 3.7 Protocol additions
 - New op: `ENGINE_OP_RDMA_READ_DONE` (Client ➜ Server) with `{tensor_key, offset, bytes}` or `req_key`.
-- Server releases staged resources on ACK. If ACK missing, apply TTL reap (`TENSORCASTCOMM_RDMA_STAGE_TTL_MS`).
+- Server releases staged resources on ACK. If ACK missing, apply TTL reap (`rdma.ack_ttl_ms`).
 
 Backward compatibility: If server responds with a direct MR (legacy), client behavior unchanged. The ACK is only required for staged RDMA responses (server advertises a flag in READ_RESPONSE reserved bits).
 
@@ -208,16 +211,22 @@ This RFC adopts a unified, layered configuration model across C++ and Python, re
     - `outstanding_wr: int` (default: 64)
     - `ack_ttl_ms: int` (default: 30000)
   - pool:
-    - `numa_policy: string` ("auto"|"nic"|"gpu"|"fixed:<node>") (default: "auto")
     - `preregister_mr: bool` (default: true)
     - `pool_size_bytes: uint64` (default: 8 GiB)
     - `chunk_bytes: uint64` (default: 64 MiB)
+    - `simple_numa.enable: bool` (default: false)
+    - `simple_numa.nodes: list<SimpleNumaNode>`
   - transport:
     - `tcp_conn_count: int` (default: 8)
   - affinity:
-    - `enable: bool` (default: false)
-    - `rdma_poll_core_mask: string` (bitmap)
-    - `stage_core_mask: string` (bitmap)
+    - `enable: bool` (default: false; reserved for future CPU pinning; masks not yet supported)
+
+Where `SimpleNumaNode` is:
+
+- `id: int` — NUMA node id
+- `nics: list<string>` — NIC device names local to this node
+- `gpus: list<int>` — GPU ids local to this node
+- `default: bool` — optional; if true, used as fallback when selection is ambiguous
 
 Implementations:
 - C++: `core/communicator/engine/communicator_config.{h,cc}`
@@ -244,10 +253,19 @@ communicator:
     outstanding_wr: 64
     ack_ttl_ms: 30000
   pool:
-    numa_policy: auto
     preregister_mr: true
     pool_size_bytes: 8589934592   # 8 GiB
     chunk_bytes: 67108864         # 64 MiB
+    simple_numa:
+      enable: true
+      nodes:
+        - id: 0
+          nics: ["mlx5_0", "mlx5_1"]
+          gpus: [0, 1]
+          default: true
+        - id: 1
+          nics: ["mlx5_2", "mlx5_3"]
+          gpus: [2, 3]
   transport:
     tcp_conn_count: 8
   affinity:
@@ -280,9 +298,10 @@ communicator:
 - Add MR cache in pinned pool per PD; pre-register MRs on pool init for registered NICs.
  - Introduce `CommunicatorConfig` and config loaders; migrate all engine env reads to typed config access.
 
-### Phase 3 — NUMA-aware pools
-- Add NUMA placement and policy to `PinnedMemoryPool`.
-- Create per-NIC and per-GPU pools; selection policy in MemoryStager.
+### Phase 3 — Simple NUMA mapping
+- Add per-NUMA-node pools configured via `simple_numa.nodes`.
+- Selection: GPU → node that lists the GPU; RDMA → node that lists the NIC; TCP → default node.
+- No auto-discovery; selection falls back to default on ambiguity.
 
 ### Phase 4 — Cleanup and policy knobs
 - Optional: enable direct MR for small CPU slabs (disable staging) via policy; default remains staged.
@@ -440,11 +459,11 @@ This section refines the design with specific knobs and mechanisms to maximize e
 - Default policy:
   - CPU: staged for RDMA (to avoid DVMP pinning) and direct for TCP.
   - GPU: staged for both RDMA and TCP.
-- Override for hot, small CPU slabs (≤ `TENSORCASTCOMM_DIRECT_MR_MAX_BYTES`): allow DirectMR to skip memcpy if UMA marks chunk range as HOT+Resident and total bytes small, bounded by `max_inflight_direct_mr`.
+- Override for hot, small CPU slabs (≤ `stager.direct_mr_max_bytes`): allow DirectMR to skip memcpy if UMA marks chunk range as HOT+Resident and total bytes small, bounded by `stager.max_inflight_direct_mr`.
 
 Knobs:
-- `TENSORCASTCOMM_DIRECT_MR_MAX_BYTES` (default 4 MiB)
-- `TENSORCASTCOMM_MAX_INFLIGHT_DIRECT_MR` (default 32)
+- `stager.direct_mr_max_bytes` (default 4 MiB)
+- `stager.max_inflight_direct_mr` (default 32)
 
 Rationale: tiny transfers are memcpy-bound; avoiding staging can help if DVMP guarantee prevents eviction during the small window. Still bounded to avoid system pin growth.
 
@@ -455,9 +474,9 @@ Rationale: tiny transfers are memcpy-bound; avoiding staging can help if DVMP gu
 - RDMA: allow multiple outstanding reads per request; `RdmaTransport` to post `k` WRs in advance (default 64) and coalesce READs up to MR boundary.
 
 Knobs:
-- `TENSORCASTCOMM_STAGE_BUFFERS_PER_FLOW` (default 4)
-- `TENSORCASTCOMM_RDMA_OUTSTANDING_WR` (default 64)
-- `TENSORCASTCOMM_TCP_CONN_COUNT` (already exists)
+- `stager.buffers_per_flow` (default 4)
+- `rdma.outstanding_wr` (default 64)
+- `transport.tcp_conn_count` (already exists)
 
 ### 14.3 Chunk sizing tuned to BDP
 
@@ -466,21 +485,19 @@ Knobs:
   - PCIe Gen4 GPU D2H prefers ≥ 16 MiB for high sustained rates; use larger staging chunks on GPU side when CPU can handle it.
 
 Knobs:
-- `TENSORCASTCOMM_STAGE_CHUNK_MB_CPU` (default 4)
-- `TENSORCASTCOMM_STAGE_CHUNK_MB_GPU` (default 16)
+- `stager.stage_chunk_mb_cpu` (default 4)
+- `stager.stage_chunk_mb_gpu` (default 16)
 
 Validation: expose dynamic autotune to increase/decrease chunk sizes based on observed throughput and completion latency percentiles.
 
 ### 14.4 NUMA and affinity
 
-- Bind staging memcpy threads to cores local to the memory node of the pool buffer.
-- For GPU staging, prefer pools local to the GPU’s closest NUMA node and bind D2H streams to a dedicated CUDA stream per GPU.
-- For RDMA, prefer pools local to NIC’s NUMA node; pin `RdmaThread::poll_loop` to NIC-local cores.
+- Initial scope: only pool selection by configured NUMA mapping. No CPU core pinning.
+- GPU staging uses a dedicated CUDA stream per stager; no special CPU affinity yet.
+- RDMA poll threads may be pinned in the future; not in initial scope.
 
 Knobs:
-- `TENSORCASTCOMM_AFFINITY_ENABLE=true|false`
-- `TENSORCASTCOMM_RDMA_POLL_CORE_MASK` (bitmap)
-- `TENSORCASTCOMM_STAGE_CORE_MASK` (bitmap) per GPU/CPU domain
+- `affinity.enable` (reserved; no masks in initial release)
 
 ### 14.5 Copy engines and async completion
 
@@ -526,6 +543,7 @@ Counters and histograms:
 ### 14.11 Mapping to code changes
 
 - `PinnedMemoryPool`: add per-PD MR registry; add NUMA placement; expose `reserve_buffers(n)` for preallocation.
+ - `PinnedMemoryPool`: add per-PD MR registry; one pool per configured NUMA node; expose `reserve_buffers(n)` for preallocation.
 - `GpuTcpStager` → `GpuNetStager`: add MR lookup, configurable chunk size, buffers per flow.
 - `DRAMStager`: support multi-buffer stage with memcpy and RAII completion queue.
 - `CommunicateEngine`:
@@ -533,3 +551,4 @@ Counters and histograms:
   - Add autotune engine that observes throughput and tail latencies and adjusts chunk size/buffers.
 - `RdmaTransport`: pipeline multiple WRs per response; add ACK batching.
 - `MTcpTransport`: ensure deep send queue; avoid frequent heap allocations by pooling `MTcpTransportChunk`.
+- `CommunicateEngine`: choose pool via `simple_numa` mapping (GPU id → node; NIC name → node; else default).
