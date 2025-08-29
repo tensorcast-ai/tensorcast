@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/dvmp_region_sink.h"
 
@@ -7,7 +7,7 @@
 #include "absl/log/log.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 DVMPRegionSink::DVMPRegionSink(Options options) : options_(std::move(options)) {
   if (options_.total_size == 0) {
@@ -31,4 +31,4 @@ absl::Status DVMPRegionSink::write_at(uint64_t offset, const void* src, size_t b
   return options_.region.write_at(offset, src, bytes);
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

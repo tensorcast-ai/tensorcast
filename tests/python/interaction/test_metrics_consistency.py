@@ -1,12 +1,12 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 from __future__ import annotations
 
 import prometheus_client
 import pytest
 
-from scstore.proto import global_store_pb2
-from scstore.global_store import metrics as gs_metrics
+from tensorcast.proto import global_store_pb2
+from tensorcast.global_store import metrics as gs_metrics
 
 from tests.python.interaction.utils import FakeContext
 

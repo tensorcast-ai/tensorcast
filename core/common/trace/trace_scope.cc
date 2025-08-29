@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 
@@ -6,7 +6,7 @@
 
 #include "core/common/trace/trace_manager.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 TraceScope::TraceScope(const std::string& replica, const std::string& stage)
     : artifact_id_(replica), request_id_(TraceManager::current_request_id()) {
@@ -40,4 +40,4 @@ void TraceScope::Finish() {
   }
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

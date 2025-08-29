@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_TCP_CONTEXT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_TCP_CONTEXT_H_
@@ -13,7 +13,7 @@
 #include "core/communicator/misc/common.h"
 #include "core/communicator/transport/tcp_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 typedef std::function<result_t(tcp_transport_t)> on_accept_func_t;
 
@@ -52,6 +52,6 @@ class TcpContext {
 };
 typedef std::shared_ptr<TcpContext> tcp_context_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_TCP_CONTEXT_H_

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Global Store test suite.
 
@@ -19,5 +19,5 @@ Run specific test module:
     pytest tests/python/global_store/test_artifacts.py
 
 Run with coverage:
-    pytest tests/python/global_store/ --cov=scstore.global_store
+    pytest tests/python/global_store/ --cov=tensorcast.global_store
 """

@@ -207,7 +207,7 @@ absl::Status pump_ranges(
 - Optional: extend `load_from_source` fallback to read size from `SafetensorsSource` when UMA does not provide it
 
 4) Python integration
-- Add header parser and dtype mapping in `scstore/torch_util.py`
+- Add header parser and dtype mapping in `tensorcast/torch_util.py`
 - `load_dict` and `load_dict_pure_local` add a Safetensors path that constructs meta/data indices from the header and uses identity offsets
 - Tests: CPU & GPU restoration from `.safetensors`
 
@@ -225,7 +225,7 @@ absl::Status pump_ranges(
 | `core/store/loader/disk_loader.cc` | Update | Detect `.safetensors`; compute data_size; return `SafetensorsSource` |
 | `core/store/replica/transfer_service.cc` | Update (optional) | Fallback: size from `SafetensorsSource`/`MultiSafetensorsSource` when UMA is empty |
 | `core/store/loader/multi_safetensors_source.h/.cc` | Add | Concatenate multiple Safetensors data buffers into one logical source |
-| `scstore/torch_util.py` | Update | Parse header; build meta/data indices; identity offsets |
+| `tensorcast/torch_util.py` | Update | Parse header; build meta/data indices; identity offsets |
 | `core/checkpoint/*` | Update | Verification: handle `.safetensors` data buffer only |
 | `core/store/loader/BUILD` | Update | Add new source, tests |
 | `web-docs/docs/developer-guides/...` | Update | Add Safetensors loading doc |
@@ -397,7 +397,7 @@ flowchart LR
 | 2 | Add `MultiSafetensorsSource` + unit tests | ✅ Implemented (tests TBD) | Added `core/store/loader/multi_safetensors_source.{h,cc}` |
 | 3 | `DiskLoader` multi-file detection + open source | ✅ Implemented | Detects `*.safetensors`, computes data sizes, returns appropriate source |
 | 4 | TransferService fallback (optional) | ✅ Implemented | Fallback reads size from `SafetensorsSource`/`MultiSafetensorsSource` |
-| 5 | Python header parse & merge + load paths | ✅ Implemented | `scstore/torch_util.py` builds indices from `.safetensors` when no `tensor_index.json` |
+| 5 | Python header parse & merge + load paths | ✅ Implemented | `tensorcast/torch_util.py` builds indices from `.safetensors` when no `tensor_index.json` |
 | 6 | Verification updates (single & multi) | ⏳ Pending | |
 | 7 | Docs & examples | ⏳ Pending | |
 
@@ -407,7 +407,7 @@ flowchart LR
 - Extended `DiskLoader::initialize()` to discover `.safetensors` when no `tensor.data*` is present, pre-parse headers to compute `data_size_i`, and aggregate `artifact_size_`. `open_source()` returns the safetensors sources accordingly.
 - Updated `TransferService` to fallback to safetensors `total_size()` when UMA is missing.
 - Updated Bazel targets in `core/store/loader/BUILD` and `core/store/replica/BUILD` to include the new sources.
-- Python path: `scstore/torch_util.py` now parses safetensors headers to produce unified meta/data indices when `tensor_index.json` is absent. Dtype mapping covers F16/BF16/F32/F64 and integer/byte/bool types.
+- Python path: `tensorcast/torch_util.py` now parses safetensors headers to produce unified meta/data indices when `tensor_index.json` is absent. Dtype mapping covers F16/BF16/F32/F64 and integer/byte/bool types.
 
 Open tasks:
 - Unit tests for new sources and integration tests for single/multi-file safetensors.

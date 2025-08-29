@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import os
 from pathlib import Path
@@ -6,7 +6,7 @@ from typing import Sequence, cast
 
 import torch
 
-from scstore.torch_util import save_dict, load_dict
+from tensorcast.torch_util import save_dict, load_dict
 
 
 def test_shared_storage_roundtrip(tmp_path):

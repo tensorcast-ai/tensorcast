@@ -16,7 +16,7 @@ bash tools/build_proto_python.sh
 
 This will:
 - Compile all `.proto` files
-- Generate Python code in `./scstore/proto/` directory
+- Generate Python code in `./tensorcast/proto/` directory
 - Update type stubs for proper IDE support
 
 ## Best Practices

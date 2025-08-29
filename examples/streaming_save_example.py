@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """
 Example demonstrating the streaming save functionality for GPU tensors.
@@ -13,7 +13,7 @@ import time
 
 import torch
 
-from scstore.torch_util import save_dict
+from tensorcast.torch_util import save_dict
 
 
 def create_example_model(size_gb: float = 1.0) -> dict[str, torch.Tensor]:

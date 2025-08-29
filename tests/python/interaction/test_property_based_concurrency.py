@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover – environment without Hypothes
 
     pytest.skip("hypothesis not installed – skipping property-based test", allow_module_level=True)
 
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 from .utils import get_free_port_pair
 
 from tests.python.interaction.utils import FakeContext

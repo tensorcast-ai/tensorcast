@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <sstream>
 
@@ -7,7 +7,7 @@
 #include "core/communicator/misc/utils.h"
 
 int run_server() {
-  stepcast::communicator::CommunicateEngine engine(g_rdma);
+  tensorcast::communicator::CommunicateEngine engine(g_rdma);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
   memset(addr, 0, g_count);
@@ -19,11 +19,11 @@ int run_server() {
 }
 
 int run_client() {
-  stepcast::communicator::CommunicateEngine engine(g_rdma, 10);
+  tensorcast::communicator::CommunicateEngine engine(g_rdma, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));
 
-  auto start = stepcast::communicator::get_us();
+  auto start = tensorcast::communicator::get_us();
   auto result = engine.read_tensor("cpu-ce-test-tensor", reinterpret_cast<uint64_t>(addr), g_count, 0, 1, g_ip, g_port);
   auto ret = result.get();
   printf(
@@ -33,7 +33,7 @@ int run_client() {
       ret.request_cost,
       ret.rdma_queue_cost,
       ret.read_cost,
-      stepcast::communicator::get_us() - start);
+      tensorcast::communicator::get_us() - start);
 
   free(addr);
   while (true) {

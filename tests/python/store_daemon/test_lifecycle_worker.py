@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for lifecycle worker module."""
 
@@ -8,8 +8,8 @@ from unittest.mock import Mock, MagicMock, patch
 
 import pytest
 
-from scstore.store_daemon.lifecycle_worker import LifecycleWorker
-from scstore.store_daemon.replica_ref import ReplicaKey
+from tensorcast.store_daemon.lifecycle_worker import LifecycleWorker
+from tensorcast.store_daemon.replica_ref import ReplicaKey
 
 
 class TestLifecycleWorker:

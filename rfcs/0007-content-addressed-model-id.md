@@ -102,7 +102,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
     - Unified P2P and memory (CPU/GPU) sources:
       - P2P uses `RemoteKeySource`; memory uses a minimal local source wrapper inside `source_hash.cc` (no new public classes/targets).
       - Convenience functions: `loader::compute_data_multihash_from_cpu_memory(...)`, `loader::compute_data_multihash_from_gpu_memory(...)` run through the same streaming pipeline as disk/P2P.
-  - PyBind: new unified interfaces in `scstore/_C`:
+  - PyBind: new unified interfaces in `tensorcast/_C`:
     - `save_model_to_disk(tensor_names, tensor_data, meta_state_dict, path, config) -> descriptor`
     - `inspect_or_generate_descriptor(path) -> descriptor`
   - Python:
@@ -110,7 +110,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
     - `load_dict(...)` calls `inspect_or_generate_descriptor(...)` after loading; if missing, computes and writes `artifact_descriptor.json`; retains background KEY_POINTS/SEGMENT verification.
     - Removed `load_dict_pure_local(...)`; tests call `load_dict(...)` directly.
   - Tools and tests:
-    - `scstore/tools/backfill_descriptor.py` delegates to `_C.inspect_or_generate_descriptor`; removed the redundant `--write-index` placeholder.
+    - `tensorcast/tools/backfill_descriptor.py` delegates to `_C.inspect_or_generate_descriptor`; removed the redundant `--write-index` placeholder.
     - `core/testing/common.cc` and C++ tests call the unified loader pipeline (`loader::compute_data_multihash_from_disk_dir`).
     - Examples and tests (`examples/*`, `tests/python/*`) updated to the new interfaces.
 
@@ -144,7 +144,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 ### 10. Examples
 
 ```python
-from scstore.torch_util import register_artifact
+from tensorcast.torch_util import register_artifact
 
 sd, info = register_artifact(artifact.state_dict(), "name", device_id=0)
 assert info["artifact_id"].startswith("mi2:")
@@ -207,10 +207,10 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 ### 14. Code-level Implementation Plan (Aligned with Current Repo)
 
 - Save side (Python via unified C++ pipeline) — completed
-  - File: `scstore/torch_util.py`
+  - File: `tensorcast/torch_util.py`
     - `save_dict(...)` prepares inputs and calls `_C.save_model_to_disk(...)` to emit `tensor_index.(cbor|json)` and `artifact_descriptor.json`, returning the `descriptor`.
     - Python no longer implements multihash/tree-hash/base32.
-  - Files: `scstore/_C.pyi` / `scstore/csrc/checkpoint_py.cc`
+  - Files: `tensorcast/_C.pyi` / `tensorcast/csrc/checkpoint_py.cc`
     - Expose and implement `save_model_to_disk(...)` and `inspect_or_generate_descriptor(...)`, both backed by the C++ `SeekableSource` hashing + Canonical Index pipeline.
 
 - Disk loading (C++, unified verification and backfill) — completed
@@ -261,7 +261,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 
 - Python layer (effective immediately)
   - Delete files/functions (no compatibility shims):
-    - In `scstore/content_addressing.py` remove:
+    - In `tensorcast/content_addressing.py` remove:
       - `compute_index_multihash_from_index_bytes`
       - `compute_data_multihash_from_segments`
       - `collect_partition_segments_for_stream`
@@ -270,7 +270,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
   - Retain but refactor:
     - `generate_artifact_id_from_path(...)`: call `_C.inspect_or_generate_descriptor(path)` and return the resulting `descriptor`; do not compute hashes in Python.
   - Tools and examples:
-    - `scstore/tools/backfill_descriptor.py` now uses `_C.inspect_or_generate_descriptor` and drops the `--write-index` placeholder (done); ensure other CLIs/examples no longer import compute functions from `scstore.content_addressing` (self-audited).
+    - `tensorcast/tools/backfill_descriptor.py` now uses `_C.inspect_or_generate_descriptor` and drops the `--write-index` placeholder (done); ensure other CLIs/examples no longer import compute functions from `tensorcast.content_addressing` (self-audited).
 
 - C++ layer
   - Removed entry points:

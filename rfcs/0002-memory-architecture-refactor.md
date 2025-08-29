@@ -57,9 +57,9 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
-    const stepcast::store::ReplicaKey& ikey) {
+    const tensorcast::store::ReplicaKey& ikey) {
   // DVMP chunk iteration + UMA lock + memcpy + UMA update + best-effort DVMP unlock
 }
 ```
@@ -81,7 +81,7 @@ virtual absl::StatusOr<VirtualRegion> allocate(std::string_view artifact_id, siz
 virtual absl::StatusOr<DvmpRegion> open(std::string_view artifact_id);
 virtual absl::StatusOr<VirtualRegion> region_info(std::string_view artifact_id) const;
 // Snapshot & State
-virtual absl::Span<const stepcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
+virtual absl::Span<const tensorcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
 virtual absl::Status lock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx);
 virtual absl::Status unlock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx, bool copied_gpu);
 // IO + pin leases

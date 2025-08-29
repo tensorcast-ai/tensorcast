@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +12,7 @@
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 RdmaContext::RdmaContext() {
   ASSERT(ibv_init() == SUCCESS, "failed to init");
@@ -419,4 +419,4 @@ void RdmaThread::recv_loop() {
   }
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

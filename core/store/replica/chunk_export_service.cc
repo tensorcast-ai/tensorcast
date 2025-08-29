@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/chunk_export_service.h"
 
@@ -9,7 +9,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/replica/transfer_constants.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 std::vector<std::pair<uint32_t, uint32_t>> ChunkExportService::coalesce_ranges(std::vector<uint32_t> chunks) {
   std::vector<std::pair<uint32_t, uint32_t>> out;
@@ -192,4 +192,4 @@ absl::Status ChunkExportService::unexport_chunks(
   return first_error.ok() ? absl::OkStatus() : first_error;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

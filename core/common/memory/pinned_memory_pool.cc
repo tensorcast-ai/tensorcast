@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -21,7 +21,7 @@
 #include "absl/log/log.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 PinnedMemoryPool::PinnedMemoryPool(size_t total_size, size_t chunk_size) : chunk_size_(chunk_size) {
   // Ensure chunk_size is aligned for DIRECT_IO support
@@ -149,4 +149,4 @@ size_t PinnedMemoryPool::get_available_size() const {
   return free_list_.size() * chunk_size_;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

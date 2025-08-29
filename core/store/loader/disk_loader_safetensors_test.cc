@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/multi_safetensors_source.h"
@@ -13,9 +13,9 @@
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-using stepcast::store::DiskLoader;
-using stepcast::store::DiskSource;
-using stepcast::store::loader::SeekableSource;
+using tensorcast::store::DiskLoader;
+using tensorcast::store::DiskSource;
+using tensorcast::store::loader::SeekableSource;
 
 namespace {
 
@@ -69,7 +69,7 @@ TEST_CASE("DiskLoader detects single .safetensors", "[safetensors]") {
   REQUIRE(src_or.ok());
   std::unique_ptr<SeekableSource> src = std::move(*src_or);
   // Ensure DiskLoader selected the single-file Safetensors source
-  auto* st_src = dynamic_cast<stepcast::store::loader::SafetensorsSource*>(src.get());
+  auto* st_src = dynamic_cast<tensorcast::store::loader::SafetensorsSource*>(src.get());
   REQUIRE(st_src != nullptr);
 
   std::filesystem::remove(f);
@@ -101,7 +101,7 @@ TEST_CASE("DiskLoader detects multiple .safetensors", "[safetensors]") {
   REQUIRE(src_or.ok());
   std::unique_ptr<SeekableSource> src = std::move(*src_or);
   // Ensure DiskLoader selected the multi-file Safetensors source
-  auto* ms_src = dynamic_cast<stepcast::store::loader::MultiSafetensorsSource*>(src.get());
+  auto* ms_src = dynamic_cast<tensorcast::store::loader::MultiSafetensorsSource*>(src.get());
   REQUIRE(ms_src != nullptr);
 
   std::filesystem::remove(f1);

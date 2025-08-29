@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: global-store
-  namespace: stepcast
+  namespace: tensorcast
   labels:
     app: global-store
 spec:
@@ -27,7 +27,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: global-store
-  namespace: stepcast
+  namespace: tensorcast
   labels:
     app: global-store
 spec:
@@ -63,9 +63,9 @@ spec:
         effect: NoSchedule
       containers:
       - name: global-store
-        image: hub.i.basemind.com/stepcast/global-store:2025.07.08-61f0f
+        image: hub.i.basemind.com/tensorcast/global-store:2025.07.08-61f0f
         imagePullPolicy: IfNotPresent
-        command: ["python", "-m", "scstore.global_store"]
+        command: ["python", "-m", "tensorcast.global_store"]
         env:
         # Database configuration
         - name: GLOBAL_STORE_DB_PATH
@@ -164,7 +164,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: global-store-backup-script
-  namespace: stepcast
+  namespace: tensorcast
 data:
   backup.sh: |
     #!/bin/bash
@@ -198,7 +198,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: global-store-backup
-  namespace: stepcast
+  namespace: tensorcast
 spec:
   schedule: "0 2 * * *"  # Daily at 2 AM
   jobTemplate:
@@ -212,7 +212,7 @@ spec:
             runAsGroup: 1000
           containers:
           - name: backup
-            image: hub.i.basemind.com/stepcast/global-store:latest
+            image: hub.i.basemind.com/tensorcast/global-store:latest
             command: ["/bin/bash", "/scripts/backup.sh"]
             volumeMounts:
             - name: data

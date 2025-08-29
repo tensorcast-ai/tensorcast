@@ -1,13 +1,13 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "daemon/transport_lock_manager.h"
 
 #include <catch2/catch_test_macros.hpp>
 
-using stepcast::DeviceType;
-using stepcast::daemon::TransportLockManager;
-using stepcast::store::DeviceKey;
-using stepcast::store::ReplicaKey;
+using tensorcast::DeviceType;
+using tensorcast::daemon::TransportLockManager;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::ReplicaKey;
 
 static ReplicaKey make_key(const std::string& id) {
   return ReplicaKey{

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 #pragma once
@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class TraceScope {
  public:
@@ -30,4 +30,4 @@ class TraceScope {
   uint64_t id_ = kInvalidSpan;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

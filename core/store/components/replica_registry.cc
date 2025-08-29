@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "replica_registry.h"
 
@@ -6,7 +6,7 @@
 
 #include "core/store/replica/memory_state.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New ReplicaKey-based API implementation
@@ -152,4 +152,4 @@ uint64_t ReplicaRegistry::get_total_replica_size() const {
   return total;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

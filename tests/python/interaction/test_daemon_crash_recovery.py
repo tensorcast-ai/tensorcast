@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ releases counters when a Store-Daemon crashes before completing a transport.
 
 import time
 
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 
 from tests.python.interaction.utils import FakeContext
 

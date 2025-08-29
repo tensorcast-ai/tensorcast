@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loader/sink.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Writes directly into the DVMP-reserved CPU region at a given offset.
 // Uses DVMP::write_at to ensure chunk metadata is updated.
@@ -51,4 +51,4 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
   uint64_t current_offset_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

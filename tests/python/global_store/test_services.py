@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for Global Store service layer."""
 
 import pytest
 
-from scstore.global_store.models import Replica, Worker, MemoryType
-from scstore.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
+from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
 
 
 class TestServices:

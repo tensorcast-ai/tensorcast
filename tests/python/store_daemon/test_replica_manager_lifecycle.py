@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 # pyright: reportArgumentType=false
 
@@ -10,9 +10,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from scstore.proto import store_daemon_pb2
-from scstore.store_daemon.replica_ref import ReplicaKey
-from scstore.store_daemon.replica_manager import ReplicaManager
+from tensorcast.proto import store_daemon_pb2
+from tensorcast.store_daemon.replica_ref import ReplicaKey
+from tensorcast.store_daemon.replica_manager import ReplicaManager
 # NOTE: We intentionally avoid importing the C++ StoreEngine here because its
 # attributes are read-only at runtime, which prevents the test-suite from
 # monkey-patching them with ``unittest.mock.Mock``.  To keep the unit tests
@@ -428,9 +428,9 @@ class TestReplicaManagerLifecycle:
         # Should complete without errors
         assert len(errors) == 0
 
-    @patch("scstore.store_daemon.replica_manager.ARTIFACT_REF_COUNT")
-    @patch("scstore.store_daemon.replica_manager.GPU_CACHE_BYTES")
-    @patch("scstore.store_daemon.replica_manager.EVICTIONS_TOTAL")
+    @patch("tensorcast.store_daemon.replica_manager.ARTIFACT_REF_COUNT")
+    @patch("tensorcast.store_daemon.replica_manager.GPU_CACHE_BYTES")
+    @patch("tensorcast.store_daemon.replica_manager.EVICTIONS_TOTAL")
     def test_metrics_updates(self, mock_evictions, mock_cache_bytes, mock_ref_count):
         """Test that metrics are properly updated."""
         servicer = MockServicer()

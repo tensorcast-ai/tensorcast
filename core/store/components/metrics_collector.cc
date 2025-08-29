@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "metrics_collector.h"
 
@@ -7,7 +7,7 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/memory_types.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 MetricsCollector::MetricsCollector()
     : // Memory Pool Metrics
@@ -92,4 +92,4 @@ void MetricsCollector::update_all_metrics(
   update_gpu_metrics(device_manager);
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

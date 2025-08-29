@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -28,7 +28,7 @@
 
 #include <chrono>
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ENV_PARAM(TCP_TOS, 0);
 
@@ -725,7 +725,7 @@ void MTcpTransport::recv_loop() {
                   device_id = 0;
                 }
 
-                stepcast::common::DeviceGuard guard(device_id);
+                tensorcast::common::DeviceGuard guard(device_id);
                 if (!guard.status().ok()) {
                   LOG(ERROR) << "Failed to set CUDA device: " << guard.status();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
@@ -844,4 +844,4 @@ result_t MTcpTransport::init_socket_fd(int sock_fd) {
   return SUCCESS;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

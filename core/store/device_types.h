@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ══════════════════════════════════════════════════════════════════════════
 // Unified Device Representation
@@ -24,7 +24,7 @@ namespace stepcast::store {
  * uuid and ordinal >= 0 for intra-node ranking.
  */
 struct DeviceKey {
-  DeviceType type{::stepcast::DeviceType::CPU};
+  DeviceType type{::tensorcast::DeviceType::CPU};
   int32_t ordinal{-1};
   std::string uuid;
 
@@ -34,9 +34,9 @@ struct DeviceKey {
   // String representation for logging / debugging.
   [[nodiscard]] std::string to_string() const {
     const char* type_str = "REMOTE";
-    if (type == ::stepcast::DeviceType::CPU) {
+    if (type == ::tensorcast::DeviceType::CPU) {
       type_str = "CPU";
-    } else if (type == ::stepcast::DeviceType::GPU) {
+    } else if (type == ::tensorcast::DeviceType::GPU) {
       type_str = "GPU";
     }
     return std::string("DeviceKey{") + type_str + ":" + std::to_string(ordinal) + ":" + uuid + "}";
@@ -62,11 +62,11 @@ struct Location {
   [[nodiscard]] DeviceKey to_device_key() const {
     DeviceKey key;
     if (type == MemoryLocation::GPU) {
-      key.type = ::stepcast::DeviceType::GPU;
+      key.type = ::tensorcast::DeviceType::GPU;
       key.ordinal = device_id;
       key.uuid = device_uuid;
     } else if (type == MemoryLocation::PAGEABLE_CPU || type == MemoryLocation::DISK) {
-      key.type = ::stepcast::DeviceType::CPU;
+      key.type = ::tensorcast::DeviceType::CPU;
       key.ordinal = -1;
     }
     return key;
@@ -98,4 +98,4 @@ struct CudaIpcHandle {
   }
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

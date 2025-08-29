@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Manages P2P communication and RDMA operations.
@@ -23,7 +23,7 @@ namespace stepcast::store {
 class CommunicationManager {
  public:
   CommunicationManager() = default;
-  explicit CommunicationManager(std::shared_ptr<stepcast::communicator::CommunicateEngine> external_engine);
+  explicit CommunicationManager(std::shared_ptr<tensorcast::communicator::CommunicateEngine> external_engine);
   ~CommunicationManager() = default;
 
   // Disable copy and move
@@ -59,12 +59,12 @@ class CommunicationManager {
    * @brief Get the communication engine.
    * @return Pointer to the engine or nullptr if not initialized
    */
-  stepcast::communicator::CommunicateEngine& get_engine() {
+  tensorcast::communicator::CommunicateEngine& get_engine() {
     return *comm_engine_;
   }
 
   // Return shared pointer for cases needing shared ownership (e.g., ReplicaConfig)
-  [[nodiscard]] std::shared_ptr<stepcast::communicator::CommunicateEngine> get_shared_engine() const {
+  [[nodiscard]] std::shared_ptr<tensorcast::communicator::CommunicateEngine> get_shared_engine() const {
     return comm_engine_;
   }
 
@@ -82,7 +82,7 @@ class CommunicationManager {
 
  private:
   bool enabled_ = false;
-  std::shared_ptr<stepcast::communicator::CommunicateEngine> comm_engine_;
+  std::shared_ptr<tensorcast::communicator::CommunicateEngine> comm_engine_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -24,7 +24,7 @@
 
 #include "pinned_memory_pool.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class PinnedMemory {
  public:
@@ -54,4 +54,4 @@ class PinnedMemory {
   std::shared_ptr<PinnedMemoryPool> mempool_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

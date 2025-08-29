@@ -238,7 +238,7 @@ sequenceDiagram
 ### Key Components and File Locations
 
 #### Python Layer
-- **ArtifactLoader** (`scstore/store_daemon/artifact_loader.py`)
+- **ArtifactLoader** (`tensorcast/store_daemon/artifact_loader.py`)
   - Simplified to call `store_engine.materialize_replica()` with AUTO mode
   - No longer handles P2P vs disk decisions
 

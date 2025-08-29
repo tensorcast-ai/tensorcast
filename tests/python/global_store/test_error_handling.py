@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for error handling and edge cases in Global Store."""
 
@@ -7,15 +7,15 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-from scstore.global_store.models import Replica, Worker, MemoryType
-from scstore.global_store.exceptions import (
+from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.exceptions import (
     NotFoundError,
     ValidationError,
     TimeoutError,
     ConflictError,
     DatabaseError,
 )
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 from .conftest import create_test_replicas, create_test_workers
 
 

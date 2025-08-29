@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Demo script showing the refactored Web UI architecture."""
 import asyncio
@@ -66,7 +66,7 @@ def main():
         response = requests.get("http://localhost:50051", timeout=1)
     except:
         print("\n⚠️  Global Store not running on port 50051")
-        print("Please start it with: python -m scstore.global_store --port 50051")
+        print("Please start it with: python -m tensorcast.global_store --port 50051")
         sys.exit(1)
 
     try:
@@ -78,13 +78,13 @@ def main():
         pass
 
     print("\nStarting Web UI with gRPC backend...")
-    print("Command: python -m scstore.global_store.webui_backend.main \\")
+    print("Command: python -m tensorcast.global_store.webui_backend.main \\")
     print("           --grpc-host 127.0.0.1 --grpc-port 50051 \\")
     print("           --ui-host 0.0.0.0 --ui-port 9000")
 
     # Start Web UI process
     webui_proc = subprocess.Popen([
-        sys.executable, "-m", "scstore.global_store.webui_backend.main",
+        sys.executable, "-m", "tensorcast.global_store.webui_backend.main",
         "--grpc-host", "127.0.0.1",
         "--grpc-port", "50051",
         "--ui-host", "0.0.0.0",

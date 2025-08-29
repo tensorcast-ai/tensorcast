@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import uuid
 
@@ -11,13 +11,13 @@ import contextlib  # Added for suppressing cleanup exceptions
 from pathlib import Path
 from pydantic import ByteSize
 
-from scstore.proto import store_daemon_pb2, global_store_pb2
-from scstore.store_daemon.config import (
+from tensorcast.proto import store_daemon_pb2, global_store_pb2
+from tensorcast.store_daemon.config import (
     StoreDaemonConfig,
     ServerConfig,
     NetworkConfig,
 )
-from scstore.store_daemon.servicer import StoreDaemonServicer
+from tensorcast.store_daemon.servicer import StoreDaemonServicer
 
 from .utils import get_free_port_pair, FakeContext as _MockContext
 from tests.python.utils.artifact_utils import create_dummy_artifact
@@ -220,7 +220,7 @@ def test_remote_load_between_two_daemons(global_store_service):
         assert worker_resp_a.status == global_store_pb2.Status.OK
 
         # Export remote memory keys from daemon A's Store Engine for P2P
-        from scstore import _store_engine as _cs
+        from tensorcast import _store_engine as _cs
 
         dev = _cs.DeviceKey()
         dev.type = _cs.DeviceType.GPU
@@ -388,7 +388,7 @@ def test_remote_load_p2p_failure_fallback_to_disk(global_store_service):
 
         # Force the Global Store to time out transport requests so the daemon
         # immediately falls back to disk without attempting a P2P allocation.
-        from scstore.global_store.exceptions import TimeoutError as _GSTimeout
+        from tensorcast.global_store.exceptions import TimeoutError as _GSTimeout
         _orig_request_transport = global_store_service.service.transport_service.request_transport
         def _always_timeout(*args, **kwargs):
             raise _GSTimeout("forced timeout for test")

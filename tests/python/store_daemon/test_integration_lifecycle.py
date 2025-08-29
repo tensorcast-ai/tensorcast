@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Integration tests for PID-based lifecycle management."""
 
@@ -17,14 +17,14 @@ from concurrent.futures import Future
 
 import pytest
 
-from scstore.proto import store_daemon_pb2
-from scstore.store_daemon.config import StoreDaemonConfig, LifecycleConfig, ServerConfig, NetworkConfig
-from scstore.store_daemon.servicer import StoreDaemonServicer
+from tensorcast.proto import store_daemon_pb2
+from tensorcast.store_daemon.config import StoreDaemonConfig, LifecycleConfig, ServerConfig, NetworkConfig
+from tensorcast.store_daemon.servicer import StoreDaemonServicer
 
 # -----------------------------------------------------------------------------
 # Use FakeStoreEngine for all tests instead of scattered MagicMocks
 # -----------------------------------------------------------------------------
-# Note: Real StoreEngine from `scstore._store_engine` is now used directly.
+# Note: Real StoreEngine from `tensorcast._store_engine` is now used directly.
 
 
 class TestLifecycleIntegration:

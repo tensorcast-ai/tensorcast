@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
@@ -19,7 +19,7 @@
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/store.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class CommunicateEngine {
  public:
@@ -139,6 +139,6 @@ class CommunicateEngine {
   mutable absl::Mutex create_channel_mu_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_ENGINE_ENGINE_H_

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """
 Pytest configuration and shared fixtures.
@@ -19,7 +19,7 @@ import duckdb
 import pytest
 
 # NOTE: Removed fake StoreEngine related imports – tests now rely on the real
-# scstore._store_engine implementation shipped with the project.
+# tensorcast._store_engine implementation shipped with the project.
 from tests.python.utils.ports import get_free_port, get_free_port_pair
 
 # Configure logging for tests

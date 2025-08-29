@@ -1,18 +1,18 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // ----------------------------------------------------------------------------
 //  Shared device type definitions
 //
 //  This header defines the lightweight DeviceType enum that is shared across
 //  multiple core modules (common, communicator, store).  The definition lives
-//  in the top-level `stepcast` namespace so that nested namespaces (e.g.
-//  `stepcast::store`) can refer to it without additional qualifiers.
+//  in the top-level `tensorcast` namespace so that nested namespaces (e.g.
+//  `tensorcast::store`) can refer to it without additional qualifiers.
 // ----------------------------------------------------------------------------
 #pragma once
 
 #include <cstdint>
 
-namespace stepcast {
+namespace tensorcast {
 
 // Logical device categories recognised by the runtime.  Keep this header free
 // from heavy dependencies so that it can be included from low-level modules
@@ -49,4 +49,4 @@ inline const char* to_string(DeviceType t) {
   }
 }
 
-} // namespace stepcast
+} // namespace tensorcast

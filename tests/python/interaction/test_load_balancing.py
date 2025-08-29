@@ -1,6 +1,6 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 
 from tests.python.interaction.utils import FakeContext
 

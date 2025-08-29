@@ -10,7 +10,7 @@
 
 -I.
 -Icore
--Iscstore
+-Itensorcast
 -Itests/cpp
 -Ibazel-bin/external/catch2+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import os
 from pathlib import Path
@@ -7,8 +7,8 @@ from typing import TypedDict, Optional
 import pytest
 
 
-import scstore._store_engine as _cs
-import scstore._C as _C
+import tensorcast._store_engine as _cs
+import tensorcast._C as _C
 
 
 def _ensure_minimal_model_files(storage_root: Path, artifact_id: str, size_bytes: int) -> None:
@@ -46,7 +46,7 @@ def test_pybind_begin_commit_and_ipc_map(tmp_path: Path):
     storage_root = tmp_path / "models"
     # Enable same-process CUDA IPC fallback for unit tests. Real CUDA IPC
     # requires separate processes, but our tests run export+open in one.
-    os.environ.setdefault("SCSTORE_ENABLE_IPC_SAME_PROCESS_FALLBACK", "1")
+    os.environ.setdefault("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK", "1")
     cs = _cs.create_store_engine({
         "storage_path": str(storage_root),
         "memory_pool_size": 4 * 1024 * 1024,

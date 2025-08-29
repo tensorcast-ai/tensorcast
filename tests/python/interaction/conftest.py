@@ -1,12 +1,12 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import pytest
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import grpc
-from scstore.proto import global_store_pb2_grpc
-from scstore.global_store.grpc_service import GlobalStoreServicer
-from scstore.store_daemon import health_check as _health_check  # pylint: disable=import-error
+from tensorcast.proto import global_store_pb2_grpc
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.store_daemon import health_check as _health_check  # pylint: disable=import-error
 from typing import Iterator
 
 
@@ -78,7 +78,7 @@ def global_store_service() -> Iterator[InProcessGlobalStore]:
     # Prevent port-collision issues when the daemon's internal HealthCheckServer
     # attempts to start – just turn its start() into a no-op so it never binds.
     # ------------------------------------------------------------------
-    _health_check.HealthCheckServer.start = lambda self: None
+    _health_check.HealthCheckServer.start = lambda self: None # type: ignore[method-assign]
 
     yield wrapper
 

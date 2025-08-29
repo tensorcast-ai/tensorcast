@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -21,7 +21,7 @@
 #include "absl/log/log.h"
 #include "pinned_memory_pool.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 PinnedMemory::~PinnedMemory() {
   LOG(INFO) << "Deallocating " << buffers_.size() << " memory chunks";
@@ -60,4 +60,4 @@ std::vector<char*>& PinnedMemory::get() {
   return buffers_;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

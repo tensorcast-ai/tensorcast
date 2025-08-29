@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/memory_manager.h"
 
@@ -22,7 +22,7 @@
 #include "core/store/replica/chunk_export_service.h"
 #include "core/store/replica/transfer_service.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 MemoryManager::MemoryManager(
     std::string artifact_identifier,
@@ -45,7 +45,7 @@ MemoryManager::MemoryManager(
               memory_coordinator_,
               ReplicaKey{
                   .artifact_id = artifact_identifier,
-                  .device = {.type = ::stepcast::DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
+                  .device = {.type = ::tensorcast::DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
@@ -53,7 +53,7 @@ MemoryManager::MemoryManager(
       export_service_(std::make_shared<ChunkExportService>(memory_coordinator_, dvmp_)) {
   // Populate replica_key_ using constructor inputs
   replica_key_.artifact_id = std::move(artifact_identifier);
-  replica_key_.device.type = ::stepcast::DeviceType::GPU;
+  replica_key_.device.type = ::tensorcast::DeviceType::GPU;
   replica_key_.device.ordinal = local_device_id;
   // Initialize services already done in initializer list
 
@@ -838,11 +838,11 @@ absl::Status MemoryManager::unexport_chunks_for_p2p(
 }
 
 // --- DVMP accessor implementation ---
-gsl::not_null<memory::DistributedVirtualMemoryPool*> stepcast::store::MemoryManager::get_dvmp() {
+gsl::not_null<memory::DistributedVirtualMemoryPool*> tensorcast::store::MemoryManager::get_dvmp() {
   return gsl::not_null<memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
-gsl::not_null<const memory::DistributedVirtualMemoryPool*> stepcast::store::MemoryManager::get_dvmp() const {
+gsl::not_null<const memory::DistributedVirtualMemoryPool*> tensorcast::store::MemoryManager::get_dvmp() const {
   return gsl::not_null<const memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
@@ -937,7 +937,7 @@ absl::Status MemoryManager::finalize_load(
 // DVMP instance itself lives.  Callers must treat the returned ChunkMeta
 // objects as immutable and use the atomic accessors defined inside ChunkMeta
 // for state inspection.
-absl::Span<const store::ChunkMeta> stepcast::store::MemoryManager::chunk_snapshot() const noexcept {
+absl::Span<const store::ChunkMeta> tensorcast::store::MemoryManager::chunk_snapshot() const noexcept {
   // No expensive operations here – simply delegate to DVMP.
   return dvmp_->chunk_snapshot(replica_key_.artifact_id);
 }
@@ -1097,4 +1097,4 @@ absl::Status MemoryManager::ensure_gpu_stream_initialized_locked_() {
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

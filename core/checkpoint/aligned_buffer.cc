@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -26,7 +26,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 AlignedBuffer::AlignedBuffer(const std::string& filename)
     : fd_(-1), buf_size_(kBufferSize), buf_pos_(0), file_offset_(0), direct_io_(true) {
@@ -181,4 +181,4 @@ void AlignedBuffer::flush_buffer(bool pad_to_alignment) {
   buf_pos_ = 0;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

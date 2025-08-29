@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <thread>
@@ -6,7 +6,7 @@
 #include "core/common/metrics/metric_objects.h"
 #include "core/common/metrics/metrics_registry.h"
 
-using namespace stepcast::metrics;
+using namespace tensorcast::metrics;
 
 TEST_CASE("Metrics Registry", "[metrics]") {
   auto& registry = MetricsRegistry::instance();

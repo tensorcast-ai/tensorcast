@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -21,7 +21,7 @@
 #include "core/store/replica/replica_memory_coordinator.h"
 #include "core/store/replica/transfer_constants.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Forward decls
 namespace loader {
@@ -91,4 +91,4 @@ class TransferService {
   gsl::not_null<std::shared_ptr<StreamingPinnedBuffer>> spb_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

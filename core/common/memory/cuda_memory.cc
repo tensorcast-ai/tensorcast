@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -24,7 +24,7 @@
 #include "absl/log/log.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 CudaMemory::~CudaMemory() {
   release_resources();
@@ -173,4 +173,4 @@ void CudaMemory::release_resources() {
   allocation_type_ = AllocationType::UNINITIALIZED;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

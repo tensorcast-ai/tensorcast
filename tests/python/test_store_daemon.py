@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 # pyright: reportAttributeAccessIssue=false
 import types
@@ -11,7 +11,7 @@ import pytest
 
 import contextlib  # Added for suppressing cleanup exceptions
 
-from scstore.proto import global_store_pb2, store_daemon_pb2
+from tensorcast.proto import global_store_pb2, store_daemon_pb2
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -56,8 +56,8 @@ def servicer(tmp_path):
     call to keep the system */tmp* tidy.
     """
     # Import here to ensure mock is in place
-    from scstore.store_daemon.config import StoreDaemonConfig, ServerConfig, NetworkConfig
-    from scstore.store_daemon.servicer import StoreDaemonServicer
+    from tensorcast.store_daemon.config import StoreDaemonConfig, ServerConfig, NetworkConfig
+    from tensorcast.store_daemon.servicer import StoreDaemonServicer
     from pathlib import Path
     from pydantic import ByteSize
 
@@ -135,15 +135,15 @@ def servicer(tmp_path):
 def servicer_with_global_store(tmp_path):
     """Create a StoreDaemonServicer with mocked global store connection"""
     # Import here to ensure mock is in place
-    from scstore.store_daemon.config import StoreDaemonConfig, ServerConfig
-    from scstore.store_daemon.servicer import StoreDaemonServicer
+    from tensorcast.store_daemon.config import StoreDaemonConfig, ServerConfig
+    from tensorcast.store_daemon.servicer import StoreDaemonServicer
     from pathlib import Path
     from pydantic import ByteSize
 
     # Mock the grpc channel and GlobalStoreStub
     with (
         mock.patch("grpc.insecure_channel"),
-        mock.patch("scstore.proto.global_store_pb2_grpc.GlobalStoreStub") as mock_stub,
+        mock.patch("tensorcast.proto.global_store_pb2_grpc.GlobalStoreStub") as mock_stub,
     ):
         # Setup the mock stub
         mock_instance = mock_stub.return_value
@@ -165,7 +165,7 @@ def servicer_with_global_store(tmp_path):
         )
 
         # Mock the connection manager to avoid actual connections
-        with mock.patch("scstore.store_daemon.servicer.GlobalStoreConnectionManager"):
+        with mock.patch("tensorcast.store_daemon.servicer.GlobalStoreConnectionManager"):
             servicer = StoreDaemonServicer(config=config)
 
         # Replace the stub with our mock and initialize grpc_channel

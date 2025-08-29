@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -16,11 +16,11 @@
 #include "core/store/loading/loading_spec.h" // For DiskSource
 // Forward declaration instead of including memory manager to avoid heavy deps
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 class SeekableSource;
 }
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // MemoryManager is already defined in this namespace via included header.
 
@@ -76,4 +76,4 @@ class DiskLoader : public IArtifactLoader {
   bool initialized_ = false;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

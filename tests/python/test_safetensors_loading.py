@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 from pathlib import Path
 
 import torch
 from safetensors.torch import save_file as st_save
 
-from scstore.torch_util import build_indices_from_safetensors
+from tensorcast.torch_util import build_indices_from_safetensors
 from tests.python.utils.artifact_utils import create_dummy_safetensors
 
 

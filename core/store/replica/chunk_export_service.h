@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -20,11 +20,11 @@
 #include "core/store/direct_write.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 class CommunicateEngine;
 }
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class ChunkExportService {
  public:
@@ -80,4 +80,4 @@ class ChunkExportService {
   std::mutex records_mu_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,17 +1,17 @@
 ---
 title: Developer Guides
-description: Comprehensive guides for developers working on or extending StepCast Store
+description: Comprehensive guides for developers working on or extending TensorCast
 sidebar_position: 4
 hide_title: true
 ---
 
 # Developer Guides
 
-This section contains comprehensive guides for developers working on or extending StepCast Store.
+This section contains comprehensive guides for developers working on or extending TensorCast.
 
 ## 🏗️ System Architecture
 
-Understand how StepCast Store works:
+Understand how TensorCast works:
 
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive

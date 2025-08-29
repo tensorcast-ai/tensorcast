@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loading/materialize_orchestrator.h"
 
@@ -10,7 +10,7 @@
 #include "core/store/loading/replica_registration_helper.h"
 #include "core/store/store_engine.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 MaterializeOrchestrator::MaterializeOrchestrator(StoreEngine* store, GlobalStoreClient* gs_client)
     : store_(store), gs_client_(gs_client) {}
@@ -119,4 +119,4 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   return disk_or;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

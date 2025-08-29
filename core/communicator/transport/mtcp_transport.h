@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_MTCP_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_MTCP_TRANSPORT_H_
@@ -22,7 +22,7 @@ extern "C" {
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/request.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 // Forward declaration
 class GpuTcpStager;
@@ -151,6 +151,6 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 };
 using mtcp_transport_t = std::shared_ptr<MTcpTransport>;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_MTCP_TRANSPORT_H_

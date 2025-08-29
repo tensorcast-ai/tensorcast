@@ -1,5 +1,5 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """
-Tests for the scstore package.
+Tests for the tensorcast package.
 """

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 #define COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
@@ -8,7 +8,7 @@
 
 #include "core/communicator/transport/net_dev.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class NetDev;
 typedef std::shared_ptr<NetDev> net_dev_t;
@@ -88,6 +88,6 @@ class RemotePartitionTensor {
 };
 typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_

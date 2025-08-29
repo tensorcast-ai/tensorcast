@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -20,7 +20,7 @@
 
 #include <string>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 [[maybe_unused]] constexpr size_t kAlignment = 4096; // 4k
 [[maybe_unused]] constexpr size_t kBufferSize = 1L << 30; // 1GB
@@ -55,4 +55,4 @@ class AlignedBuffer {
   void flush_buffer(bool pad_to_alignment);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

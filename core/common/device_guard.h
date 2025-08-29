@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
 #include "absl/log/absl_check.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::common {
+namespace tensorcast::common {
 
 class DeviceGuard {
  public:
@@ -37,4 +37,4 @@ class DeviceGuard {
   absl::Status status_ = absl::OkStatus();
 };
 
-} // namespace stepcast::common
+} // namespace tensorcast::common

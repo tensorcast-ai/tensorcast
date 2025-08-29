@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 extern "C" {
 #include <sys/socket.h>
@@ -6,7 +6,7 @@ extern "C" {
 
 #include "core/communicator/transport/base_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 result_t send_bytes(int sock_fd, uint8_t* buf, int size) {
   ssize_t remain_bytes = size;
@@ -47,4 +47,4 @@ result_t recv_bytes(int sock_fd, uint8_t* buf, int size) {
   return SUCCESS;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

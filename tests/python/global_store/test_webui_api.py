@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for Global Store Web UI API."""
 
@@ -9,8 +9,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from scstore.global_store.config.settings import GlobalStoreConfig
-from scstore.global_store.webui_backend.app import WebUIApp
+from tensorcast.global_store.config.settings import GlobalStoreConfig
+from tensorcast.global_store.webui_backend.app import WebUIApp
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,11 +8,11 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 class CommunicateEngine;
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Holds information about memory registered for communication.
@@ -39,7 +39,7 @@ struct P2PSource {
   bool enable_checksum = true;
   Location location;
 
-  std::shared_ptr<stepcast::communicator::CommunicateEngine> comm_engine;
+  std::shared_ptr<tensorcast::communicator::CommunicateEngine> comm_engine;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

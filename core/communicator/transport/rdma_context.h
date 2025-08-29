@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
 #define COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
@@ -11,7 +11,7 @@
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class RdmaThread;
 typedef std::shared_ptr<RdmaThread> rdma_thread_t;
@@ -98,6 +98,6 @@ class RdmaThread {
   net_dev_t net_dev_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_

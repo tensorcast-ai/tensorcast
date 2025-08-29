@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -10,7 +10,7 @@
 
 #include "core/store/replica/chunk_meta.h"
 
-using namespace stepcast::store;
+using namespace tensorcast::store;
 
 // Helper to test state transitions via raw CAS (no policy)
 class ChunkStateMachine {

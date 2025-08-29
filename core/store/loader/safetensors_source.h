@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -11,7 +11,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/loader/source.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Presents the data buffer of a single .safetensors file as a contiguous byte
 // space starting at logical offset 0. The file header is hidden from readers.
@@ -42,4 +42,4 @@ class SafetensorsSource : public SeekableSource {
   uint64_t current_offset_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

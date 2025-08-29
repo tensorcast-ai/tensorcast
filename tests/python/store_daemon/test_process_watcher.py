@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for process watcher module."""
 
@@ -8,7 +8,7 @@ import time
 import subprocess
 import pytest
 
-from scstore.store_daemon.process_watcher import ProcessWatcher
+from tensorcast.store_daemon.process_watcher import ProcessWatcher
 
 
 class TestProcessWatcher:

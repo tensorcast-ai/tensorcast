@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -18,7 +18,7 @@
 #include "core/store/device_types.h"
 #include "core/store/replica/memory_state.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ══════════════════════════════════════════════════════════════════════════
 // Replica Sources - Describe where data comes from
@@ -164,4 +164,4 @@ struct ReplicaHandle {
   absl::Status wait_ready(std::chrono::milliseconds timeout);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

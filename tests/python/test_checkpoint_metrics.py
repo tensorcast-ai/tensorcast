@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 from pathlib import Path
 
@@ -6,9 +6,9 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 import torch  # noqa: F401
-import scstore._store_engine as _cs
+import tensorcast._store_engine as _cs
 
-from scstore.store_daemon.ckpt_collector import (
+from tensorcast.store_daemon.ckpt_collector import (
     GlobalMetricsCollector,
 )
 
@@ -71,10 +71,10 @@ def test_store_engine_metrics_snapshot(tmp_path: Path) -> None:  # noqa: D401
     # 1. Build an isolated registry so we don't pollute global state across tests
     registry = CollectorRegistry()
 
-    # 2. Register Python layer metrics defined in scstore.store_daemon.metrics
+    # 2. Register Python layer metrics defined in tensorcast.store_daemon.metrics
     #    Those metric objects already exist; we simply add them to the custom
     #    registry so both C++ and Python metrics are exported together.
-    from scstore.store_daemon import metrics as py_metrics  # noqa: WPS433 (test import)
+    from tensorcast.store_daemon import metrics as py_metrics  # noqa: WPS433 (test import)
 
     python_metric_objects = [
         py_metrics.ACTIVE_OPERATIONS,

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -9,15 +9,15 @@
 #include "core/common/device_guard.h"
 #include "core/store/loader/gpu_memory_sink.h"
 
-using namespace stepcast::store::loader;
-using namespace stepcast::common;
+using namespace tensorcast::store::loader;
+using namespace tensorcast::common;
 
 class GPUMemoryFixture {
  public:
   GPUMemoryFixture(size_t size = 10 * 1024 * 1024) : size_(size) {
     // Check if CUDA is available
     int device_count = 0;
-    auto status = stepcast::cuda::get_device_count(&device_count);
+    auto status = tensorcast::cuda::get_device_count(&device_count);
     if (!status.ok() || device_count == 0) {
       cuda_available_ = false;
       return;
@@ -30,18 +30,18 @@ class GPUMemoryFixture {
       cuda_available_ = false;
       return;
     }
-    status = stepcast::cuda::malloc(&gpu_ptr_, size_);
+    status = tensorcast::cuda::malloc(&gpu_ptr_, size_);
     if (!status.ok()) {
       gpu_ptr_ = nullptr;
       cuda_available_ = false;
     }
 
     // Allocate pinned host memory for testing
-    status = stepcast::cuda::malloc_host(&host_ptr_, size_);
+    status = tensorcast::cuda::malloc_host(&host_ptr_, size_);
     if (!status.ok()) {
       host_ptr_ = nullptr;
       if (gpu_ptr_) {
-        auto st3 = stepcast::cuda::free(gpu_ptr_);
+        auto st3 = tensorcast::cuda::free(gpu_ptr_);
         (void)st3;
         gpu_ptr_ = nullptr;
       }
@@ -51,11 +51,11 @@ class GPUMemoryFixture {
 
   ~GPUMemoryFixture() {
     if (gpu_ptr_) {
-      auto st = stepcast::cuda::free(gpu_ptr_);
+      auto st = tensorcast::cuda::free(gpu_ptr_);
       (void)st;
     }
     if (host_ptr_) {
-      auto st2 = stepcast::cuda::free_host(host_ptr_);
+      auto st2 = tensorcast::cuda::free_host(host_ptr_);
       (void)st2;
     }
   }
@@ -98,7 +98,7 @@ class GPUMemoryFixture {
     std::vector<char> temp(bytes);
 
     // Copy from GPU to host for verification
-    auto status = stepcast::cuda::memcpy(temp.data(), gpu_ptr_, bytes, cudaMemcpyDeviceToHost);
+    auto status = tensorcast::cuda::memcpy(temp.data(), gpu_ptr_, bytes, cudaMemcpyDeviceToHost);
     if (!status.ok()) {
       return false;
     }
@@ -262,7 +262,7 @@ TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
     GPUMemoryFixture fixture(1024);
 
     int device_count = 0;
-    auto status = stepcast::cuda::get_device_count(&device_count);
+    auto status = tensorcast::cuda::get_device_count(&device_count);
     if (!status.ok() || device_count == 0) {
       SKIP("CUDA not available");
     }

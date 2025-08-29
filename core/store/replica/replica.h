@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -23,7 +23,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Facade class for managing a machine learning replica's lifecycle,
@@ -147,7 +147,7 @@ class Replica {
    */
   absl::StatusOr<CommRegistrationInfo> enable_remote_memory_access(
       MemoryLocation location,
-      stepcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Disables the communication access for the specified location.
@@ -158,7 +158,7 @@ class Replica {
    */
   absl::Status disable_remote_memory_access(
       MemoryLocation location,
-      stepcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Generates verification information for the replica data at the specified location.
@@ -220,4 +220,4 @@ class Replica {
   std::shared_future<absl::Status> gpu_load_future_ ABSL_GUARDED_BY(mutex_);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

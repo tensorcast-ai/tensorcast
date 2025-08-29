@@ -13,7 +13,7 @@
             "args": [
                 "--model-name=DeepSeek-R1-0528",
                 "--local-model-path=/mnt/DeepSeek-R1-0528",
-                "--storage-path=/mnt/host0/scstore",
+                "--storage-path=/mnt/host0/tensorcast",
                 "--tensor-parallel-size=8"
             ],
             "justMyCode": false
@@ -22,7 +22,7 @@
             "name": "local daemon",
             "type": "debugpy",
             "request": "launch",
-            "program": "scstore/cli.py",
+            "program": "tensorcast/cli.py",
             "console": "integratedTerminal",
             "args": [
                 "start",
@@ -37,7 +37,7 @@
             "name": "global store",
             "type": "debugpy",
             "request": "launch",
-            "program": "scstore/global_store/__main__.py",
+            "program": "tensorcast/global_store/__main__.py",
             "console": "integratedTerminal",
             "args": [],
             "justMyCode": false
@@ -48,7 +48,7 @@
             "request": "launch",
             "program": "/${workspaceFolder}/.venv/bin/python",
             "args": [
-                "scstore/cli.py",
+                "tensorcast/cli.py",
                 "start",
                 // "--global-store-address=100.96.104.39:50051",
                 // "--enable-p2p-engine",
@@ -76,7 +76,7 @@
             ],
             "cwd": "${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"
@@ -94,7 +94,7 @@
             "args": ["DiskModel page-aligned load to CPU via mmap"],
             "cwd": "${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"
@@ -118,7 +118,7 @@
             ],
             "cwd": "/${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for concurrency and thread-safety in Global Store."""
 
@@ -8,7 +8,7 @@ import time
 import concurrent.futures
 from uuid import uuid4
 
-from scstore.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import Replica, Worker, MemoryType
 from .conftest import create_test_replicas, create_test_workers
 
 

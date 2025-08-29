@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for Global Store configuration management."""
 
 import pytest
 from pydantic import ValidationError
 
-from scstore.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config import GlobalStoreConfig
 
 
 class TestConfiguration:

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,10 +10,10 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/loading/loading_spec.h"
 
-namespace stepcast::daemon {
+namespace tensorcast::daemon {
 
 struct SessionEntry {
-  stepcast::store::ReplicaKey key;
+  tensorcast::store::ReplicaKey key;
   std::shared_future<absl::Status> ready;
   std::chrono::steady_clock::time_point expiry;
 };
@@ -24,7 +24,7 @@ class ReplicaSessionManager {
 
   void put(
       const std::string& replica_uuid,
-      const stepcast::store::ReplicaKey& key,
+      const tensorcast::store::ReplicaKey& key,
       std::shared_future<absl::Status> ready) {
     absl::MutexLock l(&mu_);
     sessions_[replica_uuid] = SessionEntry{key, std::move(ready), now() + ttl_};
@@ -86,4 +86,4 @@ class ReplicaSessionManager {
   std::chrono::seconds ttl_;
 };
 
-} // namespace stepcast::daemon
+} // namespace tensorcast::daemon

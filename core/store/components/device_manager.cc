@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "device_manager.h"
 
@@ -8,7 +8,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 DeviceManager::DeviceManager() = default;
 
@@ -102,7 +102,7 @@ absl::Status DeviceManager::initialize() {
     gpu_memory_free_gauges_.emplace(
         i, metrics::Gauge("store_daemon_gpu_memory_bytes", {{"device_id", device_id_str}, {"memory_type", "free"}}));
     gpu_replicas_loaded_gauges_.emplace(
-        i, stepcast::metrics::Gauge("store_daemon_gpu_replicas_loaded", {{"device_id", device_id_str}}));
+        i, tensorcast::metrics::Gauge("store_daemon_gpu_replicas_loaded", {{"device_id", device_id_str}}));
 
     // Set initial metric values
     gpu_memory_total_gauges_.at(i).set(static_cast<double>(total_mem));
@@ -175,4 +175,4 @@ absl::StatusOr<size_t> DeviceManager::get_free_memory(int device_id) {
   return free_mem;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

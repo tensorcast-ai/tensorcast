@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/safetensors_util.h"
 
@@ -19,7 +19,7 @@
 // Use nlohmann/json for header parsing and canonical index serialization
 #include <nlohmann/json.hpp>
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd) {
   // Read the 8-byte header length (little-endian)
@@ -200,4 +200,4 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
   return out.dump();
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

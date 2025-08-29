@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Simple test to verify gRPC server starts correctly."""
 
@@ -6,7 +6,7 @@ from concurrent import futures
 
 import grpc
 
-from scstore.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
 from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for streaming save functionality (pytest style)."""
 
@@ -9,7 +9,7 @@ import os
 import pytest
 import torch
 
-from scstore.torch_util import save_dict, load_dict_from_disk
+from tensorcast.torch_util import save_dict, load_dict_from_disk
 
 
 @pytest.fixture

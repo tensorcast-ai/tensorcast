@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: store-daemon-config
-  namespace: stepcast
+  namespace: tensorcast
   labels:
     app: store-daemon
   annotations:
@@ -53,7 +53,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: store-daemon-set
-  namespace: stepcast
+  namespace: tensorcast
 spec:
   revisionHistoryLimit: 10
   selector:
@@ -87,15 +87,15 @@ spec:
                       - ali
       containers:
         - name: store-daemon
-          image: 'hub.i.basemind.com/stepcast/scstore:2025.07.11-3d8ec'
+          image: 'hub.i.basemind.com/tensorcast/tensorcast:2025.07.11-3d8ec'
           imagePullPolicy: IfNotPresent
           command: ["python"]
           args:
             - -m
-            - scstore.cli
+            - tensorcast.cli
             - start
             - "--config"
-            - /etc/stepcast/store-daemon.yaml
+            - /etc/tensorcast/store-daemon.yaml
             - "--blocking"
           env:
             - name: NVIDIA_VISIBLE_DEVICES
@@ -140,7 +140,7 @@ spec:
           terminationMessagePolicy: File
           volumeMounts:
             - name: config
-              mountPath: /etc/stepcast/store-daemon.yaml
+              mountPath: /etc/tensorcast/store-daemon.yaml
               subPath: store-daemon.yaml
             - mountPath: /mnt/stepcloud
               mountPropagation: HostToContainer

@@ -179,11 +179,11 @@ Daemon:
 
 ## 5. API Changes
 
-- External (Python): new `scstore.torch_util.register_artifact(...)` returning `RegisteredTensorDict`.
+- External (Python): new `tensorcast.torch_util.register_artifact(...)` returning `RegisteredTensorDict`.
 - Internal:
   - `proto/store_daemon.proto`: Begin/Commit/Abort with oneof index and metadata.
   - `proto/global_store.proto`: add `tensor_index_key`, add `GetArtifactIndex`, remove per-replica index BLOBs.
-  - `scstore/store_daemon/servicer.py`: implement registration, TTL cleanup, and error handling.
+  - `tensorcast/store_daemon/servicer.py`: implement registration, TTL cleanup, and error handling.
   - Optional C++ bridge: `StoreEngine::register_artifact`.
 
 ## 6. Compatibility & Migration
@@ -257,11 +257,11 @@ sequenceDiagram
 
 - StoreDaemon (proto + service + client):
   - `proto/store_daemon.proto`: add `BeginRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact` RPCs and messages.
-  - `scstore/store_daemon/servicer.py`: implement the above RPCs with validation, TTL-based pending state, error handling, and commit-time GS registration.
-  - `scstore/proto/*_pb2*.py[i]`: regenerated Python stubs; minor formatting/blank-line updates.
+  - `tensorcast/store_daemon/servicer.py`: implement the above RPCs with validation, TTL-based pending state, error handling, and commit-time GS registration.
+  - `tensorcast/proto/*_pb2*.py[i]`: regenerated Python stubs; minor formatting/blank-line updates.
 
 - Python API/Bindings:
-  - `scstore/_store_engine.pyi/.py`: add `begin_register_artifact`, `commit_registered_artifact`, `abort_registered_artifact`; remove `MemCopyChunk` (API cleanup); add `TypedDict` types `ArtifactRegistration`, `RegistrationBeginResult`, `RegistrationCommitResult`.
+  - `tensorcast/_store_engine.pyi/.py`: add `begin_register_artifact`, `commit_registered_artifact`, `abort_registered_artifact`; remove `MemCopyChunk` (API cleanup); add `TypedDict` types `ArtifactRegistration`, `RegistrationBeginResult`, `RegistrationCommitResult`.
   - `tests/python/test_checkpoint_registration_pybind.py`: new tests covering begin → CUDA IPC map → commit; adds same-process fallback coverage.
 
 - Database & Migrations:

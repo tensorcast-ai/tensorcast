@@ -1,10 +1,10 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
 #include <atomic>
 
-namespace stepcast::common {
+namespace tensorcast::common {
 
 /**
  * @brief Process-wide capabilities detected at startup.
@@ -63,4 +63,4 @@ class SystemCapabilities {
   std::atomic<bool> rdma_available_{false};
 };
 
-} // namespace stepcast::common
+} // namespace tensorcast::common

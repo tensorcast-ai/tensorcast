@@ -26,7 +26,7 @@ sc_cc_library(
 )
 
 cc_binary(
-    name = "scstore_daemon",
+    name = "tensorcast_daemon",
     srcs = ["server_main.cc"],
     deps = [
         ":grpc_service_impl",

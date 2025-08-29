@@ -1,8 +1,8 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 # type: ignore
 """
-StepCast Store Setup Script
+TensorCast Setup Script
 
 Supports building with fake CUDA backend for development without GPU:
   - Environment variable: USE_FAKE_CUDA=1
@@ -317,10 +317,10 @@ def build_libstore_engine_cxx11_abi(
 
 
 def gen_version_file():
-    if not os.path.exists(dir_path + "/scstore/_version.py"):
-        os.mknod(dir_path + "/scstore/_version.py")
+    if not os.path.exists(dir_path + "/tensorcast/_version.py"):
+        os.mknod(dir_path + "/tensorcast/_version.py")
 
-    with open(dir_path + "/scstore/_version.py", "w") as f:
+    with open(dir_path + "/tensorcast/_version.py", "w") as f:
         print("creating version file")
         f.write('__version__ = "' + __version__ + '"\n')
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
@@ -330,10 +330,10 @@ def copy_libstore_engine(debug: bool):
     if not BUILD_EXTENSION:
         return
 
-    if not os.path.exists(dir_path + "/scstore/lib"):
-        os.makedirs(dir_path + "/scstore/lib")
+    if not os.path.exists(dir_path + "/tensorcast/lib"):
+        os.makedirs(dir_path + "/tensorcast/lib")
 
-    target = dir_path + "/scstore/lib/libstore_engine.so"
+    target = dir_path + "/tensorcast/lib/libstore_engine.so"
     if os.path.exists(target):
         print(f"Removing {target}")
         os.remove(target)
@@ -345,11 +345,57 @@ def copy_libstore_engine(debug: bool):
             target
     )
 
+def find_bazel_daemon_binary() -> Path | None:
+    candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
+    return candidate if candidate.exists() else None
+
+def build_daemon_binary(use_fake_cuda: bool = False) -> None:
+    if BAZEL_EXE is None:
+        print("Bazell not available; skipping daemon build")
+        return
+    cmd = [BAZEL_EXE, "build", "//daemon:tensorcast_daemon"]
+    if use_fake_cuda:
+        cmd += ["--define", "use_fake_cuda=true"]
+    print(f"building tensorcast_daemon cmd={cmd}")
+    rc = subprocess.run(cmd).returncode
+    if rc != 0:
+        sys.exit(rc)
+
+def copy_daemon_binary() -> None:
+    """Copy daemon binary into package at tensorcast/bin/tensorcast_daemon.
+
+    Source precedence: TENSORCAST_DAEMON_BIN env -> bazel-bin output.
+    """
+    target_dir = Path(dir_path) / "tensorcast" / "bin"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "tensorcast_daemon"
+    if target.exists():
+        try:
+            target.unlink()
+        except Exception:
+            pass
+
+    src_env = os.environ.get("TENSORCAST_DAEMON_BIN")
+    if src_env and Path(src_env).exists():
+        print(f"Copying {src_env} -> {target}")
+        copyfile(src_env, target)
+        os.chmod(target, 0o755)
+        return
+
+    bazel_bin = find_bazel_daemon_binary()
+    if bazel_bin is not None:
+        print(f"Copying {bazel_bin} -> {target}")
+        copyfile(bazel_bin, target)
+        os.chmod(target, 0o755)
+        return
+
+    print("Warning: tensorcast_daemon binary not found; package will not include daemon binary.")
+
 def copy_extensions():
-    files = glob.glob(dir_path + "/build/lib.linux-*/scstore/*.so")
+    files = glob.glob(dir_path + "/build/lib.linux-*/tensorcast/*.so")
     for file in files:
-        print(f"Copying {file} to {dir_path}/scstore/")
-        copyfile(file, dir_path + "/scstore/" + os.path.basename(file))
+        print(f"Copying {file} to {dir_path}/tensorcast/")
+        copyfile(file, dir_path + "/tensorcast/" + os.path.basename(file))
 
 class DevelopCommand(develop):
     description = "Builds the package and symlinks it into the PYTHONPATH"
@@ -364,6 +410,8 @@ class DevelopCommand(develop):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libstore_engine(debug=True)
+        # For development, just copy existing daemon binary if present
+        copy_daemon_binary()
 
         gen_version_file()
         develop.run(self)
@@ -380,6 +428,7 @@ class BuildExtensionCommand(BuildExtension):
         copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
+        copy_daemon_binary()
 
 
 class InstallCommand(install):
@@ -400,6 +449,12 @@ class InstallCommand(install):
             use_remote=USE_REMOTE,
         )
         copy_libstore_engine(debug=False)
+        # Ensure daemon binary is built and copied for installed package
+        try:
+            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
+        except Exception as e:
+            print(f"Warning: daemon build failed: {e}")
+        copy_daemon_binary()
 
         gen_version_file()
         install.run(self)
@@ -418,6 +473,12 @@ class BdistCommand(bdist_wheel):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_libstore_engine_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         copy_libstore_engine(debug=False)
+        # Wheel should contain the daemon binary
+        try:
+            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
+        except Exception as e:
+            print(f"Warning: daemon build failed: {e}")
+        copy_daemon_binary()
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -437,6 +498,7 @@ class EditableWheelCommand(editable_wheel):
         build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
         gen_version_file()
         copy_libstore_engine(debug=True)
+        copy_daemon_binary()
         editable_wheel.run(self)
 
 
@@ -446,15 +508,15 @@ class CleanCommand(Command):
     PY_CLEAN_DIRS = [
         os.path.join(".", "build"),
         os.path.join(".", "dist"),
-        os.path.join(".", "scstore", "__pycache__"),
-        os.path.join(".", "scstore", "lib"),
+        os.path.join(".", "tensorcast", "__pycache__"),
+        os.path.join(".", "tensorcast", "lib"),
         os.path.join(".", "*.pyc"),
         os.path.join(".", "*.tgz"),
         os.path.join(".", "*.egg-info"),
     ]
     PY_CLEAN_FILES = [
-        os.path.join(".", "scstore", "*.so"),
-        os.path.join(".", "scstore", "_version.py"),
+        os.path.join(".", "tensorcast", "*.so"),
+        os.path.join(".", "tensorcast", "_version.py"),
     ]
     description = "Command to tidy up the project root"
     user_options = []
@@ -559,15 +621,15 @@ if BUILD_EXTENSION:
         ensure_cudart_unversioned_symlink(CUDA_RUNTIME_LIB_DIR)
 
     EXTENSIONS = {
-        "_C": ["scstore/csrc/checkpoint_py.cc"],
-        "_store_engine": ["scstore/csrc/store_engine_py.cc"],
+        "_C": ["tensorcast/csrc/checkpoint_py.cc"],
+        "_store_engine": ["tensorcast/csrc/store_engine_py.cc"],
     }
 
     for name, sources in EXTENSIONS.items():
         # Build include dirs dynamically to avoid None concatenation when CUDA_DIR is unset
         _include_dirs = [
             dir_path,
-            dir_path + "/scstore/csrc",
+            dir_path + "/tensorcast/csrc",
             dir_path + "/external/abseil-cpp+",
             dir_path + "/external/grpc+/include",
             dir_path + "/external/protobuf+/src",
@@ -580,7 +642,7 @@ if BUILD_EXTENSION:
 
         # Library search paths
         _library_dirs = [
-            (dir_path + "/scstore/lib"),
+            (dir_path + "/tensorcast/lib"),
         ]
         if CUDA_RUNTIME_LIB_DIR:
             _library_dirs.append(CUDA_RUNTIME_LIB_DIR)
@@ -595,7 +657,7 @@ if BUILD_EXTENSION:
 
         ext_modules += [
             CUDAExtension(
-                f"scstore.{name}",
+                f"tensorcast.{name}",
                 sources,
                 library_dirs=_library_dirs,
                 libraries=["store_engine"],
@@ -663,17 +725,17 @@ if BuildExtension is not None:
     cmd_class["build_ext"] = BuildExtensionCommand
 
 setup(
-    name="scstore",
+    name="tensorcast",
     ext_modules=ext_modules,
     version=__version__,
     cmdclass=cmd_class,
     zip_safe=False,
     packages=find_packages(exclude=["*.csrc.*"]),
     # include_package_data=False,
-    package_data={"": ["*.so", "lib/*.so"]},
+    package_data={"": ["*.so", "lib/*.so", "bin/*"]},
     exclude_package_data={
-        # "scstore": [
-        #     "scstore/csrc/*.cc",
+        # "tensorcast": [
+        #     "tensorcast/csrc/*.cc",
         # ],
     },
 )

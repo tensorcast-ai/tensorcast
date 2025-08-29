@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Verification levels from least to most thorough
 enum class VerificationLevel {
@@ -87,4 +87,4 @@ class ArtifactVerifier {
       int device_id);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

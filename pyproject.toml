@@ -5,12 +5,12 @@ requires = ["setuptools>=68.0.0", "pyyaml>=6.0", "torch==2.6.0", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scstore"
-description = "StepCast Store"
+name = "tensorcast"
+description = "TensorCast"
 readme = "README.md"
 requires-python = ">=3.10"
 # Note: Runtime torch version should match the build-time version
-# The package name will include the torch version suffix (e.g., scstore-0.0.2+torch26)
+# The package name will include the torch version suffix (e.g., tensorcast-0.0.2+torch26)
 dependencies = [
     "click>=8.1.8",
     "grpcio>=1.56.0,<2",
@@ -52,7 +52,7 @@ dev = [
 ]
 
 [project.scripts]
-scstore-cli = "scstore.cli:main"
+tensorcast-cli = "tensorcast.cli:main"
 
 [project.optional-dependencies]
 build = ["setuptools", "cython"]
@@ -245,12 +245,12 @@ max-complexity = 10
 
 [tool.pyright]
 include = [
-    "scstore/**",
+    "tensorcast/**",
     "tests/python/**",
 ]
 
 exclude = [
-    "scstore/transformers_util.py" # TODO: remove this
+    "tensorcast/transformers_util.py" # TODO: remove this
 ]
 
 typeCheckingMode = "standard"

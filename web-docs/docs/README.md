@@ -1,12 +1,12 @@
 ---
-title: StepCast Store Documentation
-description: Comprehensive documentation for StepCast Store - a high-performance, distributed artifact storage and loading system
+title: TensorCast Documentation
+description: Comprehensive documentation for TensorCast - a high-performance, distributed artifact storage and loading system
 sidebar_position: 1
 ---
 
-# StepCast Store Documentation
+# TensorCast Documentation
 
-Welcome to the StepCast Store documentation! This comprehensive guide covers everything from getting started to advanced development topics.
+Welcome to the TensorCast documentation! This comprehensive guide covers everything from getting started to advanced development topics.
 
 ## 📚 Documentation Structure
 
@@ -19,7 +19,7 @@ docs/
 
 ## 🏗️ System Architecture Overview
 
-StepCast Store follows a distributed master-worker architecture:
+TensorCast follows a distributed master-worker architecture:
 
 ```mermaid
 graph TB
@@ -53,7 +53,7 @@ graph TB
 | **Global Store** | Centralized artifact registry and load balancer | Python gRPC service |
 | **Store Daemon** | Distributed worker nodes with local storage | Python gRPC + C++ core |
 | **C++ Core** | High-performance checkpoint, storage, and P2P | C++ with PyTorch integration |
-| **User Process** | Application layer using models | Python with `scstore.torch_util` |
+| **User Process** | Application layer using models | Python with `tensorcast.torch_util` |
 
 ## 📖 Key Source Files
 
@@ -63,9 +63,9 @@ graph TB
 | `core/checkpoint/streaming_tensor_writer.*` | C++ | Asynchronous GPU→disk streaming pipeline |
 | `core/store/store_engine.cc` | C++ | Bridges checkpoint module with on-disk store |
 | `core/communicator/engine/*` | C++ | RDMA/TCP transport engines for inter-node transfer |
-| `scstore/torch_util.py` | Python | High-level PyTorch integration (`save_dict`, `load_dict`) |
-| `scstore/daemon_manager.py` | Python | Daemon process management and health monitoring |
-| `scstore/global_store/grpc_service.py` | Python | Global metadata registry gRPC server |
+| `tensorcast/torch_util.py` | Python | High-level PyTorch integration (`save_dict`, `load_dict`) |
+| `tensorcast/daemon_manager.py` | Python | Daemon process management and health monitoring |
+| `tensorcast/global_store/grpc_service.py` | Python | Global metadata registry gRPC server |
 | `proto/global_store.proto` | Protobuf | RPC definitions for global metadata service |
 
 ## 🔨 Development Workflow

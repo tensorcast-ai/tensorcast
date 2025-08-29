@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/multi_safetensors_source.h"
 
@@ -14,7 +14,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/store/loader/safetensors_util.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 namespace {
 absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
@@ -191,4 +191,4 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
   return total;
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -11,7 +11,7 @@
 #include "core/store/loader/loader.h"
 #include "core/store/loading/loading_spec.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Minimal loader for InlineBufferSource.
@@ -60,4 +60,4 @@ class InlineBufferLoader : public IArtifactLoader {
   absl::Mutex mutex_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

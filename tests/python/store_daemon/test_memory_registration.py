@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import contextlib
 import time
@@ -8,7 +8,7 @@ import grpc
 from pathlib import Path
 import pytest
 
-from scstore.proto import store_daemon_pb2
+from tensorcast.proto import store_daemon_pb2
 
 
 def _ensure_minimal_model_files(storage_root: Path, artifact_id: str, size_bytes: int) -> None:
@@ -29,8 +29,8 @@ def _ensure_minimal_model_files(storage_root: Path, artifact_id: str, size_bytes
 @pytest.fixture
 def servicer(tmp_path):
     """Create a StoreDaemonServicer with minimal config for memory registration tests."""
-    from scstore.store_daemon.config import StoreDaemonConfig, ServerConfig, NetworkConfig
-    from scstore.store_daemon.servicer import StoreDaemonServicer
+    from tensorcast.store_daemon.config import StoreDaemonConfig, ServerConfig, NetworkConfig
+    from tensorcast.store_daemon.servicer import StoreDaemonServicer
     from pydantic import ByteSize
 
     cfg = StoreDaemonConfig(

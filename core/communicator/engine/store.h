@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_STORE_H_
 #define CORE_COMMUNICATOR_ENGINE_STORE_H_
@@ -9,7 +9,7 @@
 #include "core/communicator/misc/map.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class PartitionTensorStore {
  public:
@@ -27,6 +27,6 @@ class PartitionTensorStore {
   Map<std::string, tensor_t> tensors_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_ENGINE_STORE_H_

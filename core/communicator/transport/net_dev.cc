@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 NetDev::NetDev(struct ibv_context* context, int dev_id, struct ibv_device* dev, int port_id, struct ibv_port_attr port)
     : dev_name_(dev->name),
@@ -163,4 +163,4 @@ void NetDev::register_loop() {
   }
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

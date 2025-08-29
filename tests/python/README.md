@@ -1,6 +1,6 @@
-# Python Tests for StepCast Store
+# Python Tests for TensorCast
 
-This directory contains comprehensive test suites for the StepCast Store system, covering both the Global Store service and the Store Daemon functionality, as well as auto-daemon management and artifact transport capabilities.
+This directory contains comprehensive test suites for the TensorCast system, covering both the Global Store service and the Store Daemon functionality, as well as auto-daemon management and artifact transport capabilities.
 
 
 ## Running Tests

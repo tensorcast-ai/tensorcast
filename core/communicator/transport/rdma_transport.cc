@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <utility>
 
@@ -6,7 +6,7 @@
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ENV_PARAM(RDMA_TOS, 186);
 ENV_PARAM(RDMA_TIMEOUT, 20);
@@ -221,4 +221,4 @@ result_t RdmaTransport::do_post_recv() {
   return SUCCESS;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

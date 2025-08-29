@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "absl/status/statusor.h"
 #include "core/store/loader/source.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 /**
  * Compute data multihash (multibase base32 over Merkle tree sha2-256 root)
@@ -36,4 +36,4 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
     int device_id,
     size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

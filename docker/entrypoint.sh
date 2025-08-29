@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Entrypoint script for the StepCast Store image.
+# Entrypoint script for the TensorCast image.
 #
 # Usage examples:
-#   docker run stepcast-store store-daemon --config /path/to/config.yaml
-#   docker run stepcast-store global-store --port 50051
+#   docker run tensorcast-store store-daemon --config /path/to/config.yaml
+#   docker run tensorcast-store global-store --port 50051
 #
 # The first positional argument selects which service to start.
-# * store-daemon  -> scstore.cli start
-# * global-store -> scstore.global_store
+# * store-daemon  -> tensorcast.cli start
+# * global-store -> tensorcast.global_store
 # Any additional arguments are forwarded verbatim to the underlying command.
 
 set -euo pipefail
@@ -22,10 +22,10 @@ shift
 
 case "${mode}" in
   store-daemon)
-    exec python -m scstore.cli start "$@"
+    exec python -m tensorcast.cli start "$@"
     ;;
   global-store)
-    exec python -m scstore.global_store "$@"
+    exec python -m tensorcast.global_store "$@"
     ;;
   *)
     # Fallback: execute the command as-is (allows users to run arbitrary shells)

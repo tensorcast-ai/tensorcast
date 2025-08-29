@@ -1,14 +1,10 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI when working with code in this repository.
 
 ## Project Overview
 
-StepCast Store is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
-- **One Global Store**: Centralized coordinator and artifact registry
-- **Many Store Daemons**: Distributed worker nodes across the cluster
-- **C++ Core**: High-performance checkpoint, storage, and P2P communication layer
-- **User Process Worker**: Loads and uses the artifact in the final application context
+TensorCast is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
 
 ## Development Environment Setup
 
@@ -17,7 +13,7 @@ StepCast Store is a high-performance, distributed artifact storage and loading s
 #### C++ Core (Bazel) and Python Extension
 ```bash
 # Build all. BUILD_CORE means cxx files in core/
-#  BUILD_EXTENSION means cxx files in scstore/csrc
+#  BUILD_EXTENSION means cxx files in tensorcast/csrc
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
@@ -65,7 +61,7 @@ uv run ruff check .
 uv run ruff format .
 
 # Type checking
-uv run mypy ./scstore
+uv run mypy ./tensorcast
 ```
 
 ### Protocol Buffer Code Generation
@@ -74,7 +70,7 @@ uv run mypy ./scstore
 ```bash
 bash tools/build_proto_python.sh
 ```
-This updates generated Python code in `./scstore/proto/` directory.
+This updates generated Python code in `./tensorcast/proto/` directory.
 
 ### Common Build Issues
 
@@ -100,16 +96,16 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 
 ### Core Components
 - **C++ Core** (`/core/`): High-performance checkpoint, store, and communicator modules with CUDA/P2P support
-- **Python Services** (`/scstore/`): gRPC-based global store and daemon services with PyTorch integration. **All gRPC service and client implementations are in Python**.
+- **Python Services** (`/tensorcast/`): gRPC-based global store and client libraries with PyTorch integration. The Store Daemon is now implemented in C++ (see `/daemon`), while the Global Store and Python clients remain in Python.
 - **Protocol Buffers** (`/proto/`): Service definitions for distributed communication
 - **User Process Worker**: Responsible for final artifact loading and utilization
 
 ### Key Directories
 - `/core/checkpoint/`: Streaming tensor serialization with GPU-to-disk optimization
-- `/core/store/`: Artifact lifecycle management and memory optimization. **The Store Engine used by ArtifactLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `scstore/csrc/store_engine_py.cc`**.
+- `/core/store/`: Artifact lifecycle management and memory optimization. **The Store Engine used by ArtifactLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `tensorcast/csrc/store_engine_py.cc`**.
 - `/core/communicator/`: RDMA/TCP communication engines
-- `/scstore/global_store/`: Centralized metadata registry with DuckDB backend
-- `/scstore/store_daemon/`: Local artifact storage service
+- `/tensorcast/global_store/`: Centralized metadata registry with DuckDB backend
+- `/tensorcast/store_daemon/`: Local artifact storage service
 - `/tests/`: Comprehensive C++ and Python test suites
 
 ### Build Systems
@@ -167,7 +163,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 - Registration of local replicas with Global Store
 
 #### User Process Worker (Application Layer)
-- **Primary Interface**: Uses `scstore.torch_util.py` for artifact operations
+- **Primary Interface**: Uses `tensorcast.torch_util.py` for artifact operations
 - **Artifact Loading**: Calls `load_dict()` to load models from Store Daemon
 - **Artifact Usage**: Runs inference, training, and other ML workloads
 - **PyTorch Integration**: Direct tensor operations and artifact manipulation
@@ -256,24 +252,22 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ### C++ Guidelines (Simplified)
 
+#### C++ Naming Conventions
+- **Variables/Functions**: `snake_case`
+- **Classes/Structs**: `PascalCase`
+- **Constants/Macros**: `ALL_CAPS`
+- **Files/Directories**: `snake_case`
+
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs
-- **Explicit file lists** - Never use `glob()`, list all files explicitly
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
 - Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
-- CLI: Use `bazel` instead of raw `bazel` in the command line.
 
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
 - **Build System**: Bazel with Clang18
 - **Common Deps**: absl, catch2, nlohmann_json
-
-#### Naming Conventions
-- **Variables/Functions**: `snake_case`
-- **Classes/Structs**: `PascalCase`
-- **Constants/Macros**: `ALL_CAPS`
-- **Files/Directories**: `snake_case`
 
 #### Code Style
 - Prefer modern C++ features and language standards. No compatibility shims.

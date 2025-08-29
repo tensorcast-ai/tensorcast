@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_
 #define CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_
 
 #include <cstdint>
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 #ifdef __APPLE__
 enum EPOLL_EVENTS {
@@ -71,6 +71,6 @@ extern "C" {
 
 #endif
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_

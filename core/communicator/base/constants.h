@@ -1,9 +1,9 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_BASE_CONSTANTS_H_
 #define CORE_COMMUNICATOR_BASE_CONSTANTS_H_
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 // Device type constants
 enum {
@@ -22,6 +22,6 @@ constexpr int kMTcpConnCount = 8;
 constexpr int kMaxTcpConns = 32;
 constexpr int kMaxFd = 32;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_BASE_CONSTANTS_H_

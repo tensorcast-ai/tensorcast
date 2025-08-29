@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -17,8 +17,8 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") {
   if (!is_cuda_available()) {
@@ -27,7 +27,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     return;
   }
   int device_count = 0;
-  absl::Status cuda_status = stepcast::cuda::get_device_count(&device_count);
+  absl::Status cuda_status = tensorcast::cuda::get_device_count(&device_count);
   REQUIRE(cuda_status.ok());
   if (device_count < 2) {
     INFO("Less than 2 CUDA devices found. Marking as success.");
@@ -73,7 +73,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     REQUIRE(pool != nullptr);
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -84,7 +84,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dev,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -102,7 +102,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
     REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
 
-    absl::Status set_dev_status = stepcast::cuda::set_device(dev);
+    absl::Status set_dev_status = tensorcast::cuda::set_device(dev);
     REQUIRE(set_dev_status.ok());
     auto gfut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(gfut.valid());
@@ -116,7 +116,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     REQUIRE(gpu_ptr != nullptr);
 
     std::vector<char> hostbuf(total);
-    absl::Status copy_status = stepcast::cuda::memcpy(hostbuf.data(), gpu_ptr, total, cudaMemcpyDeviceToHost);
+    absl::Status copy_status = tensorcast::cuda::memcpy(hostbuf.data(), gpu_ptr, total, cudaMemcpyDeviceToHost);
     REQUIRE(copy_status.ok());
     REQUIRE(hostbuf == orig);
 

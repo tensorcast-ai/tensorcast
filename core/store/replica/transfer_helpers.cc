@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/transfer_helpers.h"
 
@@ -10,7 +10,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/replica/chunk_meta.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
@@ -175,4 +175,4 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

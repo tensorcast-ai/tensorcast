@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -12,11 +12,11 @@
 #include "core/store/loading/loading_spec.h"
 #include "gsl/pointers"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 class CommunicateEngine;
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Runtime configuration for a Replica instance.
@@ -34,7 +34,7 @@ struct ReplicaConfig {
   // Explicit target device type (CPU, GPU, REMOTE). Defaults to CPU. If GPU is chosen, also
   // specify `local_device_id` below. This makes the target placement unambiguous and avoids
   // the legacy convention of inferring GPU vs. CPU from the sign of `local_device_id`.
-  ::stepcast::DeviceType device_type = ::stepcast::DeviceType::CPU;
+  ::tensorcast::DeviceType device_type = ::tensorcast::DeviceType::CPU;
 
   // Target local GPU device for operations (if applicable).
   int local_device_id = -1; // -1 means unspecified; runtime will decide
@@ -66,4 +66,4 @@ struct ReplicaConfig {
   // - Performance tuning parameters
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -328,9 +328,9 @@ flowchart TB
 
 | Environment Variable                         | Default | Description                           |
 | -------------------------------------------- | ------- | ------------------------------------- |
-| `STEPCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | 64      | Size of each staging chunk (MB)       |
-| `STEPCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | 2       | Number of staging buffers for send    |
-| `STEPCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | 4       | Number of staging buffers for receive |
+| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | 64      | Size of each staging chunk (MB)       |
+| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | 2       | Number of staging buffers for send    |
+| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | 4       | Number of staging buffers for receive |
 
 #### Performance Characteristics
 
@@ -468,15 +468,15 @@ This flow demonstrates:
 
 | Variable                                     | Default   | Description                           |
 | -------------------------------------------- | --------- | ------------------------------------- |
-| `STEPCAST_COMM_ENABLE_RDMA`                  | `true`    | Enable RDMA transport                 |
-| `STEPCAST_COMM_CHANNEL_EXPIRE_SEC`           | `0`       | Channel idle timeout (0=never)        |
-| `STEPCAST_COMM_TCP_CONN_COUNT`               | `8`       | Parallel TCP sockets for MTCP         |
-| `STEPCAST_COMM_DEFAULT_DEV`                  | ""        | Force NIC when GPU mapping fails      |
-| `STEPCAST_COMM_LOCAL_IP`                     | `0.0.0.0` | Bind IP for server                    |
-| `STEPCAST_COMM_LOCAL_PORT`                   | `50051`   | Bind port for server                  |
-| `STEPCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | `64`      | GPU staging chunk size (MB)           |
-| `STEPCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | `2`       | Number of GPU send staging buffers    |
-| `STEPCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | `4`       | Number of GPU receive staging buffers |
+| `TENSORCAST_COMM_ENABLE_RDMA`                  | `true`    | Enable RDMA transport                 |
+| `TENSORCAST_COMM_CHANNEL_EXPIRE_SEC`           | `0`       | Channel idle timeout (0=never)        |
+| `TENSORCAST_COMM_TCP_CONN_COUNT`               | `8`       | Parallel TCP sockets for MTCP         |
+| `TENSORCAST_COMM_DEFAULT_DEV`                  | ""        | Force NIC when GPU mapping fails      |
+| `TENSORCAST_COMM_LOCAL_IP`                     | `0.0.0.0` | Bind IP for server                    |
+| `TENSORCAST_COMM_LOCAL_PORT`                   | `50051`   | Bind port for server                  |
+| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | `64`      | GPU staging chunk size (MB)           |
+| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | `2`       | Number of GPU send staging buffers    |
+| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | `4`       | Number of GPU receive staging buffers |
 
 ---
 
@@ -491,10 +491,10 @@ For optimal performance, consider:
 ### Concurrency Tuning
 ```cpp
 // Adjust MTCP parallelism based on bandwidth
-export STEPCAST_COMM_TCP_CONN_COUNT=16
+export TENSORCAST_COMM_TCP_CONN_COUNT=16
 
 // Increase channel cache time to reduce reconnects
-export STEPCAST_COMM_CHANNEL_EXPIRE_SEC=300
+export TENSORCAST_COMM_CHANNEL_EXPIRE_SEC=300
 ```
 
 ### Memory Registration
@@ -505,14 +505,14 @@ export STEPCAST_COMM_CHANNEL_EXPIRE_SEC=300
 ### GPU Transfer Optimization
 ```bash
 # Optimize staging buffer size based on tensor sizes
-export STEPCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB=128
+export TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB=128
 
 # Increase buffers for higher concurrency
-export STEPCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS=4
-export STEPCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS=8
+export TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS=4
+export TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS=8
 
 # Ensure sufficient TCP connections for bandwidth
-export STEPCAST_COMM_TCP_CONN_COUNT=16
+export TENSORCAST_COMM_TCP_CONN_COUNT=16
 ```
 
 **GPU-Specific Tips:**

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -7,7 +7,7 @@
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class GlobalStoreClient;
 class ReplicaRegistry;
@@ -33,4 +33,4 @@ class MaterializeOrchestrator {
   GlobalStoreClient* gs_client_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

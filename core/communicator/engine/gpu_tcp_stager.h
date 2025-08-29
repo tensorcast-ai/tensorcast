@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -15,7 +15,7 @@
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 // Forward declaration
 class PartitionTensor;
@@ -278,4 +278,4 @@ class GpuTcpStager {
   void return_event(cudaEvent_t event) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

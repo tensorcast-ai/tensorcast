@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/system_capabilities.h"
 
@@ -11,7 +11,7 @@
 
 #include "absl/log/log.h"
 
-namespace stepcast::common {
+namespace tensorcast::common {
 
 namespace {
 // Try a tiny probe on anonymous page to check MADV flag acceptance.
@@ -99,4 +99,4 @@ void SystemCapabilities::detect_madv_() noexcept {
             << ", MADV_PAGEOUT=" << pageout_ok;
 }
 
-} // namespace stepcast::common
+} // namespace tensorcast::common

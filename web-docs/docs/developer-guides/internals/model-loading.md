@@ -1,12 +1,12 @@
 ---
 title: Artifact Loading Workflow
-description: Complete artifact loading workflow and component interactions in StepCast Store
+description: Complete artifact loading workflow and component interactions in TensorCast
 sidebar_position: 1
 ---
 
 # Artifact Loading Workflow
 
-This diagram shows the complete artifact loading workflow in StepCast Store, including the interaction between different components.
+This diagram shows the complete artifact loading workflow in TensorCast, including the interaction between different components.
 
 ## System Components
 

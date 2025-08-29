@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """
 Tests for the artifact transport functionality of the GlobalStoreServicer.
@@ -10,8 +10,8 @@ import uuid
 
 import pytest
 
-from scstore.global_store.grpc_service import GlobalStoreServicer
-from scstore.proto import global_store_pb2
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.proto import global_store_pb2
 
 
 class _MockContext:

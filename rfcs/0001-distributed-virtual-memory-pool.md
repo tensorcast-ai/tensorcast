@@ -425,6 +425,6 @@ dvmp:
 
 ## 7. Conclusion
 
-DVMP provides a robust foundation for distributed memory management in StepCast Store. By abstracting physical memory distribution behind a unified virtual memory interface, it enables efficient loading and sharing of ultra-large models while maintaining high performance and reliability.
+DVMP provides a robust foundation for distributed memory management in TensorCast. By abstracting physical memory distribution behind a unified virtual memory interface, it enables efficient loading and sharing of ultra-large models while maintaining high performance and reliability.
 
 The system has been successfully implemented and tested with models up to 670GB, demonstrating the viability of the approach for production ML workloads.

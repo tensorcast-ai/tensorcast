@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -14,7 +14,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Forward declarations
 class GlobalStoreClient;
@@ -162,4 +162,4 @@ class ChunkAwareLoadingStrategy {
       const ProgressCallback& progress_cb);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

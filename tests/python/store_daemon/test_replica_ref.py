@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Tests for replica reference tracking data structures."""
 
 import time
 import pytest
 
-from scstore.store_daemon.replica_ref import ReplicaKey, ReplicaRefInfo
+from tensorcast.store_daemon.replica_ref import ReplicaKey, ReplicaRefInfo
 
 
 class TestReplicaKey:

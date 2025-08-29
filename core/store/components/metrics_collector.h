@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/metrics/metric_objects.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Forward declarations
 class ReplicaRegistry;
@@ -85,24 +85,24 @@ class MetricsCollector {
 
  private:
   // Memory Pool Metrics
-  stepcast::metrics::Gauge memory_pool_total_gauge_;
-  stepcast::metrics::Gauge memory_pool_available_gauge_;
-  stepcast::metrics::Gauge memory_pool_allocated_chunks_gauge_;
+  tensorcast::metrics::Gauge memory_pool_total_gauge_;
+  tensorcast::metrics::Gauge memory_pool_available_gauge_;
+  tensorcast::metrics::Gauge memory_pool_allocated_chunks_gauge_;
 
   // Replica Metrics
-  stepcast::metrics::Gauge replicas_in_memory_cpu_gauge_;
-  stepcast::metrics::Gauge replicas_in_memory_gpu_gauge_;
-  stepcast::metrics::Gauge total_replica_size_bytes_gauge_;
+  tensorcast::metrics::Gauge replicas_in_memory_cpu_gauge_;
+  tensorcast::metrics::Gauge replicas_in_memory_gpu_gauge_;
+  tensorcast::metrics::Gauge total_replica_size_bytes_gauge_;
 
   // Operation Metrics
-  stepcast::metrics::Counter operations_total_counter_;
-  stepcast::metrics::Histogram operation_latency_histogram_;
+  tensorcast::metrics::Counter operations_total_counter_;
+  tensorcast::metrics::Histogram operation_latency_histogram_;
 
   // P2P/RDMA Metrics
-  stepcast::metrics::Counter p2p_transfers_total_;
-  stepcast::metrics::Counter p2p_bytes_transferred_total_;
-  stepcast::metrics::Counter p2p_transfer_errors_total_;
-  stepcast::metrics::Counter memory_evictions_total_;
+  tensorcast::metrics::Counter p2p_transfers_total_;
+  tensorcast::metrics::Counter p2p_bytes_transferred_total_;
+  tensorcast::metrics::Counter p2p_transfer_errors_total_;
+  tensorcast::metrics::Counter memory_evictions_total_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/loader/source.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Concatenates the data buffers of multiple .safetensors files into one logical
 // byte space. Headers are hidden and not exposed to readers.
@@ -49,4 +49,4 @@ class MultiSafetensorsSource : public SeekableSource {
   uint64_t current_offset_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

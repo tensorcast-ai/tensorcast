@@ -1,8 +1,8 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import torch
 from typing import Any
-from scstore.torch_util import load_dict
+from tensorcast.torch_util import load_dict
 
 
 def compare_tensor_dicts(
@@ -81,10 +81,10 @@ if __name__ == "__main__":
     # Replace with actual paths to your artifact files
     # Ensure the artifact files exist at these paths before running.
     path_to_torch_state_dict = (
-        "/data/workspace/stepcast-store/test-models/Qwen/Qwen3-0.6B/state_dict.pth"
+        "/data/workspace/tensorcast-store/test-models/Qwen/Qwen3-0.6B/state_dict.pth"
     )
     path_to_sc_model_dir = (
-        "/data/workspace/stepcast-store/test-models/Qwen/Qwen3-0.6B"
+        "/data/workspace/tensorcast-store/test-models/Qwen/Qwen3-0.6B"
     )
 
     try:

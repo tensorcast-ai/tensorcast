@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -18,15 +18,15 @@
 // Forward declaration instead of include to avoid circular dependency
 
 // Forward declaration
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 class CommunicateEngine;
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 class SeekableSource;
 }
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Loader implementation for fetching replica data from a remote peer via RDMA or TCP.
@@ -71,4 +71,4 @@ class P2PLoader : public IArtifactLoader {
   bool initialized_ = false;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store
