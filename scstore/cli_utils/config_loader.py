@@ -135,7 +135,8 @@ def validate_config(config: StoreDaemonConfig) -> None:
     if config.server.num_threads <= 0:
         raise ConfigError(f"Invalid number of threads: {config.server.num_threads}")
 
-    if config.server.mem_pool_size <= 0:
+    # Allow 0 to disable pinned host pool (useful on systems without CUDA)
+    if config.server.mem_pool_size < 0:
         raise ConfigError(f"Invalid memory pool size: {config.server.mem_pool_size}")
 
     if config.server.chunk_size <= 0:

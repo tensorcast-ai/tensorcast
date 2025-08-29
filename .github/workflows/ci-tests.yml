@@ -68,11 +68,25 @@ jobs:
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
+      - name: Build scstore_daemon (Fake CUDA)
+        run: |
+          bazel build //daemon:scstore_daemon \
+            --define use_fake_cuda=true \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
+
       - name: Upload libstore_engine.so artifact
         uses: actions/upload-artifact@v4
         with:
           name: libstore_engine-so
           path: bazel-bin/core/libstore_engine.so
+          if-no-files-found: error
+
+      - name: Upload scstore_daemon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scstore-daemon-bin
+          path: bazel-bin/daemon/scstore_daemon
           if-no-files-found: error
 
       - name: Restore Bazel external headers cache
@@ -197,6 +211,16 @@ jobs:
           mkdir -p bazel-bin/core
           cp -f libstore_engine.so bazel-bin/core/libstore_engine.so
 
+      - name: Download scstore_daemon artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: scstore-daemon-bin
+          path: .
+
+      - name: Make scstore_daemon executable
+        run: |
+          chmod +x ./scstore_daemon
+
       - name: Restore Bazel external headers cache
         id: cache-externals
         uses: actions/cache@v4
@@ -242,3 +266,27 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/scstore/lib:${{ env.LD_LIBRARY_PATH }}
         shell: bash
+
+      - name: Smoke test C++ StoreDaemon via CLI
+        env:
+          SCSTORE_DAEMON_BIN: ${{ github.workspace }}/scstore_daemon
+          UV_NO_SYNC: "1"
+        run: |
+          set -euxo pipefail
+          PORT=17073
+          uv run -q python -m scstore.cli start --non-blocking --host 127.0.0.1 --port ${PORT}
+          deadline=$((SECONDS+10))
+          ok=0
+          while (( SECONDS < deadline )); do
+            if uv run -q python -c "import grpc; from scstore.proto import store_daemon_pb2 as pb2, store_daemon_pb2_grpc as pb2g; stub=pb2g.StoreDaemonStub(grpc.insecure_channel('127.0.0.1:${PORT}')); stub.GetServerConfig(pb2.GetServerConfigRequest(), timeout=2.0)" >/dev/null 2>&1; then
+              echo READY
+              ok=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo NOT_READY
+            exit 1
+          fi
+          uv run -q python -m scstore.cli stop || true

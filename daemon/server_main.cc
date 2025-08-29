@@ -13,6 +13,9 @@
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 
+#include <pthread.h>
+#include <csignal>
+
 ABSL_FLAG(std::string, listen_addr, "0.0.0.0:50051", "gRPC listen address");
 ABSL_FLAG(std::string, storage_path, "", "Optional storage path for local artifacts");
 ABSL_FLAG(uint16_t, p2p_port, 9090, "P2P communication port for engine");
@@ -42,7 +45,25 @@ int main(int argc, char** argv) {
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   LOG(INFO) << "scstore-daemon listening on " << absl::GetFlag(FLAGS_listen_addr);
+  // Install signal handling using sigwait in a dedicated thread.
+  // Block SIGINT/SIGTERM in this thread (will be inherited by worker threads)
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGINT);
+  sigaddset(&set, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &set, nullptr);
+
+  std::thread sig_thread([&server, set]() mutable {
+    int sig = 0;
+    if (sigwait(&set, &sig) == 0) {
+      LOG(INFO) << "Received signal " << sig << ", initiating gRPC shutdown...";
+      server->Shutdown();
+    }
+  });
+
   server->Wait();
+  if (sig_thread.joinable())
+    sig_thread.join();
   metrics.stop();
   return 0;
 }

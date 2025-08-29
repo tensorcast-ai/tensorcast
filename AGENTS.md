@@ -100,7 +100,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 
 ### Core Components
 - **C++ Core** (`/core/`): High-performance checkpoint, store, and communicator modules with CUDA/P2P support
-- **Python Services** (`/scstore/`): gRPC-based global store and daemon services with PyTorch integration. **All gRPC service and client implementations are in Python**.
+- **Python Services** (`/scstore/`): gRPC-based global store and client libraries with PyTorch integration. The Store Daemon is now implemented in C++ (see `/daemon`), while the Global Store and Python clients remain in Python.
 - **Protocol Buffers** (`/proto/`): Service definitions for distributed communication
 - **User Process Worker**: Responsible for final artifact loading and utilization
 
