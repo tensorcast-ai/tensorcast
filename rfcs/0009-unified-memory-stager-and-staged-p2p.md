@@ -350,3 +350,106 @@ struct RegisterTensorOptions {
 - Keep `register_tensor()` fast; avoid blocking on MR registration when `register_mr=false`.
 - Leverage existing UMA `create_direct_write_token(...)` for DVMP pin leases.
 - MR cache must be per-PD and cleared on device shutdown.
+
+## 14. P2P Throughput Optimizations (Framework-level)
+
+This section refines the design with specific knobs and mechanisms to maximize end-to-end throughput while keeping CPU overhead and latency low.
+
+### 14.1 Zero-register (DirectMR) vs Staged policy matrix
+
+- Default policy:
+  - CPU: staged for RDMA (to avoid DVMP pinning) and direct for TCP.
+  - GPU: staged for both RDMA and TCP.
+- Override for hot, small CPU slabs (≤ `STEPCAST_COMM_DIRECT_MR_MAX_BYTES`): allow DirectMR to skip memcpy if UMA marks chunk range as HOT+Resident and total bytes small, bounded by `max_inflight_direct_mr`.
+
+Knobs:
+- `STEPCAST_COMM_DIRECT_MR_MAX_BYTES` (default 4 MiB)
+- `STEPCAST_COMM_MAX_INFLIGHT_DIRECT_MR` (default 32)
+
+Rationale: tiny transfers are memcpy-bound; avoiding staging can help if DVMP guarantee prevents eviction during the small window. Still bounded to avoid system pin growth.
+
+### 14.2 Pipelining: triple-buffer and deep queues
+
+- MemoryStager should support acquiring multiple StageTokens concurrently; recommended buffers per inflight request: 3–4 to overlap copy/D2H, network IO, and CPU processing.
+- MTCP: keep `send_queue_` depth ≥ `conn_count × 2` chunks; use chunk size that matches NIC BDP.
+- RDMA: allow multiple outstanding reads per request; `RdmaTransport` to post `k` WRs in advance (default 64) and coalesce READs up to MR boundary.
+
+Knobs:
+- `STEPCAST_COMM_STAGE_BUFFERS_PER_FLOW` (default 4)
+- `STEPCAST_COMM_RDMA_OUTSTANDING_WR` (default 64)
+- `STEPCAST_COMM_TCP_CONN_COUNT` (already exists)
+
+### 14.3 Chunk sizing tuned to BDP
+
+- Choose stage chunk size s.t. `chunk_bytes ≈ bandwidth × RTT`. Typical values:
+  - 100 Gbps, RTT 80 µs → BDP ≈ 1 MB; with parallelism, 4–8 MB chunk performs well.
+  - PCIe Gen4 GPU D2H prefers ≥ 16 MiB for high sustained rates; use larger staging chunks on GPU side when CPU can handle it.
+
+Knobs:
+- `STEPCAST_COMM_STAGE_CHUNK_MB_CPU` (default 4)
+- `STEPCAST_COMM_STAGE_CHUNK_MB_GPU` (default 16)
+
+Validation: expose dynamic autotune to increase/decrease chunk sizes based on observed throughput and completion latency percentiles.
+
+### 14.4 NUMA and affinity
+
+- Bind staging memcpy threads to cores local to the memory node of the pool buffer.
+- For GPU staging, prefer pools local to the GPU’s closest NUMA node and bind D2H streams to a dedicated CUDA stream per GPU.
+- For RDMA, prefer pools local to NIC’s NUMA node; pin `RdmaThread::poll_loop` to NIC-local cores.
+
+Knobs:
+- `STEPCAST_COMM_AFFINITY_ENABLE=true|false`
+- `STEPCAST_COMM_RDMA_POLL_CORE_MASK` (bitmap)
+- `STEPCAST_COMM_STAGE_CORE_MASK` (bitmap) per GPU/CPU domain
+
+### 14.5 Copy engines and async completion
+
+- DRAMStager: use `memcpy` for now; optionally switch to `memcpy_nt`/`std::memcpy` tuned by platform. Consider `io_uring` `IORING_OP_READ/WRITE` when source is file-mapped in future paths (not DVMP path).
+- GpuNetStager: keep `cudaMemcpyAsync` + per-buffer CUDA event; always reuse one stream per stager to avoid stream creation overhead.
+- Completion: use eventfd or lock-free queues for StageToken completions to minimize contention.
+
+### 14.6 RDMA control overhead minimization
+
+- Batch READ_RESPONSE messages when a single READ_REQUEST enumerates multiple segments; the server can return a vector of staged segments (addr,rkey,bytes) for pipelined posting by the client.
+- Use inline data for small READ_RESPONSE payloads to reduce latency.
+- ACK (`RDMA_READ_DONE`) batching: client can ACK a group of segments with a bitmap.
+
+Protocol additions (optional, backward compatible):
+- `ENGINE_OP_READ_RESPONSE_EX` with repeated segments.
+- `ENGINE_OP_RDMA_READ_DONE_EX` with ranges/bitmap.
+
+### 14.7 Pre-registration and warmup
+
+- On engine init or first RDMA enable, pre-register MRs for all pool buffers across discovered PDs; record rkeys.
+- Warmup path to stage N dummy chunks to calibrate chunk size autotune and prime caches.
+
+### 14.8 Back-pressure and fairness
+
+- If pool pressure is high, prefer smaller chunks to improve fairness across flows; if pressure is low and completion is fast, increase chunk size.
+- Implement token-bucket per remote peer to prevent head-of-line blocking.
+
+### 14.9 Observability for tuning
+
+Counters and histograms:
+- `stager_copy_bytes_total{type=cpu|gpu}`
+- `stager_copy_seconds_sum{type=cpu|gpu}` & P50/95 latency histograms
+- `rdma_wr_inflight`, `rdma_wr_posted_total`, `rdma_wr_completed_total`
+- `mtcp_send_q_depth`, `mtcp_recv_q_depth`
+- `pool_buffers_total`, `pool_buffers_free`
+- `ack_pending_total`, `ack_batch_size`
+
+### 14.10 Concrete defaults per transport
+
+- TCP (MTCP): `conn_count=8`, stage chunk CPU=4 MiB, GPU=16 MiB, buffers per flow=4.
+- RDMA: outstanding WR=64, stage chunk CPU=4–8 MiB, GPU=16–32 MiB; pre-registered MR per pool buffer.
+
+### 14.11 Mapping to code changes
+
+- `PinnedMemoryPool`: add per-PD MR registry; add NUMA placement; expose `reserve_buffers(n)` for preallocation.
+- `GpuTcpStager` → `GpuNetStager`: add MR lookup, configurable chunk size, buffers per flow.
+- `DRAMStager`: support multi-buffer stage with memcpy and RAII completion queue.
+- `CommunicateEngine`:
+  - Add segment array in READ_RESPONSE_EX; posting and ACK batching.
+  - Add autotune engine that observes throughput and tail latencies and adjusts chunk size/buffers.
+- `RdmaTransport`: pipeline multiple WRs per response; add ACK batching.
+- `MTcpTransport`: ensure deep send queue; avoid frequent heap allocations by pooling `MTcpTransportChunk`.
