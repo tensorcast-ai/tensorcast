@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   builder.AddListeningPort(absl::GetFlag(FLAGS_listen_addr), grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-  LOG(INFO) << "scstore-daemon listening on " << absl::GetFlag(FLAGS_listen_addr);
+  LOG(INFO) << "tensorcast-daemon listening on " << absl::GetFlag(FLAGS_listen_addr);
   // Install signal handling using sigwait in a dedicated thread.
   // Block SIGINT/SIGTERM in this thread (will be inherited by worker threads)
   sigset_t set;

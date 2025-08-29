@@ -16,13 +16,13 @@ import grpc
 import pytest
 import pytest_asyncio
 
-from scstore.global_store.webui_backend.grpc_client import (
+from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
     close_global_store_client,
     get_global_store_client,
 )
-from scstore.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
 
 
 class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):

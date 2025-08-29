@@ -34,11 +34,11 @@ ADD pyproject.toml /app/pyproject.toml
 ADD uv.lock /app/uv.lock
 ADD README.md /app/README.md
 
-ADD scstore/global_store /app/scstore/global_store
-ADD scstore/*.py /app/scstore/
-ADD scstore/proto/*.py /app/scstore/proto/
-ADD scstore/cli_utils /app/scstore/cli_utils
-ADD scstore/store_daemon /app/scstore/store_daemon
+ADD tensorcast/global_store /app/tensorcast/global_store
+ADD tensorcast/*.py /app/tensorcast/
+ADD tensorcast/proto/*.py /app/tensorcast/proto/
+ADD tensorcast/cli_utils /app/tensorcast/cli_utils
+ADD tensorcast/store_daemon /app/tensorcast/store_daemon
 
 ADD .git /app/.git
 
@@ -50,13 +50,13 @@ FROM hub.i.basemind.com/tensorcast/debian:bookworm-slim as ui_builder
 
 RUN apt-get update && apt-get install -y nodejs npm curl build-essential zip unzip openjdk-17-jdk-headless
 
-ADD scstore/global_store /app/scstore/global_store
+ADD tensorcast/global_store /app/tensorcast/global_store
 
 # -----------------------------------------------------------------------------
 # Build the Global-Store Web-UI (static assets served by FastAPI backend)
 # -----------------------------------------------------------------------------
 RUN npm install -g pnpm && \
-    cd /app/scstore/global_store/webui_frontend && \
+    cd /app/tensorcast/global_store/webui_frontend && \
     pnpm install --frozen-lockfile --force && \
     pnpm tsc --noEmit && \
     pnpm build
@@ -94,7 +94,7 @@ COPY --from=builder --chown=app:app /app/setup.py /app/setup.py
 COPY --from=builder --chown=app:app /app/README.md /app/README.md
 
 # Copy application code (changes more frequently)
-COPY --from=builder --chown=app:app /app/scstore /app/scstore
+COPY --from=builder --chown=app:app /app/tensorcast /app/tensorcast
 
 # Copy .git last as it changes with every commit
 COPY --from=builder --chown=app:app /app/.git /app/.git
@@ -105,7 +105,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps -e .
 
-ADD scstore/lib/libstore_engine.so /app/scstore/lib/libstore_engine.so
+ADD tensorcast/lib/libstore_engine.so /app/tensorcast/lib/libstore_engine.so
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
@@ -113,9 +113,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 ADD docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-ADD scstore/*.so /app/scstore/
+ADD tensorcast/*.so /app/tensorcast/
 
-COPY --from=ui_builder --chown=python:python /app/scstore/global_store /app/scstore/global_store
+COPY --from=ui_builder --chown=python:python /app/tensorcast/global_store /app/tensorcast/global_store
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 

@@ -4,7 +4,7 @@
 
 import pytest
 
-from scstore.global_store.models import Replica, Worker, Transport, MemoryType
+from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 
 
 class TestModels:

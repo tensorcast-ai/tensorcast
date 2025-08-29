@@ -51,7 +51,7 @@ alwaysApply: false
 - **Implementation**: Python service with C++ core
 
 ### User Process Worker (Application Layer)
-- **Interface**: `scstore.torch_util` module
+- **Interface**: `tensorcast.torch_util` module
 - **Operations**:
   - `load_dict()`: Load models from Store Daemon
   - Direct tensor operations

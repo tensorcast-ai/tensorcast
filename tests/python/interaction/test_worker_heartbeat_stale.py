@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 from .utils import get_free_port_pair
 
 from tests.python.interaction.utils import FakeContext

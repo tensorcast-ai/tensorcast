@@ -5,7 +5,7 @@ from __future__ import annotations
 import grpc
 import pytest
 
-from scstore.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
 
 
 @pytest.mark.integration  # mark for explicit grouping

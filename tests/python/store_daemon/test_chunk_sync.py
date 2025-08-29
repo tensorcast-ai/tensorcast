@@ -9,8 +9,8 @@ from unittest.mock import Mock, MagicMock, patch, call
 import grpc
 import pytest
 
-from scstore.proto import global_store_pb2
-from scstore.store_daemon.chunk_sync import ChunkSyncWorker
+from tensorcast.proto import global_store_pb2
+from tensorcast.store_daemon.chunk_sync import ChunkSyncWorker
 
 
 class TestChunkSyncWorker:
@@ -54,7 +54,7 @@ class TestChunkSyncWorker:
         assert worker._channel is None
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
+    @patch('tensorcast.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_start_stop(self, mock_stub_class, mock_channel, mock_servicer):
         """Test starting and stopping the worker."""
         # Setup mocks
@@ -105,7 +105,7 @@ class TestChunkSyncWorker:
         assert worker._map_chunk_state(99) == global_store_pb2.ChunkState.CHUNK_HOT
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
+    @patch('tensorcast.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_with_updates(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test synchronization with chunk updates."""
         # Setup mocks
@@ -147,7 +147,7 @@ class TestChunkSyncWorker:
         assert update_map[("model2", 1)] == global_store_pb2.ChunkState.CHUNK_COLD
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
+    @patch('tensorcast.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_delta_updates(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test that only changed chunks are synchronized."""
         # Setup mocks
@@ -193,7 +193,7 @@ class TestChunkSyncWorker:
         assert request.updates[0].state == global_store_pb2.ChunkState.CHUNK_COLD
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
+    @patch('tensorcast.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_sync_batch_size(self, mock_stub_class, mock_channel, mock_servicer, mock_stub):
         """Test that updates are sent in batches."""
         # Setup mocks
@@ -230,7 +230,7 @@ class TestChunkSyncWorker:
         assert len(call_args_list[3][0][0].updates) == 1  # Last batch has remainder
 
     @patch('grpc.insecure_channel')
-    @patch('scstore.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
+    @patch('tensorcast.store_daemon.chunk_sync.global_store_pb2_grpc.GlobalStoreStub')
     def test_rpc_error_handling(self, mock_stub_class, mock_channel, mock_servicer):
         """Test handling of RPC errors."""
         # Setup mocks

@@ -60,10 +60,10 @@ The Global Store can run with default settings, but for production deployments, 
 #### Development/Testing
 ```bash
 # In-memory database (ephemeral)
-python -m scstore.global_store
+python -m tensorcast.global_store
 
 # With all monitoring features
-python -m scstore.global_store \
+python -m tensorcast.global_store \
   --metrics-port 8001 \
   --webui-log-file /var/log/global-store-webui.log
 ```
@@ -74,7 +74,7 @@ python -m scstore.global_store \
 mkdir -p /var/lib/global_store
 
 # Run with persistent database
-python -m scstore.global_store \
+python -m tensorcast.global_store \
   --db-file /var/lib/global_store/models.db \
   --port 50051 \
   --workers 20 \
@@ -95,7 +95,7 @@ export GLOBAL_STORE_UI_PORT=9000
 export GLOBAL_STORE_UI_ENABLED=true
 
 # Start the service
-python -m scstore.global_store
+python -m tensorcast.global_store
 ```
 
 ### 3. Docker Deployment
@@ -132,7 +132,7 @@ mkdir -p /var/lib/global_store
 chown -R app:app /var/lib/global_store
 
 # Start with persistent database
-python -m scstore.global_store --db-file /var/lib/global_store/models.db
+python -m tensorcast.global_store --db-file /var/lib/global_store/models.db
 ```
 
 Benefits:
@@ -325,7 +325,7 @@ export RECONNECT_MAX_RETRIES=10
 ```bash
 # Enable debug logging
 export LOG_LEVEL=DEBUG
-python -m scstore.global_store
+python -m tensorcast.global_store
 ```
 
 ### Recovery Procedures

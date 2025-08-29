@@ -87,12 +87,12 @@ spec:
                       - ali
       containers:
         - name: store-daemon
-          image: 'hub.i.basemind.com/tensorcast/scstore:2025.07.11-3d8ec'
+          image: 'hub.i.basemind.com/tensorcast/tensorcast:2025.07.11-3d8ec'
           imagePullPolicy: IfNotPresent
           command: ["python"]
           args:
             - -m
-            - scstore.cli
+            - tensorcast.cli
             - start
             - "--config"
             - /etc/tensorcast/store-daemon.yaml

@@ -150,7 +150,7 @@ graph LR
 ## C++ Core Integration
 
 ### Python Bindings
-The C++ core is exposed via pybind11 (`scstore/csrc/store_engine_py.cc`):
+The C++ core is exposed via pybind11 (`tensorcast/csrc/store_engine_py.cc`):
 
 ```cpp
 // Key exports to Python

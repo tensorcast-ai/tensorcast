@@ -3,7 +3,7 @@
 """Integration tests for Global Store full stack."""
 
 
-from scstore.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.models import MemoryType, Replica, Worker
 
 
 class TestIntegration:

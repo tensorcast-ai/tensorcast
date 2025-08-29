@@ -120,12 +120,12 @@ The system implements sophisticated load balancing for artifact transfers:
 
 ### Starting Global Store
 ```bash
-python -m scstore.global_store --db /path/to/models.db
+python -m tensorcast.global_store --db /path/to/models.db
 ```
 
 ### Starting Store Daemon
 ```bash
-python -m scstore.store_daemon --config config.yaml
+python -m tensorcast.store_daemon --config config.yaml
 ```
 
 ## Next Steps

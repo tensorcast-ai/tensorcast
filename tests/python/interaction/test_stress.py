@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from scstore.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2
 from tests.python.interaction.utils import FakeContext, get_free_port_pair
 
 # -----------------------------------------------------------------------------

@@ -282,7 +282,7 @@ Compared to the classic `TensorWriter`, this pipeline overlaps compute, PCIe tra
 
 ## Python Binding Overview (`checkpoint_py.cc`)
 
-`checkpoint_py.cc` exposes the full C++ API to Python via **pybind11**. The binding lives in `scstore.csrc` and provides:
+`checkpoint_py.cc` exposes the full C++ API to Python via **pybind11**. The binding lives in `tensorcast.csrc` and provides:
 
 * `save_tensors` / `restore_tensors` – Original synchronous APIs.
 * `save_tensors_streaming` – Thin wrapper that forwards a `dict`-based config to `StreamingTensorWriter`.

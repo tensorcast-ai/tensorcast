@@ -41,14 +41,14 @@ uv sync --all-extras --all-groups --verbose
 
 # Install dependencies
 #   - BUILD_CORE means cxx files in core/
-#   - BUILD_EXTENSION means cxx files in scstore/csrc
+#   - BUILD_EXTENSION means cxx files in tensorcast/csrc
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run tests
 uv run pytest tests/python/**.py
 
 # Run cli target
-uv run scstore-cli --help
+uv run tensorcast-cli --help
 
 # Run specific file
 uv run xxx/xxx.py
@@ -58,14 +58,14 @@ uv run xxx/xxx.py
 The StoreDaemon service is implemented in C++ and launched by the Python CLI.
 
 - Development (from source):
-  - Build once with Bazel: `bazel build //daemon:scstore_daemon`
-  - Start background: `uv run -q python -m scstore.cli start --non-blocking --host 127.0.0.1 --port 8073`
-  - Stop: `uv run -q python -m scstore.cli stop`
-  - The CLI automatically locates the binary from `bazel-bin/daemon/scstore_daemon`.
+  - Build once with Bazel: `bazel build //daemon:tensorcast_daemon`
+  - Start background: `uv run -q python -m tensorcast.cli start --non-blocking --host 127.0.0.1 --port 8073`
+  - Stop: `uv run -q python -m tensorcast.cli stop`
+  - The CLI automatically locates the binary from `bazel-bin/daemon/tensorcast_daemon`.
 
 - Packaged (wheel) usage:
-  - The wheel packages the daemon at `scstore/bin/scstore_daemon` and the CLI will use it automatically.
-  - To override, set `SCSTORE_DAEMON_BIN` to an absolute path to a `scstore_daemon` executable.
+  - The wheel packages the daemon at `tensorcast/bin/tensorcast_daemon` and the CLI will use it automatically.
+  - To override, set `TENSORCAST_DAEMON_BIN` to an absolute path to a `tensorcast_daemon` executable.
 
 
 ```bash
@@ -182,7 +182,7 @@ Note that currently, P2P unit tests fail when being called by bazel test, and ne
 # It listens for gRPC requests on the specified port.
 # Default port: 50051
 # Default workers: 10
-uv run -m scstore.global_store --port 50051 --workers 10
+uv run -m tensorcast.global_store --port 50051 --workers 10
 
 # Run the Global Store Server in Docker
 sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/tensorcast/global-store:2025.04.27-55f24

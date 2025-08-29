@@ -4,8 +4,8 @@ MODULE.bazel.lock
 bazel-*
 user.bazelrc
 
-scstore/_version.py
-scstore/lib
+tensorcast/_version.py
+tensorcast/lib
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

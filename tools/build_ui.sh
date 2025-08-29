@@ -5,8 +5,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-WEBUI_DIR="${PROJECT_ROOT}/scstore/global_store/webui_frontend"
-BUILD_OUTPUT="${PROJECT_ROOT}/scstore/global_store/webui_backend/build"
+WEBUI_DIR="${PROJECT_ROOT}/tensorcast/global_store/webui_frontend"
+BUILD_OUTPUT="${PROJECT_ROOT}/tensorcast/global_store/webui_backend/build"
 
 echo "Building Global Store Web UI..."
 

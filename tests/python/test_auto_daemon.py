@@ -14,9 +14,9 @@ import time
 import pytest
 from unittest import mock
 
-from scstore.daemon_manager import DaemonManager, ensure_daemon_running
-from scstore.store_daemon.config import StoreDaemonConfig, ServerConfig
-from scstore.logger import init_logger
+from tensorcast.daemon_manager import DaemonManager, ensure_daemon_running
+from tensorcast.store_daemon.config import StoreDaemonConfig, ServerConfig
+from tensorcast.logger import init_logger
 from pathlib import Path
 from pydantic import ByteSize
 
@@ -88,7 +88,7 @@ class TestDaemonManager:
         is_responsive = daemon_manager.is_daemon_running()
         assert isinstance(is_responsive, bool)
 
-    @mock.patch("scstore.daemon_manager.DaemonManager.is_daemon_running")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.is_daemon_running")
     def test_daemon_running_check_mocked(self, mock_is_running, daemon_manager):
         """Test daemon running check with mocked response."""
         # Mock daemon as running
@@ -98,8 +98,8 @@ class TestDaemonManager:
         assert is_running is True
         mock_is_running.assert_called_once()
 
-    @mock.patch("scstore.daemon_manager.DaemonManager.is_daemon_running")
-    @mock.patch("scstore.daemon_manager.DaemonManager.start_daemon")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.is_daemon_running")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.start_daemon")
     def test_ensure_daemon_running_when_not_running(
         self, mock_start_daemon, mock_is_running, daemon_manager
     ):
@@ -115,7 +115,7 @@ class TestDaemonManager:
         # ensure_daemon_running calls is_daemon_running once to check initial state
         assert mock_is_running.call_count == 1
 
-    @mock.patch("scstore.daemon_manager.DaemonManager.is_daemon_running")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.is_daemon_running")
     def test_ensure_daemon_running_when_already_running(
         self, mock_is_running, daemon_manager
     ):
@@ -148,8 +148,8 @@ class TestConvenienceFunction:
 
         assert isinstance(success, bool)
 
-    @mock.patch("scstore.daemon_manager.DaemonManager.ensure_daemon_running")
-    @mock.patch("scstore.daemon_manager.DaemonManager.__init__")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.ensure_daemon_running")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.__init__")
     def test_convenience_function_with_mock(
         self, mock_init, mock_ensure_running, test_storage_path
     ):
@@ -233,8 +233,8 @@ class TestDaemonLifecycle:
 class TestErrorHandling:
     """Test cases for error handling scenarios."""
 
-    @mock.patch("scstore.daemon_manager.DaemonManager.start_daemon")
-    @mock.patch("scstore.daemon_manager.DaemonManager.is_daemon_running")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.start_daemon")
+    @mock.patch("tensorcast.daemon_manager.DaemonManager.is_daemon_running")
     def test_daemon_start_failure(
         self, mock_is_running, mock_start_daemon, daemon_manager
     ):

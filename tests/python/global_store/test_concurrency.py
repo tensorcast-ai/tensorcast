@@ -8,7 +8,7 @@ import time
 import concurrent.futures
 from uuid import uuid4
 
-from scstore.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import Replica, Worker, MemoryType
 from .conftest import create_test_replicas, create_test_workers
 
 

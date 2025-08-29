@@ -38,7 +38,7 @@ Proto surface (must remain stable):
 - Registration: `BeginRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`
 - Verification: `WaitReplicaVerification`
 
-Python v1 daemon semantics to preserve (scstore/store_daemon/servicer.py):
+Python v1 daemon semantics to preserve (tensorcast/store_daemon/servicer.py):
 - `MaterializeReplica`: returns immediately with `ALLOCATED` + CUDA IPC handle, records pending future and initial PID ref.
 - `ConfirmReplica`: bounded wait (≈30s) on future; return `code=0` on success, `code=1` on failure with INTERNAL.
 - `UnloadReplica`: drop PID ref; if refs remain, skip unload and return success; otherwise unload.
@@ -244,7 +244,7 @@ This mapping is unit-tested; daemon returns structured details.
 ## 12. Configuration & Bootstrap
 
 - Flags (absl::flags): listen address/port, metrics port, device defaults, per-device concurrency, timeouts, TTLs, comm enable, global store endpoints.
-- Single-binary `scstore-daemon` that constructs `StoreEngineOptions`, initializes communication and GS when enabled, and registers gRPC service.
+- Single-binary `tensorcast-daemon` that constructs `StoreEngineOptions`, initializes communication and GS when enabled, and registers gRPC service.
 
 ## 13. Shutdown & Recovery
 
@@ -288,7 +288,7 @@ Crash recovery expectations:
 - Performance: ≥20% reduction in median daemon CPU; ≥15% reduction in p99 latency for Materialize/Confirm typical workloads.
 - Reliability: No memory leaks in 24h stress; no deadlocks detected in lock/unlock tests; stable RDMA registrations.
 - Observability: Metrics present with expected names; logs structured with required fields; health endpoints accurate.
-- Stability Gates: `uv run ruff check .`, `uv run mypy ./scstore` green; `bazel build //...` and `bazel test //tests/cpp:all` pass; sanitizer runs clean in nightly.
+- Stability Gates: `uv run ruff check .`, `uv run mypy ./tensorcast` green; `bazel build //...` and `bazel test //tests/cpp:all` pass; sanitizer runs clean in nightly.
 
 ## 16.2 Edge Cases
 
@@ -375,7 +375,7 @@ Completed (2025-08-29):
 - Metrics: HTTP `/metrics` exporter with core memory pool gauges
 - Sweepers: session and lock sweepers running every 10s
 - Tests: `//daemon:status_utils_test`, `//daemon:transport_lock_manager_test` passing; Python linters/typing green
-- Build: `bazel build //daemon:scstore_daemon --define use_fake_cuda=true` successful
+- Build: `bazel build //daemon:tensorcast_daemon --define use_fake_cuda=true` successful
 
 Notes:
 - Detailed GPU memory figures in detailed status are placeholders pending DeviceManager exposure

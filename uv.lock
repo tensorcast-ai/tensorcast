@@ -1669,7 +1669,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scstore"
+name = "tensorcast"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

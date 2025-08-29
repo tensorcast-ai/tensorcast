@@ -10,9 +10,9 @@ from unittest.mock import Mock, patch
 import grpc
 from pydantic import ByteSize
 
-from scstore.proto import store_daemon_pb2
-from scstore.store_daemon.config import LifecycleConfig, ServerConfig, StoreDaemonConfig
-from scstore.store_daemon.servicer import StoreDaemonServicer
+from tensorcast.proto import store_daemon_pb2
+from tensorcast.store_daemon.config import LifecycleConfig, ServerConfig, StoreDaemonConfig
+from tensorcast.store_daemon.servicer import StoreDaemonServicer
 
 
 class MockContext:

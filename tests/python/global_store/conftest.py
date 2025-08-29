@@ -10,21 +10,21 @@ from uuid import uuid4
 import pytest
 import duckdb
 
-from scstore.global_store.grpc_service import GlobalStoreServicer
-from scstore.proto import global_store_pb2
-from scstore.global_store.config import GlobalStoreConfig
-from scstore.global_store.models import Replica, Worker, Transport, MemoryType
-from scstore.global_store.repositories import (
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.proto import global_store_pb2
+from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
+from tensorcast.global_store.repositories import (
     ReplicaRepository,
     TransportRepository,
     WorkerRepository,
 )
-from scstore.global_store.services import (
+from tensorcast.global_store.services import (
     ArtifactService,
     TransportService,
     WorkerService,
 )
-from scstore.global_store.db_utils import init_db
+from tensorcast.global_store.db_utils import init_db
 
 
 # =============================================================================
