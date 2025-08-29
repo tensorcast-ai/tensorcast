@@ -1,11 +1,11 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <utility>
 
 #include "core/communicator/engine/store.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 PartitionTensorStore::PartitionTensorStore() = default;
 
@@ -25,4 +25,4 @@ void PartitionTensorStore::clear() {
   tensors_.clear();
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -7,7 +7,7 @@
 
 namespace py = pybind11;
 
-namespace stepcast {
+namespace tensorcast {
 
 void InitMetricsBindings(py::module_& m) {
   m.def(
@@ -19,4 +19,4 @@ void InitMetricsBindings(py::module_& m) {
       "Get the global metrics snapshot in OpenMetrics text format");
 }
 
-} // namespace stepcast
+} // namespace tensorcast

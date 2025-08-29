@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/cuda_api.h"
 
@@ -8,8 +8,8 @@
 #include "core/communicator/engine/engine.h"
 #include "core/testing/test_helpers.h"
 
-using namespace stepcast::communicator;
-using namespace stepcast::communicator::test;
+using namespace tensorcast::communicator;
+using namespace tensorcast::communicator::test;
 
 TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
   SKIP_IF_NO_CUDA();
@@ -22,11 +22,11 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     // Allocate GPU memory
     std::size_t tensor_size = 1024 * 1024; // 1MB
     void* gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
+    REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     // Create test data
     auto test_data = create_test_pattern(tensor_size, 42);
-    REQUIRE(stepcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
+    REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register GPU tensor
     auto status = engine->register_tensor(
@@ -40,6 +40,6 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     REQUIRE(status.ok());
 
     // Cleanup
-    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
   }
 }

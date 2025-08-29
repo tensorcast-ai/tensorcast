@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/engine/gpu_tcp_stager.h"
 
@@ -11,7 +11,7 @@
 #include "core/communicator/base/constants.h" // For COMMUNICATE_ENGINE_DEV_GPU
 #include "core/communicator/transport/partition_tensor.h" // For PartitionTensor
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 // Implementation of ScopedStagedBuffer
 ScopedStagedBuffer::~ScopedStagedBuffer() {
@@ -413,4 +413,4 @@ absl::StatusOr<ScopedStagedBuffer> GpuTcpStager::stage_scoped(
   return ScopedStagedBuffer(this, *result, bytes);
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

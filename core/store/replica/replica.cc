@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/replica.h"
 
@@ -17,7 +17,7 @@
 #include "core/store/loader/p2p_loader.h"
 #include "core/store/replica/memory_manager.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 //--------------------------------------------------------------------------
 // Static Factory: create()
@@ -502,7 +502,7 @@ MemoryManager& Replica::get_memory_manager() const {
 
 absl::StatusOr<CommRegistrationInfo> Replica::enable_remote_memory_access(
     MemoryLocation location,
-    stepcast::communicator::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Build full chunk list using DVMP metadata snapshot.
@@ -621,7 +621,7 @@ absl::Status Replica::verify_key_points(MemoryLocation location, const ArtifactV
 
 absl::Status Replica::disable_remote_memory_access(
     MemoryLocation location,
-    stepcast::communicator::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Use chunk-scoped unexport. Chunks parameter is currently ignored internally.
@@ -674,4 +674,4 @@ absl::Status Replica::copy_from(const Replica& src) {
   return dst_mm.copy_from_peer(src.get_memory_manager());
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace stepcast::metrics {
+namespace tensorcast::metrics {
 
 enum class MetricType {
   kCounter,
@@ -122,4 +122,4 @@ class MetricsRegistry {
   std::unordered_map<std::string, Metric> metrics_;
 };
 
-} // namespace stepcast::metrics
+} // namespace tensorcast::metrics

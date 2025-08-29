@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Replica reference tracking data structures for lifecycle management."""
 

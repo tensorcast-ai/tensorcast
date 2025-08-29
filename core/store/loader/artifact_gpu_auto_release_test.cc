@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -17,8 +17,8 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][release]") {
   if (!is_cuda_available()) {
@@ -53,7 +53,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -64,7 +64,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -88,7 +88,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     REQUIRE(cpu_ptrs[0] != nullptr);
 
     // Copy to GPU
-    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(gpu_fut.valid());
@@ -114,7 +114,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     // Perform a lightweight host copy to ensure the GPU pointer is readable.
     std::vector<char> host_buf(16); // only copy first 16 bytes for sanity
     absl::Status copy_status =
-        stepcast::cuda::memcpy(host_buf.data(), gpu_ptr, host_buf.size(), cudaMemcpyDeviceToHost);
+        tensorcast::cuda::memcpy(host_buf.data(), gpu_ptr, host_buf.size(), cudaMemcpyDeviceToHost);
     REQUIRE(copy_status.ok());
     // Expect that at least the first byte matches the expected pattern.
     REQUIRE(host_buf[0] == 'A');
@@ -134,7 +134,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
   }
 
   int device_count = 0;
-  auto count_status = stepcast::cuda::get_device_count(&device_count);
+  auto count_status = tensorcast::cuda::get_device_count(&device_count);
   if (!count_status.ok() || device_count < 2) {
     SKIP("Multi-GPU test requires at least 2 GPUs.");
   }
@@ -164,7 +164,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     // First GPU load
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+      auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -175,7 +175,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       ReplicaConfig cfg{
           .source = disk_src,
           .artifact_identifier = artifact_id,
-          .device_type = ::stepcast::DeviceType::CPU,
+          .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 0,
           .pinned_memory_pool = pool,
           .dvmp = dvmp,
@@ -189,7 +189,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
       REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
 
-      absl::Status set_dev = stepcast::cuda::set_device(0);
+      absl::Status set_dev = tensorcast::cuda::set_device(0);
       REQUIRE(set_dev.ok());
 
       auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
@@ -205,7 +205,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     // Second GPU load (different device)
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+      auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -216,7 +216,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       ReplicaConfig cfg{
           .source = disk_src,
           .artifact_identifier = artifact_id + "_gpu1",
-          .device_type = ::stepcast::DeviceType::CPU,
+          .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 1,
           .pinned_memory_pool = pool,
           .dvmp = dvmp,
@@ -230,7 +230,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
       REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
 
-      absl::Status set_dev = stepcast::cuda::set_device(1);
+      absl::Status set_dev = tensorcast::cuda::set_device(1);
       REQUIRE(set_dev.ok());
 
       auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
@@ -277,7 +277,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -287,7 +287,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -304,7 +304,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
 
     // Copy to GPU
-    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
@@ -326,7 +326,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -337,7 +337,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -352,7 +352,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
 
-    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
 
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
@@ -375,7 +375,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -385,7 +385,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -400,7 +400,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
 
-    absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+    absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
 
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);

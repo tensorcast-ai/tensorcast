@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/safetensors_source.h"
 
@@ -16,7 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "absl/strings/str_format.h"
 
-using stepcast::store::loader::SafetensorsSource;
+using tensorcast::store::loader::SafetensorsSource;
 
 namespace {
 

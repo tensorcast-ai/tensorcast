@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 #include "absl/hash/hash.h"
 #include "core/store/replica/chunk_meta.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 struct ChunkLocation {
   std::string node_id; ///< Node UUID or hostname
@@ -29,4 +29,4 @@ struct ChunkKeyHash {
 // Directory that tracks all replicas of every chunk across the cluster.
 using ChunkDirectory = std::unordered_map<ChunkKey, std::vector<ChunkLocation>, ChunkKeyHash>;
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -17,8 +17,8 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][disk][copy]") {
   if (!is_cuda_available()) {
@@ -63,7 +63,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
   // Use new DiskSource
   DiskSource disk_src;
@@ -74,7 +74,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   ReplicaConfig cfg{
       .source = disk_src,
       .artifact_identifier = artifact_id,
-      .device_type = ::stepcast::DeviceType::CPU,
+      .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
@@ -93,7 +93,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
 
   // Copy to GPU
-  absl::Status set_dev = stepcast::cuda::set_device(cfg.local_device_id);
+  absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
   REQUIRE(set_dev.ok());
   auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
   REQUIRE(gpu_fut.valid());
@@ -106,7 +106,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   REQUIRE(gpu_ptr != nullptr);
 
   std::vector<char> host_buf(total_size);
-  absl::Status copy_status = stepcast::cuda::memcpy(host_buf.data(), gpu_ptr, total_size, cudaMemcpyDeviceToHost);
+  absl::Status copy_status = tensorcast::cuda::memcpy(host_buf.data(), gpu_ptr, total_size, cudaMemcpyDeviceToHost);
   REQUIRE(copy_status.ok());
 
   REQUIRE(host_buf == combined);

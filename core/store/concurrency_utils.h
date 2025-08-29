@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // Shared utilities for StoreEngine concurrency tests.
 #pragma once
@@ -14,7 +14,7 @@
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"
 
-namespace stepcast::tests::store_engine {
+namespace tensorcast::tests::store_engine {
 
 // Test setup utilities
 inline void skip_if_no_cuda(const std::string& test_name) {
@@ -31,7 +31,7 @@ inline void skip_if_insufficient_gpus(int required_gpus, const std::string& test
   }
   int device_count = 0;
   {
-    auto st = stepcast::cuda::get_device_count(&device_count);
+    auto st = tensorcast::cuda::get_device_count(&device_count);
     ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
   }
   if (device_count < required_gpus) {
@@ -171,4 +171,4 @@ inline store::ReplicaKey make_replica_key(const std::string& artifact_id, int gp
   return store::ReplicaKey{.artifact_id = artifact_id, .device = make_gpu_key(gpu_ordinal), .replica = 0};
 }
 
-} // namespace stepcast::tests::store_engine
+} // namespace tensorcast::tests::store_engine

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -24,8 +24,8 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 namespace {
 // Write minimal RFC-0007 metadata for a standard partition directory:
@@ -59,7 +59,7 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
     return index_mh_or.status();
   }
   // Use unified SeekableSource hashing pipeline instead of ad-hoc disk dir hashing
-  stepcast::store::loader::FilePartitionSource::Options opts;
+  tensorcast::store::loader::FilePartitionSource::Options opts;
   // Collect all standard partition files (tensor.data, tensor.data_0, tensor.data_1, ...)
   std::vector<std::filesystem::path> parts;
   for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -84,8 +84,8 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
     size_sum += sz;
   }
   opts.total_size = size_sum;
-  stepcast::store::loader::FilePartitionSource src(std::move(opts));
-  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_seekable_source(src, size_sum);
+  tensorcast::store::loader::FilePartitionSource src(std::move(opts));
+  auto data_mh_or = tensorcast::store::loader::compute_data_multihash_from_seekable_source(src, size_sum);
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
@@ -164,7 +164,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -173,7 +173,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   ReplicaConfig cfg{
       .source = disk_src,
       .artifact_identifier = artifact_id,
-      .device_type = ::stepcast::DeviceType::GPU,
+      .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,
@@ -199,7 +199,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   REQUIRE(gpu_ptr != nullptr);
 
   std::vector<char> host_buf(total_size);
-  absl::Status copy_status = stepcast::cuda::memcpy(host_buf.data(), gpu_ptr, total_size, cudaMemcpyDeviceToHost);
+  absl::Status copy_status = tensorcast::cuda::memcpy(host_buf.data(), gpu_ptr, total_size, cudaMemcpyDeviceToHost);
   REQUIRE(copy_status.ok());
 
   // Verify data matches

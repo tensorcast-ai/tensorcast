@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -23,7 +23,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/chunk_meta.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Unified memory management for artifacts/replicas across DRAM and VRAM.
@@ -291,7 +291,7 @@ class ReplicaMemoryCoordinator {
  private:
   struct ReplicaAllocation {
     // DRAM allocation info from DVMP
-    stepcast::memory::DistributedVirtualMemoryPool::VirtualRegion dram_region;
+    tensorcast::memory::DistributedVirtualMemoryPool::VirtualRegion dram_region;
 
     // GPU allocations per device (lazy creation)
     std::unordered_map<DeviceKey, std::shared_ptr<CudaMemory>, DeviceKeyHash> gpu_allocations;
@@ -309,8 +309,8 @@ class ReplicaMemoryCoordinator {
   };
 
   mutable std::mutex mutex_;
-  gsl::not_null<std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool>> dvmp_;
+  gsl::not_null<std::shared_ptr<tensorcast::memory::DistributedVirtualMemoryPool>> dvmp_;
   std::unordered_map<ReplicaKey, ReplicaAllocation, ReplicaKeyHash> allocations_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

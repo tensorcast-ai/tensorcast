@@ -113,7 +113,7 @@ docker run -d \
   -v /var/lib/global_store:/data \
   -e GLOBAL_STORE_DB_PATH=/data/models.db \
   -e GLOBAL_STORE_MAX_WORKERS=20 \
-  hub.i.basemind.com/stepcast/global-store:latest
+  hub.i.basemind.com/tensorcast/global-store:latest
 ```
 
 ### 4. Kubernetes Deployment (High Availability)
@@ -204,7 +204,7 @@ spec:
     spec:
       containers:
       - name: global-store
-        image: hub.i.basemind.com/stepcast/global-store:latest
+        image: hub.i.basemind.com/tensorcast/global-store:latest
         env:
         - name: GLOBAL_STORE_DB_PATH
           value: /data/models.db

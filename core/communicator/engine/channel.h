@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_CHANNEL_H_
 #define CORE_COMMUNICATOR_ENGINE_CHANNEL_H_
@@ -11,7 +11,7 @@
 #include "core/communicator/transport/rdma_transport.h"
 #include "core/communicator/transport/tcp_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class Channel {
  public:
@@ -44,6 +44,6 @@ class Channel {
 
 typedef std::shared_ptr<Channel> channel_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_ENGINE_CHANNEL_H_

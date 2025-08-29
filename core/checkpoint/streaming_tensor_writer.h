@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -15,7 +15,7 @@
 #include "core/checkpoint/tensor_writer.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief A tensor writer that uses streaming pinned buffer for efficient GPU tensor saving.
@@ -106,4 +106,4 @@ class StreamingTensorWriter {
   bool initialized_{false};
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

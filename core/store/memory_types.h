@@ -1,10 +1,10 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
 #include <cstddef>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ══════════════════════════════════════════════════════════════════════════
 // Memory Size Constants
@@ -26,4 +26,4 @@ struct Batch {
   size_t size = 0;
 } __attribute__((aligned(16)));
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/metrics/metrics_registry.h"
 
@@ -15,7 +15,7 @@ const std::vector<double> kDefaultBuckets = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25
 // of the form `key1="val1",key2="val2"`.  Sorting ensures that the
 // representation is *unique* for a given set irrespective of input order so we
 // can safely use it as part of the unordered_map key.
-std::string LabelsToString(stepcast::metrics::Labels labels) {
+std::string LabelsToString(tensorcast::metrics::Labels labels) {
   if (labels.empty()) {
     return "";
   }
@@ -34,7 +34,7 @@ std::string LabelsToString(stepcast::metrics::Labels labels) {
 // Compose the map key: `<name>{sorted_labels}`.  For metrics without labels the
 // braces are omitted so the key degenerates to the metric name – preserving
 // backward-compatible behaviour.
-std::string compose_key(const std::string& name, const stepcast::metrics::Labels& labels) {
+std::string compose_key(const std::string& name, const tensorcast::metrics::Labels& labels) {
   std::string lbl_str = LabelsToString(labels);
   if (lbl_str.empty()) {
     return name;
@@ -43,7 +43,7 @@ std::string compose_key(const std::string& name, const stepcast::metrics::Labels
 }
 } // namespace
 
-namespace stepcast::metrics {
+namespace tensorcast::metrics {
 
 MetricsRegistry& MetricsRegistry::instance() {
   static MetricsRegistry instance;
@@ -287,4 +287,4 @@ Metric& Metric::operator=(Metric&& other) noexcept {
   return *this;
 }
 
-} // namespace stepcast::metrics
+} // namespace tensorcast::metrics

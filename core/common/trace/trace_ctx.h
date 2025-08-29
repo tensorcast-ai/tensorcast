@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 #pragma once
@@ -9,7 +9,7 @@
 
 #include "core/common/trace/trace_manager.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ---------------------------------------------------------------------------
 // Helper for propagating request-id & replica-id across std::async / thread pools
@@ -35,4 +35,4 @@ auto with_trace_ctx(Fn&& fn) {
   };
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

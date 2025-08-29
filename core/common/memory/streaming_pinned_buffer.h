@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -14,7 +14,7 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Manages a circular buffer pool for streaming data transfers.
@@ -182,4 +182,4 @@ class StreamingPinnedBuffer {
   size_t chunks_consumed_ ABSL_GUARDED_BY(mutex_) = 0;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

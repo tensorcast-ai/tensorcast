@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -14,8 +14,8 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 using Catch::Matchers::ContainsSubstring;
 
 TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
@@ -31,7 +31,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
 
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource
@@ -43,7 +43,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,
@@ -72,7 +72,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
     ReplicaConfig cfg{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_memory_pool = pool,
         .dvmp = dvmp,

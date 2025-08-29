@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/canonical_index.h"
 
@@ -15,7 +15,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 namespace {
 
@@ -151,4 +151,4 @@ absl::StatusOr<std::string> build_canonical_index_json(
   return out.dump();
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

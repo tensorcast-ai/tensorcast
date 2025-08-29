@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <atomic>
 #include <chrono>
@@ -13,8 +13,8 @@
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
 
-using namespace stepcast::communicator;
-using namespace stepcast::communicator::test;
+using namespace tensorcast::communicator;
+using namespace tensorcast::communicator::test;
 
 TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
@@ -45,7 +45,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Allocate GPU memory
     void* gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, 1024 * 1024).ok());
+    REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024 * 1024).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), 1024 * 1024, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -90,7 +90,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // No manual release needed - RAII handles it automatically
 
-    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Zero-size transfer handling") {
@@ -98,7 +98,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, 1024).ok());
+    REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024).ok());
 
     // Register with zero size should fail
     auto status = engine->register_tensor(
@@ -115,7 +115,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
         (status.message().find("size") != std::string::npos || status.message().find("zero") != std::string::npos ||
          status.message().find("empty") != std::string::npos));
 
-    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
   }
 
   SECTION("Out of bounds staging") {
@@ -123,7 +123,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     void* gpu_ptr;
     const std::size_t tensor_size = 1024 * 1024;
-    REQUIRE(stepcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
+    REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
     auto tensor = std::make_shared<PartitionTensor>(
         "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
@@ -138,6 +138,6 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     INFO("Expected InvalidArgument status for out-of-bounds staging, but got: " << result.status().ToString());
     REQUIRE(absl::IsInvalidArgument(result.status()));
 
-    REQUIRE(stepcast::cuda::free(gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
   }
 }

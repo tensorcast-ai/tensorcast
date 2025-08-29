@@ -1,12 +1,12 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/communicator/misc/metric.h"
 
 #include <utility>
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t bytes, int mem_type, net_dev_t dev)
     : tensor_key_(std::move(tensor_key)),
@@ -106,4 +106,4 @@ uint64_t RemotePartitionTensor::get_uint64_addr() const {
   return addr_;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

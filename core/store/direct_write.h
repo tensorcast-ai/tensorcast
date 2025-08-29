@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include <memory>
 #include <vector>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Byte range expressed in destination VA space (offset within replica) and length.
 struct VaRange {
@@ -27,4 +27,4 @@ struct DirectWriteToken {
   std::shared_ptr<void> keepalive; // opaque lifetime anchor
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

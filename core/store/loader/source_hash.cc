@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/source_hash.h"
 
@@ -10,13 +10,13 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 namespace {
 
-using stepcast::store::artifact_hash::compute_tree_hash_root_sha256;
-using stepcast::store::artifact_hash::multibase_multihash_sha256;
-using stepcast::store::artifact_hash::sha256_digest_bytes;
+using tensorcast::store::artifact_hash::compute_tree_hash_root_sha256;
+using tensorcast::store::artifact_hash::multibase_multihash_sha256;
+using tensorcast::store::artifact_hash::sha256_digest_bytes;
 
 class CpuMemorySourceLocal : public SeekableSource {
  public:
@@ -60,12 +60,12 @@ class GpuMemorySourceLocal : public SeekableSource {
     if (offset >= total_size_)
       return static_cast<size_t>(0);
     const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    if (auto st = stepcast::cuda::set_device(device_id_); !st.ok())
+    if (auto st = tensorcast::cuda::set_device(device_id_); !st.ok())
       return st;
-    auto st = stepcast::cuda::memcpy(dst, device_ptr_ + offset, to_copy, cudaMemcpyDeviceToHost);
+    auto st = tensorcast::cuda::memcpy(dst, device_ptr_ + offset, to_copy, cudaMemcpyDeviceToHost);
     if (!st.ok())
       return st;
-    if (auto sync = stepcast::cuda::device_synchronize(); !sync.ok())
+    if (auto sync = tensorcast::cuda::device_synchronize(); !sync.ok())
       return sync;
     return to_copy;
   }
@@ -136,4 +136,4 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
   return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

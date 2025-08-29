@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -22,7 +22,7 @@
 
 #include "core/store/replica/chunk_meta.h"
 
-namespace stepcast::memory {
+namespace tensorcast::memory {
 
 class DistributedVirtualMemoryPool {
  public:
@@ -60,7 +60,7 @@ class DistributedVirtualMemoryPool {
   virtual absl::StatusOr<VirtualRegion> region_info(std::string_view artifact_id) const;
 
   // ===== Snapshot & State =====
-  virtual absl::Span<const stepcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
+  virtual absl::Span<const tensorcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
 
   // Lock/unlock a set of chunks for H2D or P2P transfer.
   virtual absl::Status lock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx);
@@ -154,7 +154,7 @@ class DistributedVirtualMemoryPool {
     // Base CPU virtual address reserved for the replica's region
     void* cpu_base{nullptr};
     size_t bytes{0};
-    std::unique_ptr<stepcast::store::ChunkMeta[]> metadata;
+    std::unique_ptr<tensorcast::store::ChunkMeta[]> metadata;
     size_t chunk_count{0};
     // Per-chunk pin refcounts used by ChunkResidencyLease API
     std::unique_ptr<std::atomic<uint32_t>[]> pin_refcnt;
@@ -246,4 +246,4 @@ class DistributedVirtualMemoryPool::DvmpRegion {
   std::string artifact_id_;
 };
 
-} // namespace stepcast::memory
+} // namespace tensorcast::memory

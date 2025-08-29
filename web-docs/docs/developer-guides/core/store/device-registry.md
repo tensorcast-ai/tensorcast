@@ -10,7 +10,7 @@ The **Device Registry** is a lightweight singleton utility that provides a *cano
 
 ## Motivation
 
-Historically, StepCast components referred to GPUs only by *ordinal* (`0 … N-1`). This becomes problematic when:
+Historically, TensorCast components referred to GPUs only by *ordinal* (`0 … N-1`). This becomes problematic when:
 
 1. PCIe topology changes and GPU enumeration order shifts.
 2. GPUs are hot-plugged, replaced, or removed.

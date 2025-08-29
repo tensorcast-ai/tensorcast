@@ -1,10 +1,10 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
 #include <cstddef>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Transfer buffer size constants
 constexpr size_t kDefaultMaxBufferBytes = 256ULL << 20; // 256 MB
@@ -12,4 +12,4 @@ constexpr size_t kDefaultMaxBufferBytes = 256ULL << 20; // 256 MB
 // Device ID constants
 constexpr int kCpuDeviceId = -1;
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

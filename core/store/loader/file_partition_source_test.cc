@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -12,7 +12,7 @@
 #include "absl/status/status.h"
 #include "core/store/loader/file_partition_source.h"
 
-using namespace stepcast::store::loader;
+using namespace tensorcast::store::loader;
 namespace fs = std::filesystem;
 
 class TempFileFixture {

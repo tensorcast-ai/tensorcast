@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """REST API endpoints for Web UI."""
 

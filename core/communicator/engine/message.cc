@@ -1,12 +1,12 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 EngineMessage::EngineMessage(ProtoHeader* header) : TransportMessage(PROTO_HEADER_SIZE, header->size) {
   memcpy(header_buf_, header, PROTO_HEADER_SIZE);
@@ -25,4 +25,4 @@ uint32_t EngineMessage::get_op() {
   return header->op;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

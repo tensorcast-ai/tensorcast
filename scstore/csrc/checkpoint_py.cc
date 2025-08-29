@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <torch/extension.h>
 #include "scstore/csrc/logging.h"
@@ -31,8 +31,8 @@
 
 namespace py = pybind11;
 
-using namespace stepcast::store;
-using stepcast::store::artifact_hash::compute_index_multihash;
+using namespace tensorcast::store;
+using tensorcast::store::artifact_hash::compute_index_multihash;
 
 // Helper function to convert ArtifactVerificationInfo to Python dictionary
 py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
@@ -233,7 +233,7 @@ static py::dict save_model_to_disk_wrapper(
   // Build Canonical Index JSON via C++ authority (stable grouping + 8B alignment invariant already respected by writer)
   std::vector<std::string> ordered_names = tensor_names;
   std::ranges::sort(ordered_names);
-  std::unordered_map<std::string, stepcast::store::loader::CanonicalTensorMeta> metas;
+  std::unordered_map<std::string, tensorcast::store::loader::CanonicalTensorMeta> metas;
   metas.reserve(ordered_names.size());
   for (const auto& name : ordered_names) {
     if (!meta_state_dict.contains(name.c_str())) {
@@ -244,7 +244,7 @@ static py::dict save_model_to_disk_wrapper(
     if (tpl.size() != 4) {
       PY_THROW_WITH_LOG(PyExc_RuntimeError, std::string("meta_state_dict entry must be a 4-tuple"));
     }
-    stepcast::store::loader::CanonicalTensorMeta m;
+    tensorcast::store::loader::CanonicalTensorMeta m;
     m.shape = tpl[0].cast<std::vector<int64_t>>();
     m.stride = tpl[1].cast<std::vector<int64_t>>();
     m.dtype = tpl[2].cast<std::string>();
@@ -261,7 +261,7 @@ static py::dict save_model_to_disk_wrapper(
     logical_sizes[name] = offset_max_size.at(off_it->second);
   }
   absl::StatusOr<std::string> index_json_or =
-      stepcast::store::loader::build_canonical_index_json(ordered_names, offsets, logical_sizes, metas);
+      tensorcast::store::loader::build_canonical_index_json(ordered_names, offsets, logical_sizes, metas);
   if (!index_json_or.ok()) {
     PY_THROW_WITH_LOG(PyExc_RuntimeError, index_json_or.status().ToString());
   }
@@ -314,8 +314,8 @@ static py::dict save_model_to_disk_wrapper(
     // Empty artifact: no bytes to hash → define data_multihash deterministically
     if (total_size == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = stepcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return stepcast::store::artifact_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = tensorcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
+      return tensorcast::store::artifact_hash::multibase_multihash_sha256(root);
     }
 
     // Collect partition files deterministically
@@ -340,7 +340,7 @@ static py::dict save_model_to_disk_wrapper(
       return absl::NotFoundError("No tensor.data partitions found");
     }
 
-    stepcast::store::loader::FilePartitionSource::Options opts;
+    tensorcast::store::loader::FilePartitionSource::Options opts;
     for (const auto& p : parts) {
       opts.partition_paths.push_back(p);
       opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
@@ -348,8 +348,8 @@ static py::dict save_model_to_disk_wrapper(
     opts.total_size = total_size;
     opts.chunk_size = 128 * 1024 * 1024;
     opts.use_direct_io = (total_size > 5ULL * 1024 * 1024 * 1024);
-    stepcast::store::loader::FilePartitionSource src(std::move(opts));
-    return stepcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
+    tensorcast::store::loader::FilePartitionSource src(std::move(opts));
+    return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
   };
   absl::StatusOr<std::string> data_mh_or = compute_mh_via_source(path);
   if (!data_mh_or.ok()) {
@@ -467,13 +467,13 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
     // Empty artifact: produce deterministic data multihash without requiring partitions
     if (total_size2 == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = stepcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return stepcast::store::artifact_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = tensorcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
+      return tensorcast::store::artifact_hash::multibase_multihash_sha256(root);
     }
     if (parts.empty()) {
       return absl::NotFoundError("No tensor.data partitions found");
     }
-    stepcast::store::loader::FilePartitionSource::Options opts2;
+    tensorcast::store::loader::FilePartitionSource::Options opts2;
     for (const auto& p : parts) {
       opts2.partition_paths.push_back(p);
       opts2.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
@@ -481,8 +481,8 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
     opts2.total_size = total_size2;
     opts2.chunk_size = 128 * 1024 * 1024;
     opts2.use_direct_io = (total_size2 > 5ULL * 1024 * 1024 * 1024);
-    stepcast::store::loader::FilePartitionSource src2(std::move(opts2));
-    return stepcast::store::loader::compute_data_multihash_from_seekable_source(src2, total_size2);
+    tensorcast::store::loader::FilePartitionSource src2(std::move(opts2));
+    return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src2, total_size2);
   };
   absl::StatusOr<std::string> data_mh_or = compute_mh_via_source2(path);
   if (!data_mh_or.ok()) {

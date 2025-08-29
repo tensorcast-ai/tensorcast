@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 
-using stepcast::memory::DistributedVirtualMemoryPool;
+using tensorcast::memory::DistributedVirtualMemoryPool;
 
 TEST_CASE("DvmpRegion handle open and basic delegation") {
   DistributedVirtualMemoryPool dvmp(DistributedVirtualMemoryPool::kDefaultChunkSize);

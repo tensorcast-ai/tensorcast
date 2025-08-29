@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/memory/streaming_pinned_buffer.h"
 
@@ -7,7 +7,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 StreamingPinnedBuffer::StreamingPinnedBuffer(
     size_t num_chunks,
@@ -294,4 +294,4 @@ bool StreamingPinnedBuffer::production_done() const {
   return production_complete_;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-"""Helper macros for StepCast Store BUILD files.
+"""Helper macros for TensorCast BUILD files.
 
 This file provides minimal abstractions to reduce repetition while keeping
 the build system simple and natural to read.

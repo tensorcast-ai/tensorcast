@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_NET_DEV_H_
 #define CORE_COMMUNICATOR_TRANSPORT_NET_DEV_H_
@@ -10,7 +10,7 @@
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/misc/queue.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class PartitionTensor;
 typedef std::shared_ptr<PartitionTensor> tensor_t;
@@ -67,6 +67,6 @@ class NetDev {
 };
 typedef std::shared_ptr<NetDev> net_dev_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // #define CORE_COMMUNICATOR_TRANSPORT_NET_DEV_H_

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_TCP_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_TCP_TRANSPORT_H_
@@ -20,7 +20,7 @@ extern "C" {
 #include "core/communicator/transport/rdma_transport.h"
 #include "core/communicator/transport/transport_message.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class TcpContext;
 class TcpTransport;
@@ -69,6 +69,6 @@ class TcpTransport : public std::enable_shared_from_this<TcpTransport> {
   mutable std::mutex mu_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_TCP_TRANSPORT_H_

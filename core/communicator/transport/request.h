@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
@@ -10,7 +10,7 @@
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 using read_result_t = struct ReadResult {
   absl::Status status = absl::OkStatus();
@@ -82,6 +82,6 @@ class WriteRequest {
 
 using write_request_t = std::shared_ptr<WriteRequest>;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_ENGINE_REQUEST_H_

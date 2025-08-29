@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -8,7 +8,7 @@
 #include "absl/status/status.h"
 #include "core/common/artifact_verification.h"
 
-using namespace stepcast::store;
+using namespace tensorcast::store;
 using Catch::Matchers::ContainsSubstring;
 
 TEST_CASE("ArtifactVerifier Direct Testing", "[verification][direct]") {

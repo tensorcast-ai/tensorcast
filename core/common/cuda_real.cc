@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/cuda_api.h"
 
@@ -14,7 +14,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/common/error_handling.h"
 
-namespace stepcast::cuda {
+namespace tensorcast::cuda {
 
 namespace {
 // Best-effort same-process fallback for CUDA IPC handles during unit tests.
@@ -367,4 +367,4 @@ absl::Status host_unregister(void* ptr) {
   return absl::OkStatus();
 }
 
-} // namespace stepcast::cuda
+} // namespace tensorcast::cuda

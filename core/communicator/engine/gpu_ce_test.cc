@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <sstream>
 
@@ -8,15 +8,15 @@
 #include "core/communicator/misc/utils.h"
 
 int run_server() {
-  stepcast::communicator::CommunicateEngine engine;
+  tensorcast::communicator::CommunicateEngine engine;
   engine.init("0.0.0.0", g_port);
   uint8_t* addr[8][1024] = {{nullptr}};
 
   for (uint32_t i = 0; i < g_gpu; i++) {
-    stepcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
+    tensorcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
 
     for (uint32_t j = 0; j < g_chunk; j++) {
-      stepcast::cuda::malloc(reinterpret_cast<void**>(&addr[i][j]), g_count).IgnoreError();
+      tensorcast::cuda::malloc(reinterpret_cast<void**>(&addr[i][j]), g_count).IgnoreError();
 
       std::stringstream name;
       name << std::string("gpu-ce-test-tensor-");
@@ -31,20 +31,20 @@ int run_server() {
 }
 
 int run_client() {
-  stepcast::communicator::CommunicateEngine engine;
+  tensorcast::communicator::CommunicateEngine engine;
   engine.init("0.0.0.0", g_port + 1);
   uint8_t* addr[8][1024] = {{nullptr}};
 
   for (uint32_t i = 0; i < g_gpu; i++) {
-    stepcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
+    tensorcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
     for (uint32_t j = 0; j < g_chunk; j++) {
-      stepcast::cuda::malloc(reinterpret_cast<void**>(&addr[i][j]), g_count).IgnoreError();
+      tensorcast::cuda::malloc(reinterpret_cast<void**>(&addr[i][j]), g_count).IgnoreError();
     }
   }
 
-  std::vector<stepcast::communicator::future_read_result_t> futures;
+  std::vector<tensorcast::communicator::future_read_result_t> futures;
 
-  auto start = stepcast::communicator::get_us();
+  auto start = tensorcast::communicator::get_us();
   for (uint32_t i = 0; i < g_gpu; i++) {
     for (uint32_t j = 0; j < g_chunk; j++) {
       std::stringstream name;
@@ -67,10 +67,10 @@ int run_client() {
         result.rdma_regmr_cost,
         result.read_cost);
   }
-  printf("all with result: cost=%lu\n", stepcast::communicator::get_us() - start);
+  printf("all with result: cost=%lu\n", tensorcast::communicator::get_us() - start);
 
   futures.clear();
-  start = stepcast::communicator::get_us();
+  start = tensorcast::communicator::get_us();
   for (uint32_t i = 0; i < g_gpu; i++) {
     for (uint32_t j = 0; j < g_chunk; j++) {
       std::stringstream name;
@@ -94,7 +94,7 @@ int run_client() {
         result.read_cost);
   }
 
-  printf("all no regmr result: cost=%lu\n", stepcast::communicator::get_us() - start);
+  printf("all no regmr result: cost=%lu\n", tensorcast::communicator::get_us() - start);
   return 0;
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -24,7 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class PinnedMemoryPool {
  public:
@@ -57,4 +57,4 @@ class PinnedMemoryPool {
   std::unordered_set<char*> pool_;
   size_t chunk_size_; // May be adjusted in constructor for alignment
 };
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/metrics/metric_objects.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Manages GPU devices and CUDA operations for the store engine.
@@ -90,9 +90,9 @@ class DeviceManager {
   std::unordered_map<int, GpuInfo> gpu_info_map_;
 
   // Metrics
-  std::unordered_map<int, stepcast::metrics::Gauge> gpu_memory_total_gauges_;
-  std::unordered_map<int, stepcast::metrics::Gauge> gpu_memory_free_gauges_;
-  std::unordered_map<int, stepcast::metrics::Gauge> gpu_replicas_loaded_gauges_;
+  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_total_gauges_;
+  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_free_gauges_;
+  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_replicas_loaded_gauges_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

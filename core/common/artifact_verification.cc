@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/artifact_verification.h"
 
@@ -16,7 +16,7 @@
 // for convenience
 using json = nlohmann::json;
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // xxHash64 constants
 static constexpr uint64_t PRIME64_1 = 11400714785074694791ULL;
@@ -526,4 +526,4 @@ absl::Status ArtifactVerifier::verify_artifact_data(
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

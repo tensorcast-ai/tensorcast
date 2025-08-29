@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -12,11 +12,11 @@
 
 // Forward declaration for CommunicateEngine (needed for some tooling without full header parse)
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 class CommunicateEngine;
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 class RemoteKeySource : public SeekableSource {
  public:
@@ -48,4 +48,4 @@ class RemoteKeySource : public SeekableSource {
   size_t total_bytes_read_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

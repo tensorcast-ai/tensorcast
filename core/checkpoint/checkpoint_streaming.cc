@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/checkpoint/checkpoint_streaming.h"
 
@@ -9,7 +9,7 @@
 #include "absl/log/log.h"
 #include "core/checkpoint/progress_bar.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 std::unordered_map<std::string, uint64_t> save_tensors_streaming(
     const std::vector<std::string>& tensor_names,
@@ -154,4 +154,4 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
   return tensor_offsets;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

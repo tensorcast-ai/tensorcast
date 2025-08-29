@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -22,7 +22,7 @@
 #include <string>
 
 #include "aligned_buffer.h"
-namespace stepcast::store {
+namespace tensorcast::store {
 
 [[maybe_unused]] constexpr size_t kPartitionMaxSize = 10L << 30; // 10GB
 
@@ -57,4 +57,4 @@ class TensorWriter final {
   std::unique_ptr<AlignedBuffer> buffer_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

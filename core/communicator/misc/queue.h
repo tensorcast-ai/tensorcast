@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_QUEUE_H_
 #define CORE_COMMUNICATOR_MISC_QUEUE_H_
@@ -9,7 +9,7 @@
 
 #include "core/communicator/misc/common.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 template <class T>
 class Queue {
@@ -129,6 +129,6 @@ class Queue {
   std::atomic_bool stop_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_MISC_QUEUE_H_

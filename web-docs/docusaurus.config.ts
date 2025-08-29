@@ -5,7 +5,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 const config: Config = {
-  title: 'StepCast Store',
+  title: 'TensorCast',
   tagline: 'High-performance, distributed artifact storage and loading system for ML inference and training',
   favicon: 'img/favicon.ico',
 
@@ -22,8 +22,8 @@ const config: Config = {
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'stepcast', // Usually your GitHub org/user name.
-  projectName: 'stepcast-store', // Usually your repo name.
+  organizationName: 'tensorcast', // Usually your GitHub org/user name.
+  projectName: 'tensorcast-store', // Usually your repo name.
 
   onBrokenLinks: 'warn',
   onBrokenMarkdownLinks: 'warn',
@@ -57,9 +57,9 @@ const config: Config = {
     // Replace with your project's social card
     image: 'img/docusaurus-social-card.jpg',
     navbar: {
-      title: 'StepCast Store',
+      title: 'TensorCast',
       logo: {
-        alt: 'StepCast Store Logo',
+        alt: 'TensorCast Logo',
         src: 'img/logo.svg',
       },
       items: [
@@ -82,7 +82,7 @@ const config: Config = {
           label: 'Reference',
         },
         {
-          href: 'https://gitlab.basemind.com/sys/stepcast/stepcast-store',
+          href: 'https://gitlab.basemind.com/sys/tensorcast/tensorcast-store',
           label: 'Gitlab',
           position: 'right',
         },
@@ -113,12 +113,12 @@ const config: Config = {
           items: [
             {
               label: 'Gitlab',
-              href: 'http://gitlab.basemind.com/sys/stepcast/stepcast-store',
+              href: 'http://gitlab.basemind.com/sys/tensorcast/tensorcast-store',
             },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} StepCast. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} TensorCast. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,

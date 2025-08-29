@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 
 #include "absl/status/statusor.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Information extracted from a safetensors file header
 struct SafetensorsHeaderInfo {
@@ -34,4 +34,4 @@ absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd);
 // - storage_offset: always 0 for safetensors headers
 absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files);
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/remote_key_source.h"
 
@@ -8,7 +8,7 @@
 #include "absl/log/log.h"
 #include "core/communicator/engine/engine.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 RemoteKeySource::RemoteKeySource(Options options) : options_(std::move(options)) {
   if (!options_.comm_engine) {
@@ -240,4 +240,4 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
   return bytes_done;
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

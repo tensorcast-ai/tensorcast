@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/gpu_memory_sink.h"
 
 #include "absl/log/log.h"
 #include "core/common/device_guard.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
   if (!options_.gpu_base_ptr) {
@@ -118,4 +118,4 @@ absl::Status GPUMemorySink::close() {
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

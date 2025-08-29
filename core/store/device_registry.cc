@@ -1,8 +1,8 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/device_registry.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 DeviceRegistry& DeviceRegistry::instance() {
   static auto* inst = new DeviceRegistry();
@@ -54,4 +54,4 @@ DeviceKey DeviceRegistry::normalize(const DeviceKey& in) const {
   return in;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

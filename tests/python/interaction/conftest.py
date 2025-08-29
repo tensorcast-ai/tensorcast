@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 import pytest
 from dataclasses import dataclass
@@ -78,7 +78,7 @@ def global_store_service() -> Iterator[InProcessGlobalStore]:
     # Prevent port-collision issues when the daemon's internal HealthCheckServer
     # attempts to start – just turn its start() into a no-op so it never binds.
     # ------------------------------------------------------------------
-    _health_check.HealthCheckServer.start = lambda self: None
+    _health_check.HealthCheckServer.start = lambda self: None # type: ignore[method-assign]
 
     yield wrapper
 

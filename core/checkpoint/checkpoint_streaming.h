@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 
 #include "core/checkpoint/streaming_tensor_writer.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Save tensor data to disk using streaming approach with better GPU support.
@@ -30,4 +30,4 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
     const std::string& path,
     const StreamingTensorWriter::Config& config = StreamingTensorWriter::Config{});
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

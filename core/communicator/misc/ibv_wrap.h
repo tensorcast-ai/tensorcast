@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_IBV_WRAP_H_
 #define CORE_COMMUNICATOR_MISC_IBV_WRAP_H_
@@ -18,7 +18,7 @@ extern "C" {
 
 #include "core/communicator/misc/common.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 enum {
   IBV_SUCCESS = 0, //!< The operation was successful
@@ -91,6 +91,6 @@ static inline result_t wrap_ibv_post_recv(struct ibv_qp* qp, struct ibv_recv_wr*
   return SUCCESS;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // STEPUCX_SRC_MISC_IBV_WRAP_H_

@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 extern "C" {
 #include <arpa/inet.h>
@@ -27,7 +27,7 @@ extern "C" {
 #include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 #define MAX_IFS 32
 
@@ -88,4 +88,4 @@ std::string get_default_ip() {
   return ip;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

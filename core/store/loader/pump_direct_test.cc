@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -16,8 +16,8 @@
 #include "core/store/loader/sink.h"
 #include "core/store/loader/source.h"
 
-using namespace stepcast::store;
-using namespace stepcast::store::loader;
+using namespace tensorcast::store;
+using namespace tensorcast::store::loader;
 
 namespace {
 

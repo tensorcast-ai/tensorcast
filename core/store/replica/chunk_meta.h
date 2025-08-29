@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include <cstdint>
 #include "absl/status/status.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // clang-format off
 /**
@@ -128,4 +128,4 @@ inline absl::Status try_transition_chunk_state(ChunkMeta& meta, ChunkState to) n
   }
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

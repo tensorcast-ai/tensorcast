@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/components/global_store_client.h"
 
@@ -11,7 +11,7 @@
 #include "proto/global_store.grpc.pb.h"
 #include "proto/global_store.pb.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 GlobalStoreClient::GlobalStoreClient(const GlobalStoreClientConfig& config) : config_(config) {}
 
@@ -563,4 +563,4 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
   return locations;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -7,7 +7,7 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/loader/buffer_pool.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Adapter to make StreamingPinnedBuffer implement the BufferPool interface
 class StreamingBufferAdapter : public BufferPool {
@@ -40,4 +40,4 @@ class StreamingBufferAdapter : public BufferPool {
   std::shared_ptr<StreamingPinnedBuffer> buffer_;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

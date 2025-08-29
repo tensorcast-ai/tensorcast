@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,10 +14,10 @@
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
-using stepcast::DeviceType;
-using stepcast::store::DeviceKey;
-using stepcast::store::StoreEngine;
-using stepcast::store::StoreEngineOptions;
+using tensorcast::DeviceType;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::StoreEngineOptions;
 
 static StoreEngine make_store(const fs::path& root) {
   StoreEngineOptions opts;
@@ -43,8 +43,8 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   fs::create_directories(artifact_dir);
 
   // Create data and descriptor (standard partitions format)
-  REQUIRE(stepcast::tests::create_dummy_file(artifact_dir / "tensor.data", artifact_size));
-  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir / "tensor.data", artifact_size));
+  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
   // Ensure verification.json does not exist initially
   fs::path verification_path = artifact_dir / "verification.json";
@@ -54,10 +54,10 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
 
   // Load to CPU and wait ready
   StoreEngine store = make_store(temp_root);
-  stepcast::store::MaterializeHints hints;
+  tensorcast::store::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto handle_or =
-      store.materialize_replica(cpu_key(), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(handle_or.ok());
   if (!handle_or.ok()) {
     LOG(ERROR) << "Materialize failed: " << handle_or.status().message();
@@ -72,8 +72,8 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   const std::string artifact_id2 = "verify_artifact_bad";
   fs::path artifact_dir2 = temp_root / artifact_id2;
   fs::create_directories(artifact_dir2);
-  REQUIRE(stepcast::tests::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size));
-  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
+  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size));
+  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
 
   // Write a bad verification.json (wrong key_values ensures failure)
   nlohmann::json bad;
@@ -88,10 +88,10 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   out << bad.dump(2);
   out.close();
 
-  stepcast::store::MaterializeHints hints2;
+  tensorcast::store::MaterializeHints hints2;
   hints2.disk_path = artifact_id2;
   auto handle_or2 =
-      store.materialize_replica(cpu_key(), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
+      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
   REQUIRE_FALSE(handle_or2.ok());
 
   std::error_code ec;

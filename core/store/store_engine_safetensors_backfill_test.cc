@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -12,10 +12,10 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 
-using stepcast::DeviceType;
-using stepcast::store::DeviceKey;
-using stepcast::store::StoreEngine;
-using stepcast::store::StoreEngineOptions;
+using tensorcast::DeviceType;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::StoreEngineOptions;
 
 namespace {
 
@@ -82,10 +82,10 @@ TEST_CASE("Safetensors backfill writes descriptor and CBOR index", "[store_engin
   REQUIRE_FALSE(std::filesystem::exists(dir / "tensor_index.cbor"));
 
   StoreEngine store = make_store(root);
-  stepcast::store::MaterializeHints hints;
+  tensorcast::store::MaterializeHints hints;
   hints.disk_path = artifact;
   auto handle_or =
-      store.materialize_replica(cpu_key(), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
   // If there is an error, log it and continue
   if (!handle_or.ok()) {

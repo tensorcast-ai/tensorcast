@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/file_partition_source.h"
 
@@ -13,7 +13,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 FilePartitionSource::FilePartitionSource(Options options) : options_(std::move(options)) {
   // Use the provided use_direct_io flag, or auto-detect based on artifact size
@@ -282,4 +282,4 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
   }
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <sstream>
 #include <utility>
@@ -6,7 +6,7 @@
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 Channel::Channel(tcp_transport_t control, int type)
     : type_(type), control_(std::move(control)), mtcp_(nullptr), expired_time_(0) {}
@@ -76,4 +76,4 @@ bool Channel::is_expired(uint64_t now) {
   return now > expired_time_;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

@@ -1,12 +1,12 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef COMMUNICATOR_MISC_METRIC_H_
 #define COMMUNICATOR_MISC_METRIC_H_
 
 #include <cstdint>
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class Timer {
  public:
@@ -18,6 +18,6 @@ class Timer {
   uint64_t end_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_MISC_METRIC_H_

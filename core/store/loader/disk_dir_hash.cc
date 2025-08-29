@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/disk_dir_hash.h"
 
@@ -13,7 +13,7 @@
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/source_hash.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& artifact_dir) {
   namespace fs = std::filesystem;
@@ -80,4 +80,4 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
   return compute_data_multihash_from_seekable_source(src, total_size);
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

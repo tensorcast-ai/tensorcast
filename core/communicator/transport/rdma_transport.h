@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
@@ -9,7 +9,7 @@
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/request.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 struct RdmaTransportInfo {
   uint32_t mtu = IBV_MTU_4096;
@@ -71,6 +71,6 @@ class RdmaTransport {
 };
 typedef std::shared_ptr<RdmaTransport> rdma_transport_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_

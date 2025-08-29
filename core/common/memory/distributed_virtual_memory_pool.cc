@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 
@@ -22,7 +22,7 @@
 #include "core/common/metrics/metric_objects.h"
 #include "core/common/system_capabilities.h"
 
-namespace stepcast::memory {
+namespace tensorcast::memory {
 
 DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : chunk_size_(chunk_size) {
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
@@ -712,4 +712,4 @@ absl::StatusOr<DistributedVirtualMemoryPool::DvmpRegion> DistributedVirtualMemor
   return DvmpRegion(this, std::string(artifact_id));
 }
 
-} // namespace stepcast::memory
+} // namespace tensorcast::memory

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include <ostream>
 #include <string>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Specifies the target or current location of replica data.
@@ -69,4 +69,4 @@ inline std::string location_to_string(MemoryLocation loc) {
 //    // ... implementation if needed ...
 // }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

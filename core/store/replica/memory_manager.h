@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -31,7 +31,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Manages pageable CPU memory and GPU memory allocation, state, and transfers for a single replica instance.
@@ -344,7 +344,7 @@ class MemoryManager {
   // --- Internal copy refactor helpers (no behavior change) ---------------
   struct CopyLaunchParams {
     std::shared_ptr<StreamingPinnedBuffer> streaming_buffer;
-    std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool> dvmp;
+    std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool> dvmp;
     void* dvmp_base = nullptr;
     std::shared_ptr<CudaMemory> cuda_mem;
     size_t total_size = 0;
@@ -435,4 +435,4 @@ class MemoryManager {
   [[nodiscard]] absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

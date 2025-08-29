@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 # mypy: disable-error-code=method-assign
 """Tests for chunk state synchronization worker."""

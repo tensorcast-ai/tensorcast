@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -13,10 +13,10 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/loading/loading_spec.h" // ReplicaKey
 
-namespace stepcast::daemon {
+namespace tensorcast::daemon {
 
 struct LockEntry {
-  stepcast::store::ReplicaKey key;
+  tensorcast::store::ReplicaKey key;
   std::vector<uint32_t> chunk_indices;
   std::chrono::steady_clock::time_point expiry;
 };
@@ -33,7 +33,7 @@ class TransportLockManager {
     return absl::StrFormat("%016x%016x", a, b);
   }
 
-  void put(const std::string& token, const stepcast::store::ReplicaKey& key, std::vector<uint32_t> indices) {
+  void put(const std::string& token, const tensorcast::store::ReplicaKey& key, std::vector<uint32_t> indices) {
     absl::MutexLock l(&mu_);
     locks_[token] = LockEntry{key, std::move(indices), now() + ttl_};
   }
@@ -93,4 +93,4 @@ class TransportLockManager {
   std::mt19937_64 rng_{std::random_device{}()};
 };
 
-} // namespace stepcast::daemon
+} // namespace tensorcast::daemon

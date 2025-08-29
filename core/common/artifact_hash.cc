@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/artifact_hash.h"
 
@@ -20,7 +20,7 @@
 // now implemented in core/store/loader. Keep GPU hashing and index hashing here.
 // Any disk directory hashing should be performed via loader::disk_dir_hash.
 
-namespace stepcast::store::artifact_hash {
+namespace tensorcast::store::artifact_hash {
 
 namespace {
 
@@ -388,4 +388,4 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint6
   return multihash;
 }
 
-} // namespace stepcast::store::artifact_hash
+} // namespace tensorcast::store::artifact_hash

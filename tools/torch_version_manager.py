@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Torch version management utilities and CLI.
 

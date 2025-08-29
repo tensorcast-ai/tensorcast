@@ -1,14 +1,10 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI when working with code in this repository.
 
 ## Project Overview
 
-StepCast Store is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
-- **One Global Store**: Centralized coordinator and artifact registry
-- **Many Store Daemons**: Distributed worker nodes across the cluster
-- **C++ Core**: High-performance checkpoint, storage, and P2P communication layer
-- **User Process Worker**: Loads and uses the artifact in the final application context
+TensorCast is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
 
 ## Development Environment Setup
 
@@ -256,24 +252,22 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ### C++ Guidelines (Simplified)
 
+#### C++ Naming Conventions
+- **Variables/Functions**: `snake_case`
+- **Classes/Structs**: `PascalCase`
+- **Constants/Macros**: `ALL_CAPS`
+- **Files/Directories**: `snake_case`
+
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs
-- **Explicit file lists** - Never use `glob()`, list all files explicitly
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
 - Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
-- CLI: Use `bazel` instead of raw `bazel` in the command line.
 
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
 - **Build System**: Bazel with Clang18
 - **Common Deps**: absl, catch2, nlohmann_json
-
-#### Naming Conventions
-- **Variables/Functions**: `snake_case`
-- **Classes/Structs**: `PascalCase`
-- **Constants/Macros**: `ALL_CAPS`
-- **Files/Directories**: `snake_case`
 
 #### Code Style
 - Prefer modern C++ features and language standards. No compatibility shims.

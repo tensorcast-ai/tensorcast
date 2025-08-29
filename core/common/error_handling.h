@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -26,7 +26,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::common {
+namespace tensorcast::common {
 
 // ---------------------------------------------------------------------------
 // CUDA error helpers that work for both real CUDA runtime and FakeCuda.
@@ -76,16 +76,16 @@ static inline const char* cuda_error_string(cudaError_t err) {
   return absl::InternalError(absl::StrCat(context, " - ", cuda_error_name(result), ": ", cuda_error_string(result)));
 }
 
-} // namespace stepcast::common
+} // namespace tensorcast::common
 
 // Macro to evaluate a CUDA expression and RETURN the resulting absl::Status
 // from the current function if the expression fails.
-#define SC_RETURN_IF_CUDA_ERROR(expr)                                          \
-  do {                                                                         \
-    cudaError_t _cuda_err = (expr);                                            \
-    absl::Status _status = stepcast::common::cuda_as_status(_cuda_err, #expr); \
-    if (!_status.ok()) {                                                       \
-      LOG(ERROR) << _status;                                                   \
-      return _status;                                                          \
-    }                                                                          \
+#define SC_RETURN_IF_CUDA_ERROR(expr)                                            \
+  do {                                                                           \
+    cudaError_t _cuda_err = (expr);                                              \
+    absl::Status _status = tensorcast::common::cuda_as_status(_cuda_err, #expr); \
+    if (!_status.ok()) {                                                         \
+      LOG(ERROR) << _status;                                                     \
+      return _status;                                                            \
+    }                                                                            \
   } while (0)

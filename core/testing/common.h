@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef TESTS_COMMON_H_
 #define TESTS_COMMON_H_
@@ -24,7 +24,7 @@ extern uint32_t g_rdma;
 int parse_options(int argc, char* argv[]);
 
 // File operations
-namespace stepcast::tests {
+namespace tensorcast::tests {
 
 // Helper function to create a dummy file with patterned content.
 // Returns true on success, false otherwise.
@@ -43,6 +43,6 @@ bool is_cuda_available();
 // Returns OK on success.
 absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::filesystem::path& artifact_dir);
 
-} // namespace stepcast::tests
+} // namespace tensorcast::tests
 
 #endif // TESTS_COMMON_H_

@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 extern "C" {
 #include <pthread.h>
@@ -11,7 +11,7 @@ extern "C" {
 
 #include "misc/envs.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 static void init_envs_func() {}
 
@@ -38,4 +38,4 @@ int get_env(const char* name, int default_val) {
   return default_val;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

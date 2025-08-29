@@ -1,11 +1,11 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/mux_seekable_source.h"
 
 #include "absl/log/log.h"
 #include "core/common/metrics/metric_objects.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 MuxSeekableSource::MuxSeekableSource(std::shared_ptr<SeekableSource> primary, std::shared_ptr<SeekableSource> fallback)
     : primary_(std::move(primary)), fallback_(std::move(fallback)) {
@@ -81,4 +81,4 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
   return total_read;
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

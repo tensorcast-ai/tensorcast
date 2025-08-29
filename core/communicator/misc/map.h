@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_MAP_H_
 #define CORE_COMMUNICATOR_MISC_MAP_H_
@@ -9,7 +9,7 @@
 #include <vector>
 #include "absl/log/log.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 template <class K, class V>
 class Map {
@@ -62,6 +62,6 @@ class Map {
   std::unordered_map<K, V> map_;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_MISC_MAP_H_

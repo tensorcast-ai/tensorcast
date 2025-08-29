@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "absl/status/statusor.h"
 #include "core/store/direct_write.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 class Source {
  public:
@@ -33,4 +33,4 @@ class SeekableSource : public Source {
   }
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

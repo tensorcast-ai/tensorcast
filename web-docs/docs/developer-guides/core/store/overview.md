@@ -8,7 +8,7 @@ sidebar_position: 1
 
 ## Introduction
 
-The Core Store module is the core storage engine of StepCast Store, responsible for machine learning replica loading, memory management, and data transfer. This module provides a unified interface to handle replica movement between disk, CPU memory, and GPU memory, supporting high-performance replica inference scenarios.
+The Core Store module is the core storage engine of TensorCast, responsible for machine learning replica loading, memory management, and data transfer. This module provides a unified interface to handle replica movement between disk, CPU memory, and GPU memory, supporting high-performance replica inference scenarios.
 
 ## Key Features
 
