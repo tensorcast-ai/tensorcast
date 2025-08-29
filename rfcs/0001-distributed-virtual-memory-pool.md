@@ -247,15 +247,15 @@ Notes:
 
 ```mermaid
 flowchart TD
-    A[write_at(artifact_id, va_off, src, len)] --> B{bounds check}
+    A["write_at(artifact_id, va_off, src, len)"] --> B{bounds check}
     B -- out of range --> E[Error]
-    B -- ok --> C[mprotect(target_range, RW)]
-    C -- success --> D[memcpy(base+va_off, src, len)]
-    C -- fail --> C1[mmap ANON|PRIVATE|FIXED\nensure writable]
+    B -- ok --> C["mprotect(target_range, RW)"]
+    C -- success --> D["memcpy(base+va_off, src, len)"]
+    C -- fail --> C1["mmap ANON|PRIVATE|FIXED\nensure writable"]
     C1 --> D
-    D --> F[mark chunks HOT\nupdate last_touch_s]
-    F --> G[inc dvmp_write_bytes_total]
-    G --> H[Ok]
+    D --> F["mark chunks HOT\nupdate last_touch_s"]
+    F --> G["inc dvmp_write_bytes_total"]
+    G --> H["Ok"]
 ```
 
 Policy:
