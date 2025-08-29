@@ -165,7 +165,7 @@ This guarantees large artifacts are never pinned as a whole.
 
 ### 3.7 Protocol additions
 - New op: `ENGINE_OP_RDMA_READ_DONE` (Client ➜ Server) with `{tensor_key, offset, bytes}` or `req_key`.
-- Server releases staged resources on ACK. If ACK missing, apply TTL reap (`STEPCAST_COMM_RDMA_STAGE_TTL_MS`).
+- Server releases staged resources on ACK. If ACK missing, apply TTL reap (`TENSORCASTCOMM_RDMA_STAGE_TTL_MS`).
 
 Backward compatibility: If server responds with a direct MR (legacy), client behavior unchanged. The ACK is only required for staged RDMA responses (server advertises a flag in READ_RESPONSE reserved bits).
 
@@ -175,11 +175,13 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
 - MemoryStager (new): `StageToken stage(tensor, offset, bytes)` where `tensor` is `PartitionTensor` or a typed source descriptor.
 - StageToken: RAII completion.
 - RegisterTensorOptions (new): `{ bool register_mr; bool needs_staging; int device_id; }`.
+- CommunicatorConfig (new): Typed, layered configuration container for stager/rdma/pool/transport/affinity. Constructed from explicit parameters or config files; no environment-variable fallback.
 
 ### 4.2 Component changes
 
 - ChunkExportService: stop registering DVMP windows for direct RDMA MR; keep application-level keys but call `register_tensor(..., options{register_mr=false, needs_staging=(CPU_policy)})`.
 - CommunicateEngine:
+  - Accept `CommunicatorConfig` in constructor; remove direct environment variable reads from engine codepaths.
   - Add `RegisterTensorOptions` overload.
   - Maintain `std::shared_ptr<MemoryStager>`; provide stager to MTCP and RDMA paths.
   - RDMA READ_RESPONSE path uses stager if `needs_staging==true` or policy requires; otherwise legacy direct MR (for small hot CPU allocations if desired).
@@ -188,11 +190,69 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
 - PinnedMemoryPool: add NUMA placement and per-PD MR registry (cache). Export `get_or_register_mr(pd, buffer_ptr)`.
 - RdmaTransport / RdmaThread: on client completion, send `RDMA_READ_DONE`.
 
-### 4.3 Configuration
-- `STEPCAST_COMM_EXPORT_MAX_WINDOW_MB` (default: min(DVMP chunk, 64MiB)).
-- `STEPCAST_COMM_PINNED_NUMA_POLICY=auto|nic|gpu|fixed:<node>`
-- `STEPCAST_COMM_RDMA_STAGE_TTL_MS=30000`
-- `STEPCAST_COMM_STAGE_CPU_FOR_RDMA=true|false` (default true)
+### 4.3 Unified Configuration
+
+This RFC adopts a unified, layered configuration model across C++ and Python, replacing scattered environment-variable reads with strong typing and clear precedence.
+
+#### 4.3.1 Schema (typed config)
+
+- CommunicatorConfig (C++/Proto/Python mirrored) encapsulates all knobs required by staged P2P:
+  - stager:
+    - `stage_cpu_for_rdma: bool` (default: true)
+    - `direct_mr_max_bytes: uint64` (default: 4 MiB)
+    - `max_inflight_direct_mr: int` (default: 32)
+    - `stage_chunk_mb_cpu: uint32` (default: 4)
+    - `stage_chunk_mb_gpu: uint32` (default: 16)
+    - `buffers_per_flow: int` (default: 4)
+  - rdma:
+    - `outstanding_wr: int` (default: 64)
+    - `ack_ttl_ms: int` (default: 30000)
+  - pool:
+    - `numa_policy: string` ("auto"|"nic"|"gpu"|"fixed:<node>") (default: "auto")
+    - `preregister_mr: bool` (default: true)
+    - `pool_size_bytes: uint64` (default: 8 GiB)
+    - `chunk_bytes: uint64` (default: 64 MiB)
+  - transport:
+    - `tcp_conn_count: int` (default: 8)
+  - affinity:
+    - `enable: bool` (default: false)
+    - `rdma_poll_core_mask: string` (bitmap)
+    - `stage_core_mask: string` (bitmap)
+
+Implementations:
+- C++: `core/communicator/engine/communicator_config.{h,cc}`
+- Proto: `proto/communicator_config.proto` (generated to C++/Python)
+- Python: Pydantic model `CommunicatorSettings` (e.g. `scstore/store_daemon/communicator_settings.py`)
+
+#### 4.3.2 Sources & precedence
+
+1) Explicit injection (code/CLI/service args) — highest priority
+2) Config file (YAML/JSON/TOML), e.g. `tensorcast.yaml` (service-local)
+
+Final value = Explicit > File > Built-in default.
+
+#### 4.3.3 Example (YAML)
+
+```yaml
+communicator:
+  stager:
+    stage_cpu_for_rdma: true
+    stage_chunk_mb_cpu: 4
+    stage_chunk_mb_gpu: 16
+    buffers_per_flow: 4
+  rdma:
+    outstanding_wr: 64
+    ack_ttl_ms: 30000
+  pool:
+    numa_policy: auto
+    preregister_mr: true
+    pool_size_bytes: 8589934592   # 8 GiB
+    chunk_bytes: 67108864         # 64 MiB
+  transport:
+    tcp_conn_count: 8
+  affinity:
+    enable: false
+```
 
 ### 4.4 Trade-offs
 - Staged RDMA for CPU adds one memcpy but removes massive pinning and MR churn.
@@ -218,6 +278,7 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
 - Add `ENGINE_OP_RDMA_READ_DONE` and ACK handling on both sides.
 - Server RDMA READ path uses MemoryStager for CPU and GPU; responds with pool MR.
 - Add MR cache in pinned pool per PD; pre-register MRs on pool init for registered NICs.
+ - Introduce `CommunicatorConfig` and config loaders; migrate all engine env reads to typed config access.
 
 ### Phase 3 — NUMA-aware pools
 - Add NUMA placement and policy to `PinnedMemoryPool`.
@@ -242,6 +303,9 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
 | Chunk export | `core/store/replica/chunk_export_service.{h,cc}` | Window tiling + register_mr=false for CPU |
 | Loader source | `core/store/loader/remote_key_source.{h,cc}` | Unchanged externally; may set prefer=RDMA flag |
 | Tests | `core/communicator/engine/*_test.cc`, `core/store/replica/*_test.cc` | Update assertions and add staged RDMA cases |
+| Config (C++) | `core/communicator/engine/communicator_config.{h,cc}` | NEW: typed config + FromEnv |
+| Config (Proto) | `proto/communicator_config.proto` | NEW: shared schema for C++/Python |
+| Config (Python) | `scstore/store_daemon/communicator_settings.py` | NEW: Pydantic settings + file/env loader |
 
 ## 8. Detailed Flows
 
@@ -376,11 +440,11 @@ This section refines the design with specific knobs and mechanisms to maximize e
 - Default policy:
   - CPU: staged for RDMA (to avoid DVMP pinning) and direct for TCP.
   - GPU: staged for both RDMA and TCP.
-- Override for hot, small CPU slabs (≤ `STEPCAST_COMM_DIRECT_MR_MAX_BYTES`): allow DirectMR to skip memcpy if UMA marks chunk range as HOT+Resident and total bytes small, bounded by `max_inflight_direct_mr`.
+- Override for hot, small CPU slabs (≤ `TENSORCASTCOMM_DIRECT_MR_MAX_BYTES`): allow DirectMR to skip memcpy if UMA marks chunk range as HOT+Resident and total bytes small, bounded by `max_inflight_direct_mr`.
 
 Knobs:
-- `STEPCAST_COMM_DIRECT_MR_MAX_BYTES` (default 4 MiB)
-- `STEPCAST_COMM_MAX_INFLIGHT_DIRECT_MR` (default 32)
+- `TENSORCASTCOMM_DIRECT_MR_MAX_BYTES` (default 4 MiB)
+- `TENSORCASTCOMM_MAX_INFLIGHT_DIRECT_MR` (default 32)
 
 Rationale: tiny transfers are memcpy-bound; avoiding staging can help if DVMP guarantee prevents eviction during the small window. Still bounded to avoid system pin growth.
 
@@ -391,9 +455,9 @@ Rationale: tiny transfers are memcpy-bound; avoiding staging can help if DVMP gu
 - RDMA: allow multiple outstanding reads per request; `RdmaTransport` to post `k` WRs in advance (default 64) and coalesce READs up to MR boundary.
 
 Knobs:
-- `STEPCAST_COMM_STAGE_BUFFERS_PER_FLOW` (default 4)
-- `STEPCAST_COMM_RDMA_OUTSTANDING_WR` (default 64)
-- `STEPCAST_COMM_TCP_CONN_COUNT` (already exists)
+- `TENSORCASTCOMM_STAGE_BUFFERS_PER_FLOW` (default 4)
+- `TENSORCASTCOMM_RDMA_OUTSTANDING_WR` (default 64)
+- `TENSORCASTCOMM_TCP_CONN_COUNT` (already exists)
 
 ### 14.3 Chunk sizing tuned to BDP
 
@@ -402,8 +466,8 @@ Knobs:
   - PCIe Gen4 GPU D2H prefers ≥ 16 MiB for high sustained rates; use larger staging chunks on GPU side when CPU can handle it.
 
 Knobs:
-- `STEPCAST_COMM_STAGE_CHUNK_MB_CPU` (default 4)
-- `STEPCAST_COMM_STAGE_CHUNK_MB_GPU` (default 16)
+- `TENSORCASTCOMM_STAGE_CHUNK_MB_CPU` (default 4)
+- `TENSORCASTCOMM_STAGE_CHUNK_MB_GPU` (default 16)
 
 Validation: expose dynamic autotune to increase/decrease chunk sizes based on observed throughput and completion latency percentiles.
 
@@ -414,9 +478,9 @@ Validation: expose dynamic autotune to increase/decrease chunk sizes based on ob
 - For RDMA, prefer pools local to NIC’s NUMA node; pin `RdmaThread::poll_loop` to NIC-local cores.
 
 Knobs:
-- `STEPCAST_COMM_AFFINITY_ENABLE=true|false`
-- `STEPCAST_COMM_RDMA_POLL_CORE_MASK` (bitmap)
-- `STEPCAST_COMM_STAGE_CORE_MASK` (bitmap) per GPU/CPU domain
+- `TENSORCASTCOMM_AFFINITY_ENABLE=true|false`
+- `TENSORCASTCOMM_RDMA_POLL_CORE_MASK` (bitmap)
+- `TENSORCASTCOMM_STAGE_CORE_MASK` (bitmap) per GPU/CPU domain
 
 ### 14.5 Copy engines and async completion
 
