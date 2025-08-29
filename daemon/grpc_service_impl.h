@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -15,11 +15,11 @@
 #include "grpcpp/grpcpp.h"
 #include "proto/store_daemon.grpc.pb.h"
 
-namespace stepcast::daemon {
+namespace tensorcast::daemon {
 
 class StoreDaemonServiceImpl final : public ::store_daemon::StoreDaemon::Service {
  public:
-  explicit StoreDaemonServiceImpl(std::shared_ptr<stepcast::store::StoreEngine> engine)
+  explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
       : engine_(std::move(engine)), sessions_(std::chrono::seconds(60)) {
     start_sweepers();
   }
@@ -98,7 +98,7 @@ class StoreDaemonServiceImpl final : public ::store_daemon::StoreDaemon::Service
       ::store_daemon::GetLoadedReplicasResponse* resp) override;
 
  private:
-  std::shared_ptr<stepcast::store::StoreEngine> engine_;
+  std::shared_ptr<tensorcast::store::StoreEngine> engine_;
   ReplicaSessionManager sessions_;
   TransportLockManager locks_{std::chrono::seconds(120)};
   RefTracker refs_;
@@ -112,10 +112,10 @@ class StoreDaemonServiceImpl final : public ::store_daemon::StoreDaemon::Service
   void stop_sweepers();
 
   // Helpers
-  static stepcast::store::DeviceKey resolve_device(const ::store_daemon::MaterializeReplicaRequest& req);
-  static stepcast::store::DeviceKey resolve_device(const ::store_daemon::ConfirmReplicaRequest& req);
-  static stepcast::store::DeviceKey resolve_device(const ::store_daemon::UnloadReplicaRequest& req);
-  static stepcast::store::ReplicaKey make_replica_key(const std::string& artifact_id);
+  static tensorcast::store::DeviceKey resolve_device(const ::store_daemon::MaterializeReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const ::store_daemon::ConfirmReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const ::store_daemon::UnloadReplicaRequest& req);
+  static tensorcast::store::ReplicaKey make_replica_key(const std::string& artifact_id);
 };
 
-} // namespace stepcast::daemon
+} // namespace tensorcast::daemon

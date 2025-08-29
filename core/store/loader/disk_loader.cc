@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/disk_loader.h"
 
@@ -22,7 +22,7 @@
 #include "core/store/loader/safetensors_source.h"
 #include "core/store/loader/safetensors_util.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Helper to combine paths safely
 std::filesystem::path safe_path_join(const std::filesystem::path& base, const std::filesystem::path& sub) {
@@ -304,4 +304,4 @@ absl::StatusOr<ArtifactVerificationInfo> DiskLoader::get_verification_info() con
   return absl::NotFoundError("No verification info available");
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

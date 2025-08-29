@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/p2p_loader.h"
 
@@ -17,7 +17,7 @@
 #include "core/store/loader/mux_seekable_source.h"
 #include "core/store/loader/remote_key_source.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 P2PLoader::P2PLoader(P2PSource source) : source_(std::move(source)), initialized_(false) {}
 
@@ -150,4 +150,4 @@ absl::StatusOr<uint64_t> P2PLoader::get_artifact_size() {
   return source_.size_bytes;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

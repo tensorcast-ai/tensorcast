@@ -1,11 +1,11 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/communicator/engine/engine.h"
 
-namespace stepcast::unittests {
+namespace tensorcast::unittests {
 
 #define BUF_SIZE 65536
 #define CPU_KEY "RDMA_TENSOR_KEY_CPU"
@@ -183,4 +183,4 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
   }
 }
 
-} // namespace stepcast::unittests
+} // namespace tensorcast::unittests

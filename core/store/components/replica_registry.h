@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -15,7 +15,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/replica/replica.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Thread-safe registry for managing loaded replicas.
@@ -109,4 +109,4 @@ class ReplicaRegistry {
   absl::flat_hash_map<DeviceKey, std::vector<size_t>, DeviceKeyHash> by_device_ ABSL_GUARDED_BY(mutex_);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

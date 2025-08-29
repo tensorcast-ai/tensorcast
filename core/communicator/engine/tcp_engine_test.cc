@@ -1,11 +1,11 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/communicator/engine/engine.h"
 
-namespace stepcast::unittests {
+namespace tensorcast::unittests {
 
 #define BUF_SIZE 65536
 #define KEY "TCP_TENSOR_KEY"
@@ -173,4 +173,4 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   }
 }
 
-} // namespace stepcast::unittests
+} // namespace tensorcast::unittests

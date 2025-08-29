@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_
 #define CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_
@@ -8,7 +8,7 @@
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/transport/rdma_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 constexpr static uint32_t kMaxDevName = 32;
 constexpr static uint32_t kMaxTensorNameLen = 512;
@@ -34,9 +34,9 @@ enum {
 };
 
 enum {
-  STEPCAST_READ_FAILED_NO_TENSOR = 1,
-  STEPCAST_READ_FAILED_OVERFLOW = 2,
-  STEPCAST_READ_FAILED_MEM_MISMATCH = 3,
+  TENSORCAST_READ_FAILED_NO_TENSOR = 1,
+  TENSORCAST_READ_FAILED_OVERFLOW = 2,
+  TENSORCAST_READ_FAILED_MEM_MISMATCH = 3,
 };
 
 struct ProtoHeader {
@@ -101,6 +101,6 @@ struct ProtoReadFailed {
   uint32_t reason;
 };
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_

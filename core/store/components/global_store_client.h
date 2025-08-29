@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -19,7 +19,7 @@
 #include "proto/global_store.grpc.pb.h"
 #include "proto/global_store.pb.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // Configuration for Global Store Client
 struct GlobalStoreClientConfig {
@@ -155,4 +155,4 @@ class GlobalStoreClient {
   mutable std::mutex mutex_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

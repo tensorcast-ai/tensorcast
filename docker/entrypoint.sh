@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Entrypoint script for the StepCast Store image.
+# Entrypoint script for the TensorCast image.
 #
 # Usage examples:
-#   docker run stepcast-store store-daemon --config /path/to/config.yaml
-#   docker run stepcast-store global-store --port 50051
+#   docker run tensorcast-store store-daemon --config /path/to/config.yaml
+#   docker run tensorcast-store global-store --port 50051
 #
 # The first positional argument selects which service to start.
 # * store-daemon  -> scstore.cli start

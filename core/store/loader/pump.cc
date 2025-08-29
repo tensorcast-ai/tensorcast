@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/pump.h"
 
@@ -12,7 +12,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/direct_write.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 namespace {
 
@@ -288,4 +288,4 @@ absl::Status pump_ranges(
   return close_status;
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

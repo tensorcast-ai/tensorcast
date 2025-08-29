@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // Example demonstrating the Chrome Trace functionality
 
@@ -48,15 +48,15 @@ int main() {
       SC_TRACE_SCOPE("parallel_load");
 
       auto task1 = std::async(std::launch::async, [&] {
-        stepcast::store::TraceManager::RequestIdGuard guard(request_id);
-        stepcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
+        tensorcast::store::TraceManager::RequestIdGuard guard(request_id);
+        tensorcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
         SC_TRACE_SCOPE("load_partition_1");
         simulate_work(100);
       });
 
       auto task2 = std::async(std::launch::async, [&] {
-        stepcast::store::TraceManager::RequestIdGuard guard(request_id);
-        stepcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
+        tensorcast::store::TraceManager::RequestIdGuard guard(request_id);
+        tensorcast::store::TraceManager::ArtifactIdGuard artifact(artifact_id);
         SC_TRACE_SCOPE("load_partition_2");
         simulate_work(150);
       });

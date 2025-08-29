@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 extern "C" {
 #include <arpa/inet.h>
@@ -21,7 +21,7 @@ extern "C" {
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/tcp_context.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ENV_PARAM(CONNECT_TIMEOUT, 10);
 
@@ -235,4 +235,4 @@ void TcpContext::recv_event_loop() {
   }
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

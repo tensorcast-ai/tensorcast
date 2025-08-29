@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 /*
  *  DeviceRegistry – Centralised mapping between physical devices and DeviceKey.
@@ -17,7 +17,7 @@
 
 #include "core/store/device_types.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class DeviceRegistry {
  public:
@@ -48,4 +48,4 @@ class DeviceRegistry {
   mutable absl::Mutex mutex_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

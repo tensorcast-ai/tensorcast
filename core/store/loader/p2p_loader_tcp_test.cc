@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <cstring>
 #include <vector>
@@ -15,9 +15,9 @@
 #include "core/store/replica/memory_manager.h"
 #include "core/testing/test_helpers.h"
 
-using namespace stepcast::communicator;
-using namespace stepcast::store;
-using namespace stepcast::communicator::test;
+using namespace tensorcast::communicator;
+using namespace tensorcast::store;
+using namespace tensorcast::communicator::test;
 
 TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader]") {
   SKIP_IF_NO_CUDA();
@@ -36,11 +36,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
     void* source_gpu_ptr;
-    REQUIRE(stepcast::cuda::malloc(&source_gpu_ptr, artifact_size).ok());
+    REQUIRE(tensorcast::cuda::malloc(&source_gpu_ptr, artifact_size).ok());
 
     // Fill with test data
     auto test_data = create_test_pattern(artifact_size, 123);
-    REQUIRE(stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
+    REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
     REQUIRE(source_engine
@@ -75,7 +75,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 1 * 1024 * 1024; // 1MB chunks for streaming
     const std::size_t pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
-    auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_artifact", // artifact_identifier
         0, // local_device_id (GPU device 0)
@@ -99,12 +99,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(gpu_ptrs[0] != nullptr);
 
     std::vector<uint8_t> verify_data(artifact_size);
-    REQUIRE(stepcast::cuda::memcpy(verify_data.data(), gpu_ptrs[0], artifact_size, cudaMemcpyDeviceToHost).ok());
+    REQUIRE(tensorcast::cuda::memcpy(verify_data.data(), gpu_ptrs[0], artifact_size, cudaMemcpyDeviceToHost).ok());
     REQUIRE(verify_pattern(verify_data.data(), artifact_size, 123));
 
     // Cleanup
     REQUIRE(mem_manager->release_memory(MemoryLocation::GPU).ok());
-    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
   }
 
   SECTION("Remote GPU to Local CPU via TCP") {
@@ -123,13 +123,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     const std::size_t artifact_size = 8 * 1024 * 1024; // 8MB
     void* source_gpu_ptr;
-    auto malloc_status = stepcast::cuda::malloc(&source_gpu_ptr, artifact_size);
+    auto malloc_status = tensorcast::cuda::malloc(&source_gpu_ptr, artifact_size);
     CAPTURE(artifact_size, malloc_status.message());
     REQUIRE(malloc_status.ok());
 
     auto test_data = create_test_pattern(artifact_size, 99);
     auto memcpy_status =
-        stepcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice);
+        tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice);
     CAPTURE(memcpy_status.message());
     REQUIRE(memcpy_status.ok());
 
@@ -167,7 +167,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
     const std::size_t total_pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
-    auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_artifact", // artifact_identifier
         -1, // local_device_id (-1 for CPU)
@@ -196,6 +196,6 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Release allocated CPU memory and GPU source
     REQUIRE(mem_manager->release_memory(MemoryLocation::PAGEABLE_CPU).ok());
-    REQUIRE(stepcast::cuda::free(source_gpu_ptr).ok());
+    REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
   }
 }

@@ -1,9 +1,9 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMON_LOGGING_INIT_H_
 #define CORE_COMMON_LOGGING_INIT_H_
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Ensure absl logging is initialized exactly once across all modules
@@ -19,6 +19,6 @@ namespace stepcast::store {
  */
 void ensure_logging_initialized();
 
-} // namespace stepcast::store
+} // namespace tensorcast::store
 
 #endif // CORE_COMMON_LOGGING_INIT_H_

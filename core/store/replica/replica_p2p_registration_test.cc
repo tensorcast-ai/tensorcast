@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <filesystem>
 #include <fstream>
@@ -23,7 +23,7 @@
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
+using namespace tensorcast::store;
 
 // Helper function to create a dummy file (copied from model_disk_test.cc)
 bool create_dummy_file(const fs::path& path, size_t size) {
@@ -39,7 +39,7 @@ bool create_dummy_file(const fs::path& path, size_t size) {
 // Helper function to check if CUDA devices are available
 bool has_cuda_devices() {
   int device_count = 0;
-  absl::Status status = stepcast::cuda::get_device_count(&device_count);
+  absl::Status status = tensorcast::cuda::get_device_count(&device_count);
   if (!status.ok()) {
     return false; // Error checking devices
   }
@@ -55,7 +55,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   // Initialize a CommunicationManager for test and obtain its engine for
   // dependency injection to ReplicaConfig. Use ephemeral localhost port.
   // ------------------------------------------------------------------
-  auto comm_mgr = std::make_shared<stepcast::store::CommunicationManager>();
+  auto comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
   absl::Status engine_status = comm_mgr->initialize("127.0.0.1", 16000);
   if (!engine_status.ok()) {
     FAIL("Failed to initialize communication manager: " << engine_status);
@@ -76,7 +76,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   std::shared_ptr<PinnedMemoryPool> pinned_pool = std::make_shared<PinnedMemoryPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
   // Create DVMP and StreamingPinnedBuffer required by ReplicaConfig
-  auto dvmp = std::make_shared<::stepcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
   REQUIRE(dvmp != nullptr);
 
   // --- Test GPU Registration --- (Requires CUDA device)
@@ -95,11 +95,11 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     fs::path dummy_file_path = artifact_dir / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, artifact_size));
     // RFC-0007 metadata for standard partitions
-    REQUIRE(::stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+    REQUIRE(::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
     int device_id = 0;
     int device_count;
-    absl::Status status = stepcast::cuda::get_device_count(&device_count);
+    absl::Status status = tensorcast::cuda::get_device_count(&device_count);
     REQUIRE(status.ok());
     REQUIRE(device_count > 0);
     REQUIRE(device_id < device_count);
@@ -110,7 +110,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     ReplicaConfig config{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::GPU,
+        .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = device_id,
         .pinned_memory_pool = pinned_pool,
         .dvmp = dvmp,
@@ -206,7 +206,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     fs::path dummy_file_path = artifact_dir / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, artifact_size));
     // RFC-0007 metadata for standard partitions
-    REQUIRE(::stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+    REQUIRE(::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
     // Note: No CUDA pool needed for CPU-only test
     int dummy_device_id = 0; // Still need a device ID for config
@@ -217,7 +217,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     ReplicaConfig config{
         .source = disk_src,
         .artifact_identifier = artifact_id,
-        .device_type = ::stepcast::DeviceType::CPU,
+        .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dummy_device_id,
         .pinned_memory_pool = pinned_pool,
         .dvmp = dvmp,

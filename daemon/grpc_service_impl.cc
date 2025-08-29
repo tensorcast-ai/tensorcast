@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -8,7 +8,7 @@
 #include "core/store/loading/loading_spec.h"
 #include "daemon/status_utils.h"
 
-namespace stepcast::daemon {
+namespace tensorcast::daemon {
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
@@ -31,7 +31,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
   const auto device = resolve_device(*req);
 
   // Build hints
-  stepcast::store::MaterializeHints hints;
+  tensorcast::store::MaterializeHints hints;
   if (req->pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req->pinned_allocation_timeout_ms());
   }
@@ -41,9 +41,9 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     hints.disk_path = req->disk_path();
 
   // Choose mode
-  stepcast::store::StoreEngine::MaterializeMode mode = stepcast::store::StoreEngine::MaterializeMode::AUTO;
+  tensorcast::store::StoreEngine::MaterializeMode mode = tensorcast::store::StoreEngine::MaterializeMode::AUTO;
   if (has_disk) {
-    mode = stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY;
+    mode = tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY;
   }
 
   auto result = engine_->materialize_replica(device, mode, hints);
@@ -178,17 +178,17 @@ StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-static stepcast::store::DeviceKey default_gpu_key() {
-  return stepcast::store::DeviceRegistry::instance().gpu_key(0);
+static tensorcast::store::DeviceKey default_gpu_key() {
+  return tensorcast::store::DeviceRegistry::instance().gpu_key(0);
 }
 
-stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(
     const ::store_daemon::MaterializeReplicaRequest& req) {
-  using stepcast::DeviceType;
-  using stepcast::store::DeviceKey;
+  using tensorcast::DeviceType;
+  using tensorcast::store::DeviceKey;
   if (!req.device_uuid().empty()) {
     DeviceKey key{DeviceType::GPU, 0, req.device_uuid()};
-    return stepcast::store::DeviceRegistry::instance().normalize(key);
+    return tensorcast::store::DeviceRegistry::instance().normalize(key);
   }
   switch (req.target_device_type()) {
     case ::store_daemon::DeviceType::DEVICE_TYPE_CPU:
@@ -202,9 +202,9 @@ stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(
   }
 }
 
-stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_daemon::ConfirmReplicaRequest& req) {
-  using stepcast::DeviceType;
-  using stepcast::store::DeviceKey;
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_daemon::ConfirmReplicaRequest& req) {
+  using tensorcast::DeviceType;
+  using tensorcast::store::DeviceKey;
   switch (req.target_device_type()) {
     case ::store_daemon::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{DeviceType::CPU, -1, ""};
@@ -216,9 +216,9 @@ stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_
   }
 }
 
-stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_daemon::UnloadReplicaRequest& req) {
-  using stepcast::DeviceType;
-  using stepcast::store::DeviceKey;
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_daemon::UnloadReplicaRequest& req) {
+  using tensorcast::DeviceType;
+  using tensorcast::store::DeviceKey;
   switch (req.target_device_type()) {
     case ::store_daemon::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{DeviceType::CPU, -1, ""};
@@ -230,8 +230,8 @@ stepcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const ::store_
   }
 }
 
-stepcast::store::ReplicaKey StoreDaemonServiceImpl::make_replica_key(const std::string& artifact_id) {
-  stepcast::store::ReplicaKey key;
+tensorcast::store::ReplicaKey StoreDaemonServiceImpl::make_replica_key(const std::string& artifact_id) {
+  tensorcast::store::ReplicaKey key;
   key.artifact_id = artifact_id;
   key.device = default_gpu_key();
   key.replica = 0;
@@ -315,7 +315,7 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     grpc::ServerContext* /*ctx*/,
     const ::store_daemon::BeginRegisterArtifactRequest* req,
     ::store_daemon::BeginRegisterArtifactResponse* resp) {
-  stepcast::store::StoreEngine::ArtifactRegistration reg;
+  tensorcast::store::StoreEngine::ArtifactRegistration reg;
   reg.artifact_id = req->artifact_id();
   reg.device_id = req->device_id();
   reg.total_size_bytes = req->total_size();
@@ -435,7 +435,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
   mp->set_chunk_size_bytes(engine_->get_chunk_size());
 
   for (const auto& info : engine_->get_all_replicas_info()) {
-    if (info.gpu_state != stepcast::store::MemoryLocation::NONE) {
+    if (info.gpu_state != tensorcast::store::MemoryLocation::NONE) {
       auto* gpu = resp->add_gpu_devices();
       gpu->set_device_id(info.gpu_device_id);
       gpu->set_device_uuid(info.gpu_device_uuid);
@@ -452,7 +452,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
           std::chrono::duration_cast<std::chrono::seconds>(info.last_access_time.time_since_epoch()).count());
       r->add_replica_uuids("");
       r->set_is_registered_for_comm(info.is_registered_for_comm);
-    } else if (info.cpu_state != stepcast::store::MemoryLocation::NONE) {
+    } else if (info.cpu_state != tensorcast::store::MemoryLocation::NONE) {
       auto* r = resp->add_cpu_replicas();
       r->set_artifact_id(info.artifact_id);
       r->set_artifact_size_bytes(info.size_bytes);
@@ -501,4 +501,4 @@ Status StoreDaemonServiceImpl::GetLoadedReplicas(
   return Status::OK;
 }
 
-} // namespace stepcast::daemon
+} // namespace tensorcast::daemon

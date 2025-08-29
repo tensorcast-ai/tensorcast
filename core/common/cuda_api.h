@@ -1,7 +1,7 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
-#ifndef STEPCAST_CORE_COMMON_CUDA_API_H_
-#define STEPCAST_CORE_COMMON_CUDA_API_H_
+#ifndef TENSORCAST_CORE_COMMON_CUDA_API_H_
+#define TENSORCAST_CORE_COMMON_CUDA_API_H_
 
 #include <cstddef>
 #include <string>
@@ -101,7 +101,7 @@ typedef struct cudaPointerAttributes {
 } cudaPointerAttributes;
 #endif
 
-namespace stepcast::cuda {
+namespace tensorcast::cuda {
 
 // Memory allocation and management
 absl::Status set_device(int device_id);
@@ -181,6 +181,6 @@ bool is_available();
 #define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation) ((void)0)
 #endif
 
-} // namespace stepcast::cuda
+} // namespace tensorcast::cuda
 
-#endif // STEPCAST_CORE_COMMON_CUDA_API_H_
+#endif // TENSORCAST_CORE_COMMON_CUDA_API_H_

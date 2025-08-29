@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -53,7 +53,7 @@
 
 #define BUFFER_SIZE 1 << 30
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 uint64_t calculate_actual_artifact_size(const std::string& disk_path) {
   std::filesystem::path tensor_index_path = std::filesystem::path(disk_path) / "tensor_index.json";
@@ -276,7 +276,7 @@ ArtifactVerificationInfo generate_verification_info_from_disk(
         LOG(FATAL) << "Failed to open safetensors file: " << p.string();
       }
       // Use the shared utility function to parse the header
-      auto header_info = stepcast::store::loader::ParseSafetensorsHeader(fd);
+      auto header_info = tensorcast::store::loader::ParseSafetensorsHeader(fd);
       ::close(fd);
       if (!header_info.ok()) {
         LOG(FATAL) << "Failed to parse safetensors header for " << p.string() << ": " << header_info.status();
@@ -368,7 +368,7 @@ ArtifactVerificationInfo generate_verification_info_from_disk(
       data_ptrs.push_back(addr);
     } else {
       // Use the shared utility function to parse the header
-      auto header_info = stepcast::store::loader::ParseSafetensorsHeader(fd);
+      auto header_info = tensorcast::store::loader::ParseSafetensorsHeader(fd);
       if (!header_info.ok()) {
         ::munmap(addr, bytes_to_map);
         ::close(fd);
@@ -917,4 +917,4 @@ std::unordered_map<int, std::string> get_device_uuid_map() {
   return device_uuid_map;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

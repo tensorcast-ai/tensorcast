@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // StoreEngine stress tests (C-series)
 // Long-running stress tests with randomized operations.
@@ -19,9 +19,9 @@
 #include "core/common/cuda_api.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::store_engine;
-using namespace stepcast::store;
-using stepcast::DeviceType;
+using namespace tensorcast::tests::store_engine;
+using namespace tensorcast::store;
+using tensorcast::DeviceType;
 
 // Stress test configuration
 struct StressConfig {
@@ -216,7 +216,7 @@ class StressWorker {
 
     stats_->prepare_attempts.fetch_add(1);
 
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
 
     hints.disk_path = artifact_id;
     auto handle_or =
@@ -231,7 +231,7 @@ class StressWorker {
         // Begin validation protection as early as possible to avoid races
         ValidationScopeKey _validation_scope(g_validation_tracker, key.artifact_id, key.device.ordinal);
         ValidationGpuScope _gpu_scope(g_validation_gpu_gate, key.device.ordinal);
-        (void)stepcast::cuda::set_device(key.device.ordinal);
+        (void)tensorcast::cuda::set_device(key.device.ordinal);
 
         // Post-materialize_replica validation (best-effort; tolerant to concurrent mutations)
         stats_->validation_attempts.fetch_add(1);
@@ -283,7 +283,7 @@ class StressWorker {
         if (gpu_state == MemoryState::LOADED) {
           // Retry up to 2 times to handle transient read issues
           for (int attempt = 0; attempt < 2 && !data_ok; ++attempt) {
-            (void)stepcast::cuda::set_device(key.device.ordinal);
+            (void)tensorcast::cuda::set_device(key.device.ordinal);
             auto ptr_or = store_->get_replica_gpu_ptr(key);
             if (!ptr_or.ok() || ptr_or.value() == 0) {
               break;
@@ -299,7 +299,7 @@ class StressWorker {
             const size_t verify_bytes = static_cast<size_t>(std::min<uint64_t>(4096, file_size));
             // Prefix
             std::vector<char> gpu_prefix(verify_bytes);
-            auto memcpy_st = stepcast::cuda::memcpy(
+            auto memcpy_st = tensorcast::cuda::memcpy(
                 gpu_prefix.data(), reinterpret_cast<void*>(gpu_ptr_u64), verify_bytes, cudaMemcpyDeviceToHost);
             if (!memcpy_st.ok()) {
               continue; // retry
@@ -317,7 +317,7 @@ class StressWorker {
             bool suffix_match = false;
             std::vector<char> gpu_suffix(verify_bytes);
             const uint64_t tail_offset = file_size - verify_bytes;
-            auto memcpy_tail = stepcast::cuda::memcpy(
+            auto memcpy_tail = tensorcast::cuda::memcpy(
                 gpu_suffix.data(),
                 reinterpret_cast<void*>(gpu_ptr_u64 + tail_offset),
                 verify_bytes,
@@ -663,7 +663,7 @@ TEST_CASE("C4: Multi-GPU stress", "[store_engine][stress][c4][multi_gpu]") {
   // Get actual GPU count
   int gpu_count = 0;
   {
-    auto st = stepcast::cuda::get_device_count(&gpu_count);
+    auto st = tensorcast::cuda::get_device_count(&gpu_count);
     ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
   }
   config.max_gpu_ordinal = std::min(gpu_count - 1, 3);

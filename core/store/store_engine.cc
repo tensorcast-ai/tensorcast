@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "store_engine.h"
 
@@ -39,7 +39,7 @@
 #include "core/store/loader/source_hash.h"
 // #include "core/store/loading/replica_registration_helper.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 namespace {} // namespace
 // (hashing utilities moved to core/common/artifact_hash.*)
 // Forward declaration for GPU eviction helper defined later in this file.
@@ -1298,7 +1298,7 @@ int StoreEngine::unload_replica(const ReplicaKey& key) {
   // there was anything to unload.  This avoids treating a no-op release as a
   // success – a scenario that would allow multiple threads to report success
   // when only the first one actually freed memory.
-  stepcast::store::MemoryState before_state = replica->get_memory_state(loc);
+  tensorcast::store::MemoryState before_state = replica->get_memory_state(loc);
 
   if (before_state <= MemoryState::UNALLOCATED) {
     // Nothing to release – another thread has already unloaded this instance.
@@ -1709,4 +1709,4 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

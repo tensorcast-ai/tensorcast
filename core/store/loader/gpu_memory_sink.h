@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "core/common/cuda_api.h"
 #include "core/store/loader/sink.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 class GPUMemorySink : public Sink, public PositionedSink {
  public:
@@ -39,4 +39,4 @@ class GPUMemorySink : public Sink, public PositionedSink {
   uint64_t total_bytes_written_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

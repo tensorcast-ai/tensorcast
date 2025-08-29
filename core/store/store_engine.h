@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -25,7 +25,7 @@
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class MaterializeOrchestrator; // Forward declaration for friend access
 
@@ -289,4 +289,4 @@ class StoreEngine {
   std::unordered_map<std::string, PendingRegistrationEntry> pending_regs_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

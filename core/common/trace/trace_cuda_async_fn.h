@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 #pragma once
@@ -11,7 +11,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/trace/trace_manager.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 namespace detail {
 
 // Internal payload passed to the CUDA host callback.
@@ -23,7 +23,7 @@ struct CudaTracePayload {
 };
 
 inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* payload) {
-  auto status = stepcast::cuda::launch_host_func(
+  auto status = tensorcast::cuda::launch_host_func(
       stream,
       [](void* user_data) {
         auto* p = static_cast<CudaTracePayload*>(user_data);
@@ -57,7 +57,7 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
 //
 // Usage:
 //   SC_RETURN_IF_ERROR(trace_cuda_async("h2d_copy", stream,
-//       [&]{ return stepcast::cuda::memcpy_async(dst, src, n, cudaMemcpyHostToDevice, stream); },
+//       [&]{ return tensorcast::cuda::memcpy_async(dst, src, n, cudaMemcpyHostToDevice, stream); },
 //       [&]{ pool->return_slot(slot); }));
 // ---------------------------------------------------------------------------
 template <typename Op, typename Done = std::function<void()>>
@@ -85,4 +85,4 @@ inline absl::Status trace_cuda_async(
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

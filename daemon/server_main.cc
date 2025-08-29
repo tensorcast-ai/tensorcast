@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <memory>
 #include <string>
@@ -27,17 +27,17 @@ ABSL_FLAG(uint16_t, metrics_port, 9095, "Metrics HTTP port");
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
 
-  stepcast::store::StoreEngineOptions opts;
+  tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = absl::GetFlag(FLAGS_storage_path);
   opts.p2p_port = absl::GetFlag(FLAGS_p2p_port);
   opts.memory_pool_size = absl::GetFlag(FLAGS_mem_pool_size);
   opts.chunk_size = absl::GetFlag(FLAGS_chunk_size);
   opts.num_thread = absl::GetFlag(FLAGS_io_threads);
 
-  auto engine = std::make_shared<stepcast::store::StoreEngine>(opts);
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(opts);
 
-  stepcast::daemon::StoreDaemonServiceImpl service(engine);
-  stepcast::daemon::MetricsExporter metrics(engine, absl::GetFlag(FLAGS_metrics_port));
+  tensorcast::daemon::StoreDaemonServiceImpl service(engine);
+  tensorcast::daemon::MetricsExporter metrics(engine, absl::GetFlag(FLAGS_metrics_port));
   metrics.start();
 
   grpc::ServerBuilder builder;

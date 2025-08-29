@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -16,9 +16,9 @@
 #include "core/common/system_capabilities.h"
 #include "core/store/replica/chunk_meta.h"
 
-using namespace stepcast::memory;
-using namespace stepcast::store;
-using namespace stepcast::common;
+using namespace tensorcast::memory;
+using namespace tensorcast::store;
+using namespace tensorcast::common;
 
 namespace {
 // Check if we're running in a CI environment with limited resources

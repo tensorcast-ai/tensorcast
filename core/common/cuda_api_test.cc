@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
@@ -7,7 +7,7 @@
 #include "core/common/cuda_api.h"
 
 TEST_CASE("CUDA API abstraction layer", "[cuda]") {
-  namespace cuda = stepcast::cuda;
+  namespace cuda = tensorcast::cuda;
 
   SECTION("Basic device operations") {
     // Check if CUDA is available

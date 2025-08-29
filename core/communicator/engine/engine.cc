@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <algorithm>
 #include <memory>
@@ -18,7 +18,7 @@
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ENV_PARAM_STR(DEFAULT_DEV, "");
 ENV_PARAM(GPU_TCP_STAGER_CHUNK_SIZE_MB, 64); // Default 64MB chunks
@@ -439,14 +439,14 @@ result_t CommunicateEngine::on_receive_request(
         auto* payload = rsp->get_payload<ProtoReadFailed>();
         memcpy(payload->tensor_key, req->tensor_key, 512);
         payload->offset = req->offset;
-        payload->reason = STEPCAST_READ_FAILED_NO_TENSOR;
+        payload->reason = TENSORCAST_READ_FAILED_NO_TENSOR;
         COMM_CHECK(t->send(rsp));
       } else if (req->offset + req->bytes > tensor->get_bytes()) {
         auto rsp = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
         auto* payload = rsp->get_payload<ProtoReadFailed>();
         memcpy(payload->tensor_key, req->tensor_key, 512);
         payload->offset = req->offset;
-        payload->reason = STEPCAST_READ_FAILED_OVERFLOW;
+        payload->reason = TENSORCAST_READ_FAILED_OVERFLOW;
         COMM_CHECK(t->send(rsp));
       } else {
         auto rsp = EngineMessage::make_message<ProtoReadResponse>(ENGINE_OP_READ_RESPONSE);
@@ -682,4 +682,4 @@ void CommunicateEngine::do_channel_gc_loop() {
   }
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

@@ -5,7 +5,7 @@ COMMIT_HASH=$(git rev-parse --short=5 HEAD)
 DATE=$(date +%Y.%m.%d)
 
 # Construct the tag
-TAG="hub.i.basemind.com/stepcast/scstore:${DATE}-${COMMIT_HASH}"
+TAG="hub.i.basemind.com/tensorcast/scstore:${DATE}-${COMMIT_HASH}"
 
 # Prepare proxy arguments
 PROXY_ARGS=""

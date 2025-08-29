@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """StoreDaemon - A distributed artifact storage daemon with RDMA/TCP support."""
 

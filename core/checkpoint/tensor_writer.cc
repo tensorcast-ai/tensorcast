@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -18,7 +18,7 @@
 //  ----------------------------------------------------------------------------
 #include "tensor_writer.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 TensorWriter::TensorWriter(std::string filename) : filename_(std::move(filename)) {}
 
@@ -51,4 +51,4 @@ uint64_t TensorWriter::write_record(const char* data, size_t size) {
   return start_offset;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 
@@ -15,7 +15,7 @@
 #include "absl/strings/str_cat.h"
 #include "nlohmann/json.hpp"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // ----------------------------------------------------------------------
 // Singleton accessor
@@ -270,4 +270,4 @@ void TraceManager::clear_trace(const std::string& artifact_id, const std::string
   }
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "communication_manager.h"
 
@@ -7,7 +7,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 //-------------------------------------------------------------------------
 // Constructor with externally provided CommunicateEngine (Phase-3 DI)
@@ -88,4 +88,4 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
   return info;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

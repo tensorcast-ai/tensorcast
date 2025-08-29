@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 struct ReadyChunk {
   int slot_id;
@@ -40,4 +40,4 @@ class BufferPool {
   virtual void* get_chunk_data_ptr(int slot_id) = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

@@ -1,8 +1,8 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 # type: ignore
 """
-StepCast Store Setup Script
+TensorCast Setup Script
 
 Supports building with fake CUDA backend for development without GPU:
   - Environment variable: USE_FAKE_CUDA=1

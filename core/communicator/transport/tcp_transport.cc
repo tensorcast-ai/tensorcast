@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <iomanip>
 #include <sstream>
@@ -13,7 +13,7 @@
 #include "core/communicator/transport/tcp_context.h"
 #include "core/communicator/transport/tcp_transport.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 // Helper function to decode epoll event flags into a readable string
 static std::string decode_epoll_events(uint32_t events) {
@@ -173,4 +173,4 @@ result_t TcpTransport::do_recv() {
   return SUCCESS;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

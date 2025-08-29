@@ -6,7 +6,7 @@ sidebar_position: 9
 
 # 📊 Adding New Metrics
 
-This guide explains **how to add a new Prometheus metric** to the StepCast Store with minimal effort.
+This guide explains **how to add a new Prometheus metric** to the TensorCast with minimal effort.
 The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMemoryPool`, future CUDA kernels) and requires **no change on the Python side** once the metric is registered in C++.
 
 > The mechanism relies on the lightweight `MetricsRegistry` singleton (`core/common/metrics/metrics_registry.{h,cpp}`) plus the Python `GlobalMetricsCollector` that automatically pulls the C++ snapshot and merges it with the existing Python metrics.
@@ -18,9 +18,9 @@ The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMe
 ```cpp
 #include "core/common/metrics/metric_objects.h"
 
-using stepcast::metrics::Counter;
-using stepcast::metrics::Gauge;
-using stepcast::metrics::Histogram;
+using tensorcast::metrics::Counter;
+using tensorcast::metrics::Gauge;
+using tensorcast::metrics::Histogram;
 ```
 
 ## 2. Register / Update a Metric
@@ -112,7 +112,7 @@ shares the same metric *name* but carries an **augmented** label set – perfect
 for one-off emission without keeping separate wrapper instances around.
 
 ```cpp
-using stepcast::metrics::Counter;
+using tensorcast::metrics::Counter;
 
 Counter requests_total("http_requests_total");
 

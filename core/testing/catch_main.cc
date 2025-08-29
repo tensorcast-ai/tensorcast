@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #define CATCH_CONFIG_MAIN // This tells Catch to provide a main() - only do this in one cpp file
 
@@ -16,7 +16,7 @@ struct LoggingInitializer : Catch::EventListenerBase {
     static bool initialized = false;
     if (!initialized) {
       // Use ensure_logging_initialized which respects SCSTORE_VLOG_LEVEL env var
-      stepcast::store::ensure_logging_initialized();
+      tensorcast::store::ensure_logging_initialized();
       absl::FailureSignalHandlerOptions options;
       absl::InstallFailureSignalHandler(options);
       initialized = true;

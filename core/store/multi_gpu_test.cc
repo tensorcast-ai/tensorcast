@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // StoreEngine multi-GPU tests (B-series)
 // Test multi-GPU loading, cross-GPU operations, and device-specific eviction.
@@ -15,9 +15,9 @@
 #include "core/common/device_types.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::store_engine;
-using namespace stepcast::store;
-using stepcast::DeviceType;
+using namespace tensorcast::tests::store_engine;
+using namespace tensorcast::store;
+using tensorcast::DeviceType;
 
 // B1: Load same replica to multiple GPUs
 TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") {
@@ -34,7 +34,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   // Get actual GPU count
   int gpu_count = 0;
   {
-    auto st = stepcast::cuda::get_device_count(&gpu_count);
+    auto st = tensorcast::cuda::get_device_count(&gpu_count);
     ABSL_CHECK(st.ok()) << "Failed to get GPU count: " << st.message();
   }
   gpu_count = std::min(gpu_count, 4); // Test up to 4 GPUs
@@ -43,7 +43,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   // Load replica to each GPU
   std::vector<ReplicaHandle> handles;
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
 
     hints.disk_path = artifact_id;
     auto handle_or = store->materialize_replica(make_gpu_key(gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -80,7 +80,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
     // Strengthen: verify GPU memory content matches file pattern for first few KB
     // Read disk sample
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = stepcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     // Get GPU pointer and compare prefix
@@ -92,7 +92,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
     // Copy back a small prefix (e.g., 4KB) for content validation
     size_t verify_bytes = std::min<size_t>(4096, host_data.size());
     std::vector<char> gpu_prefix(verify_bytes);
-    auto memcpy_st = stepcast::cuda::memcpy(
+    auto memcpy_st = tensorcast::cuda::memcpy(
         gpu_prefix.data(), reinterpret_cast<void*>(gpu_ptr_u64), verify_bytes, cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_st.ok());
     REQUIRE(std::memcmp(gpu_prefix.data(), host_data.data(), verify_bytes) == 0);
@@ -100,14 +100,14 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
     // Also verify the last bytes match to catch truncated tails
     size_t tail_offset = host_data.size() - verify_bytes;
     std::vector<char> gpu_suffix(verify_bytes);
-    auto memcpy_tail = stepcast::cuda::memcpy(
+    auto memcpy_tail = tensorcast::cuda::memcpy(
         gpu_suffix.data(), reinterpret_cast<void*>(gpu_ptr_u64 + tail_offset), verify_bytes, cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_tail.ok());
     REQUIRE(std::memcmp(gpu_suffix.data(), host_data.data() + tail_offset, verify_bytes) == 0);
 
     // Replace single-byte check with full content verification
     std::vector<char> gpu_full(host_data.size());
-    auto memcpy_full = stepcast::cuda::memcpy(
+    auto memcpy_full = tensorcast::cuda::memcpy(
         gpu_full.data(), reinterpret_cast<void*>(gpu_ptr_u64), host_data.size(), cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_full.ok());
     REQUIRE(std::memcmp(gpu_full.data(), host_data.data(), host_data.size()) == 0);
@@ -134,7 +134,7 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
 
   // Load to GPU 0 first via LOAD_ONLY (using disk_path)
   {
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle0_or.ok());
@@ -144,7 +144,7 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
 
   // Now try COPY_ONLY to GPU 1 WITHOUT setting artifact_id → should fail with InvalidArgument
   {
-    stepcast::store::MaterializeHints hints; // intentionally leave artifact_id empty
+    tensorcast::store::MaterializeHints hints; // intentionally leave artifact_id empty
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE_FALSE(handle1_or.ok());
     // Error message should clearly indicate missing artifact_id
@@ -166,7 +166,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
 
   // First load to GPU 0
   {
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
 
     hints.disk_path = artifact_id;
     auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -183,7 +183,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   // Now copy to GPU 1 using COPY_ONLY (GPU-to-GPU transfer enforced).
   auto copy_start = std::chrono::high_resolution_clock::now();
   {
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
     hints.artifact_id = artifact_id; // Needed by COPY_ONLY to locate source instance
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(handle1_or.ok());
@@ -210,11 +210,11 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
 
     // Validate content prefix
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = stepcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
     size_t verify_bytes = std::min<size_t>(4096, host_data.size());
     std::vector<char> gpu_prefix(verify_bytes);
-    auto memcpy_st = stepcast::cuda::memcpy(
+    auto memcpy_st = tensorcast::cuda::memcpy(
         gpu_prefix.data(), reinterpret_cast<void*>(ptr_or.value()), verify_bytes, cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_st.ok());
     REQUIRE(std::memcmp(gpu_prefix.data(), host_data.data(), verify_bytes) == 0);
@@ -222,14 +222,14 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
     // Validate content suffix
     size_t tail_offset = host_data.size() - verify_bytes;
     std::vector<char> gpu_suffix(verify_bytes);
-    auto memcpy_tail = stepcast::cuda::memcpy(
+    auto memcpy_tail = tensorcast::cuda::memcpy(
         gpu_suffix.data(), reinterpret_cast<void*>(ptr_or.value() + tail_offset), verify_bytes, cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_tail.ok());
     REQUIRE(std::memcmp(gpu_suffix.data(), host_data.data() + tail_offset, verify_bytes) == 0);
 
     // Replace single-byte check with full content verification
     std::vector<char> gpu_full(host_data.size());
-    auto memcpy_full = stepcast::cuda::memcpy(
+    auto memcpy_full = tensorcast::cuda::memcpy(
         gpu_full.data(), reinterpret_cast<void*>(ptr_or.value()), host_data.size(), cudaMemcpyDeviceToHost);
     REQUIRE(memcpy_full.ok());
     REQUIRE(std::memcmp(gpu_full.data(), host_data.data(), host_data.size()) == 0);
@@ -260,7 +260,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   // Get GPU count
   int gpu_count = 0;
   {
-    auto _st2 = stepcast::cuda::get_device_count(&gpu_count);
+    auto _st2 = tensorcast::cuda::get_device_count(&gpu_count);
     (void)_st2;
   }
   gpu_count = std::min(gpu_count, 4);
@@ -269,7 +269,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   // Load replicas with round-robin distribution
   for (size_t i = 0; i < artifact_ids.size(); ++i) {
     int target_gpu = i % gpu_count;
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
     hints.disk_path = artifact_ids[i];
     auto handle_or =
         store->materialize_replica(make_gpu_key(target_gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -313,7 +313,7 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   auto store = make_test_store(fixture.root());
 
   // Load to both GPU 0 and GPU 1
-  stepcast::store::MaterializeHints hints;
+  tensorcast::store::MaterializeHints hints;
 
   hints.disk_path = artifact_id;
   auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -328,7 +328,7 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   // Verify full content on both GPUs to ensure data correctness before unload
   {
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = stepcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::tests::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     for (int gpu = 0; gpu < 2; ++gpu) {
@@ -337,7 +337,7 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
       REQUIRE(ptr_or.ok());
 
       std::vector<char> gpu_full(host_data.size());
-      auto memcpy_full = stepcast::cuda::memcpy(
+      auto memcpy_full = tensorcast::cuda::memcpy(
           gpu_full.data(), reinterpret_cast<void*>(ptr_or.value()), host_data.size(), cudaMemcpyDeviceToHost);
       REQUIRE(memcpy_full.ok());
       REQUIRE(std::memcmp(gpu_full.data(), host_data.data(), host_data.size()) == 0);

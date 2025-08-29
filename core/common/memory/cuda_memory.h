@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/cuda_api.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Represents a block of CUDA device memory.
@@ -102,4 +102,4 @@ class CudaMemory {
   cudaIpcMemHandle_t handle_{}; // Initialize to zero/default
   AllocationType allocation_type_ = AllocationType::UNINITIALIZED;
 };
-} // namespace stepcast::store
+} // namespace tensorcast::store

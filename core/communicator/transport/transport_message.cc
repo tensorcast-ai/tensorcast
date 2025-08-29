@@ -1,9 +1,9 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/transport/transport_message.h"
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 TransportMessage::TransportMessage(uint32_t header_size, uint32_t payload_size)
     : header_size_(header_size), payload_size_(payload_size) {
@@ -25,4 +25,4 @@ uint32_t TransportMessage::get_payload_size() const {
   return payload_size_;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

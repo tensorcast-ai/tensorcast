@@ -338,7 +338,7 @@ inline grpc::Status to_grpc_status(const absl::Status& s) {
 ```
 class StoreDaemonServiceImpl final : public store_daemon::StoreDaemon::Service {
  public:
-  explicit StoreDaemonServiceImpl(std::shared_ptr<stepcast::store::StoreEngine> engine);
+  explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine);
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
@@ -353,7 +353,7 @@ class StoreDaemonServiceImpl final : public store_daemon::StoreDaemon::Service {
   // ... other RPCs ...
 
  private:
-  struct SessionEntry { stepcast::store::ReplicaKey key; std::shared_future<absl::Status> ready; std::chrono::steady_clock::time_point expiry; };
+  struct SessionEntry { tensorcast::store::ReplicaKey key; std::shared_future<absl::Status> ready; std::chrono::steady_clock::time_point expiry; };
   absl::Mutex mu_;
   absl::flat_hash_map<std::string, SessionEntry> sessions_ ABSL_GUARDED_BY(mu_);
 };

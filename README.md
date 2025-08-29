@@ -105,7 +105,7 @@ $ ./bazel-bin/tests/cpp/gpu_ce_test -a client -i <SERVER_IP> -p 19099 -c 7438380
 # Artifact Communication Memory Registration Test (Single Process)
 # Tests loading from Disk to CPU/GPU and registering for communication.
 # Requires CUDA for GPU section and P2P capable environment for full registration success.
-$ STEPCAST_COMM_LOCAL_IP=0.0.0.0 ./bazel-bin/tests/cpp/replica_p2p_registration_test
+$ TENSORCAST_COMM_LOCAL_IP=0.0.0.0 ./bazel-bin/tests/cpp/replica_p2p_registration_test
 ```
 
 ### Artifact Test (P2P Transfer C/S)
@@ -185,5 +185,5 @@ Note that currently, P2P unit tests fail when being called by bazel test, and ne
 uv run -m scstore.global_store --port 50051 --workers 10
 
 # Run the Global Store Server in Docker
-sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/stepcast/global-store:2025.04.27-55f24
+sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/tensorcast/global-store:2025.04.27-55f24
 ```

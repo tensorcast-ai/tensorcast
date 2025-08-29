@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 #include "core/store/device_types.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Performs staged CPU to GPU copy using streaming pinned buffer.
@@ -41,9 +41,9 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
-    const stepcast::store::ReplicaKey& ikey);
+    const tensorcast::store::ReplicaKey& ikey);
 
 /**
  * @brief Performs staged GPU to CPU copy using streaming pinned buffer.
@@ -70,6 +70,6 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::stepcast::memory::DistributedVirtualMemoryPool>& dvmp);
+    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp);
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_COMMON_H_
 #define CORE_COMMUNICATOR_MISC_COMMON_H_
@@ -13,7 +13,7 @@ extern "C" {
 
 #include <future>
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 enum {
   SUCCESS = 0,
@@ -56,6 +56,6 @@ constexpr size_t GB = (1ull << 30);
     }                                                                          \
   } while (0)
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // CORE_COMMUNICATOR_MISC_COMMON_H_

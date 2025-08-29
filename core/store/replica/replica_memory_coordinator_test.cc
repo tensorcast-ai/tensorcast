@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/replica_memory_coordinator.h"
 
@@ -10,7 +10,7 @@
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 namespace {
 
 // Mock implementation of DistributedVirtualMemoryPool for testing
@@ -327,4 +327,4 @@ TEST_CASE("ReplicaMemoryCoordinator multi-GPU state tracking", "[unified_memory]
 }
 
 } // namespace
-} // namespace stepcast::store
+} // namespace tensorcast::store

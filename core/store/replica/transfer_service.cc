@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/transfer_service.h"
 
@@ -16,7 +16,7 @@
 #include "core/store/loader/streaming_buffer_adapter.h"
 #include "core/store/replica/transfer_helpers.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 namespace {
 // Per-GPU (device_id) concurrency limiter: at most 1 active session per GPU.
@@ -257,4 +257,4 @@ absl::Status TransferService::load_from_source(
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

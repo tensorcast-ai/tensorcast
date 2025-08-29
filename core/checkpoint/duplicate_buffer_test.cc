@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -8,7 +8,7 @@
 #include "core/checkpoint/checkpoint.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
+using namespace tensorcast::store;
 
 TEST_CASE("save / load tensors that share same buffer", "[checkpoint][dedup]") {
   // ------------------------------------------------------------------

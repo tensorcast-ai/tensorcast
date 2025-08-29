@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // Multi-process test for loading Replica via P2P
 #include <atomic>
@@ -35,8 +35,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 // ---------------------------------------------------------------------------
 // Test configuration structure
@@ -92,7 +92,7 @@ struct TestResources {
   bool is_cuda_available = false;
   int device_count = 0;
   size_t pinned_pool_chunk_size_bytes = 0; // Store the chunk size used
-  std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool> dvmp;
+  std::shared_ptr<tensorcast::memory::DistributedVirtualMemoryPool> dvmp;
 
   bool setup(int gpu_id, size_t artifact_size) {
     actual_artifact_size = artifact_size;
@@ -118,14 +118,14 @@ struct TestResources {
     LOG(INFO) << "PinnedMemoryPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
 
     // Create DVMP and StreamingPinnedBuffer
-    dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
+    dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
     if (!dvmp) {
       LOG(ERROR) << "Failed to create DistributedVirtualMemoryPool";
       return false;
     }
 
     // Check for CUDA devices and create pool if available
-    absl::Status status = stepcast::cuda::get_device_count(&device_count);
+    absl::Status status = tensorcast::cuda::get_device_count(&device_count);
     if (status.ok() && device_count > 0) {
       is_cuda_available = true;
       if (gpu_id >= device_count) {
@@ -208,11 +208,11 @@ class P2PTestServer {
     LOG(INFO) << " Register Location: " << register_loc_str;
 
     // Set environment variable for P2P server to listen on the correct port
-    setenv("STEPCAST_COMM_LOCAL_PORT", std::to_string(server_port).c_str(), 1);
+    setenv("TENSORCAST_COMM_LOCAL_PORT", std::to_string(server_port).c_str(), 1);
 
     // Initialize Global CommunicateEngine
     LOG(INFO) << "Initializing Global CommunicateEngine for Server on port " << server_port << "...";
-    auto comm_mgr = std::make_shared<stepcast::store::CommunicationManager>();
+    auto comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
     // The communication engine needs to listen on the same port that clients will connect to
     absl::Status engine_status = comm_mgr->initialize("0.0.0.0", server_port);
     if (!engine_status.ok()) {
@@ -243,7 +243,7 @@ class P2PTestServer {
     }
     // RFC-0007 metadata for standard partitions
     auto st_desc =
-        ::stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(resources.temp_dir / ARTIFACT_SUBDIR);
+        ::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(resources.temp_dir / ARTIFACT_SUBDIR);
     if (!st_desc.ok()) {
       LOG(ERROR) << "Failed to write descriptor/index: " << st_desc;
       resources.cleanup();
@@ -257,7 +257,7 @@ class P2PTestServer {
         .source = disk_src,
         .artifact_identifier = artifact_id,
         .device_type =
-            (register_location == MemoryLocation::GPU) ? ::stepcast::DeviceType::GPU : ::stepcast::DeviceType::CPU,
+            (register_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU : ::tensorcast::DeviceType::CPU,
         .local_device_id = (register_location == MemoryLocation::GPU) ? gpu_id : -1,
         .pinned_memory_pool = resources.pinned_pool,
         .dvmp = resources.dvmp,
@@ -312,7 +312,7 @@ class P2PTestServer {
 
     // Register Memory based on the flag
     LOG(INFO) << "Registering " << register_loc_str << " memory for communication...";
-    absl::StatusOr<stepcast::store::CommRegistrationInfo> reg_status =
+    absl::StatusOr<tensorcast::store::CommRegistrationInfo> reg_status =
         replica->enable_remote_memory_access(register_location, *shared_engine);
 
     if (!reg_status.ok()) {
@@ -343,7 +343,7 @@ class P2PTestServer {
 
     // Generate verification information for the registered memory
     LOG(INFO) << "Generating verification information for registered " << register_loc_str << " memory...";
-    absl::StatusOr<stepcast::store::ArtifactVerificationInfo> verification_info_status =
+    absl::StatusOr<tensorcast::store::ArtifactVerificationInfo> verification_info_status =
         replica->generate_verification_info(register_location);
 
     if (verification_info_status.ok()) {
@@ -456,9 +456,9 @@ class P2PTestClient {
     // Client doesn't need to listen, just connect
     // Create a communication manager without initializing a server
     LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
-    auto client_comm_engine = std::make_shared<stepcast::communicator::CommunicateEngine>(false);
+    auto client_comm_engine = std::make_shared<tensorcast::communicator::CommunicateEngine>(false);
     // Bind to a dedicated, available client port to facilitate P2P connections
-    int client_port = stepcast::communicator::test::find_available_port(server_port + 1);
+    int client_port = tensorcast::communicator::test::find_available_port(server_port + 1);
     if (client_port <= 0 || client_port == server_port) {
       client_port = server_port + 1; // fallback
     }
@@ -520,8 +520,8 @@ class P2PTestClient {
     ReplicaConfig config{
         .source = p2p_source,
         .artifact_identifier = artifact_id + "_client",
-        .device_type =
-            (client_target_location == MemoryLocation::GPU) ? ::stepcast::DeviceType::GPU : ::stepcast::DeviceType::CPU,
+        .device_type = (client_target_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU
+                                                                       : ::tensorcast::DeviceType::CPU,
         .local_device_id = (client_target_location == MemoryLocation::GPU) ? static_cast<int>(gpu_id) : -1,
         .pinned_memory_pool = resources.pinned_pool,
         .dvmp = resources.dvmp,
@@ -565,12 +565,12 @@ class P2PTestClient {
     auto cleanup_borrowed_memory = [&]() {
       if (borrowed_gpu_ptr) {
         LOG(INFO) << "Freeing borrowed GPU memory: " << borrowed_gpu_ptr;
-        absl::Status set_device_status = stepcast::cuda::set_device(gpu_id);
+        absl::Status set_device_status = tensorcast::cuda::set_device(gpu_id);
         if (!set_device_status.ok()) {
           LOG(ERROR) << "Failed to set CUDA device " << gpu_id
                      << " before freeing memory: " << set_device_status.message();
         }
-        absl::Status free_status = stepcast::cuda::free(borrowed_gpu_ptr);
+        absl::Status free_status = tensorcast::cuda::free(borrowed_gpu_ptr);
         if (!free_status.ok()) {
           LOG(ERROR) << "Failed to free borrowed GPU memory: " << free_status.message();
         }
@@ -682,13 +682,13 @@ class P2PTestClient {
             return 1;
           }
 
-          absl::Status cuda_status = stepcast::cuda::set_device(gpu_id);
+          absl::Status cuda_status = tensorcast::cuda::set_device(gpu_id);
           if (!cuda_status.ok()) {
             LOG(ERROR) << "Failed to set CUDA device " << gpu_id
                        << " before verification copy: " << cuda_status.message();
           } else {
-            cuda_status =
-                stepcast::cuda::memcpy(host_verification_buffer.data(), gpu_ptr, artifact_size, cudaMemcpyDeviceToHost);
+            cuda_status = tensorcast::cuda::memcpy(
+                host_verification_buffer.data(), gpu_ptr, artifact_size, cudaMemcpyDeviceToHost);
             if (!cuda_status.ok()) {
               LOG(ERROR) << "cudaMemcpy D->H failed for verification: " << cuda_status.message();
             } else {
@@ -796,7 +796,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
   // Detect CUDA capability
   int device_count = 0;
-  absl::Status cuda_status = stepcast::cuda::get_device_count(&device_count);
+  absl::Status cuda_status = tensorcast::cuda::get_device_count(&device_count);
   bool has_cuda = (cuda_status.ok() && device_count > 0);
 
   SECTION("GPU to GPU transfer") {
@@ -807,7 +807,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = stepcast::communicator::test::find_available_port(50060);
+      int port = tensorcast::communicator::test::find_available_port(50060);
       REQUIRE(port > 0);
       config.server_port = port;
     }
@@ -836,7 +836,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = stepcast::communicator::test::find_available_port(50070);
+      int port = tensorcast::communicator::test::find_available_port(50070);
       REQUIRE(port > 0);
       config.server_port = port;
     }
@@ -865,7 +865,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = stepcast::communicator::test::find_available_port(50100);
+      int port = tensorcast::communicator::test::find_available_port(50100);
       REQUIRE(port > 0);
       config.server_port = port;
     }

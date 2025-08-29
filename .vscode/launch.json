@@ -76,7 +76,7 @@
             ],
             "cwd": "${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"
@@ -94,7 +94,7 @@
             "args": ["DiskModel page-aligned load to CPU via mmap"],
             "cwd": "${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"
@@ -118,7 +118,7 @@
             ],
             "cwd": "/${workspaceFolder}",
             "env": {
-                "STEPCAST_COMM_ENABLE_RDMA": "false"
+                "TENSORCAST_COMM_ENABLE_RDMA": "false"
             },
             "sourceLanguages": [
                 "cpp"

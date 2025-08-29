@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loading/chunk_aware_loading_strategy.h"
 
@@ -20,7 +20,7 @@
 #include "core/store/replica/memory_manager.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_plan(
     const ReplicaKey& key,
@@ -466,4 +466,4 @@ std::vector<uint32_t> ChunkAwareLoadingStrategy::optimize_chunk_order(const std:
   return sorted;
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

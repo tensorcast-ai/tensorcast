@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // StoreEngine edge case tests (E-series)
 // Test error conditions, invalid inputs, and boundary cases.
@@ -14,9 +14,9 @@
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
-using namespace stepcast::tests::store_engine;
-using namespace stepcast::store;
-using stepcast::store::StoreEngine;
+using namespace tensorcast::tests::store_engine;
+using namespace tensorcast::store;
+using tensorcast::store::StoreEngine;
 
 // E1: Invalid device ordinal
 TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
@@ -30,10 +30,10 @@ TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
 
   // Test negative ordinal
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto neg_handle = store->materialize_replica(
-        DeviceKey{.type = stepcast::DeviceType::GPU, .ordinal = -1, .uuid = ""},
+        DeviceKey{.type = tensorcast::DeviceType::GPU, .ordinal = -1, .uuid = ""},
         StoreEngine::MaterializeMode::AUTO,
         hints);
     REQUIRE(!neg_handle.ok());
@@ -42,20 +42,20 @@ TEST_CASE("E1: Invalid device ordinal", "[store_engine][edge][e1]") {
 
   // Test very large ordinal
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto large_handle = store->materialize_replica(
-        DeviceKey{stepcast::DeviceType::GPU, 999, ""}, StoreEngine::MaterializeMode::AUTO, hints);
+        DeviceKey{tensorcast::DeviceType::GPU, 999, ""}, StoreEngine::MaterializeMode::AUTO, hints);
     REQUIRE(!large_handle.ok());
     REQUIRE(large_handle.status().code() == absl::StatusCode::kInvalidArgument);
   }
 
   // Test CPU device (not supported)
   {
-    stepcast::store::MaterializeHints hints{};
+    tensorcast::store::MaterializeHints hints{};
 
     auto cpu_handle = store->materialize_replica(
-        DeviceKey{stepcast::DeviceType::CPU, 0, ""}, StoreEngine::MaterializeMode::AUTO, hints);
+        DeviceKey{tensorcast::DeviceType::CPU, 0, ""}, StoreEngine::MaterializeMode::AUTO, hints);
     REQUIRE(!cpu_handle.ok());
   }
 }
@@ -67,7 +67,7 @@ TEST_CASE("E2: Non-existent replica", "[store_engine][edge][e2]") {
 
   // Try to load non-existent replica
   {
-    stepcast::store::MaterializeHints hints{.disk_path = "non_existent_artifact"};
+    tensorcast::store::MaterializeHints hints{.disk_path = "non_existent_artifact"};
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(!handle.ok());
   }
@@ -78,8 +78,8 @@ TEST_CASE("E2: Non-existent replica", "[store_engine][edge][e2]") {
   REQUIRE(store->wait_replica_ready(fake_key) != 0);
   REQUIRE(store->unload_replica(fake_key) != 0);
 
-  auto state = store->get_replica_state(fake_key, stepcast::DeviceType::GPU);
-  REQUIRE(state == stepcast::store::MemoryState::UNINITIALIZED);
+  auto state = store->get_replica_state(fake_key, tensorcast::DeviceType::GPU);
+  REQUIRE(state == tensorcast::store::MemoryState::UNINITIALIZED);
 
   auto ptr_result = store->get_replica_gpu_ptr(fake_key);
   REQUIRE(!ptr_result.ok());
@@ -108,7 +108,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   size_t idx = 0;
   absl::Status first_status = absl::InternalError("uninitialized");
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_ids[idx]};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_ids[idx]};
     auto h_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (h_or.ok()) {
       first_status = h_or.value().wait_ready(std::chrono::milliseconds(10000));
@@ -123,7 +123,7 @@ TEST_CASE("E3: Memory pool exhaustion", "[store_engine][edge][e3]") {
   // Load remaining artifacts
   int additional_successes = 0;
   for (idx = 1; idx < artifact_ids.size(); ++idx) {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_ids[idx]};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_ids[idx]};
     auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
       auto handle = std::move(handle_or).value();
@@ -161,7 +161,7 @@ TEST_CASE("E4: Concurrent clear_mem() during materialize_replica()", "[store_eng
 
   // Thread 1: Start materialize_replica operation
   std::thread materialize_thread([&]() {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     materialize_started.store(true);
@@ -207,12 +207,12 @@ TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]")
   fixture.create_artifact(artifact_id, artifact_size);
 
   // Enable communication so remote registration can succeed
-  int comm_port = stepcast::communicator::test::find_available_port(51000);
+  int comm_port = tensorcast::communicator::test::find_available_port(51000);
   REQUIRE(comm_port > 0);
-  auto comm_manager = std::make_shared<stepcast::store::CommunicationManager>();
+  auto comm_manager = std::make_shared<tensorcast::store::CommunicationManager>();
   REQUIRE(comm_manager->initialize("127.0.0.1", static_cast<uint16_t>(comm_port), /*enable_rdma=*/false).ok());
 
-  stepcast::store::StoreEngineOptions opts;
+  tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = fixture.root().string();
   // Keep test-friendly pool sizes similar to make_test_store
   opts.memory_pool_size = 512ULL * 1024 * 1024;
@@ -225,7 +225,7 @@ TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]")
 
   // Load replica
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());
@@ -293,7 +293,7 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
 
   // Prime SPB allocation and record baseline availability after initialization
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (handle_or.ok()) {
@@ -311,7 +311,7 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
 
   for (int i = 0; i < num_cycles; ++i) {
     // materialize
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (!handle_or.ok()) {
@@ -355,7 +355,7 @@ TEST_CASE("E8: Empty replica directory", "[store_engine][edge][e8]") {
 
   // Try to load empty replica
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(!handle.ok());
@@ -382,7 +382,7 @@ TEST_CASE("E9: Corrupted replica file", "[store_engine][edge][e9]") {
 
   // Try to load corrupted replica
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     // Implementation may not perform data verification yet; accept either outcome
@@ -407,7 +407,7 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // COPY_ONLY without existing source
   {
-    stepcast::store::MaterializeHints hints{};
+    tensorcast::store::MaterializeHints hints{};
 
     auto copy_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(!copy_handle.ok()); // Should fail - no source to copy from
@@ -415,7 +415,7 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // LOAD_ONLY should work
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto load_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(load_handle.ok());
@@ -424,10 +424,10 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // Now COPY_ONLY should work
   {
-    stepcast::store::MaterializeHints hints{};
+    tensorcast::store::MaterializeHints hints{};
 
     auto copy_handle2 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
-    if (stepcast::tests::is_cuda_available() && copy_handle2.ok()) {
+    if (tensorcast::tests::is_cuda_available() && copy_handle2.ok()) {
       // Should succeed if we have multiple GPUs
       REQUIRE(copy_handle2.value().wait_ready(std::chrono::milliseconds(30000)).ok());
     }
@@ -435,7 +435,7 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
 
   // LOAD_ONLY on already loaded device
   {
-    stepcast::store::MaterializeHints hints{.disk_path = artifact_id};
+    tensorcast::store::MaterializeHints hints{.disk_path = artifact_id};
 
     auto reload_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     if (!reload_handle.ok()) {

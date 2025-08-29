@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 class ReplicaRegistrationHelper {
  public:
@@ -22,4 +22,4 @@ class ReplicaRegistrationHelper {
       uint64_t size_bytes);
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

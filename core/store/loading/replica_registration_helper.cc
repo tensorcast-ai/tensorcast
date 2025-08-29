@@ -1,10 +1,10 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loading/replica_registration_helper.h"
 
 #include "absl/log/log.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 absl::Status ReplicaRegistrationHelper::register_local_replica(
     GlobalStoreClient* gs_client,
@@ -36,4 +36,4 @@ absl::Status ReplicaRegistrationHelper::register_local_replica(
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-namespace stepcast {
+namespace tensorcast {
 namespace communicator {
 class CommunicateEngine;
 } // namespace communicator
@@ -53,7 +53,7 @@ struct StoreEngineOptions {
   // StoreEngine instances can share the same underlying CommunicateEngine
   // and listen socket.  When provided, the StoreEngine will reuse this
   // manager instead of creating its own internal instance.
-  std::shared_ptr<stepcast::store::CommunicationManager> comm_manager{nullptr};
+  std::shared_ptr<tensorcast::store::CommunicationManager> comm_manager{nullptr};
 
   // Maximum number of concurrent replica transfers that can use the shared
   // streaming pinned buffer pool. Each transfer receives an isolated buffer
@@ -73,4 +73,4 @@ struct StoreEngineOptions {
 };
 
 } // namespace store
-} // namespace stepcast
+} // namespace tensorcast

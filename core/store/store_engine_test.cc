@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // Rewritten tests for StoreEngine using the new multi-device `materialize_replica()` API.
 
@@ -15,11 +15,11 @@
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
-using stepcast::DeviceType;
-using stepcast::store::DeviceKey;
-using stepcast::store::ReplicaKey;
-using stepcast::store::StoreEngine;
-using stepcast::store::StoreEngineOptions;
+using tensorcast::DeviceType;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::ReplicaKey;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::StoreEngineOptions;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper utilities
@@ -40,7 +40,7 @@ static StoreEngine make_store(
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   return StoreEngine(opts);
 }
-static absl::Status wait_ready(stepcast::store::ReplicaHandle& handle, absl::Duration timeout = absl::Seconds(60)) {
+static absl::Status wait_ready(tensorcast::store::ReplicaHandle& handle, absl::Duration timeout = absl::Seconds(60)) {
   return handle.wait_ready(std::chrono::milliseconds(absl::ToInt64Milliseconds(timeout)));
 }
 
@@ -56,19 +56,19 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
   fs::create_directories(temp_root);
   fs::path artifact_dir = temp_root / artifact_id;
   fs::create_directories(artifact_dir);
-  REQUIRE(stepcast::tests::create_dummy_file(artifact_dir / "tensor.data_0", artifact_size));
+  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir / "tensor.data_0", artifact_size));
 
   // RFC-0007: standard partitions require descriptor and canonical index
-  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
   StoreEngine store = make_store(temp_root);
 
   // Load to GPU (Now only GPU is supported)
-  REQUIRE(stepcast::tests::is_cuda_available());
-  stepcast::store::MaterializeHints hints;
+  REQUIRE(tensorcast::tests::is_cuda_available());
+  tensorcast::store::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto gpu_handle_or =
-      store.materialize_replica(make_gpu_key(0), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(gpu_handle_or.ok());
   auto gpu_handle = std::move(gpu_handle_or).value();
   REQUIRE(wait_ready(gpu_handle).ok());
@@ -89,7 +89,7 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
 // Test case 2: Query helpers after materialize_replica()
 // ─────────────────────────────────────────────────────────────────────────────
 TEST_CASE("StoreEngine helper queries after materialize_replica()", "[store_engine][materialize_replica][status]") {
-  if (!stepcast::tests::is_cuda_available()) {
+  if (!tensorcast::tests::is_cuda_available()) {
     WARN("CUDA not available – skipping status tests with materialize_replica().");
     return;
   }
@@ -101,19 +101,19 @@ TEST_CASE("StoreEngine helper queries after materialize_replica()", "[store_engi
   fs::create_directories(temp_root);
   fs::path artifact_dir2 = temp_root / artifact_id;
   fs::create_directories(artifact_dir2);
-  REQUIRE(stepcast::tests::create_dummy_file(artifact_dir2 / "tensor.data_0", artifact_size));
+  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir2 / "tensor.data_0", artifact_size));
 
   // RFC-0007: standard partitions require descriptor and canonical index
-  REQUIRE(stepcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
+  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
 
   StoreEngine store = make_store(temp_root);
 
   // Load to GPU.
   {
-    stepcast::store::MaterializeHints hints2;
+    tensorcast::store::MaterializeHints hints2;
     hints2.disk_path = artifact_id;
     auto gpu_handle_or =
-        store.materialize_replica(make_gpu_key(0), stepcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
+        store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
     REQUIRE(gpu_handle_or.ok());
     auto gpu_handle = std::move(gpu_handle_or).value();
     REQUIRE(wait_ready(gpu_handle).ok());

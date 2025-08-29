@@ -1,11 +1,11 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ENV_PARAM(TIMER, 1);
 
@@ -29,4 +29,4 @@ uint64_t Timer::record() {
   return cost;
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

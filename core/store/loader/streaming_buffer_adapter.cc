@@ -1,10 +1,10 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/streaming_buffer_adapter.h"
 
 #include "absl/log/log.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 StreamingBufferAdapter::StreamingBufferAdapter(std::shared_ptr<StreamingPinnedBuffer> buffer)
     : buffer_(std::move(buffer)) {
@@ -83,4 +83,4 @@ void* StreamingBufferAdapter::get_chunk_data_ptr(int slot_id) {
   return buffer_->get_chunk_ptr(slot_id);
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

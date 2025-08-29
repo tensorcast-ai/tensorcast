@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, StepCast Team.
+#  Copyright (c) 2025, TensorCast Team.
 
 """Custom Prometheus collector that bridges C++ StoreEngine metrics to the Python
 Prometheus registry.

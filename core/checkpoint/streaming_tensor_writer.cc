@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/checkpoint/streaming_tensor_writer.h"
 
@@ -9,7 +9,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 StreamingTensorWriter::StreamingTensorWriter(
     const std::string& filename,
@@ -226,4 +226,4 @@ absl::Status StreamingTensorWriter::finalize() {
   return absl::OkStatus();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

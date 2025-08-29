@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // Minimal engine->gRPC status mapping helper per RFC-0010 Appendix A.
 #pragma once
@@ -6,7 +6,7 @@
 #include "absl/status/status.h"
 #include "grpcpp/grpcpp.h"
 
-namespace stepcast::daemon::status_utils {
+namespace tensorcast::daemon::status_utils {
 
 inline grpc::Status to_grpc_status(const absl::Status& s) {
   using grpc::StatusCode;
@@ -32,4 +32,4 @@ inline grpc::Status to_grpc_status(const absl::Status& s) {
   }
 }
 
-} // namespace stepcast::daemon::status_utils
+} // namespace tensorcast::daemon::status_utils

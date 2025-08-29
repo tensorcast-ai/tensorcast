@@ -1,11 +1,11 @@
 ---
 alwaysApply: true
 ---
-# StepCast Store - Common Guidelines
+# TensorCast - Common Guidelines
 
 ## Project Overview
 
-StepCast Store is a high-performance, distributed model storage and loading system for ML inference and training.
+TensorCast is a high-performance, distributed model storage and loading system for ML inference and training.
 
 **Key Features:**
 - Distributed master-worker architecture

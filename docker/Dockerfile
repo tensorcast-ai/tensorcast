@@ -1,4 +1,4 @@
-FROM hub.i.basemind.com/stepcast/python:uv-bookworm-slim as builder
+FROM hub.i.basemind.com/tensorcast/python:uv-bookworm-slim as builder
 
 ARG HTTPS_PROXY
 ARG HTTP_PROXY
@@ -46,7 +46,7 @@ ADD .git /app/.git
 # RUN --mount=type=cache,target=/root/.cache/uv \
 #     uv pip install --no-deps -e .
 
-FROM hub.i.basemind.com/stepcast/debian:bookworm-slim as ui_builder
+FROM hub.i.basemind.com/tensorcast/debian:bookworm-slim as ui_builder
 
 RUN apt-get update && apt-get install -y nodejs npm curl build-essential zip unzip openjdk-17-jdk-headless
 
@@ -62,7 +62,7 @@ RUN npm install -g pnpm && \
     pnpm build
 
 
-FROM hub.i.basemind.com/stepcast/python:uv-bookworm-slim
+FROM hub.i.basemind.com/tensorcast/python:uv-bookworm-slim
 
 RUN apt update && apt install -y git curl zip unzip openjdk-17-jdk-headless openssh-server vim net-tools iputils-ping iproute2
 

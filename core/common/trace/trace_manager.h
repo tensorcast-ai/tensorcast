@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // All rights reserved.
 //
@@ -21,7 +21,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 // A single timing span for a particular stage.
 struct Span {
@@ -229,4 +229,4 @@ class TraceSummaryGuard {
   std::string request_id_;
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

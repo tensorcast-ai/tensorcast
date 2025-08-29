@@ -1,6 +1,6 @@
 ---
 title: Checkpoint Module Overview
-description: Efficient tensor serialization and deserialization capabilities for StepCast Store
+description: Efficient tensor serialization and deserialization capabilities for TensorCast
 sidebar_position: 1
 ---
 
@@ -8,7 +8,7 @@ sidebar_position: 1
 
 ## Overview
 
-The Checkpoint module provides efficient tensor serialization and deserialization capabilities for the StepCast Store. It's designed to handle large-scale replica checkpoints with optimized I/O performance and memory management.
+The Checkpoint module provides efficient tensor serialization and deserialization capabilities for the TensorCast. It's designed to handle large-scale replica checkpoints with optimized I/O performance and memory management.
 
 ## Key Features
 
@@ -52,13 +52,13 @@ std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> tensor_data;
 // ... populate tensor_data with (data_ptr, size) pairs
 
 // Save to disk
-auto offsets = stepcast::store::save_tensors(tensor_names, tensor_data, "/path/to/replica");
+auto offsets = tensorcast::store::save_tensors(tensor_names, tensor_data, "/path/to/replica");
 ```
 
 ### Loading Tensors
 ```cpp
 // Load from disk
-auto tensors = stepcast::store::restore_tensors_from_disk(
+auto tensors = tensorcast::store::restore_tensors_from_disk(
     meta_state_dict, "/path/to/replica", tensor_offsets);
 ```
 
@@ -71,12 +71,12 @@ const void* gpu_tensor_ptr = ...;
 size_t num_bytes = ...;
 
 // Configure writer (4 buffers × 256 MB each)
-stepcast::store::StreamingTensorWriter::Config cfg;
+tensorcast::store::StreamingTensorWriter::Config cfg;
 cfg.num_buffers = 4;
 cfg.buffer_size_mb = 256;
 
 // Instantiate and use the writer
-stepcast::store::StreamingTensorWriter writer("/path/to/replica/tensor.data_0", cfg, nullptr);
+tensorcast::store::StreamingTensorWriter writer("/path/to/replica/tensor.data_0", cfg, nullptr);
 SC_CHECK_OK(writer.initialize());
 SC_CHECK_OK(writer.write_tensor(gpu_tensor_ptr, num_bytes, /*is_gpu=*/true));
 SC_CHECK_OK(writer.finalize());
@@ -85,7 +85,7 @@ SC_CHECK_OK(writer.finalize());
 Python users can call the same functionality via the binding:
 
 ```python
-import stepcast.store as scs
+import tensorcast.store as scs
 
 # tensor_names, tensor_data prepared as before
 cfg = {

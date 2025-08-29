@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <string>
 #include <utility>
@@ -8,7 +8,7 @@
 
 #include "core/communicator/transport/request.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 ReadRequest::ReadRequest(
     std::string tensor_key,
@@ -95,4 +95,4 @@ std::string WriteRequest::get_key() {
   return get_request_key(tensor_key_, offset_);
 }
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator

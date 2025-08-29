@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "daemon/metrics_exporter.h"
 
@@ -10,7 +10,7 @@
 #include <cstring>
 #include <sstream>
 
-namespace stepcast::daemon {
+namespace tensorcast::daemon {
 
 void MetricsExporter::start() {
   stop_.store(false);
@@ -77,4 +77,4 @@ void MetricsExporter::run() {
   ::close(server_fd);
 }
 
-} // namespace stepcast::daemon
+} // namespace tensorcast::daemon

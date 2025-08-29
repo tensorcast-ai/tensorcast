@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #ifndef COMMUNICATOR_TRANSPORT_TRANSPORT_MESSAGE_H_
 #define COMMUNICATOR_TRANSPORT_TRANSPORT_MESSAGE_H_
@@ -8,7 +8,7 @@
 
 #include "core/communicator/misc/utils.h"
 
-namespace stepcast::communicator {
+namespace tensorcast::communicator {
 
 class TransportMessage {
  public:
@@ -37,6 +37,6 @@ class TransportMessage {
 };
 typedef std::shared_ptr<TransportMessage> transport_message_t;
 
-} // namespace stepcast::communicator
+} // namespace tensorcast::communicator
 
 #endif // COMMUNICATOR_TRANSPORT_TRANSPORT_MESSAGE_H_

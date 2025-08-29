@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 #include "absl/types/span.h"
 #include "core/store/direct_write.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 class Sink {
  public:
@@ -48,4 +48,4 @@ class DirectWritableSink {
   virtual absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

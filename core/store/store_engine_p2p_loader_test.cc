@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // New test for StoreEngine using P2PLoader over TCP.
 
@@ -25,9 +25,9 @@
 #include "core/testing/test_helpers.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::communicator;
-using namespace stepcast::communicator::test;
+using namespace tensorcast::store;
+using namespace tensorcast::communicator;
+using namespace tensorcast::communicator::test;
 
 TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu]") {
   // ---------------------------------------------------------------------------
@@ -50,9 +50,9 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // Allocate GPU memory and fill with a deterministic pattern.
   void* src_gpu_ptr = nullptr;
-  REQUIRE(stepcast::cuda::malloc(&src_gpu_ptr, artifact_size).ok());
+  REQUIRE(tensorcast::cuda::malloc(&src_gpu_ptr, artifact_size).ok());
   std::vector<uint8_t> src_pattern = create_test_pattern(artifact_size, /*seed=*/42);
-  REQUIRE(stepcast::cuda::memcpy(src_gpu_ptr, src_pattern.data(), artifact_size, cudaMemcpyHostToDevice).ok());
+  REQUIRE(tensorcast::cuda::memcpy(src_gpu_ptr, src_pattern.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
   // Register the GPU buffer so that it can be fetched remotely.
   const char* kRemoteKey = "remote_model_weights";
@@ -84,13 +84,13 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   // ---------------------------------------------------------------------------
   int comm_port = find_available_port(9090);
   REQUIRE(comm_port > 0);
-  auto comm_manager = std::make_shared<stepcast::store::CommunicationManager>();
+  auto comm_manager = std::make_shared<tensorcast::store::CommunicationManager>();
   REQUIRE(comm_manager->initialize("127.0.0.1", /*listen_port=*/comm_port, /*enable_rdma=*/false).ok());
 
   // ---------------------------------------------------------------------------
   // 2.b Construct StoreEngine using the new Options struct.
   // ---------------------------------------------------------------------------
-  stepcast::store::StoreEngineOptions opts;
+  tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = pool_size;
   opts.num_thread = io_threads;
@@ -144,14 +144,14 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   void* tgt_gpu_ptr = reinterpret_cast<void*>(gpu_ptr_result.value());
   std::vector<uint8_t> verify_buf(artifact_size);
-  REQUIRE(stepcast::cuda::memcpy(verify_buf.data(), tgt_gpu_ptr, artifact_size, cudaMemcpyDeviceToHost).ok());
+  REQUIRE(tensorcast::cuda::memcpy(verify_buf.data(), tgt_gpu_ptr, artifact_size, cudaMemcpyDeviceToHost).ok());
   REQUIRE(verify_pattern(verify_buf.data(), artifact_size, /*seed=*/42));
 
   // ---------------------------------------------------------------------------
   // 6. Clean-up GPU memory and stores.
   // ---------------------------------------------------------------------------
   REQUIRE(tgt_store.clear_mem() == 0);
-  absl::Status free_status = stepcast::cuda::free(src_gpu_ptr);
+  absl::Status free_status = tensorcast::cuda::free(src_gpu_ptr);
   (void)free_status; // Ignore status in cleanup
 
   // Remove temp directory (best effort).

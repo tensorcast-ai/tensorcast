@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "absl/status/statusor.h"
 #include "core/store/loader/source.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Tries primary read first; on short read or error, falls back to secondary.
 class MuxSeekableSource : public SeekableSource {
@@ -25,4 +25,4 @@ class MuxSeekableSource : public SeekableSource {
   uint64_t current_offset_ = 0;
 };
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -11,10 +11,10 @@
 // Example:
 //   #include "core/common/metrics/metric_objects.h"
 //
-//   stepcast::metrics::Counter requests_total("my_requests_total");
+//   tensorcast::metrics::Counter requests_total("my_requests_total");
 //   requests_total.Inc();
 //
-//   stepcast::metrics::Gauge pending("my_queue_pending");
+//   tensorcast::metrics::Gauge pending("my_queue_pending");
 //   pending.Set(42);
 //   pending.Dec();
 //
@@ -27,7 +27,7 @@
 
 #include "core/common/metrics/metrics_registry.h"
 
-namespace stepcast::metrics {
+namespace tensorcast::metrics {
 
 class Counter {
  public:
@@ -153,4 +153,4 @@ class Histogram {
   Labels labels_;
 };
 
-} // namespace stepcast::metrics
+} // namespace tensorcast::metrics

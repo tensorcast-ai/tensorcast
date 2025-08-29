@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/replica_memory_coordinator.h"
 
@@ -11,10 +11,10 @@
 #include "core/store/device_registry.h"
 #include "core/store/replica/chunk_meta.h" // For chunk_state_to_string
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 ReplicaMemoryCoordinator::ReplicaMemoryCoordinator(
-    gsl::not_null<std::shared_ptr<stepcast::memory::DistributedVirtualMemoryPool>> dvmp)
+    gsl::not_null<std::shared_ptr<tensorcast::memory::DistributedVirtualMemoryPool>> dvmp)
     : dvmp_(std::move(dvmp)) {}
 
 absl::Status ReplicaMemoryCoordinator::allocate(const ReplicaKey& key, size_t bytes) {
@@ -41,8 +41,8 @@ absl::Status ReplicaMemoryCoordinator::allocate(const ReplicaKey& key, size_t by
     return region_or.status();
   }
   alloc.total_bytes = bytes;
-  alloc.num_chunks = (bytes + stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
-      stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+  alloc.num_chunks = (bytes + tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
+      tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
 
@@ -223,7 +223,7 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
     mapping.last_access_ns = now;
 
     // Record Prometheus counter for this transition (one per chunk event).
-    static const stepcast::metrics::Counter kTransitionsCounter("store_daemon_chunk_state_transitions_total");
+    static const tensorcast::metrics::Counter kTransitionsCounter("store_daemon_chunk_state_transitions_total");
     kTransitionsCounter
         .with_labels(
             {{"location", (location == MemoryLocation::GPU ? "GPU" : "CPU")},
@@ -389,7 +389,7 @@ absl::Status ReplicaMemoryCoordinator::release(const ReplicaKey& key) {
 }
 
 size_t ReplicaMemoryCoordinator::get_chunk_size() const {
-  return stepcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+  return tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
 }
 
 absl::Status ReplicaMemoryCoordinator::mark_cpu_chunks_preemptible(const ReplicaKey& key, float ratio) {
@@ -591,4 +591,4 @@ absl::Status ReplicaMemoryCoordinator::post_gpu_load_policy(
   }
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

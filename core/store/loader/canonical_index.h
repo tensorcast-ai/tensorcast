@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 
 #include "absl/status/statusor.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 // Canonical tensor metadata used to construct the RFC-0007 index
 struct CanonicalTensorMeta {
@@ -43,4 +43,4 @@ absl::StatusOr<std::string> build_canonical_index_json(
     const std::unordered_map<std::string, uint64_t>& sizes,
     const std::unordered_map<std::string, CanonicalTensorMeta>& metas);
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

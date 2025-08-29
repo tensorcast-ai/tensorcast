@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <pybind11/eval.h>
 #include <pybind11/stl.h>
@@ -25,8 +25,8 @@
 namespace py = pybind11;
 
 // NOLINTBEGIN(google-build-using-namespace,fuchsia-statically-constructed-objects,misc-const-correctness,misc-use-anonymous-namespace,)
-using namespace stepcast::store;
-using stepcast::DeviceType; // Bring the top-level DeviceType enum into scope
+using namespace tensorcast::store;
+using tensorcast::DeviceType; // Bring the top-level DeviceType enum into scope
 
 // Helper function to convert time_point to Python timestamp
 static double time_point_to_timestamp(const std::chrono::time_point<std::chrono::system_clock>& tp) {
@@ -539,7 +539,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "get_global_metrics_text",
       []() {
-        const std::string text = stepcast::metrics::get_global_metrics_text();
+        const std::string text = tensorcast::metrics::get_global_metrics_text();
         return py::bytes(text);
       },
       "Get the global metrics snapshot in OpenMetrics text format");
@@ -573,7 +573,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         // Optional: external CommunicationManager for dependency injection
         if (cfg.contains("comm_manager") && !cfg["comm_manager"].is_none()) {
           try {
-            auto mgr = cfg["comm_manager"].cast<std::shared_ptr<stepcast::store::CommunicationManager>>();
+            auto mgr = cfg["comm_manager"].cast<std::shared_ptr<tensorcast::store::CommunicationManager>>();
             if (mgr && mgr->is_enabled()) {
               opts.comm_manager = mgr;
             }
@@ -604,11 +604,11 @@ Missing keys fall back to sensible defaults.)pbdoc");
   // single communication instance to multiple StoreEngine objects.
   // ------------------------------------------------------------------
 
-  py::class_<stepcast::store::CommunicationManager, std::shared_ptr<stepcast::store::CommunicationManager>>(
+  py::class_<tensorcast::store::CommunicationManager, std::shared_ptr<tensorcast::store::CommunicationManager>>(
       m, "CommunicationManager")
       .def(
           py::init([](const std::string& listen_addr, uint16_t port, bool enable_rdma) {
-            auto mgr = std::make_shared<stepcast::store::CommunicationManager>();
+            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -628,7 +628,7 @@ StoreEngineOptions so multiple StoreEngine objects share the same
 transport layer.)pbdoc")
       .def(
           "is_enabled",
-          &stepcast::store::CommunicationManager::is_enabled,
+          &tensorcast::store::CommunicationManager::is_enabled,
           "Return True if the communication engine is initialized and enabled.");
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include <ostream>
 #include <string>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Represents the detailed state of memory allocation and loading for a specific location (CPU or GPU).
@@ -69,4 +69,4 @@ inline std::string state_to_string(const MemoryState& state) {
   }
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

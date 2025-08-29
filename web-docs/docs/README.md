@@ -1,12 +1,12 @@
 ---
-title: StepCast Store Documentation
-description: Comprehensive documentation for StepCast Store - a high-performance, distributed artifact storage and loading system
+title: TensorCast Documentation
+description: Comprehensive documentation for TensorCast - a high-performance, distributed artifact storage and loading system
 sidebar_position: 1
 ---
 
-# StepCast Store Documentation
+# TensorCast Documentation
 
-Welcome to the StepCast Store documentation! This comprehensive guide covers everything from getting started to advanced development topics.
+Welcome to the TensorCast documentation! This comprehensive guide covers everything from getting started to advanced development topics.
 
 ## 📚 Documentation Structure
 
@@ -19,7 +19,7 @@ docs/
 
 ## 🏗️ System Architecture Overview
 
-StepCast Store follows a distributed master-worker architecture:
+TensorCast follows a distributed master-worker architecture:
 
 ```mermaid
 graph TB

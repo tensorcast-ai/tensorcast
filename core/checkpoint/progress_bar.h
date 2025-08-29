@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -18,7 +18,7 @@
 //  ----------------------------------------------------------------------------
 #include <iostream>
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 inline void show_progress_bar(float progress, const std::string& message = "") {
   const int barWidth = 70;
@@ -44,4 +44,4 @@ inline void show_progress_bar(float progress, const std::string& message = "") {
   std::cout.flush();
 }
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

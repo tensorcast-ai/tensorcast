@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -61,7 +61,7 @@ class Tensor {
 #include "absl/status/statusor.h"
 #include "core/common/artifact_verification.h"
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Save tensor data to disk in partitioned format.
@@ -100,7 +100,7 @@ uint64_t calculate_actual_artifact_size(const std::string& disk_path);
  */
 ArtifactVerificationInfo generate_verification_info_from_disk(
     const std::string& disk_path,
-    stepcast::store::VerificationLevel max_level = stepcast::store::VerificationLevel::FULL_HASH);
+    tensorcast::store::VerificationLevel max_level = tensorcast::store::VerificationLevel::FULL_HASH);
 
 /**
  * @brief Restore tensors from GPU memory into PyTorch tensors.
@@ -136,4 +136,4 @@ std::unordered_map<int, std::string> get_device_uuid_map();
 
 // Get a map of GPU IDs to their corresponding UUIDs.
 std::unordered_map<std::string, int> get_gpu_uuid();
-} // namespace stepcast::store
+} // namespace tensorcast::store

@@ -1,6 +1,6 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
-// Copyright (c) 2025, StepCast Team.
+// Copyright (c) 2025, TensorCast Team.
 // New test to verify DiskLoader zero-copy mmap path when partition sizes are page-aligned.
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,9 +14,9 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
-using namespace stepcast::memory;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
+using namespace tensorcast::memory;
 
 TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu][mmap]") {
   // System page size
@@ -74,7 +74,7 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   ReplicaConfig cfg{
       .source = disk_src,
       .artifact_identifier = artifact_id,
-      .device_type = ::stepcast::DeviceType::CPU,
+      .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_memory_pool = pool,
       .dvmp = dvmp,

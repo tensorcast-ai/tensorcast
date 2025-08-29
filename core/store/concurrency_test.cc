@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 // StoreEngine concurrency tests (A-series)
 // Test concurrent materialize_replica() and unload_replica() operations.
@@ -13,13 +13,13 @@
 #include "core/common/logging_init.h"
 #include "core/store/concurrency_utils.h"
 
-using namespace stepcast::tests::store_engine;
-using namespace stepcast::store;
+using namespace tensorcast::tests::store_engine;
+using namespace tensorcast::store;
 
 namespace {
 struct LoggingInitializer {
   LoggingInitializer() {
-    stepcast::store::ensure_logging_initialized();
+    tensorcast::store::ensure_logging_initialized();
   }
 };
 
@@ -53,7 +53,7 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
 
       auto load_start = std::chrono::high_resolution_clock::now();
       LOG(INFO) << "Thread " << thread_id << " preparing replica " << artifact_id;
-      stepcast::store::MaterializeHints hints;
+      tensorcast::store::MaterializeHints hints;
       hints.disk_path = artifact_id;
       auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
@@ -97,7 +97,7 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
   // Verify single allocation - replica should be loaded exactly once
   auto loaded_devices = store->get_resident_devices(artifact_id);
   REQUIRE(loaded_devices.size() == 1);
-  REQUIRE(loaded_devices[0].type == stepcast::DeviceType::GPU);
+  REQUIRE(loaded_devices[0].type == tensorcast::DeviceType::GPU);
   REQUIRE(loaded_devices[0].ordinal == 0);
 
   // Verify memory pool consistency
@@ -137,7 +137,7 @@ TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_en
       const auto& artifact_id = artifact_ids[thread_id % num_models];
 
       auto load_start = std::chrono::high_resolution_clock::now();
-      stepcast::store::MaterializeHints hints;
+      tensorcast::store::MaterializeHints hints;
       hints.disk_path = artifact_id;
       auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
@@ -203,7 +203,7 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
 
   // First, load the replica
   {
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto initial_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(initial_handle.ok());
@@ -224,7 +224,7 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
       barrier.arrive_and_wait();
 
       while (!stop_flag.load()) {
-        stepcast::store::MaterializeHints hints;
+        tensorcast::store::MaterializeHints hints;
         hints.disk_path = artifact_id;
         auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
         if (handle_or.ok()) {
@@ -282,7 +282,7 @@ TEST_CASE("A4: Concurrent unload_replica() same replica", "[store_engine][concur
   auto store = make_test_store(fixture.root());
 
   // Load the replica
-  stepcast::store::MaterializeHints hints;
+  tensorcast::store::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(handle.ok());
@@ -341,7 +341,7 @@ TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
     auto artifact_id = generate_artifact_id("artifact", i);
     fixture.create_artifact(artifact_id, 10 * 1024 * 1024); // 10MB each
 
-    stepcast::store::MaterializeHints hints;
+    tensorcast::store::MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());

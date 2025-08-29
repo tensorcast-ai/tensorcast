@@ -1,4 +1,4 @@
-# StepCast Store Release Guide
+# TensorCast Release Guide
 
 > **One-pager** — the essential information for a fast and painless release.
 

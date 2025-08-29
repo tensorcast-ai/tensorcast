@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/loader/safetensors_source.h"
 
@@ -15,7 +15,7 @@
 #include "absl/strings/str_format.h"
 #include "core/store/loader/safetensors_util.h"
 
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 
 namespace {
 // Helper to pread fully in a loop
@@ -71,7 +71,7 @@ absl::Status SafetensorsSource::ParseHeaderLocked() {
   if (!header_info.ok()) {
     return header_info.status();
   }
-  
+
   // Validate the JSON header content
   std::string header;
   header.resize(static_cast<size_t>(header_info->header_length));
@@ -118,4 +118,4 @@ absl::StatusOr<size_t> SafetensorsSource::read_at(uint64_t offset, void* dst, si
   return pread_fully(fd_, data_start_ + offset, dst, to_read);
 }
 
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader

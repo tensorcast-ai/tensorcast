@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -18,8 +18,8 @@
 #include "core/store/replica/memory_manager.h"
 
 namespace fs = std::filesystem;
-using namespace stepcast::store;
-using namespace stepcast::tests;
+using namespace tensorcast::store;
+using namespace tensorcast::tests;
 
 TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gpu]") {
   if (!is_cuda_available()) {
@@ -70,7 +70,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
-  auto dvmp = std::make_shared<stepcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
   auto memmgr = std::make_shared<MemoryManager>(
       "loader_stream_artifact",
       /*device=*/0,
@@ -99,7 +99,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   REQUIRE(gpu_ptr != nullptr);
 
   std::vector<char> host_buf(artifact_size);
-  absl::Status copy_status = stepcast::cuda::memcpy(host_buf.data(), gpu_ptr, artifact_size, cudaMemcpyDeviceToHost);
+  absl::Status copy_status = tensorcast::cuda::memcpy(host_buf.data(), gpu_ptr, artifact_size, cudaMemcpyDeviceToHost);
   REQUIRE(copy_status.ok());
   REQUIRE(host_buf == combined);
 

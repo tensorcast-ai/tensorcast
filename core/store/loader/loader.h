@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #pragma once
 
@@ -8,11 +8,11 @@
 #include "absl/status/statusor.h"
 
 // Forward declare SeekableSource in the loader namespace to avoid heavy includes here
-namespace stepcast::store::loader {
+namespace tensorcast::store::loader {
 class SeekableSource;
-} // namespace stepcast::store::loader
+} // namespace tensorcast::store::loader
 
-namespace stepcast::store {
+namespace tensorcast::store {
 
 /**
  * @brief Interface for loading replica data from a source (Disk, P2P)
@@ -51,4 +51,4 @@ class IArtifactLoader {
   IArtifactLoader() = default; // Constructor accessible only to derived classes
 };
 
-} // namespace stepcast::store
+} // namespace tensorcast::store

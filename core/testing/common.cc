@@ -1,4 +1,4 @@
-// Copyright (c) 2025, StepCast Team. All rights reserved.
+// Copyright (c) 2025, TensorCast Team.
 
 #include "common.h"
 #include <getopt.h>
@@ -81,7 +81,7 @@ int parse_options(int argc, char* argv[]) {
   return 0;
 }
 
-namespace stepcast::tests {
+namespace tensorcast::tests {
 
 bool create_dummy_file(const std::filesystem::path& path, size_t size, char start_char) {
   LOG(INFO) << "Creating dummy file at " << path << " with size " << size;
@@ -116,7 +116,7 @@ std::vector<char> read_file_content(const std::filesystem::path& path) {
 
 bool is_cuda_available() {
   int device_count = 0;
-  absl::Status status = stepcast::cuda::get_device_count(&device_count);
+  absl::Status status = tensorcast::cuda::get_device_count(&device_count);
   if (!status.ok()) {
     LOG(WARNING) << "CUDA device count query failed: " << status.message();
     return false;
@@ -177,11 +177,11 @@ absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::files
 
   // 2) Compute multihashes via core/common/artifact_hash
   auto index_mh_or =
-      stepcast::store::artifact_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
+      tensorcast::store::artifact_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
-  auto data_mh_or = stepcast::store::loader::compute_data_multihash_from_disk_dir(artifact_dir.string());
+  auto data_mh_or = tensorcast::store::loader::compute_data_multihash_from_disk_dir(artifact_dir.string());
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
@@ -211,4 +211,4 @@ absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::files
   return absl::OkStatus();
 }
 
-} // namespace stepcast::tests
+} // namespace tensorcast::tests
