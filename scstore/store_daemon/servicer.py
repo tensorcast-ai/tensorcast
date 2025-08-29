@@ -502,8 +502,8 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
             # that truly malformed requests return INVALID_ARGUMENT regardless
             # of target device type.
             # --------------------------------------------------------------
-            artifact_id = getattr(request, "artifact_id", "")
-            disk_path = getattr(request, "disk_path", "")
+            artifact_id = request.artifact_id
+            disk_path = request.disk_path
             if (not artifact_id) and (not disk_path):
                 logger.error(
                     "artifact_id (mi2:...) or disk_path must be provided for materialization"

@@ -1,4 +1,4 @@
-# StepCast Store
+# TensorCast
 
 ## Introduction
 

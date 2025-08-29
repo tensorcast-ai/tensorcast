@@ -17,6 +17,7 @@
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
 -Ibazel-bin/proto/global_store_grpc_cpp_pb
+-Ibazel-bin/proto/store_daemon_grpc_cpp_pb
 -Iexternal/protobuf+/src
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src
