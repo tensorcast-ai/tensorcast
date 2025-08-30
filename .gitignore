@@ -3,6 +3,7 @@ cmake-build-debug
 MODULE.bazel.lock
 bazel-*
 user.bazelrc
+tensorcast_daemon
 
 tensorcast/_version.py
 tensorcast/lib

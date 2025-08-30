@@ -28,9 +28,9 @@ from tensorcast.cli_utils.pid_manager import (
     read_pid_file,
     stop_process,
 )
+from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger, setup_logging
 from tensorcast.proto import store_daemon_pb2, store_daemon_pb2_grpc
-from tensorcast.store_daemon.config import StoreDaemonConfig
 
 logger = init_logger(__name__)
 

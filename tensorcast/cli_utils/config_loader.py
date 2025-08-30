@@ -8,7 +8,7 @@ from typing import Any
 import click
 from pydantic import ByteSize
 
-from tensorcast.store_daemon.config import (
+from tensorcast.daemon_config import (
     NetworkConfig,
     ServerConfig,
     StoreDaemonConfig,

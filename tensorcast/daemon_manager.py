@@ -12,8 +12,8 @@ import grpc
 
 import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
 import tensorcast.proto.store_daemon_pb2_grpc as store_daemon_pb2_grpc
+from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger
-from tensorcast.store_daemon.config import StoreDaemonConfig
 
 logger = init_logger(__name__)
 

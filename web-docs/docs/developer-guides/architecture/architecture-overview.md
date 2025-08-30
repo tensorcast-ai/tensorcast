@@ -125,7 +125,7 @@ python -m tensorcast.global_store --db /path/to/models.db
 
 ### Starting Store Daemon
 ```bash
-python -m tensorcast.store_daemon --config config.yaml
+tensorcast start --config config.yaml
 ```
 
 ## Next Steps

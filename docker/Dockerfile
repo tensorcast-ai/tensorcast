@@ -38,7 +38,7 @@ ADD tensorcast/global_store /app/tensorcast/global_store
 ADD tensorcast/*.py /app/tensorcast/
 ADD tensorcast/proto/*.py /app/tensorcast/proto/
 ADD tensorcast/cli_utils /app/tensorcast/cli_utils
-ADD tensorcast/store_daemon /app/tensorcast/store_daemon
+## Legacy Python StoreDaemon removed; config-only lives in tensorcast/daemon_config.py
 
 ADD .git /app/.git
 
