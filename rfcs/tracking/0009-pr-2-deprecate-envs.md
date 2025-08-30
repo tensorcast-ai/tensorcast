@@ -23,3 +23,8 @@
 ## Acceptance
 - [x] Engine compiles with no env reads; typed config required.
 - [x] No occurrence of legacy constructor in repository.
+ - [x] PR updated to include env removal: https://github.com/tensorcast-ai/tensorcast/pull/49
+
+Artifacts
+- Code: removed `core/communicator/misc/envs.*`; migrated RDMA/TCP knobs to `CommunicatorConfig` and engine wiring.
+- Docs: updated communicator README, migration guide, and root README with typed examples.

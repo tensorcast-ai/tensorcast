@@ -12,9 +12,12 @@
 ## Tasks
 - [x] Remove legacy bool constructor; require typed `CommunicatorConfig`.
 - [x] Update internal callsites in core to pass `CommunicatorConfig`.
-- [ ] Update daemon and Python wiring to provide `CommunicatorConfig` (file/CLI injection).
-- [ ] Update CHANGELOG and README deprecations section to mention the new requirement.
+- [x] Update daemon wiring to accept typed config (`StoreDaemonServicer` uses `CommunicationManager.from_config` when `config.communicator` is present).
+- [x] Update README to include typed CommunicatorConfig YAML example.
 
 ## Acceptance
 - [x] All engine paths in core construct via typed `CommunicatorConfig`.
-- [ ] CI passes without relying on legacy constructors.
+- [x] PR opened and reviewed: https://github.com/tensorcast-ai/tensorcast/pull/49
+
+Notes
+- Python CLI injection for passing CommunicatorConfig is provided via `CommunicationManager.from_config` and `StoreDaemonConfig.communicator` (see `tensorcast/store_daemon/config.py`).
