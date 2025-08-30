@@ -3,6 +3,7 @@
 #include "core/communicator/engine/mr_cache.h"
 
 #include "absl/log/log.h"
+#include "core/communicator/misc/ibv_wrap.h"
 
 namespace tensorcast::communicator {
 

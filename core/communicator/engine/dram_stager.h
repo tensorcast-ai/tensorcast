@@ -25,7 +25,7 @@ class PartitionTensor;
 // UMA callbacks are plumbed into the communicator layer.
 class DRAMStager : public MemoryStager {
  public:
-  explicit DRAMStager(std::shared_ptr<store::PinnedMemoryPool> pool, size_t num_buffers_hint = 4);
+  explicit DRAMStager(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool, size_t num_buffers_hint = 4);
   ~DRAMStager() override = default;
 
   // UMA pin-lease provider interface (optional). If set, stage() will
@@ -57,7 +57,7 @@ class DRAMStager : public MemoryStager {
   }
 
  private:
-  std::shared_ptr<store::PinnedMemoryPool> pool_;
+  gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool_;
   const size_t chunk_size_;
   const size_t num_buffers_hint_;
 

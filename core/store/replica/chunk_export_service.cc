@@ -4,7 +4,6 @@
 
 #include <algorithm>
 
-#include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/replica/transfer_constants.h"
@@ -14,8 +13,9 @@ namespace tensorcast::store {
 
 std::vector<std::pair<uint32_t, uint32_t>> ChunkExportService::coalesce_ranges(std::vector<uint32_t> chunks) {
   std::vector<std::pair<uint32_t, uint32_t>> out;
-  if (chunks.empty())
+  if (chunks.empty()) {
     return out;
+  }
   // Remove duplicates and sort in one pass
   std::sort(chunks.begin(), chunks.end());
   chunks.erase(std::unique(chunks.begin(), chunks.end()), chunks.end());
@@ -54,8 +54,9 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 
   if (location == MemoryLocation::PAGEABLE_CPU) {
     void* base = uma_ ? uma_->get_cpu_base_ptr(key) : nullptr;
-    if (!base)
+    if (!base) {
       return absl::FailedPreconditionError("CPU base not available");
+    }
 
     info.device_id = kCpuDeviceId;
     info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_CPU;
@@ -74,8 +75,9 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
       uint64_t va_end = std::min<uint64_t>(info.artifact_size, (static_cast<uint64_t>(end) + 1) * kChunk);
       uint64_t length = (va_end > va_off) ? (va_end - va_off) : 0;
-      if (length == 0)
+      if (length == 0) {
         continue;
+      }
 
       // Bounds check before pointer arithmetic
       if (va_off >= info.artifact_size) {
@@ -92,7 +94,8 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       opts.async = false;
       // Register UMA lease mapping for this exported DVMP window to support
       // short-lived pin leases during staged transfers.
-      store::UmaLeaseProvider::instance()->register_mapping(tensor_key, key, va_off, uma_);
+      store::UmaLeaseProvider::instance()->register_mapping(
+          tensor_key, key, va_off, gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>{uma_});
 
       auto ret = comm_engine.register_tensor_ex(
           tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
@@ -117,8 +120,9 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 
   if (location == MemoryLocation::GPU) {
     void* gpu_ptr = uma_ ? uma_->get_gpu_base_ptr(key, key.device.ordinal) : nullptr;
-    if (!gpu_ptr)
+    if (!gpu_ptr) {
       return absl::FailedPreconditionError("GPU base not available");
+    }
 
     info.device_id = key.device.ordinal;
     info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_GPU;
@@ -134,8 +138,9 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       uint64_t off = static_cast<uint64_t>(start) * kChunk;
       uint64_t va_end = std::min<uint64_t>(info.artifact_size, (static_cast<uint64_t>(end) + 1) * kChunk);
       uint64_t length = (va_end > off) ? (va_end - off) : 0;
-      if (length == 0)
+      if (length == 0) {
         continue;
+      }
       // Bounds check before pointer arithmetic
       if (off >= info.artifact_size) {
         return absl::OutOfRangeError(

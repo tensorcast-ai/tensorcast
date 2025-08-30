@@ -17,32 +17,30 @@ namespace tensorcast::communicator {
 // Internally delegates to GpuTcpStager for D2H copies and buffer lifecycle.
 class GpuNetStager : public MemoryStager {
  public:
-  explicit GpuNetStager(std::shared_ptr<GpuTcpStager> delegate)
-      : delegate_(std::move(delegate)) {}
+  explicit GpuNetStager(const gsl::not_null<std::shared_ptr<GpuTcpStager>>& delegate)
+      : delegate_(delegate) {}
 
   absl::StatusOr<void*> stage(
       const std::shared_ptr<PartitionTensor>& tensor,
       uint64_t offset,
       uint64_t bytes) override {
-    if (!delegate_) return absl::FailedPreconditionError("GpuNetStager not initialized");
     return delegate_->stage(tensor, offset, bytes);
   }
 
   absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override {
-    if (!delegate_) return absl::FailedPreconditionError("GpuNetStager not initialized");
     return delegate_->release_staged_buffer(host_ptr.get());
   }
 
   size_t get_chunk_size() const override {
-    return delegate_ ? delegate_->get_chunk_size() : 0;
+    return delegate_->get_chunk_size();
   }
 
   size_t get_num_buffers() const override {
-    return delegate_ ? delegate_->get_num_buffers() : 0;
+    return delegate_->get_num_buffers();
   }
 
  private:
-  std::shared_ptr<GpuTcpStager> delegate_;
+  gsl::not_null<std::shared_ptr<GpuTcpStager>> delegate_;
 };
 
 } // namespace tensorcast::communicator

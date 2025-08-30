@@ -3,13 +3,12 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <unordered_map>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
-#include "core/communicator/misc/ibv_wrap.h"
 #include "gsl/pointers"
+#include "core/communicator/misc/ibv_wrap.h"
 
 namespace tensorcast::communicator {
 
@@ -25,6 +24,10 @@ class MrCache {
   // of requested bytes, assuming the cached MR length covers the staging chunk.
   // Access flags must be consistent for a given (pd, ptr) registration.
   struct ibv_mr* get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, size_t bytes, int access) ABSL_LOCKS_EXCLUDED(mu_);
+  // Preferred overload using not_null for pd.
+  struct ibv_mr* get_or_register(gsl::not_null<ibv_pd*> pd, gsl::not_null<void*> ptr, size_t bytes, int access) ABSL_LOCKS_EXCLUDED(mu_) {
+    return get_or_register(pd.get(), ptr, bytes, access);
+  }
 
  private:
   struct Key {
@@ -39,7 +42,7 @@ class MrCache {
   };
 
   absl::Mutex mu_;
-  std::unordered_map<Key, ibv_mr*, KeyHash> cache_ ABSL_GUARDED_BY(mu_);
+  std::unordered_map<Key, gsl::owner<ibv_mr*>, KeyHash> cache_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::communicator

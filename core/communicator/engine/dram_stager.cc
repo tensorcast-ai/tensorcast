@@ -25,22 +25,16 @@ std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider(
   return provider;
 }
 
-DRAMStager::DRAMStager(std::shared_ptr<store::PinnedMemoryPool> pool, size_t num_buffers_hint)
+DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool, size_t num_buffers_hint)
     : pool_(std::move(pool)),
-      chunk_size_(pool_ ? pool_->chunk_size() : static_cast<size_t>(64 * 1024 * 1024)),
-      num_buffers_hint_(num_buffers_hint) {
-  if (!pool_) {
-    LOG(WARNING) << "DRAMStager constructed without a pinned memory pool; staging may fail";
-  }
-}
+      chunk_size_(pool_->chunk_size()),
+      num_buffers_hint_(num_buffers_hint) {}
 
 absl::StatusOr<void*> DRAMStager::stage(
     const std::shared_ptr<PartitionTensor>& tensor,
     uint64_t offset,
     uint64_t bytes) {
-  if (!pool_) {
-    return absl::FailedPreconditionError("PinnedMemoryPool is not configured for DRAMStager");
-  }
+  // pool_ is guaranteed non-null
   if (bytes == 0 || bytes > chunk_size_) {
     return absl::InvalidArgumentError("bytes must be in [1, chunk_size]");
   }
@@ -72,9 +66,7 @@ absl::StatusOr<void*> DRAMStager::stage(
 }
 
 absl::Status DRAMStager::release_staged_buffer(gsl::not_null<void*> host_ptr) {
-  if (!pool_) {
-    return absl::FailedPreconditionError("PinnedMemoryPool is not configured for DRAMStager");
-  }
+  // pool_ is guaranteed non-null
   std::vector<char*> bufs;
   {
     absl::MutexLock lock(&mu_);

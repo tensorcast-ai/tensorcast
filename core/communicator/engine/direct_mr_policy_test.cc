@@ -1,7 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
-#include <thread>
 #include <cstdlib>
 
 #include "absl/status/status.h"
@@ -10,6 +9,7 @@
 #include "core/store/components/uma_lease_provider.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
+#include "gsl/pointers"
 
 using tensorcast::communicator::CommunicateEngine;
 using tensorcast::communicator::CommunicatorConfig;
@@ -41,7 +41,9 @@ TEST_CASE("DirectMR inflight cap triggers staging for concurrent requests", "[co
   static uint32_t server_buf[kBufElems];
   static uint32_t client_buf_a[kBufElems];
   static uint32_t client_buf_b[kBufElems];
-  for (size_t i = 0; i < kBufElems; ++i) server_buf[i] = static_cast<uint32_t>(i);
+  for (size_t i = 0; i < kBufElems; ++i) {
+    server_buf[i] = static_cast<uint32_t>(i);
+  }
 
   const char* kKey = "CPU_DIRECTMR_CAP_KEY";
   // Avoid MR registration for CPU tensor to not require an RDMA device at registration time
@@ -69,7 +71,8 @@ TEST_CASE("DirectMR inflight cap triggers staging for concurrent requests", "[co
   REQUIRE(rmc->allocate(rep_key, DistributedVirtualMemoryPool::kDefaultChunkSize).ok());
   uint8_t one = 1;
   REQUIRE(dvmp->write_at(rep_key.artifact_id, /*va_offset=*/0, &one, 1).ok()); // mark HOT in first chunk
-  tensorcast::store::UmaLeaseProvider::instance()->register_mapping(kKey, rep_key, /*base_va_off=*/0, rmc);
+  tensorcast::store::UmaLeaseProvider::instance()->register_mapping(
+      kKey, rep_key, /*base_va_off=*/0, gsl::not_null<std::shared_ptr<tensorcast::store::ReplicaMemoryCoordinator>>{rmc});
 
   // Two concurrent reads within direct_mr_max_bytes
   auto f1 = client.read_tensor(kKey, reinterpret_cast<uint64_t>(client_buf_a), cfg.stager.direct_mr_max_bytes, COMMUNICATE_ENGINE_DEV_CPU, -1, "127.0.0.1", 61000, /*remote_offset=*/0);

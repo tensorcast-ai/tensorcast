@@ -15,9 +15,12 @@ void UmaLeaseProvider::register_mapping(
     const std::string& tensor_key,
     const ReplicaKey& key,
     uint64_t base_va_off,
-    std::shared_ptr<ReplicaMemoryCoordinator> uma) {
+    gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma) {
   absl::MutexLock lk(&mu_);
-  map_[tensor_key] = Entry{.key = key, .base_va_off = base_va_off, .uma = std::move(uma)};
+  map_[tensor_key] = Entry{
+      .key = key,
+      .base_va_off = base_va_off,
+      .uma = std::weak_ptr<ReplicaMemoryCoordinator>(uma.get())};
 }
 
 std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire(

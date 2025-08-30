@@ -5,6 +5,7 @@
 #include "core/store/components/uma_lease_provider.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
+#include "gsl/pointers"
 
 using tensorcast::memory::DistributedVirtualMemoryPool;
 using tensorcast::store::ReplicaKey;
@@ -28,7 +29,8 @@ TEST_CASE("UMA Lease Provider hot residency checks", "[store][uma][residency]") 
 
   // Register UMA mapping (base VA offset = 0)
   const std::string tensor_key = "tensor-key-uma-hot";
-  tensorcast::store::UmaLeaseProvider::instance()->register_mapping(tensor_key, key, /*base_va_off=*/0, rmc);
+  tensorcast::store::UmaLeaseProvider::instance()->register_mapping(
+      tensor_key, key, /*base_va_off=*/0, gsl::not_null<std::shared_ptr<tensorcast::store::ReplicaMemoryCoordinator>>{rmc});
 
   auto* uma = tensorcast::store::UmaLeaseProvider::instance().get();
 

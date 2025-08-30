@@ -33,7 +33,7 @@ class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
       const std::string& tensor_key,
       const ReplicaKey& key,
       uint64_t base_va_off,
-      std::shared_ptr<ReplicaMemoryCoordinator> uma);
+      gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma);
 
   std::unique_ptr<communicator::DRAMStager::LeaseHandle> acquire(
       const std::string& tensor_key, uint64_t offset, uint64_t bytes) override;

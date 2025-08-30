@@ -691,14 +691,68 @@ This section lists code paths intentionally retained for backward compatibility 
 - Removal Plan:
   - Make RDMA device selection strictly typed/config-driven; remove `DEFAULT_DEV` fallback once config is mandatory.
 
-### 13.8 Tracking Table (initial)
+### 13.8 Tracking Table (with owners & milestones)
 
-| Item | Area | Current Status | Next Step |
-|---|---|---|---|
-| GPU stager dual-track | Engine/MTCP | In use | Switch all callsites to `MemoryStager`; remove legacy API and fallbacks |
-| Dual constructors + env reads | Engine | In use | Migrate to `CommunicatorConfig` everywhere; remove env reads |
-| Protocol legacy ops | Engine | In use | Require `*_EX`; remove legacy ops and branches |
-| RDMA direct MR | Engine | Policy gated | Keep only explicit small-slab policy; remove generic direct path |
-| MTCP CPU direct send | MTCP | Fallback present | Require MemoryStager; delete direct branch |
-| Registration API | Engine | Both exist | Migrate to `register_tensor_ex`; remove legacy overload |
-| DEFAULT_DEV fallback | Engine | In use | Replace with typed config; remove fallback |
+| ✓ | Item | Area | Owner | Milestone | Current Status | Next Step |
+|---|---|---|---|---|---|---|
+| [ ] | GPU stager dual-track → unified | Engine/MTCP | Communicator (C++) | P3 | In use | Switch all callsites to `MemoryStager`; remove legacy API and fallbacks |
+| [ ] | Require `CommunicatorConfig` (flip default) | Engine | Communicator (C++) | P2 | In use | Make typed config mandatory; deprecate legacy constructor and env reads |
+| [ ] | Protocol legacy ops → `*_EX` only | Engine | Communicator (C++) | P3 | In use | Require EX handlers; remove legacy ops and branches |
+| [ ] | RDMA DirectMR limited to small-slab policy | Engine | Communicator (C++) | P4 | Policy gated | Keep only explicit small-slab path; remove generic DVMP MR advertisement |
+| [ ] | MTCP CPU direct send → stager-required | MTCP | Transport (C++) | P3 | Fallback present | Require `MemoryStager`; delete direct CPU-send branch |
+| [ ] | Registration API → `register_tensor_ex` only | Engine | Communicator (C++) | P3 | Both exist | Migrate callsites to `register_tensor_ex`; remove legacy overload |
+| [ ] | Remove `DEFAULT_DEV` fallback | Engine | Communicator (C++) | P3 | In use | Replace with typed NIC selection in config; delete env fallback |
+
+Notes:
+- Milestones P2/P3/P4 align with Implementation Plan phases (P2: staged RDMA+ACK; P3: NUMA; P4: cleanup/policy knobs).
+- Owners denote responsible sub-team/module; adjust to specific individuals in tracking issues.
+
+### 13.9 Default Flips & Env Deprecations — Removal PR Plan
+
+This sub-section defines concrete PRs to flip defaults and start removals. The goal is to make typed configuration mandatory and phase out legacy environment variables.
+
+- PR-1: Require `CommunicatorConfig` injection (flip default)
+  - Change: Make the `CommunicateEngine(const CommunicatorConfig&, ...)` constructor the only supported path in new code paths; keep legacy constructor as deprecated shim that immediately builds a `CommunicatorConfig` from explicit params only (no env reads).
+  - Behavior: If engine is constructed without `CommunicatorConfig`, emit a deprecation warning once per process and proceed via a temporary `CommunicatorConfig::FromEnvDeprecated()` builder (see PR-2). Tests and services switch to injecting typed config.
+  - Affected: `core/communicator/engine/engine.{h,cc}`, daemon service wiring, Python client wiring.
+  - Owner: Communicator (C++) — Milestone: P2.
+
+- PR-2: Deprecate and gate legacy environment variables
+  - Change: Introduce a centralized deprecated-env loader `CommunicatorConfig::FromEnvDeprecated()` used only by the legacy shim in PR-1 and gated by `TENSORCAST_ALLOW_LEGACY_ENV=1` (default off). When enabled, it logs a warning mapping each env var to its typed config field.
+  - Env vars to deprecate and replacement fields:
+    - `DEFAULT_DEV` → `pool.simple_numa.nodes[n].nics` selection and explicit NIC choice via typed config
+    - `GPU_TCP_STAGER_CHUNK_SIZE_MB` → `stager.stage_chunk_mb_gpu`
+    - `GPU_TCP_STAGER_NUM_BUFFERS` → `stager.buffers_per_flow`
+    - `GPU_TCP_RECV_NUM_BUFFERS` → `stager.buffers_per_flow` (receiver buffering unified under stager policy)
+    - `RDMA_ACK_TTL_MS` → `rdma.ack_ttl_ms`
+    - `STAGER_NUMA_ENABLE` → `pool.simple_numa.enable`
+    - `STAGER_NUMA_GPU_MAP` → `pool.simple_numa.nodes[].gpus`
+    - `STAGER_NUMA_NIC_MAP` → `pool.simple_numa.nodes[].nics`
+  - Behavior: With `TENSORCAST_ALLOW_LEGACY_ENV` unset, env values are ignored; process fails fast if no typed config is provided. With the flag set, envs are loaded with WARN-level deprecation logs and a telemetry counter `communicator.deprecated_env_used` is incremented.
+  - Affected: `core/communicator/engine/communicator_config.{h,cc}` (add FromEnvDeprecated), daemon config loader, docs.
+  - Owner: Communicator (C++) — Milestone: P2.
+
+- PR-3: Update docs and examples to typed config only
+  - Change: Remove env-based examples from README and internal docs; add YAML examples mapping to `CommunicatorConfig` schema.
+  - Affected: `README.md`, developer guides.
+  - Owner: Docs — Milestone: P2.
+
+- PR-4: Remove legacy constructor and env loader
+  - Change: Delete `CommunicateEngine(bool, ...)` and `CommunicatorConfig::FromEnvDeprecated()`; remove all callsites and CI env setups relying on them.
+  - Pre-reqs: PR-1..3 merged and milestone P3 reached.
+  - Owner: Communicator (C++) — Milestone: P3.
+
+### 13.10 Deprecation Schedule
+
+- P2 (staged RDMA + ACK):
+  - `[ ]` `CommunicatorConfig` required by default (legacy shim logs WARN once per process)
+  - `[ ]` Env usage gated by `TENSORCAST_ALLOW_LEGACY_ENV=1` and logs WARN per variable
+
+- P3 (NUMA):
+  - `[ ]` Remove `DEFAULT_DEV` fallback; NIC selection must come from typed config
+  - `[ ]` Remove MTCP CPU direct-send fallback; `MemoryStager` required
+  - `[ ]` Remove legacy registration overload after migrating internal callsites
+
+- P4 (cleanup/policy knobs):
+  - `[ ]` Limit DirectMR to small-slab policy only; delete generic DVMP MR advertisement path
+  - `[ ]` Remove legacy GPU TCP stager and all dual-track GPU staging branches

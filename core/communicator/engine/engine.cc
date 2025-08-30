@@ -59,8 +59,8 @@ CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_s
 
   gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
   gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, gpu_memory_pool_);
-  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_tcp_stager_);
-  memory_stager_ = std::make_shared<DRAMStager>(gpu_memory_pool_, /*num_buffers_hint=*/num_buffers);
+  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gsl::not_null<std::shared_ptr<GpuTcpStager>>{gpu_tcp_stager_});
+  memory_stager_ = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{gpu_memory_pool_}, /*num_buffers_hint=*/num_buffers);
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
     ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
   }
@@ -128,7 +128,7 @@ CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_s
       for (int node_id : node_ids) {
         auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
         numa_pools_.push_back(pool);
-        auto cpu_stager = std::make_shared<DRAMStager>(pool, /*num_buffers_hint=*/num_buffers);
+        auto cpu_stager = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
         if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
           ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
         }
@@ -203,7 +203,7 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   // GPU staging pool and stager
   gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
   gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
-  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_tcp_stager_);
+  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gsl::not_null<std::shared_ptr<GpuTcpStager>>{gpu_tcp_stager_});
 
   // CPU staging pool honors CPU chunk size; size conservatively for one flow
   if (cpu_chunk_size != gpu_chunk_size) {
@@ -211,7 +211,7 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
     cpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(cpu_pool_size, cpu_chunk_size);
   }
   auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
-  memory_stager_ = std::make_shared<DRAMStager>(dram_pool, /*num_buffers_hint=*/num_buffers);
+  memory_stager_ = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
     ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
   }
@@ -224,12 +224,12 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       for (const auto& node : config_.simple_numa.nodes) {
         auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
         numa_pools_.push_back(pool);
-        auto cpu_stager = std::make_shared<DRAMStager>(pool, /*num_buffers_hint=*/num_buffers);
+        auto cpu_stager = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
         if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
           ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
         }
         auto gpu_stager = std::make_shared<GpuTcpStager>(gpu_chunk_size, num_buffers, pool);
-        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_stager);
+        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gsl::not_null<std::shared_ptr<GpuTcpStager>>{gpu_stager});
         // Map GPU ids
         for (int gid : node.gpus) {
           gpu_stagers_[gid] = gpu_stager;
