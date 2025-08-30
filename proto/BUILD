@@ -33,6 +33,7 @@ cpp_grpc_library(
     name = "store_daemon_grpc_cpp",
     protos = [":store_daemon_proto"],
 )
+
 # Communicator config (messages only)
 proto_library(
     name = "communicator_config_proto",

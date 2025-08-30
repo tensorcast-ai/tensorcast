@@ -12,9 +12,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
-#include "gsl/pointers"
-#include "core/communicator/engine/memory_stager.h"
 #include "core/common/memory/pinned_memory_pool.h"
+#include "core/communicator/engine/memory_stager.h"
+#include "gsl/pointers"
 
 namespace tensorcast::communicator {
 
@@ -36,16 +36,14 @@ class DRAMStager : public MemoryStager {
   };
   struct LeaseProvider {
     virtual ~LeaseProvider() = default;
-    virtual std::unique_ptr<LeaseHandle> acquire(
-        const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
+    virtual std::unique_ptr<LeaseHandle> acquire(const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
   };
-  void set_lease_provider(std::shared_ptr<LeaseProvider> provider) { lease_provider_ = std::move(provider); }
+  void set_lease_provider(std::shared_ptr<LeaseProvider> provider) {
+    lease_provider_ = std::move(provider);
+  }
   static std::shared_ptr<LeaseProvider> make_noop_lease_provider();
 
-  absl::StatusOr<void*> stage(
-      const std::shared_ptr<PartitionTensor>& tensor,
-      uint64_t offset,
-      uint64_t bytes) override;
+  absl::StatusOr<void*> stage(const std::shared_ptr<PartitionTensor>& tensor, uint64_t offset, uint64_t bytes) override;
 
   absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override;
 

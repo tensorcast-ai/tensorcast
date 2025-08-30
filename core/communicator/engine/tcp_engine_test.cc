@@ -19,10 +19,12 @@ struct TcpTestFixture {
   uint32_t client_buf_[BUF_SIZE];
 
   TcpTestFixture() {
-    communicator::CommunicatorConfig srv_cfg; srv_cfg.enable_rdma = false;
+    communicator::CommunicatorConfig srv_cfg;
+    srv_cfg.enable_rdma = false;
     server_ = new communicator::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
-    communicator::CommunicatorConfig cli_cfg; cli_cfg.enable_rdma = false;
+    communicator::CommunicatorConfig cli_cfg;
+    cli_cfg.enable_rdma = false;
     client_ = new communicator::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
@@ -104,7 +106,9 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
     communicator::CommunicateEngine::RegisterTensorOptions opts3;
-    opts3.register_mr = false; opts3.needs_staging = false; opts3.async = false;
+    opts3.register_mr = false;
+    opts3.needs_staging = false;
+    opts3.async = false;
     auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -128,7 +132,10 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Read CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::CommunicateEngine::RegisterTensorOptions opts4; opts4.register_mr=false; opts4.needs_staging=false; opts4.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions opts4;
+    opts4.register_mr = false;
+    opts4.needs_staging = false;
+    opts4.async = false;
     auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),

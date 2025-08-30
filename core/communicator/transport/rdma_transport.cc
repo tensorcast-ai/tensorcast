@@ -7,7 +7,6 @@
 
 namespace tensorcast::communicator {
 
-
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
       dev_(std::move(dev)),
@@ -242,8 +241,9 @@ result_t RdmaTransport::read_multi(read_request_t request, const std::vector<Rdm
 
   auto res = wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
   if (res) {
-    request->set_result(absl::InternalError(
-        absl::StrFormat("rdma post_send (multi) failed: return=%d, error=%s", res, strerror(errno))));
+    request->set_result(
+        absl::InternalError(
+            absl::StrFormat("rdma post_send (multi) failed: return=%d, error=%s", res, strerror(errno))));
     return FAILED;
   }
   return SUCCESS;

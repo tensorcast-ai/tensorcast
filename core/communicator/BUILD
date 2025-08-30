@@ -23,7 +23,6 @@ sc_header_only_library(
     visibility = ["//core/communicator:__subpackages__"],  # Visible to subpackages
 )
 
-
 sc_cc_library(
     name = "utils_lib",
     srcs = ["misc/utils.cc"],
@@ -129,8 +128,8 @@ cc_test(
     srcs = ["transport/request_test.cc"],
     deps = [
         ":constants_lib",
-        ":request_lib",
         ":partition_tensor_lib",
+        ":request_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -271,7 +270,6 @@ sc_cc_library(
     ],
 )
 
-
 # Unified memory stager interface
 sc_header_only_library(
     name = "memory_stager_lib",
@@ -337,28 +335,28 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":channel_lib",
-        ":constants_lib",
         ":communicator_config_lib",
-        ":gpu_net_stager_lib",
-        ":uma_residency_provider_lib",
+        ":constants_lib",
         ":dram_stager_lib",
-        ":mr_cache_lib",
-        "//core/store:uma_lease_provider",
+        ":gpu_net_stager_lib",
         ":message_lib",
+        ":mr_cache_lib",
         ":mtcp_transport_lib",
         ":protocol_lib",
         ":rdma_lib",
         ":store_lib",
         ":tcp_lib",
+        ":uma_residency_provider_lib",
         ":utils_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:system_capabilities_lib",
-        "@abseil-cpp//absl/strings",
+        "//core/store:uma_lease_provider",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": ["@cudart"],
@@ -373,9 +371,9 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":ibv_wrap_lib",
-        "@gsl//:gsl",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/synchronization",
+        "@gsl",
     ],
 )
 
@@ -400,7 +398,6 @@ cc_test(
     ],
 )
 
-
 cc_test(
     name = "tcp_engine_test",
     srcs = ["engine/tcp_engine_test.cc"],
@@ -410,7 +407,6 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
-
 
 cc_test(
     name = "gpu_tensor_registration_test",

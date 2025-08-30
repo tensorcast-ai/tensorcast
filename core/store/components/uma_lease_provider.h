@@ -36,7 +36,9 @@ class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
       gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma);
 
   std::unique_ptr<communicator::DRAMStager::LeaseHandle> acquire(
-      const std::string& tensor_key, uint64_t offset, uint64_t bytes) override;
+      const std::string& tensor_key,
+      uint64_t offset,
+      uint64_t bytes) override;
 
   // Lightweight residency query for DirectMR policy checks. Returns true only
   // if all chunks fully covering [offset, offset+bytes) are in HOT state.

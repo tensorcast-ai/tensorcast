@@ -116,8 +116,8 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
-        "//core/communicator:engine_lib",
         ":uma_lease_provider",
+        "//core/communicator:engine_lib",
     ],
 )
 
@@ -407,6 +407,7 @@ sc_header_only_library(
         "@abseil-cpp//absl/synchronization",
     ],
 )
+
 sc_cc_library(
     name = "uma_lease_provider",
     srcs = ["components/uma_lease_provider.cc"],

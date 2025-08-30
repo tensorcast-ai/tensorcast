@@ -598,7 +598,7 @@ Counters and histograms:
     - `pool_buffers_total`, `pool_buffers_free` per NUMA node.
   - Wire metric emission in `DRAMStager`, `GpuNetStager`, RDMA server/client paths, and TTL reaper. Include labels for NIC/GPU where useful.
 
-  
+
 
 - Observability (stager + RDMA)
   - Add communicator metrics (exported via daemon’s metrics exporter):

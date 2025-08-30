@@ -22,7 +22,6 @@ extern "C" {
 
 namespace tensorcast::communicator {
 
-
 constexpr static int kTcpContextBatchSize = 16;
 
 TcpContext::TcpContext() : stop_(false) {

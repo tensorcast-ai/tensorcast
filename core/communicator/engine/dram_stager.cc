@@ -14,7 +14,9 @@ class NoOpLeaseHandle : public DRAMStager::LeaseHandle {};
 class NoOpLeaseProvider : public DRAMStager::LeaseProvider {
  public:
   std::unique_ptr<DRAMStager::LeaseHandle> acquire(
-      const std::string& /*tensor_key*/, uint64_t /*offset*/, uint64_t /*bytes*/) override {
+      const std::string& /*tensor_key*/,
+      uint64_t /*offset*/,
+      uint64_t /*bytes*/) override {
     return std::make_unique<NoOpLeaseHandle>();
   }
 };
@@ -26,9 +28,7 @@ std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider(
 }
 
 DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool, size_t num_buffers_hint)
-    : pool_(std::move(pool)),
-      chunk_size_(pool_->chunk_size()),
-      num_buffers_hint_(num_buffers_hint) {}
+    : pool_(std::move(pool)), chunk_size_(pool_->chunk_size()), num_buffers_hint_(num_buffers_hint) {}
 
 absl::StatusOr<void*> DRAMStager::stage(
     const std::shared_ptr<PartitionTensor>& tensor,
@@ -54,12 +54,13 @@ absl::StatusOr<void*> DRAMStager::stage(
   }
   auto* src = tensor->get_addr<uint8_t>() + offset;
   std::memcpy(host_ptr, src, static_cast<size_t>(bytes));
-  
+
   {
     absl::MutexLock lock(&mu_);
     std::vector<gsl::not_null<char*>> wrapped;
     wrapped.reserve(bufs.size());
-    for (auto* p : bufs) wrapped.emplace_back(gsl::not_null<char*>{p});
+    for (auto* p : bufs)
+      wrapped.emplace_back(gsl::not_null<char*>{p});
     allocations_[host_ptr] = std::move(wrapped);
   }
   return host_ptr;
@@ -75,7 +76,8 @@ absl::Status DRAMStager::release_staged_buffer(gsl::not_null<void*> host_ptr) {
       return absl::InvalidArgumentError("Unknown host_ptr for DRAMStager::release_staged_buffer");
     }
     bufs.reserve(it->second.size());
-    for (auto p : it->second) bufs.push_back(p.get());
+    for (auto p : it->second)
+      bufs.push_back(p.get());
     allocations_.erase(it);
   }
   int ret = pool_->deallocate(bufs);

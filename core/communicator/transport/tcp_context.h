@@ -28,7 +28,9 @@ class TcpContext {
   std::string get_local_ip() const;
 
   // Typed configuration injection
-  void set_connect_timeout(int seconds) { connect_timeout_sec_ = seconds; }
+  void set_connect_timeout(int seconds) {
+    connect_timeout_sec_ = seconds;
+  }
 
  protected:
   result_t register_transport(TcpTransport* t);

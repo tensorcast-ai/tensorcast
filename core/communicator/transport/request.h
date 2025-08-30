@@ -3,8 +3,8 @@
 #ifndef CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 
-#include <string>
 #include <functional>
+#include <string>
 
 #include "absl/status/status.h"
 
@@ -52,7 +52,9 @@ class ReadRequest {
   void record_read_done();
 
   // Multi-segment RDMA coordination
-  void set_expected_completions(int n) { expected_completions_.store(n); }
+  void set_expected_completions(int n) {
+    expected_completions_.store(n);
+  }
   // Returns true if all segments have completed
   bool mark_completion_and_is_done() {
     int done = completed_.fetch_add(1) + 1;
@@ -60,11 +62,14 @@ class ReadRequest {
   }
 
   // Per-request ACK action (invoked once when all completions are done)
-  void set_ack_action(std::function<void()> fn) { ack_action_ = std::move(fn); }
+  void set_ack_action(std::function<void()> fn) {
+    ack_action_ = std::move(fn);
+  }
   void invoke_ack_action_once() {
     bool expected = false;
     if (ack_invoked_.compare_exchange_strong(expected, true)) {
-      if (ack_action_) ack_action_();
+      if (ack_action_)
+        ack_action_();
     }
   }
 

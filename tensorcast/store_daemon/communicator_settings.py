@@ -71,6 +71,8 @@ class CommunicatorSettings(BaseModel):
     pool: PoolSettings = Field(default_factory=lambda: PoolSettings())
     transport: TransportSettings = Field(default_factory=lambda: TransportSettings())
     affinity: AffinitySettings = Field(default_factory=lambda: AffinitySettings())
-    simple_numa: SimpleNumaSettings = Field(default_factory=lambda: SimpleNumaSettings())
+    simple_numa: SimpleNumaSettings = Field(
+        default_factory=lambda: SimpleNumaSettings()
+    )
 
     model_config = ConfigDict(extra="forbid")

@@ -6,7 +6,6 @@
 
 namespace tensorcast::communicator {
 
-
 Timer::Timer(bool init_record) : start_(0), end_(0) {
   if (init_record) {
     record();

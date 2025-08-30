@@ -17,17 +17,17 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/memory_stager.h"
-#include "core/communicator/engine/mr_cache.h"
-#include "core/communicator/engine/dram_stager.h"
-#include "core/communicator/engine/message.h"
 #include "core/communicator/engine/communicator_config.h"
+#include "core/communicator/engine/dram_stager.h"
+#include "core/communicator/engine/memory_stager.h"
+#include "core/communicator/engine/message.h"
+#include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
 
 namespace tensorcast::communicator {
 
- class CommunicateEngine {
+class CommunicateEngine {
  public:
   explicit CommunicateEngine(const CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
@@ -75,9 +75,9 @@ namespace tensorcast::communicator {
    *    otherwise return the ib registration status
    */
   struct RegisterTensorOptions {
-    bool register_mr = true;     // Skip MR registration when false
-    bool needs_staging = false;  // Hint for transports that staging is required
-    bool async = false;          // Async MR registration when applicable
+    bool register_mr = true; // Skip MR registration when false
+    bool needs_staging = false; // Hint for transports that staging is required
+    bool async = false; // Async MR registration when applicable
   };
 
   // Extended registration with options.
@@ -112,7 +112,9 @@ namespace tensorcast::communicator {
     virtual ~ResidencyProvider() = default;
     virtual bool is_hot(const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
   };
-  void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) { residency_provider_ = std::move(provider); }
+  void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) {
+    residency_provider_ = std::move(provider);
+  }
 
   /**
    * @brief Whether this engine instance was configured with RDMA support.

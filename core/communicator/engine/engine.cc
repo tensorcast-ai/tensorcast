@@ -14,10 +14,10 @@
 
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/engine.h"
 #include "core/communicator/engine/dram_stager.h"
-#include "core/communicator/engine/message.h"
+#include "core/communicator/engine/engine.h"
 #include "core/communicator/engine/gpu_net_stager.h"
+#include "core/communicator/engine/message.h"
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/uma_residency_provider.h"
 #include "core/communicator/misc/utils.h"
@@ -56,9 +56,8 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       (config_.stager.stage_chunk_mb_cpu > 0 ? config_.stager.stage_chunk_mb_cpu : 4) * 1024ull * 1024ull;
   const size_t num_buffers = (config_.stager.buffers_per_flow > 0 ? config_.stager.buffers_per_flow : 4);
   const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
-  const size_t total_pool_size = config_.pool.pool_size_bytes > 0
-                                     ? config_.pool.pool_size_bytes
-                                     : gpu_chunk_size * (num_buffers + recv_num_buffers);
+  const size_t total_pool_size = config_.pool.pool_size_bytes > 0 ? config_.pool.pool_size_bytes
+                                                                  : gpu_chunk_size * (num_buffers + recv_num_buffers);
 
   // GPU staging pool and stager
   gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
@@ -70,7 +69,8 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
     cpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(cpu_pool_size, cpu_chunk_size);
   }
   auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
-  memory_stager_ = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
+  memory_stager_ = std::make_shared<DRAMStager>(
+      gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
     ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
   }
@@ -85,7 +85,8 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       for (const auto& node : config_.simple_numa.nodes) {
         auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
         numa_pools_.push_back(pool);
-        auto cpu_stager = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
+        auto cpu_stager = std::make_shared<DRAMStager>(
+            gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
         if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
           ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
         }
@@ -108,7 +109,8 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
     if (cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
       pools.push_back(cpu_memory_pool_);
     }
-    for (auto& p : numa_pools_) pools.push_back(p);
+    for (auto& p : numa_pools_)
+      pools.push_back(p);
     for (const auto& dev : rdma_context_->list_devs()) {
       for (auto& pool : pools) {
         auto buffers = pool->list_buffers();
@@ -142,7 +144,8 @@ CommunicateEngine::~CommunicateEngine() {
 }
 
 void CommunicateEngine::set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider) {
-  if (!memory_stager_) return;
+  if (!memory_stager_)
+    return;
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
     ds->set_lease_provider(std::move(provider));
   }
@@ -540,14 +543,17 @@ result_t CommunicateEngine::on_receive_request(
           if (do_stage) {
             if (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) {
               cpu_stager_sptr = get_cpu_stager_for_nic(dev->get_name());
-              if (!cpu_stager_sptr) cpu_stager_sptr = memory_stager_;
+              if (!cpu_stager_sptr)
+                cpu_stager_sptr = memory_stager_;
               max_seg_bytes = cpu_stager_sptr ? cpu_stager_sptr->get_chunk_size() : static_cast<size_t>(req->bytes);
             } else {
               gpu_stager_sptr = get_gpu_mem_stager_for_id(tensor->get_device_id());
-              if (!gpu_stager_sptr) gpu_stager_sptr = gpu_memory_stager_;
+              if (!gpu_stager_sptr)
+                gpu_stager_sptr = gpu_memory_stager_;
               max_seg_bytes = gpu_stager_sptr ? gpu_stager_sptr->get_chunk_size() : static_cast<size_t>(req->bytes);
             }
-            if (max_seg_bytes == 0) max_seg_bytes = static_cast<size_t>(req->bytes);
+            if (max_seg_bytes == 0)
+              max_seg_bytes = static_cast<size_t>(req->bytes);
           }
 
           const uint64_t total = req->bytes;
@@ -570,7 +576,8 @@ result_t CommunicateEngine::on_receive_request(
             uint64_t remain = total - (off - start_off);
             uint32_t seg_bytes = static_cast<uint32_t>(std::min<uint64_t>(remain, max_seg_bytes));
             auto* seg_pl = reinterpret_cast<ProtoReadResponseExSeg*>(
-                reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
+                reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) +
+                i * sizeof(ProtoReadResponseExSeg));
             seg_pl->offset = off;
             seg_pl->bytes = seg_bytes;
             if (do_stage) {
@@ -609,7 +616,8 @@ result_t CommunicateEngine::on_receive_request(
               }
 
               if (mr_cache_) {
-                staged_mr = mr_cache_->get_or_register(dev->get_pd(), gsl::not_null<void*>{host_ptr}, seg_bytes, access);
+                staged_mr =
+                    mr_cache_->get_or_register(dev->get_pd(), gsl::not_null<void*>{host_ptr}, seg_bytes, access);
                 if (staged_mr == nullptr) {
                   auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
                   auto* pf = rspf->get_payload<ProtoReadFailed>();
@@ -638,9 +646,8 @@ result_t CommunicateEngine::on_receive_request(
               seg.ptr = host_ptr;
               seg.bytes = seg_bytes;
               seg.mr = staged_mr;
-              seg.kind = (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) ?
-                             StagedRdmaSegment::Kind::CPU :
-                             StagedRdmaSegment::Kind::GPU;
+              seg.kind = (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) ? StagedRdmaSegment::Kind::CPU
+                                                                                : StagedRdmaSegment::Kind::GPU;
               seg.ts_us = get_us();
               seg.deregister_mr = (mr_cache_ == nullptr);
               seg.stager_ptr = used_stager;
@@ -663,9 +670,12 @@ result_t CommunicateEngine::on_receive_request(
           }
           // Apply typed MTCP tuning
           transport->set_tcp_tos(config_.transport.tcp_tos);
-          if (gpu_memory_stager_) transport->set_gpu_memory_stager(gpu_memory_stager_);
-          if (gpu_memory_pool_) transport->set_memory_pool(gpu_memory_pool_);
-          if (memory_stager_) transport->set_memory_stager(memory_stager_);
+          if (gpu_memory_stager_)
+            transport->set_gpu_memory_stager(gpu_memory_stager_);
+          if (gpu_memory_pool_)
+            transport->set_memory_pool(gpu_memory_pool_);
+          if (memory_stager_)
+            transport->set_memory_stager(memory_stager_);
           transport->send(write_request);
           auto rsp = std::make_shared<EngineMessage>(
               ENGINE_OP_READ_RESPONSE_EX,
@@ -705,13 +715,13 @@ result_t CommunicateEngine::on_receive_request(
           }
         }
         if (seg.ptr != nullptr || seg.mr != nullptr) {
-        if (seg.mr && seg.deregister_mr) {
-          CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr");
-        }
-        if (seg.ptr) {
-          if (seg.stager_ptr != nullptr) {
-            auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
-            if (!st.ok()) {
+          if (seg.mr && seg.deregister_mr) {
+            CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr");
+          }
+          if (seg.ptr) {
+            if (seg.stager_ptr != nullptr) {
+              auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+              if (!st.ok()) {
                 LOG(WARNING) << "Failed to release staged buffer on ACK_EX: " << st;
               }
             } else if (memory_stager_) {
@@ -783,7 +793,8 @@ result_t CommunicateEngine::on_receive_response(
       LOG(INFO) << "[on_receive_response] READ_RESPONSE_EX: key=" << tensor_key << " segs=" << hdr->num_segments
                 << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
 
-      auto* seg0 = reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
+      auto* seg0 = reinterpret_cast<ProtoReadResponseExSeg*>(
+          reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
       auto req_key = get_request_key(tensor_key, seg0->offset);
       auto read_request = pending_requests_.get(req_key);
       if (read_request == nullptr) {
@@ -814,7 +825,8 @@ result_t CommunicateEngine::on_receive_response(
         ack_offsets.reserve(hdr->num_segments);
         uint64_t base_off = read_request->remote_offset_;
         for (uint32_t i = 0; i < hdr->num_segments; ++i) {
-          auto* s = reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
+          auto* s = reinterpret_cast<ProtoReadResponseExSeg*>(
+              reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
           RdmaTransport::RdmaReadSeg seg{};
           seg.remote_addr = s->addr;
           seg.rkey = s->rkey;
@@ -831,13 +843,15 @@ result_t CommunicateEngine::on_receive_response(
           read_request->set_ack_action([ctrl, staged_key, offsets]() {
             auto ack = std::make_shared<EngineMessage>(
                 ENGINE_OP_RDMA_READ_DONE_EX,
-                static_cast<uint32_t>(sizeof(ProtoRdmaReadDoneExHeader) + offsets->size() * sizeof(ProtoRdmaReadDoneExSeg)));
+                static_cast<uint32_t>(
+                    sizeof(ProtoRdmaReadDoneExHeader) + offsets->size() * sizeof(ProtoRdmaReadDoneExSeg)));
             auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
             STRNCPY(h->tensor_key, staged_key.c_str(), kMaxTensorNameLen);
             h->num_segments = static_cast<uint32_t>(offsets->size());
             for (size_t i = 0; i < offsets->size(); ++i) {
               auto* s = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
-                  reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) + i * sizeof(ProtoRdmaReadDoneExSeg));
+                  reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) +
+                  i * sizeof(ProtoRdmaReadDoneExSeg));
               s->offset = (*offsets)[i];
             }
             COMM_CHECK(ctrl->send(ack));
@@ -857,8 +871,10 @@ result_t CommunicateEngine::on_receive_response(
           channel->set_transport(transport);
         }
         transport->set_tcp_tos(config_.transport.tcp_tos);
-        if (gpu_memory_pool_) transport->set_memory_pool(gpu_memory_pool_);
-        if (memory_stager_) transport->set_memory_stager(memory_stager_);
+        if (gpu_memory_pool_)
+          transport->set_memory_pool(gpu_memory_pool_);
+        if (memory_stager_)
+          transport->set_memory_stager(memory_stager_);
         CHECK_WARN(transport->recv(read_request), "failed to recv via mtcp");
         // Remove pending entry now; completion is tracked in request future
         pending_requests_.del(req_key);
@@ -910,7 +926,8 @@ net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
     } else {
       // CPU: choose the first available RDMA device when not specified via policy/mapping.
       const auto& devs = rdma_context_->list_devs();
-      if (!devs.empty()) net_dev = devs.front();
+      if (!devs.empty())
+        net_dev = devs.front();
     }
     if (net_dev == nullptr) {
       LOG(WARNING) << "failed to select RDMA device (dev_type=" << dev_type
@@ -998,17 +1015,19 @@ void CommunicateEngine::do_channel_gc_loop() {
       }
     }
   }
-} 
+}
 
 std::shared_ptr<MemoryStager> CommunicateEngine::get_cpu_stager_for_nic(const std::string& nic_name) const {
   auto it = nic_cpu_stagers_.find(nic_name);
-  if (it != nic_cpu_stagers_.end()) return it->second;
+  if (it != nic_cpu_stagers_.end())
+    return it->second;
   return nullptr;
 }
 
 std::shared_ptr<MemoryStager> CommunicateEngine::get_gpu_mem_stager_for_id(int gpu_id) const {
   auto it = gpu_mem_stagers_.find(gpu_id);
-  if (it != gpu_mem_stagers_.end()) return it->second;
+  if (it != gpu_mem_stagers_.end())
+    return it->second;
   return nullptr;
 }
 

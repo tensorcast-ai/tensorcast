@@ -17,14 +17,14 @@ void UmaLeaseProvider::register_mapping(
     uint64_t base_va_off,
     gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma) {
   absl::MutexLock lk(&mu_);
-  map_[tensor_key] = Entry{
-      .key = key,
-      .base_va_off = base_va_off,
-      .uma = std::weak_ptr<ReplicaMemoryCoordinator>(uma.get())};
+  map_[tensor_key] =
+      Entry{.key = key, .base_va_off = base_va_off, .uma = std::weak_ptr<ReplicaMemoryCoordinator>(uma.get())};
 }
 
 std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire(
-    const std::string& tensor_key, uint64_t offset, uint64_t bytes) {
+    const std::string& tensor_key,
+    uint64_t offset,
+    uint64_t bytes) {
   Entry entry;
   {
     absl::MutexLock lk(&mu_);
@@ -54,7 +54,8 @@ std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire
 }
 
 bool UmaLeaseProvider::is_range_hot(const std::string& tensor_key, uint64_t offset, uint64_t bytes) const {
-  if (bytes == 0) return false;
+  if (bytes == 0)
+    return false;
   Entry entry;
   {
     absl::MutexLock lk(&mu_);
@@ -66,17 +67,20 @@ bool UmaLeaseProvider::is_range_hot(const std::string& tensor_key, uint64_t offs
   }
 
   auto uma = entry.uma.lock();
-  if (!uma) return false;
+  if (!uma)
+    return false;
 
   const uint64_t va_off = entry.base_va_off + offset;
   const uint64_t end_off = va_off + bytes;
   const size_t chunk_sz = uma->get_chunk_size();
-  if (chunk_sz == 0) return false;
+  if (chunk_sz == 0)
+    return false;
   const auto start_idx = static_cast<uint32_t>(va_off / chunk_sz);
   const auto end_idx = static_cast<uint32_t>((end_off + chunk_sz - 1) / chunk_sz);
 
   auto mappings = uma->get_chunk_mappings(entry.key);
-  if (mappings.empty()) return false;
+  if (mappings.empty())
+    return false;
 
   // Build a quick index from chunk_idx to state, assuming contiguous indices
   for (uint32_t i = start_idx; i < end_idx; ++i) {
@@ -91,7 +95,8 @@ bool UmaLeaseProvider::is_range_hot(const std::string& tensor_key, uint64_t offs
         break;
       }
     }
-    if (!found) return false;
+    if (!found)
+      return false;
   }
   return true;
 }

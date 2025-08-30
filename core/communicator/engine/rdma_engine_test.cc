@@ -20,10 +20,12 @@ struct RdmaTestFixture {
   uint32_t client_buf_[BUF_SIZE];
 
   RdmaTestFixture() {
-    communicator::CommunicatorConfig srv_cfg; srv_cfg.enable_rdma = true;
+    communicator::CommunicatorConfig srv_cfg;
+    srv_cfg.enable_rdma = true;
     server_ = new communicator::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
-    communicator::CommunicatorConfig cli_cfg; cli_cfg.enable_rdma = true;
+    communicator::CommunicatorConfig cli_cfg;
+    cli_cfg.enable_rdma = true;
     client_ = new communicator::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
@@ -52,7 +54,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.client_init_status_.ok());
 
     // register GPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o1; o1.register_mr=true; o1.needs_staging=true; o1.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o1;
+    o1.register_mr = true;
+    o1.needs_staging = true;
+    o1.async = false;
     auto status = fixture.server_->register_tensor_ex(
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -63,7 +68,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(status.ok());
 
     // register CPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o2; o2.register_mr=true; o2.needs_staging=false; o2.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o2;
+    o2.register_mr = true;
+    o2.needs_staging = false;
+    o2.async = false;
     status = fixture.server_->register_tensor_ex(
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -79,7 +87,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.client_init_status_.ok());
 
     // register/unregister CPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o3; o3.register_mr=true; o3.needs_staging=false; o3.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o3;
+    o3.register_mr = true;
+    o3.needs_staging = false;
+    o3.async = false;
     auto status = fixture.server_->register_tensor_ex(
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -93,7 +104,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(status.ok());
 
     // register/unregister GPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o4; o4.register_mr=true; o4.needs_staging=true; o4.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o4;
+    o4.register_mr = true;
+    o4.needs_staging = true;
+    o4.async = false;
     status = fixture.server_->register_tensor_ex(
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -122,7 +136,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions o5; o5.register_mr=true; o5.needs_staging=true; o5.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o5;
+    o5.register_mr = true;
+    o5.needs_staging = true;
+    o5.async = false;
     auto status = fixture.server_->register_tensor_ex(
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
@@ -132,7 +149,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         o5);
     REQUIRE(status.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions o6; o6.register_mr=true; o6.needs_staging=false; o6.async=false;
+    communicator::CommunicateEngine::RegisterTensorOptions o6;
+    o6.register_mr = true;
+    o6.needs_staging = false;
+    o6.async = false;
     status = fixture.server_->register_tensor_ex(
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),

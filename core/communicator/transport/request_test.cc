@@ -4,8 +4,8 @@
 
 #include "catch2/catch_test_macros.hpp"
 
-#include "core/communicator/transport/request.h"
 #include "core/communicator/base/constants.h"
+#include "core/communicator/transport/request.h"
 
 using tensorcast::communicator::PartitionTensor;
 using tensorcast::communicator::ReadRequest;

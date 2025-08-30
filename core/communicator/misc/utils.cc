@@ -52,7 +52,6 @@ std::string gid2str(uint8_t* gid) {
   return ss.str();
 }
 
-
 uint64_t get_us() {
   auto now = std::chrono::system_clock::now();
   auto now_us = std::chrono::time_point_cast<std::chrono::microseconds>(now);

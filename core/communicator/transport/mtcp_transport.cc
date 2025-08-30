@@ -28,7 +28,6 @@
 
 namespace tensorcast::communicator {
 
-
 MTcpTransportChunk::MTcpTransportChunk(uint8_t* addr, uint64_t len) : addr_(addr), len_(len), timer_(true) {}
 
 MTcpTransportTask::MTcpTransportTask(int sock_fd) : sock_fd_(sock_fd), stop_(false) {}

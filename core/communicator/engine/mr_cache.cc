@@ -41,4 +41,3 @@ struct ibv_mr* MrCache::get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, si
 }
 
 } // namespace tensorcast::communicator
-

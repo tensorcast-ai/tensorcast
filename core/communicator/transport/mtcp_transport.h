@@ -17,14 +17,13 @@ extern "C" {
 #include <string>
 
 #include "core/common/memory/streaming_pinned_buffer.h"
-#include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/base/constants.h"
+#include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/request.h"
 
 namespace tensorcast::communicator {
-
 
 using chunk_result_t = struct MTcpTransportChunkResult {
   result_t status = SUCCESS;
@@ -159,7 +158,9 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   int tcp_tos_ = 0;
 
  public:
-  void set_tcp_tos(int tos) { tcp_tos_ = tos; }
+  void set_tcp_tos(int tos) {
+    tcp_tos_ = tos;
+  }
 };
 using mtcp_transport_t = std::shared_ptr<MTcpTransport>;
 

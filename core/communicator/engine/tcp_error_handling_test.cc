@@ -13,7 +13,8 @@
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
 
-using namespace tensorcast;;
+using namespace tensorcast;
+;
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
 
@@ -21,13 +22,16 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
 
   SECTION("Invalid tensor registration") {
-    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
     auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Try to register with invalid device ID
     communicator::CommunicateEngine::RegisterTensorOptions opts;
-    opts.register_mr = false; opts.needs_staging = true; opts.async = false;
+    opts.register_mr = false;
+    opts.needs_staging = true;
+    opts.async = false;
     auto status = engine->register_tensor_ex(
         "invalid_tensor",
         0x12345678,
@@ -95,7 +99,8 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Zero-size transfer handling") {
-    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
     auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
@@ -104,7 +109,9 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Register with zero size should fail
     communicator::CommunicateEngine::RegisterTensorOptions opts;
-    opts.register_mr = false; opts.needs_staging = true; opts.async = false;
+    opts.register_mr = false;
+    opts.needs_staging = true;
+    opts.async = false;
     auto status = engine->register_tensor_ex(
         "zero_size",
         reinterpret_cast<uint64_t>(gpu_ptr),

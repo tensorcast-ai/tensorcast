@@ -170,7 +170,7 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         comm_manager_obj = None
         if self.enable_p2p_engine:
             try:
-                if getattr(config, "communicator", None) is not None:
+                if config.communicator is not None:
                     cfg_dict = config.communicator.model_dump()
                     comm_manager_obj = _cs.CommunicationManager.from_config(
                         "0.0.0.0", local_p2p_port, cfg_dict
