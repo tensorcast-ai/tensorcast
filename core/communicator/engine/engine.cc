@@ -7,6 +7,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -571,6 +572,8 @@ result_t CommunicateEngine::on_receive_request(
           STRNCPY(hdr->nic_name, dev->get_name(), kMaxDevName);
           hdr->num_segments = num_segments;
 
+          std::vector<std::string> staged_keys;
+          bool failed = false;
           for (uint32_t i = 0; i < num_segments; ++i) {
             uint64_t off = start_off + static_cast<uint64_t>(i) * max_seg_bytes;
             uint64_t remain = total - (off - start_off);
@@ -596,6 +599,7 @@ result_t CommunicateEngine::on_receive_request(
                   pf->offset = off;
                   pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
                   COMM_CHECK(t->send(rspf));
+                  failed = true;
                   break;
                 }
                 host_ptr = *staged;
@@ -610,6 +614,7 @@ result_t CommunicateEngine::on_receive_request(
                   pf->offset = off;
                   pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
                   COMM_CHECK(t->send(rspf));
+                  failed = true;
                   break;
                 }
                 host_ptr = *staged;
@@ -625,6 +630,7 @@ result_t CommunicateEngine::on_receive_request(
                   pf->offset = off;
                   pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
                   COMM_CHECK(t->send(rspf));
+                  failed = true;
                   break;
                 }
               } else {
@@ -635,6 +641,7 @@ result_t CommunicateEngine::on_receive_request(
                   pf->offset = off;
                   pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
                   COMM_CHECK(t->send(rspf));
+                  failed = true;
                   break;
                 }
               }
@@ -656,7 +663,44 @@ result_t CommunicateEngine::on_receive_request(
                 absl::MutexLock lk(&staged_mu_);
                 staged_segments_.put(seg_req_key, std::move(seg));
               }
+              staged_keys.push_back(seg_req_key);
             }
+          }
+          if (failed) {
+            for (const auto& key : staged_keys) {
+              StagedRdmaSegment seg;
+              {
+                absl::MutexLock lk(&staged_mu_);
+                seg = staged_segments_.get(key);
+                if (seg.ptr != nullptr || seg.mr != nullptr) {
+                  staged_segments_.del(key);
+                } else {
+                  continue;
+                }
+              }
+              if (seg.mr && seg.deregister_mr) {
+                CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr");
+              }
+              if (seg.ptr) {
+                if (seg.stager_ptr != nullptr) {
+                  auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                  if (!st.ok()) {
+                    LOG(WARNING) << "Failed to release staged buffer on staging failure: " << st;
+                  }
+                } else if (memory_stager_) {
+                  auto st = memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                  if (!st.ok()) {
+                    LOG(WARNING) << "Failed to release staged buffer on staging failure (default CPU stager): " << st;
+                  }
+                } else if (gpu_memory_stager_) {
+                  auto st = gpu_memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                  if (!st.ok()) {
+                    LOG(WARNING) << "Failed to release staged buffer on staging failure (default GPU stager): " << st;
+                  }
+                }
+              }
+            }
+            return FAILED;
           }
           COMM_CHECK(t->send(rsp));
         } else {

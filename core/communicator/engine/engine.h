@@ -3,6 +3,7 @@
 #ifndef CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
+#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <vector>
