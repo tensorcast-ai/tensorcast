@@ -16,7 +16,7 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
 
   SECTION("Register GPU tensor in TCP mode") {
     // Create engine in TCP mode
-    communicator::CommunicatorConfig cfg;
+    CommunicatorConfig cfg;
     cfg.enable_rdma = false; /* disable RDMA */
     auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
@@ -31,7 +31,7 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register GPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    CommunicateEngine::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;

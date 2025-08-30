@@ -15,6 +15,7 @@
 #include "core/store/replica/memory_manager.h"
 #include "core/testing/test_helpers.h"
 
+using namespace tensorcast;
 using namespace tensorcast::communicator;
 using namespace tensorcast::store;
 using namespace tensorcast::communicator::test;

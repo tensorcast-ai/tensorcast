@@ -45,7 +45,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   int src_port = find_available_port(51000);
   REQUIRE(src_port > 0);
 
-  communicator::CommunicatorConfig cfg;
+  CommunicatorConfig cfg;
   cfg.enable_rdma = false; /* disable RDMA */
   auto src_engine = std::make_shared<CommunicateEngine>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
@@ -58,7 +58,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // Register the GPU buffer so that it can be fetched remotely.
   const char* kRemoteKey = "remote_model_weights";
-  communicator::CommunicateEngine::RegisterTensorOptions reg_opts;
+  CommunicateEngine::RegisterTensorOptions reg_opts;
   reg_opts.register_mr = false; // RDMA disabled for this engine
   reg_opts.needs_staging = true; // GPU over TCP requires staging
   reg_opts.async = false;

@@ -124,11 +124,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 88);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "large_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "large_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     int target_port = find_available_port(source_port + 10);
     REQUIRE(target_port > 0);
@@ -543,11 +549,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 111);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "cycling_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "cycling_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     // Rapidly create connections, transfer, and close
     const int num_cycles = 10;
@@ -666,15 +678,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "gpu_tensor_" + std::to_string(gpu_id);
-      REQUIRE(source_engine
-                  ->register_tensor(
-                      tensor_name,
-                      reinterpret_cast<uint64_t>(gpu_ptr),
-                      tensor_size,
-                      COMMUNICATE_ENGINE_DEV_GPU,
-                      gpu_id,
-                      false)
-                  .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(source_engine
+                    ->register_tensor_ex(
+                        tensor_name,
+                        reinterpret_cast<uint64_t>(gpu_ptr),
+                        tensor_size,
+                        COMMUNICATE_ENGINE_DEV_GPU,
+                        gpu_id,
+                        opts)
+                    .ok());
+      }
 
       LOG(INFO) << "Registered tensor on GPU " << gpu_id;
     }
@@ -923,11 +941,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 123);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "deadlock_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(source_engine
+                  ->register_tensor_ex(
+                      "deadlock_test",
+                      reinterpret_cast<uint64_t>(gpu_ptr),
+                      tensor_size,
+                      COMMUNICATE_ENGINE_DEV_GPU,
+                      0,
+                      opts)
+                  .ok());
+    }
 
     // Create readers that will hold staging buffers
     const int num_holders = 2; // Equal to default staging buffers
@@ -1094,11 +1122,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       std::string tensor_name = "boundary_tensor_" + std::to_string(i);
       tensor_names.push_back(tensor_name);
 
-      REQUIRE(
-          source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), test_sizes[i], COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-              .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(source_engine
+                    ->register_tensor_ex(
+                        tensor_name,
+                        reinterpret_cast<uint64_t>(gpu_ptr),
+                        test_sizes[i],
+                        COMMUNICATE_ENGINE_DEV_GPU,
+                        0,
+                        opts)
+                    .ok());
+      }
 
       LOG(INFO) << "Registered tensor " << i << " with size " << test_sizes[i] << " ("
                 << (double)test_sizes[i] / chunk_size << " chunks)";
@@ -1208,11 +1246,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "dynamic_tensor_" + std::to_string(i);
-      REQUIRE(
-          source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-              .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(
+            source_engine
+                ->register_tensor_ex(
+                    tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+                .ok());
+      }
     }
 
     std::atomic<bool> stop_flag(false);
@@ -1293,15 +1337,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         auto test_data = create_test_pattern(tensor_size, 170 + i + cycle * 10);
         REQUIRE(tensorcast::cuda::memcpy(gpu_ptrs[i], test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-        REQUIRE(source_engine
-                    ->register_tensor(
-                        tensor_name,
-                        reinterpret_cast<uint64_t>(gpu_ptrs[i]),
-                        tensor_size,
-                        COMMUNICATE_ENGINE_DEV_GPU,
-                        0,
-                        false)
-                    .ok());
+        {
+          CommunicateEngine::RegisterTensorOptions opts;
+          opts.register_mr = false;
+          opts.needs_staging = true;
+          opts.async = false;
+          REQUIRE(source_engine
+                      ->register_tensor_ex(
+                          tensor_name,
+                          reinterpret_cast<uint64_t>(gpu_ptrs[i]),
+                          tensor_size,
+                          COMMUNICATE_ENGINE_DEV_GPU,
+                          0,
+                          opts)
+                      .ok());
+        }
       }
 
       LOG(INFO) << "Completed registration cycle " << cycle;
@@ -1350,10 +1400,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 180);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(source_engine
-                ->register_tensor(
-                    "raii_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-                .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "raii_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     // Test multiple scenarios
     const int num_iterations = 10;
