@@ -1090,9 +1090,14 @@ net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
     CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
     if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
       net_dev = rdma_context_->get_best_dev(dev_id);
+    } else {
+      // CPU: choose the first available RDMA device when not specified via policy/mapping.
+      const auto& devs = rdma_context_->list_devs();
+      if (!devs.empty()) net_dev = devs.front();
     }
     if (net_dev == nullptr) {
-      LOG(WARNING) << "failed to get net dev for gpu=" << dev_id << "; provide explicit device mapping in config";
+      LOG(WARNING) << "failed to select RDMA device (dev_type=" << dev_type
+                   << ") — ensure CommunicatorConfig specifies device mapping";
       return nullptr;
     }
   }

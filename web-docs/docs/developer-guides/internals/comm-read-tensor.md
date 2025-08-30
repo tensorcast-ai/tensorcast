@@ -124,7 +124,7 @@ flowchart LR
 
 ## 优化建议
 1. **提高 staging 池并发度**
-   • 环境变量 `GPU_TCP_STAGER_NUM_BUFFERS` 提升到并发 reader 数量或动态根据 active ReadRequest 调整。
+   • 使用 `stager.buffers_per_flow` 提升到并发 reader 数量或动态根据 active ReadRequest 调整。
    • 或者源端 send_loop 不占用 buffer 到 _所有_ chunk 完成，可把每 chunk 的 future 立即 detach，让 buffer 快速返还。
 
 2. **MTcpTransport::send_loop 改为多写并行**

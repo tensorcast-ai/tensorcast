@@ -324,13 +324,13 @@ flowchart TB
 
 ### 3.7 GPU Transfer Optimizations
 
-#### Staging Buffer Configuration
+#### Staging Buffer Configuration (typed)
 
-| Environment Variable                         | Default | Description                           |
-| -------------------------------------------- | ------- | ------------------------------------- |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | 64      | Size of each staging chunk (MB)       |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | 2       | Number of staging buffers for send    |
-| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | 4       | Number of staging buffers for receive |
+Use `CommunicatorConfig` fields instead of env vars:
+
+- stager.stage_chunk_mb_gpu: size of each staging chunk (MB). Default: 16.
+- stager.stage_chunk_mb_cpu: CPU chunk size (MB). Default: 4.
+- stager.buffers_per_flow: number of buffers per flow. Default: 4.
 
 #### Performance Characteristics
 
@@ -464,19 +464,16 @@ This flow demonstrates:
 
 ---
 
-## 5. Configuration & Environment Variables
+## 5. Configuration (typed)
 
-| Variable                                     | Default   | Description                           |
-| -------------------------------------------- | --------- | ------------------------------------- |
-| `TENSORCAST_COMM_ENABLE_RDMA`                  | `true`    | Enable RDMA transport                 |
-| `TENSORCAST_COMM_CHANNEL_EXPIRE_SEC`           | `0`       | Channel idle timeout (0=never)        |
-| `TENSORCAST_COMM_TCP_CONN_COUNT`               | `8`       | Parallel TCP sockets for MTCP         |
-| `TENSORCAST_COMM_DEFAULT_DEV`                  | ""        | Force NIC when GPU mapping fails      |
-| `TENSORCAST_COMM_LOCAL_IP`                     | `0.0.0.0` | Bind IP for server                    |
-| `TENSORCAST_COMM_LOCAL_PORT`                   | `50051`   | Bind port for server                  |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | `64`      | GPU staging chunk size (MB)           |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | `2`       | Number of GPU send staging buffers    |
-| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | `4`       | Number of GPU receive staging buffers |
+Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Python). See the migration guide
+"CommunicatorConfig Migration" for YAML examples. Key fields:
+
+- enable_rdma: enable RDMA transport.
+- channel_expire_sec: channel idle timeout (0=never).
+- transport.tcp_conn_count: parallel TCP sockets for MTCP.
+- rdma.ack_ttl_ms: RDMA staged-segment ACK TTL.
+- stager.stage_chunk_mb_{gpu,cpu}, stager.buffers_per_flow: staging parameters.
 
 ---
 
@@ -489,13 +486,7 @@ For optimal performance, consider:
 - Isolate GC thread to avoid interference
 
 ### Concurrency Tuning
-```cpp
-// Adjust MTCP parallelism based on bandwidth
-export TENSORCAST_COMM_TCP_CONN_COUNT=16
-
-// Increase channel cache time to reduce reconnects
-export TENSORCAST_COMM_CHANNEL_EXPIRE_SEC=300
-```
+Set `transport.tcp_conn_count` and `channel_expire_sec` in `CommunicatorConfig`.
 
 ### Memory Registration
 - RDMA memory registration happens asynchronously
@@ -503,17 +494,7 @@ export TENSORCAST_COMM_CHANNEL_EXPIRE_SEC=300
 - Pre-register frequently used tensors
 
 ### GPU Transfer Optimization
-```bash
-# Optimize staging buffer size based on tensor sizes
-export TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB=128
-
-# Increase buffers for higher concurrency
-export TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS=4
-export TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS=8
-
-# Ensure sufficient TCP connections for bandwidth
-export TENSORCAST_COMM_TCP_CONN_COUNT=16
-```
+Tune `stager.stage_chunk_mb_gpu`, `stager.buffers_per_flow`, and `transport.tcp_conn_count`.
 
 **GPU-Specific Tips:**
 1. **Chunk Size**: Match staging chunk size to typical tensor dimensions

@@ -28,8 +28,7 @@ TEST_CASE("DirectMR inflight cap triggers staging for concurrent requests", "[co
   cfg.stager.max_inflight_direct_mr = 1; // cap
   cfg.rdma.ack_ttl_ms = 60000;          // large TTL to avoid reaping during test
 
-  // Provide a default RDMA device name; if unavailable, we'll skip
-  ::setenv("DEFAULT_DEV", "mlx5_0", /*overwrite=*/1);
+  // Select any available RDMA device implicitly; if none, test will skip.
 
   CommunicateEngine server(cfg, 30);
   CommunicateEngine client(cfg, 30);
@@ -58,7 +57,7 @@ TEST_CASE("DirectMR inflight cap triggers staging for concurrent requests", "[co
            -1,
            opts)
            .ok()) {
-    INFO("Skipping DirectMR inflight cap test: no RDMA device available to register CPU tensor (DEFAULT_DEV not found)");
+    INFO("Skipping DirectMR inflight cap test: no RDMA device available to register CPU tensor");
     SUCCEED();
     return;
   }
@@ -81,7 +80,7 @@ TEST_CASE("DirectMR inflight cap triggers staging for concurrent requests", "[co
   auto r1 = f1.get();
   auto r2 = f2.get();
   if (!r1.status.ok() || !r2.status.ok()) {
-    INFO("Skipping DirectMR inflight cap test: RDMA device not available or DEFAULT_DEV not resolvable");
+    INFO("Skipping DirectMR inflight cap test: RDMA device not available");
     SUCCEED();
     return;
   }
