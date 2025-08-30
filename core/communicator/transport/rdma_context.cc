@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "core/common/cuda_api.h"
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"

@@ -7,8 +7,8 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
-#include "gsl/pointers"
 #include "core/communicator/misc/ibv_wrap.h"
+#include "gsl/pointers"
 
 namespace tensorcast::communicator {
 
@@ -23,9 +23,11 @@ class MrCache {
   // If a cached MR exists with matching base ptr, returns it regardless
   // of requested bytes, assuming the cached MR length covers the staging chunk.
   // Access flags must be consistent for a given (pd, ptr) registration.
-  struct ibv_mr* get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, size_t bytes, int access) ABSL_LOCKS_EXCLUDED(mu_);
+  struct ibv_mr* get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, size_t bytes, int access)
+      ABSL_LOCKS_EXCLUDED(mu_);
   // Preferred overload using not_null for pd.
-  struct ibv_mr* get_or_register(gsl::not_null<ibv_pd*> pd, gsl::not_null<void*> ptr, size_t bytes, int access) ABSL_LOCKS_EXCLUDED(mu_) {
+  struct ibv_mr* get_or_register(gsl::not_null<ibv_pd*> pd, gsl::not_null<void*> ptr, size_t bytes, int access)
+      ABSL_LOCKS_EXCLUDED(mu_) {
     return get_or_register(pd.get(), ptr, bytes, access);
   }
 
@@ -33,7 +35,9 @@ class MrCache {
   struct Key {
     gsl::not_null<ibv_pd*> pd;
     gsl::not_null<void*> ptr;
-    bool operator==(const Key& o) const { return pd.get() == o.pd.get() && ptr.get() == o.ptr.get(); }
+    bool operator==(const Key& o) const {
+      return pd.get() == o.pd.get() && ptr.get() == o.ptr.get();
+    }
   };
   struct KeyHash {
     size_t operator()(const Key& k) const {
@@ -46,4 +50,3 @@ class MrCache {
 };
 
 } // namespace tensorcast::communicator
-

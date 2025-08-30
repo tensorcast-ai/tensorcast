@@ -125,11 +125,11 @@ sc_cc_library(
     deps = [
         ":replica_memory_coordinator",
         ":transfer_constants",
-        "//core/store:uma_lease_provider",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
+        "//core/store:uma_lease_provider",
         "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",

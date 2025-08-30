@@ -41,4 +41,3 @@ class MemoryStager {
 };
 
 } // namespace tensorcast::communicator
-

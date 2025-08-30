@@ -7,8 +7,8 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/communicator/engine/engine.h"
 #include "core/communicator/engine/communicator_config.h"
+#include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
 
 namespace tensorcast::store {

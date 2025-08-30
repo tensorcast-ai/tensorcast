@@ -14,8 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class StagerSettings(BaseModel):
     stage_cpu_for_rdma: bool = Field(default=True)
-    direct_mr_max_bytes: int = Field(default=4 * 1024 * 1024, ge=0)
-    max_inflight_direct_mr: int = Field(default=32, ge=0)
     stage_chunk_mb_cpu: int = Field(default=4, ge=1)
     stage_chunk_mb_gpu: int = Field(default=16, ge=1)
     buffers_per_flow: int = Field(default=4, ge=1)
@@ -73,7 +71,8 @@ class CommunicatorSettings(BaseModel):
     pool: PoolSettings = Field(default_factory=lambda: PoolSettings())
     transport: TransportSettings = Field(default_factory=lambda: TransportSettings())
     affinity: AffinitySettings = Field(default_factory=lambda: AffinitySettings())
-    simple_numa: SimpleNumaSettings = Field(default_factory=lambda: SimpleNumaSettings())
+    simple_numa: SimpleNumaSettings = Field(
+        default_factory=lambda: SimpleNumaSettings()
+    )
 
     model_config = ConfigDict(extra="forbid")
-

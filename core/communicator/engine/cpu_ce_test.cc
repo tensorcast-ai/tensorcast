@@ -7,11 +7,17 @@
 #include "core/communicator/misc/utils.h"
 
 int run_server() {
-  tensorcast::communicator::CommunicateEngine engine(g_rdma);
+  tensorcast::communicator::CommunicatorConfig cfg;
+  cfg.enable_rdma = g_rdma;
+  tensorcast::communicator::CommunicateEngine engine(cfg);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
   memset(addr, 0, g_count);
-  engine.register_tensor("cpu-ce-test-tensor", reinterpret_cast<uint64_t>(addr), g_count, 0, 1);
+  communicator::CommunicateEngine::RegisterTensorOptions opts;
+  opts.register_mr = false;
+  opts.needs_staging = false;
+  opts.async = false;
+  engine.register_tensor_ex("cpu-ce-test-tensor", reinterpret_cast<uint64_t>(addr), g_count, 0, 1, opts);
   while (true) {
     std::this_thread::yield();
   }
@@ -19,7 +25,9 @@ int run_server() {
 }
 
 int run_client() {
-  tensorcast::communicator::CommunicateEngine engine(g_rdma, 10);
+  tensorcast::communicator::CommunicatorConfig cfg;
+  cfg.enable_rdma = g_rdma;
+  tensorcast::communicator::CommunicateEngine engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));
 

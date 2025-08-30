@@ -6,11 +6,9 @@ package communicator;
 
 message StagerConfig {
   bool stage_cpu_for_rdma = 1;          // default: true
-  uint32 direct_mr_max_bytes = 2;       // default: 4 MiB
-  int32 max_inflight_direct_mr = 3;     // default: 32
-  uint32 stage_chunk_mb_cpu = 4;        // default: 4
-  uint32 stage_chunk_mb_gpu = 5;        // default: 16
-  int32 buffers_per_flow = 6;           // default: 4
+  uint32 stage_chunk_mb_cpu = 2;        // default: 4
+  uint32 stage_chunk_mb_gpu = 3;        // default: 16
+  int32 buffers_per_flow = 4;           // default: 4
 }
 
 message RdmaConfig {
@@ -53,4 +51,3 @@ message CommunicatorConfig {
   AffinityConfig affinity = 6;
   SimpleNumaConfig simple_numa = 7;     // optional; mirrors env-based interim
 }
-

@@ -6,8 +6,8 @@
 
 #include "absl/strings/str_format.h"
 #include "core/communicator/engine/engine.h"
-#include "core/store/replica/transfer_constants.h"
 #include "core/store/components/uma_lease_provider.h"
+#include "core/store/replica/transfer_constants.h"
 
 namespace tensorcast::store {
 
@@ -97,8 +97,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       store::UmaLeaseProvider::instance()->register_mapping(
           tensor_key, key, va_off, gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>{uma_});
 
-      auto ret = comm_engine.register_tensor_ex(
-          tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
+      auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
         return absl::InternalError("Failed to register CPU chunk-range tensor");
       }
@@ -148,7 +147,12 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.artifact_id, range_idx++);
-      auto ret = comm_engine.register_tensor(tensor_key, addr, length, info.comm_dev_type, info.device_id);
+      communicator::CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = comm_engine.is_rdma_enabled();
+      opts.needs_staging =
+          (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::COMMUNICATE_ENGINE_DEV_GPU);
+      opts.async = false;
+      auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
         return absl::InternalError("Failed to register GPU chunk-range tensor");
       }

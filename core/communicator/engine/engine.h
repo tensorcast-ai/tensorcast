@@ -17,20 +17,18 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/gpu_tcp_stager.h"
-#include "core/communicator/engine/memory_stager.h"
-#include "core/communicator/engine/mr_cache.h"
-#include "core/communicator/engine/dram_stager.h"
-#include "core/communicator/engine/message.h"
 #include "core/communicator/engine/communicator_config.h"
+#include "core/communicator/engine/dram_stager.h"
+#include "core/communicator/engine/memory_stager.h"
+#include "core/communicator/engine/message.h"
+#include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
 
 namespace tensorcast::communicator {
 
- class CommunicateEngine {
+class CommunicateEngine {
  public:
-  explicit CommunicateEngine(bool enable_rdma = false, uint32_t channel_expire_sec = 0);
   explicit CommunicateEngine(const CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
   ~CommunicateEngine();
@@ -76,18 +74,10 @@ namespace tensorcast::communicator {
    * @return if async, the status is always Ok,
    *    otherwise return the ib registration status
    */
-  absl::Status register_tensor(
-      const std::string& tensor_key,
-      uint64_t tensor_addr,
-      uint64_t tensor_bytes,
-      int dev_type,
-      int dev_id,
-      bool async = false);
-
   struct RegisterTensorOptions {
-    bool register_mr = true;     // Skip MR registration when false
-    bool needs_staging = false;  // Hint for transports that staging is required
-    bool async = false;          // Async MR registration when applicable
+    bool register_mr = true; // Skip MR registration when false
+    bool needs_staging = false; // Hint for transports that staging is required
+    bool async = false; // Async MR registration when applicable
   };
 
   // Extended registration with options.
@@ -117,12 +107,14 @@ namespace tensorcast::communicator {
   // Inject a UMA-backed lease provider for DRAM staging (optional).
   void set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider);
 
-  // Lightweight UMA residency provider for DirectMR escape hatch
+  // Lightweight UMA residency provider (reserved)
   struct ResidencyProvider {
     virtual ~ResidencyProvider() = default;
     virtual bool is_hot(const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
   };
-  void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) { residency_provider_ = std::move(provider); }
+  void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) {
+    residency_provider_ = std::move(provider);
+  }
 
   /**
    * @brief Whether this engine instance was configured with RDMA support.
@@ -133,8 +125,6 @@ namespace tensorcast::communicator {
     return enable_rdma_;
   }
 
-  // Test-only accessors (safe to call in unit tests)
-  int inflight_direct_mr_for_test() const { return inflight_direct_mr_.load(); }
   size_t staged_segments_count_for_test() {
     absl::MutexLock lk(&staged_mu_);
     return staged_segments_.pairs().size();
@@ -172,8 +162,7 @@ namespace tensorcast::communicator {
 
   uint64_t channel_expire_;
 
-  // GPU->CPU staging for TCP transport (legacy adapter) and unified GPU MemoryStager
-  std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
+  // GPU->CPU staging uses unified GPU MemoryStager only
   std::shared_ptr<MemoryStager> gpu_memory_stager_;
 
   // Shared pinned memory pool for GPU operations
@@ -207,8 +196,6 @@ namespace tensorcast::communicator {
   // --- Simple NUMA mapping (Phase 3) ---
   // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)
   std::unordered_map<std::string, std::shared_ptr<MemoryStager>> nic_cpu_stagers_;
-  // Mapping from GPU id -> GpuTcpStager (pool per NUMA node)
-  std::unordered_map<int, std::shared_ptr<GpuTcpStager>> gpu_stagers_;
   // Mapping from GPU id -> MemoryStager (GpuNetStager adapter per NUMA node)
   std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_mem_stagers_;
   // Keep pools alive and accessible for MR preregistration
@@ -216,11 +203,7 @@ namespace tensorcast::communicator {
 
   // Helpers to select NUMA-aware stagers
   std::shared_ptr<MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
-  std::shared_ptr<GpuTcpStager> get_gpu_stager_for_id(int gpu_id) const;
   std::shared_ptr<MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
-
-  // Track inflight direct-MR responses (CPU escape hatch)
-  std::atomic<int> inflight_direct_mr_{0};
 };
 
 } // namespace tensorcast::communicator
