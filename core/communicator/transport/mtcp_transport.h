@@ -122,8 +122,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 
   void send_loop();
   void recv_loop();
-
-  static result_t init_socket_fd(int sock_fd);
+  result_t init_socket_fd(int sock_fd);
 
   int listen_fd_ = 0;
   int retry_count_;
@@ -160,6 +159,12 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   // Track outstanding async tasks for proper cleanup
   mutable std::mutex async_tasks_mutex_;
   std::vector<std::shared_future<chunk_result_t>> outstanding_async_tasks_;
+
+  // Socket tuning (typed-config): IP_TOS value; 0 to leave unchanged
+  int tcp_tos_ = 0;
+
+ public:
+  void set_tcp_tos(int tos) { tcp_tos_ = tos; }
 };
 using mtcp_transport_t = std::shared_ptr<MTcpTransport>;
 

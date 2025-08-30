@@ -22,7 +22,6 @@
 #include "core/common/device_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/engine/gpu_tcp_stager.h"
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
 
@@ -30,7 +29,6 @@
 
 namespace tensorcast::communicator {
 
-ENV_PARAM(TCP_TOS, 0);
 
 MTcpTransportChunk::MTcpTransportChunk(uint8_t* addr, uint64_t len) : addr_(addr), len_(len), timer_(true) {}
 
@@ -343,7 +341,7 @@ void MTcpTransport::server_loop() {
         continue;
       }
 
-      init_socket_fd(sock_fds_[i]);
+      this->init_socket_fd(sock_fds_[i]);
       tasks_[i] = std::make_unique<MTcpTransportTask>(sock_fds_[i]);
       tasks_[i]->start();
     }
@@ -918,9 +916,9 @@ result_t MTcpTransport::init_socket_fd(int sock_fd) {
     LOG(WARNING) << "failed to setup tcp linger: err=" << errno << " " << strerror(errno);
   }
 
-  if (TCP_TOS > 0) {
-    int tos = TCP_TOS;
-    LOG(INFO) << "set tcp tos as " << TCP_TOS;
+  if (tcp_tos_ > 0) {
+    int tos = tcp_tos_;
+    LOG(INFO) << "set tcp tos as " << tcp_tos_;
     socklen_t optlen = sizeof(tos);
     ret = setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, optlen);
     if (ret != 0) {

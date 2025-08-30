@@ -701,7 +701,7 @@ This section lists code paths intentionally retained for backward compatibility 
 | [ ] | RDMA DirectMR limited to small-slab policy | Engine | Communicator (C++) | P4 | Policy gated | Keep only explicit small-slab path; remove generic DVMP MR advertisement |
 | [ ] | MTCP CPU direct send → stager-required | MTCP | Transport (C++) | P3 | Fallback present | Require `MemoryStager`; delete direct CPU-send branch |
 | [ ] | Registration API → `register_tensor_ex` only | Engine | Communicator (C++) | P3 | Both exist | Migrate callsites to `register_tensor_ex`; remove legacy overload |
-| [ ] | Remove `DEFAULT_DEV` fallback | Engine | Communicator (C++) | P3 | In use | Replace with typed NIC selection in config; delete env fallback |
+| [x] | Remove `DEFAULT_DEV` fallback | Engine | Communicator (C++) | P2 | Done | Removed env-based fallback; engine selects PD via config or first device |
 
 Notes:
 - Milestones P2/P3/P4 align with Implementation Plan phases (P2: staged RDMA+ACK; P3: NUMA; P4: cleanup/policy knobs).

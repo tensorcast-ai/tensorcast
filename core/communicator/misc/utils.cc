@@ -24,7 +24,6 @@ extern "C" {
 #include <string>
 #include <utility>
 
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 
 namespace tensorcast::communicator {
@@ -53,7 +52,6 @@ std::string gid2str(uint8_t* gid) {
   return ss.str();
 }
 
-ENV_PARAM_STR(IFNAME, "eth0");
 
 uint64_t get_us() {
   auto now = std::chrono::system_clock::now();
@@ -77,7 +75,8 @@ std::string get_default_ip() {
       void* tmp = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
       char address[INET_ADDRSTRLEN];
       inet_ntop(AF_INET, tmp, address, INET_ADDRSTRLEN);
-      if ((ifa->ifa_flags & IFF_UP) && IFNAME == ifa->ifa_name) {
+      // Choose the first non-loopback, UP interface
+      if ((ifa->ifa_flags & IFF_UP) && std::string(ifa->ifa_name) != "lo") {
         ip = address;
         break;
       }

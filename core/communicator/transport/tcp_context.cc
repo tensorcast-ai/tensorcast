@@ -16,14 +16,12 @@ extern "C" {
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/epoll_wrap.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/tcp_context.h"
 
 namespace tensorcast::communicator {
 
-ENV_PARAM(CONNECT_TIMEOUT, 10);
 
 constexpr static int kTcpContextBatchSize = 16;
 
@@ -121,7 +119,7 @@ absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint1
   }
 
   struct timeval timeo;
-  timeo.tv_sec = CONNECT_TIMEOUT;
+  timeo.tv_sec = connect_timeout_sec_;
   timeo.tv_usec = 0;
 
   int ret = setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));

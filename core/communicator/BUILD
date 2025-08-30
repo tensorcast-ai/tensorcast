@@ -23,13 +23,6 @@ sc_header_only_library(
     visibility = ["//core/communicator:__subpackages__"],  # Visible to subpackages
 )
 
-sc_cc_library(
-    name = "envs_lib",
-    srcs = ["misc/envs.cc"],
-    hdrs = ["misc/envs.h"],
-    includes = ["."],
-    visibility = ["//visibility:public"],
-)
 
 sc_cc_library(
     name = "utils_lib",
@@ -38,7 +31,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":common_lib",
-        ":envs_lib",
     ],
 )
 
@@ -94,7 +86,6 @@ sc_cc_library(
     hdrs = ["misc/metric.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":envs_lib",
         ":utils_lib",
         "@abseil-cpp//absl/synchronization",
     ],
@@ -189,7 +180,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":base_transport_lib",
-        ":envs_lib",
         ":epoll_wrap_lib",
         ":map_lib",
         ":protocol_lib",
@@ -216,7 +206,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":base_transport_lib",
-        ":envs_lib",
         ":ibv_wrap_lib",
         ":net_dev_lib",
         ":request_lib",

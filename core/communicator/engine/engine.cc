@@ -42,6 +42,9 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
+  // Apply typed config to TCP contexts
+  server_context_->set_connect_timeout(config_.transport.connect_timeout_sec);
+  client_context_->set_connect_timeout(config_.transport.connect_timeout_sec);
 
   // Default UMA-backed residency provider
   residency_provider_ = std::make_shared<UmaResidencyProvider>();
@@ -76,6 +79,8 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   if (enable_rdma_) {
     rdma_context_ = std::make_shared<RdmaContext>();
     mr_cache_ = std::make_unique<MrCache>();
+    // Apply typed RDMA QP tuning
+    rdma_context_->set_qp_params(config_.rdma.traffic_class, config_.rdma.qp_timeout, config_.rdma.qp_retry);
 
     if (config_.simple_numa.enable) {
       for (const auto& node : config_.simple_numa.nodes) {
@@ -738,6 +743,8 @@ result_t CommunicateEngine::on_receive_request(
             transport = std::make_shared<MTcpTransport>(mtcp_conn_count_);
             channel->set_transport(transport);
           }
+          // Apply typed MTCP tuning
+          transport->set_tcp_tos(config_.transport.tcp_tos);
           if (gpu_tcp_stager_) transport->set_gpu_tcp_stager(gpu_tcp_stager_);
           if (gpu_memory_stager_) transport->set_gpu_memory_stager(gpu_memory_stager_);
           if (gpu_memory_pool_) transport->set_memory_pool(gpu_memory_pool_);
@@ -957,6 +964,8 @@ result_t CommunicateEngine::on_receive_response(
           channel->set_transport(transport);
         }
 
+        // Apply typed MTCP tuning
+        transport->set_tcp_tos(config_.transport.tcp_tos);
         if (gpu_tcp_stager_) {
           transport->set_gpu_tcp_stager(gpu_tcp_stager_);
         }

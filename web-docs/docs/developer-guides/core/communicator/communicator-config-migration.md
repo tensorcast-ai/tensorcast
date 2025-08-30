@@ -33,6 +33,9 @@ communicator:
   rdma:
     outstanding_wr: 64
     ack_ttl_ms: 30000
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
   pool:
     preregister_mr: true
     pool_size_bytes: 8589934592
@@ -49,6 +52,8 @@ communicator:
           gpus: [2, 3]
   transport:
     tcp_conn_count: 8
+    connect_timeout_sec: 10
+    tcp_tos: 0
   affinity:
     enable: false
 ```

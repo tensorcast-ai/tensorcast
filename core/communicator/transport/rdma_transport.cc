@@ -2,15 +2,11 @@
 
 #include <utility>
 
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_transport.h"
 
 namespace tensorcast::communicator {
 
-ENV_PARAM(RDMA_TOS, 186);
-ENV_PARAM(RDMA_TIMEOUT, 20);
-ENV_PARAM(RDMA_RETRY, 7);
 
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
@@ -113,7 +109,7 @@ result_t RdmaTransport::do_modify_qp_rtr() {
   qp_attr.ah_attr.grh.flow_label = 0;
   qp_attr.ah_attr.grh.sgid_index = gid_idx_;
   qp_attr.ah_attr.grh.hop_limit = 255;
-  qp_attr.ah_attr.grh.traffic_class = RDMA_TOS;
+  qp_attr.ah_attr.grh.traffic_class = context_->traffic_class();
   qp_attr.ah_attr.sl = 0;
   qp_attr.ah_attr.src_path_bits = 0;
   qp_attr.ah_attr.port_num = peer_info_.ib_port;
@@ -129,8 +125,8 @@ result_t RdmaTransport::do_modify_qp_rts() {
   struct ibv_qp_attr qp_attr{};
   CLEAR(qp_attr);
   qp_attr.qp_state = IBV_QPS_RTS;
-  qp_attr.timeout = RDMA_TIMEOUT;
-  qp_attr.retry_cnt = RDMA_RETRY;
+  qp_attr.timeout = context_->qp_timeout();
+  qp_attr.retry_cnt = context_->qp_retry();
   qp_attr.rnr_retry = 7;
   qp_attr.sq_psn = 0;
   qp_attr.max_rd_atomic = 1;

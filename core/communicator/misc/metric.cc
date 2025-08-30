@@ -2,12 +2,10 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/misc/metric.h"
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 
 namespace tensorcast::communicator {
 
-ENV_PARAM(TIMER, 1);
 
 Timer::Timer(bool init_record) : start_(0), end_(0) {
   if (init_record) {
@@ -16,9 +14,7 @@ Timer::Timer(bool init_record) : start_(0), end_(0) {
 }
 
 uint64_t Timer::record() {
-  if (!TIMER) {
-    return 0;
-  }
+  // Always record timing metrics (env gating removed)
   end_ = get_us();
   if (start_ == 0) {
     start_ = end_;
