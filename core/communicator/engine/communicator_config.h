@@ -59,6 +59,14 @@ struct CommunicatorConfig {
   TransportConfig transport = {};
   AffinityConfig affinity = {};
   SimpleNumaConfig simple_numa = {};
+  // PR-2: true if loaded via deprecated env path (gate-controlled).
+  bool legacy_env_mode = false;
+
+  // Build a config from deprecated environment variables (gate-controlled).
+  // Only used by the legacy CommunicateEngine(bool) shim when
+  // TENSORCAST_ALLOW_LEGACY_ENV=1 is set. Otherwise, callers should
+  // construct CommunicatorConfig explicitly or from typed files.
+  static CommunicatorConfig FromEnvDeprecated(bool enable_rdma, bool log_warnings = true);
 };
 
 } // namespace tensorcast::communicator

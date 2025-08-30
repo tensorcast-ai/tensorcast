@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -27,24 +28,23 @@
 
 namespace tensorcast::communicator {
 
-ENV_PARAM_STR(DEFAULT_DEV, "");
-ENV_PARAM(GPU_TCP_STAGER_CHUNK_SIZE_MB, 64); // Default 64MB chunks
-ENV_PARAM(GPU_TCP_STAGER_NUM_BUFFERS, 2); // Default 2 buffers for double buffering
-ENV_PARAM(GPU_TCP_RECV_NUM_BUFFERS, 4); // Default 4 buffers for GPU receive operations
-ENV_PARAM(RDMA_ACK_TTL_MS, 30000);
-ENV_PARAM(STAGER_NUMA_ENABLE, 0);
-ENV_PARAM_STR(STAGER_NUMA_GPU_MAP, "");    // Format: "0:0,1;1:2,3"
-ENV_PARAM_STR(STAGER_NUMA_NIC_MAP, "");    // Format: "0:mlx5_0,mlx5_1;1:mlx5_2"
+// Deprecated envs are no longer read directly in engine codepaths.
+// See CommunicatorConfig::FromEnvDeprecated for the gated loader used by the legacy shim.
 
 namespace {
 // One-time deprecation warning for legacy constructor usage
 std::atomic<bool> g_comm_engine_legacy_ctor_warned{false};
 
 inline tensorcast::communicator::CommunicatorConfig make_legacy_shim_config(bool enable_rdma) {
+  // Gate deprecated env usage; if allowed, build config from envs, else use
+  // typed defaults.
+  const char* gate = std::getenv("TENSORCAST_ALLOW_LEGACY_ENV");
+  if (gate && (*gate == '1' || *gate == 't' || *gate == 'T' || *gate == 'y' || *gate == 'Y')) {
+    return tensorcast::communicator::CommunicatorConfig::FromEnvDeprecated(enable_rdma, /*log_warnings=*/true);
+  }
   tensorcast::communicator::CommunicatorConfig cfg;
   cfg.enable_rdma = enable_rdma;
   cfg.transport.tcp_conn_count = tensorcast::communicator::kMTcpConnCount;
-  // All other fields use typed defaults defined in CommunicatorConfig.
   return cfg;
 }
 } // namespace
@@ -69,6 +69,7 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       config_(cfg),
       channel_expire_(channel_expire_sec) {
   common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
+  legacy_env_allowed_ = cfg.legacy_env_mode;
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
 
@@ -81,7 +82,7 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   const size_t cpu_chunk_size =
       (config_.stager.stage_chunk_mb_cpu > 0 ? config_.stager.stage_chunk_mb_cpu : 4) * 1024ull * 1024ull;
   const size_t num_buffers = (config_.stager.buffers_per_flow > 0 ? config_.stager.buffers_per_flow : 4);
-  const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS; // keep existing knob for now
+  const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
   const size_t total_pool_size = config_.pool.pool_size_bytes > 0
                                      ? config_.pool.pool_size_bytes
                                      : gpu_chunk_size * (num_buffers + recv_num_buffers);
@@ -105,6 +106,10 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   if (enable_rdma_) {
     rdma_context_ = std::make_shared<RdmaContext>();
     mr_cache_ = std::make_unique<MrCache>();
+    // Mark legacy env mode for guarded fallbacks
+    if (config_.legacy_env_mode) {
+      VLOG(1) << "CommunicateEngine constructed in legacy-env mode (guarded)";
+    }
 
     if (config_.simple_numa.enable) {
       for (const auto& node : config_.simple_numa.nodes) {
@@ -1121,16 +1126,23 @@ net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
       net_dev = rdma_context_->get_best_dev(dev_id);
     }
     if (net_dev == nullptr) {
-      if (DEFAULT_DEV.empty()) {
-        LOG(WARNING) << "failed to get net dev for gpu=" << dev_id;
-        return nullptr;
-      }
+      // If legacy env mode is allowed, honor TENSORCAST_COMM_DEFAULT_DEV as a fallback.
+      if (legacy_env_allowed_) {
+        std::string default_dev = get_env("TENSORCAST_COMM_DEFAULT_DEV", "");
+        if (default_dev.empty()) {
+          LOG(WARNING) << "failed to get net dev for gpu=" << dev_id;
+          return nullptr;
+        }
 
-      LOG(WARNING) << "failed to find a net dev for gpu" << dev_id << ", automatically, use the default net dev "
-                   << DEFAULT_DEV;
-      net_dev = rdma_context_->get_dev(DEFAULT_DEV);
-      if (net_dev == nullptr) {
-        LOG(WARNING) << "failed to get default net dev " << DEFAULT_DEV;
+        LOG(WARNING) << "failed to find a net dev for gpu" << dev_id
+                     << ", automatically, use the default net dev " << default_dev;
+        net_dev = rdma_context_->get_dev(default_dev);
+        if (net_dev == nullptr) {
+          LOG(WARNING) << "failed to get default net dev " << default_dev;
+          return nullptr;
+        }
+      } else {
+        LOG(WARNING) << "failed to get net dev for gpu=" << dev_id << "; no legacy env fallback allowed";
         return nullptr;
       }
     }
@@ -1169,7 +1181,7 @@ void CommunicateEngine::do_channel_gc_loop() {
     pairs.clear();
 
     // Reap expired staged RDMA segments if ACK missing
-    const uint64_t ttl_ms = ack_ttl_ms_ ? ack_ttl_ms_ : RDMA_ACK_TTL_MS;
+    const uint64_t ttl_ms = ack_ttl_ms_ ? ack_ttl_ms_ : 30000;
     if (ttl_ms > 0) {
       auto staged_pairs = staged_segments_.pairs();
       for (auto& kv : staged_pairs) {

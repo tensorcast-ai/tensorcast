@@ -169,6 +169,8 @@ namespace tensorcast::communicator {
   uint32_t ack_ttl_ms_ = 30000;
   CommunicatorConfig config_{}; // defaults unless provided
   std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
+  // True when constructed with legacy env config (PR-2 gate enabled)
+  bool legacy_env_allowed_ = false;
 
   uint64_t channel_expire_;
 
