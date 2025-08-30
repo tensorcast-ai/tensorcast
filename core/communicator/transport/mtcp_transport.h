@@ -17,6 +17,7 @@ extern "C" {
 #include <string>
 
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/metric.h"
@@ -108,6 +109,12 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   void set_conn_count(int conn_count);
   void set_gpu_tcp_stager(std::shared_ptr<GpuTcpStager> stager);
   void set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool);
+  void set_memory_stager(std::shared_ptr<MemoryStager> stager) {
+    memory_stager_ = std::move(stager);
+  }
+  void set_gpu_memory_stager(std::shared_ptr<MemoryStager> stager) {
+    gpu_memory_stager_ = std::move(stager);
+  }
 
  private:
   void server_loop();
@@ -140,10 +147,15 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 
   // GPU->CPU staging for TCP transport
   std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
+  // Unified GPU MemoryStager (preferred when provided)
+  std::shared_ptr<MemoryStager> gpu_memory_stager_;
 
   // GPU receive buffer management
   std::shared_ptr<store::PinnedMemoryPool> memory_pool_;
   std::unique_ptr<store::StreamingPinnedBuffer> gpu_recv_buffer_;
+
+  // Unified memory stager for CPU staging in TCP path
+  std::shared_ptr<MemoryStager> memory_stager_;
 
   // Track outstanding async tasks for proper cleanup
   mutable std::mutex async_tasks_mutex_;

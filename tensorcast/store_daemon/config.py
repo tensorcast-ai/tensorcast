@@ -27,6 +27,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from tensorcast.store_daemon.communicator_settings import CommunicatorSettings
 
 # ---------------------------------------------------------------------------
 # Section: artifact storage
@@ -204,6 +205,13 @@ class StoreDaemonConfig(BaseModel):
     shutdown: ShutdownConfig = Field(default_factory=lambda: ShutdownConfig())
     high_availability: HighAvailabilityConfig = Field(
         default_factory=lambda: HighAvailabilityConfig()
+    )
+
+    # Optional communicator (P2P engine) configuration. When provided, the
+    # daemon will initialize the communication engine using these typed
+    # settings instead of legacy environment-variable driven defaults.
+    communicator: CommunicatorSettings | None = Field(
+        default=None, description="Typed communicator engine settings"
     )
 
     # Optional global-store settings (kept at root level for clarity)

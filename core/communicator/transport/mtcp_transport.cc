@@ -448,13 +448,15 @@ void MTcpTransport::send_loop() {
         std::vector<future_chunk_result_t> results;
 
         // Check if tensor needs GPU->CPU staging
-        if (tensor->needs_staging() && gpu_tcp_stager_) {
+        if (tensor->needs_staging() && (gpu_memory_stager_ || gpu_tcp_stager_)) {
           // Handle GPU tensor with staging - process in batches to avoid buffer exhaustion
           VLOG(1) << "Staging GPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks";
 
           // Process chunks in batches to avoid exhausting staging buffers
           // Use a conservative batch size - leave one buffer free for pipelining
-          const int available_buffers = static_cast<int>(gpu_tcp_stager_->get_num_buffers());
+          const size_t stager_buffers = gpu_memory_stager_ ? gpu_memory_stager_->get_num_buffers()
+                                                           : gpu_tcp_stager_->get_num_buffers();
+          const int available_buffers = static_cast<int>(stager_buffers);
           const int batch_size = std::max(1, available_buffers - 1);
 
           bool staging_failed = false;
@@ -478,11 +480,19 @@ void MTcpTransport::send_loop() {
               uint64_t gpu_offset_in_real_chunk = 0;
 
               while (remain_gpu_bytes > 0) {
-                uint64_t gpu_chunk_size = std::min<uint64_t>(remain_gpu_bytes, gpu_tcp_stager_->get_chunk_size());
+                const size_t stager_chunk_size = gpu_memory_stager_ ? gpu_memory_stager_->get_chunk_size()
+                                                                    : gpu_tcp_stager_->get_chunk_size();
+                uint64_t gpu_chunk_size = std::min<uint64_t>(remain_gpu_bytes, stager_chunk_size);
 
-                // Stage synchronously for the sub-chunk
-                auto staged_result =
-                    gpu_tcp_stager_->stage(tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
+                // Stage synchronously for the sub-chunk using unified stager if available
+                absl::StatusOr<void*> staged_result = absl::InvalidArgumentError("");
+                if (gpu_memory_stager_) {
+                  staged_result = gpu_memory_stager_->stage(
+                      tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
+                } else {
+                  staged_result = gpu_tcp_stager_->stage(
+                      tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
+                }
 
                 if (!staged_result.ok()) {
                   LOG(ERROR) << "Failed to stage GPU data: " << staged_result.status();
@@ -502,10 +512,12 @@ void MTcpTransport::send_loop() {
 
                 // Asynchronously release the staged buffer after send completes
                 auto chunk_future = chunk->get_future();
-                auto stager = gpu_tcp_stager_; // Keep shared_ptr copy
+                // Keep a copy of the stager for the async releaser
+                auto stager_mem = gpu_memory_stager_;
+                auto stager_tcp = gpu_tcp_stager_;
                 auto release_future = std::async(
                     std::launch::async,
-                    [stager,
+                    [stager_mem, stager_tcp,
                      staged_ptr,
                      chunk_future = std::move(chunk_future),
                      idx,
@@ -513,7 +525,12 @@ void MTcpTransport::send_loop() {
                       VLOG(2) << "[MTcpTransport::send_loop] Release task #" << idx
                               << " waiting for send to complete (sub-chunk offset=" << gpu_offset_in_real_chunk << ")";
                       auto result = chunk_future.get();
-                      auto release_status = stager->release_staged_buffer(staged_ptr);
+                      absl::Status release_status;
+                      if (stager_mem) {
+                        release_status = stager_mem->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
+                      } else {
+                        release_status = stager_tcp->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
+                      }
                       if (!release_status.ok()) {
                         LOG(ERROR) << "Failed to release staged buffer: " << release_status;
                       }
@@ -550,17 +567,98 @@ void MTcpTransport::send_loop() {
             }
           }
         } else {
-          // Regular CPU tensor path
-          for (uint64_t offset = 0; offset < bytes; offset += chunk_size) {
-            auto real_chunk_size = chunk_size;
-            if (offset + real_chunk_size > bytes) {
-              real_chunk_size = bytes - offset;
+          // CPU tensor path
+          if (memory_stager_) {
+            // Stage CPU data into pinned buffers to avoid direct DVMP window exposure
+            VLOG(1) << "Staging CPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks";
+
+            const int available_buffers = static_cast<int>(memory_stager_->get_num_buffers());
+            const int batch_size = std::max(1, available_buffers - 1);
+
+            bool staging_failed = false;
+            for (uint64_t offset = 0; offset < bytes && !staging_failed;) {
+              std::vector<future_chunk_result_t> batch_results;
+              int batch_idx = 0;
+
+              while (batch_idx < batch_size && offset < bytes && idx < conn_count_ && !staging_failed) {
+                auto real_chunk_size = chunk_size;
+                if (offset + real_chunk_size > bytes) {
+                  real_chunk_size = bytes - offset;
+                }
+
+                uint64_t remain_bytes = real_chunk_size;
+                uint64_t sub_off = 0;
+
+                while (remain_bytes > 0) {
+                  uint64_t stager_chunk = std::min<uint64_t>(remain_bytes, memory_stager_->get_chunk_size());
+                  auto staged_or = memory_stager_->stage(tensor, global_offset + offset + sub_off, stager_chunk);
+                  if (!staged_or.ok()) {
+                    LOG(ERROR) << "Failed to stage CPU data: " << staged_or.status();
+                    // Fail remaining connections
+                    for (; idx < conn_count_; idx++) {
+                      auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
+                      fail_chunk->set_result(TRANSPORT_FAILED);
+                      results.push_back(fail_chunk->get_future());
+                    }
+                    staging_failed = true;
+                    break;
+                  }
+                  auto* staged_ptr = static_cast<uint8_t*>(*staged_or);
+                  auto chunk = std::make_shared<MTcpTransportChunk>(staged_ptr, stager_chunk);
+                  tasks_[idx]->push_send(chunk);
+
+                  auto chunk_future = chunk->get_future();
+                  auto stager = memory_stager_;
+                  auto release_future = std::async(
+                      std::launch::async,
+                      [stager, staged_ptr, chunk_future = std::move(chunk_future), idx, sub_off]() mutable {
+                        VLOG(2) << "[MTcpTransport::send_loop] CPU staged release task #" << idx
+                                << " waiting for send to complete (sub-off=" << sub_off << ")";
+                        auto result = chunk_future.get();
+                        auto st = stager->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
+                        if (!st.ok()) {
+                          LOG(ERROR) << "Failed to release CPU staged buffer: " << st;
+                        }
+                        return result;
+                      });
+                  batch_results.push_back(std::move(release_future));
+
+                  remain_bytes -= stager_chunk;
+                  sub_off += stager_chunk;
+                }
+
+                if (staging_failed) {
+                  break;
+                }
+
+                offset += real_chunk_size;
+                idx++;
+                batch_idx++;
+              }
+
+              if (offset < bytes && idx < conn_count_ && !staging_failed) {
+                for (auto& r : batch_results) {
+                  r.wait();
+                }
+              }
+
+              for (auto& r : batch_results) {
+                results.push_back(std::move(r));
+              }
             }
-            auto chunk = std::make_shared<MTcpTransportChunk>(
-                global_offset + offset + tensor->get_addr<uint8_t>(), real_chunk_size);
-            tasks_[idx]->push_send(chunk);
-            results.push_back(chunk->get_future());
-            idx++;
+          } else {
+            // Regular direct CPU send path
+            for (uint64_t offset = 0; offset < bytes; offset += chunk_size) {
+              auto real_chunk_size = chunk_size;
+              if (offset + real_chunk_size > bytes) {
+                real_chunk_size = bytes - offset;
+              }
+              auto chunk = std::make_shared<MTcpTransportChunk>(
+                  global_offset + offset + tensor->get_addr<uint8_t>(), real_chunk_size);
+              tasks_[idx]->push_send(chunk);
+              results.push_back(chunk->get_future());
+              idx++;
+            }
           }
         }
 

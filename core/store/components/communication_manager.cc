@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "core/store/components/uma_lease_provider.h"
 
 namespace tensorcast::store {
 
@@ -29,7 +30,29 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   }
 
   enabled_ = true;
+  // Inject UMA-backed lease provider for CPU staging (DRAM)
+  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
   VLOG(1) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
+  return absl::OkStatus();
+}
+
+absl::Status CommunicationManager::initialize_with_config(
+    const std::string& listen_addr,
+    uint16_t listen_port,
+    const communicator::CommunicatorConfig& config) {
+  comm_engine_ = std::make_shared<communicator::CommunicateEngine>(config);
+
+  auto status = comm_engine_->init(listen_addr, listen_port);
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to initialize communication engine (config): " << status.message();
+    comm_engine_.reset();
+    return status;
+  }
+
+  enabled_ = true;
+  // Inject UMA-backed lease provider for CPU staging (DRAM)
+  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
+  VLOG(1) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
 

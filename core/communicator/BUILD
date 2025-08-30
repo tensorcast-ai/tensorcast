@@ -133,6 +133,18 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "request_test",
+    srcs = ["transport/request_test.cc"],
+    deps = [
+        ":constants_lib",
+        ":request_lib",
+        ":partition_tensor_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Combined net_dev and partition_tensor to avoid circular dependency
 sc_cc_library(
     name = "partition_tensor_lib",
@@ -259,6 +271,7 @@ sc_cc_library(
     deps = [
         ":base_transport_lib",
         ":constants_lib",
+        ":memory_stager_lib",
         ":gpu_tcp_stager_lib",
         ":partition_tensor_lib",
         ":tcp_lib",
@@ -289,6 +302,51 @@ sc_cc_library(
     ],
 )
 
+# Unified memory stager interface
+sc_header_only_library(
+    name = "memory_stager_lib",
+    hdrs = ["engine/memory_stager.h"],
+    visibility = ["//visibility:public"],
+)
+
+# GPU Net Stager adapter (header-only)
+sc_header_only_library(
+    name = "gpu_net_stager_lib",
+    hdrs = ["engine/gpu_net_stager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":memory_stager_lib",
+        ":gpu_tcp_stager_lib",
+    ],
+)
+
+# UMA residency provider bridge (header-only)
+sc_header_only_library(
+    name = "uma_residency_provider_lib",
+    hdrs = ["engine/uma_residency_provider.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":channel_lib",
+        "//core/store:uma_lease_provider",
+    ],
+)
+
+# DRAM (CPU) stager implementation
+sc_cc_library(
+    name = "dram_stager_lib",
+    srcs = ["engine/dram_stager.cc"],
+    hdrs = ["engine/dram_stager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":memory_stager_lib",
+        ":partition_tensor_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
 sc_cc_library(
     name = "channel_lib",
     srcs = ["engine/channel.cc"],
@@ -309,6 +367,12 @@ sc_cc_library(
     deps = [
         ":channel_lib",
         ":constants_lib",
+        ":communicator_config_lib",
+        ":gpu_net_stager_lib",
+        ":uma_residency_provider_lib",
+        ":dram_stager_lib",
+        ":mr_cache_lib",
+        "//core/store:uma_lease_provider",
         ":envs_lib",
         ":message_lib",
         ":mtcp_transport_lib",
@@ -322,12 +386,34 @@ sc_cc_library(
         "//core/common:error_handling_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:system_capabilities_lib",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": ["@cudart"],
     }),
+)
+
+# MR cache for pinned buffers per PD
+sc_cc_library(
+    name = "mr_cache_lib",
+    srcs = ["engine/mr_cache.cc"],
+    hdrs = ["engine/mr_cache.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ibv_wrap_lib",
+        "@gsl//:gsl",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+# Communicator typed config (header-only for now)
+sc_header_only_library(
+    name = "communicator_config_lib",
+    hdrs = ["engine/communicator_config.h"],
+    visibility = ["//visibility:public"],
 )
 
 # Aggregate target removed; depend on specific libs instead.
@@ -339,6 +425,20 @@ cc_test(
     tags = ["rdma"],
     deps = [
         ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "direct_mr_policy_test",
+    srcs = ["engine/direct_mr_policy_test.cc"],
+    tags = ["rdma"],
+    deps = [
+        ":engine_lib",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/store:uma_lease_provider",
+        "//core/store/replica:replica_memory_coordinator",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

@@ -337,3 +337,52 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ### Code Fixing and Testing
 - When fixing tests, always first understand the actual functionality of the test and the code behind that functionality. Make the test match the functionality, rather than making the functionality match the original test (while also ensuring the functionality is reasonable)
+# Repository Guidelines
+
+## Project Structure & Module Organization
+- core/: C++20 core (checkpoint, store engine, communicator). Bazel-first builds.
+- tensorcast/: Python services and client libs (gRPC, PyTorch integration).
+- daemon/: C++ StoreDaemon service (launched by Python CLI).
+- proto/: Protocol Buffers used across components.
+- tests/: C++ and Python tests; C++ tests live next to code, Python under tests/python/.
+- rfcs/: Technical designs (e.g., unified stager, staged P2P).
+
+## Build, Test, and Development Commands
+- Build C++ core + Python extension:
+  ```bash
+  BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+  ```
+- Develop without GPUs (fake CUDA):
+  ```bash
+  USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+  bazel test //core/communicator:tcp_engine_test --define use_fake_cuda=true
+  ```
+- Run C++ tests (examples):
+  ```bash
+  bazel test //core/store:store_engine_test
+  bazel test //core/store/loader:disk_loader_streaming_buffer_test
+  ```
+- Run Python tests and quality:
+  ```bash
+  uv run pytest tests/python
+  uv run ruff check . && uv run ruff format .
+  uv run mypy ./tensorcast
+  ```
+- Regenerate protobufs after .proto changes:
+  ```bash
+  bash tools/build_proto_python.sh
+  ```
+
+## Coding Style & Naming Conventions
+- C++: C++20, Bazel with sc_cc_library targets; naming — snake_case (vars/funcs), PascalCase (types), ALL_CAPS (consts/macros). Prefer early returns, RAII, absl::Status/StatusOr; logging via LOG/CHECK/VLOG.
+- Python: 3.10+, type hints required; prefer functional style; use Pydantic models for validation; avoid dynamic getattr/hasattr.
+- Formatting: use clang-tidy for C++ and ruff for Python. Keep changes minimal and consistent with neighbors.
+
+## Testing Guidelines
+- Frameworks: Catch2 (C++) and pytest (Python).
+- Placement: C++ tests beside sources; Python under tests/python/ with test_*.py names.
+- Running: prefer Bazel for C++ (see above) and uv run pytest for Python. Use fake CUDA for GPU paths when no hardware is available.
+
+## Commit & Pull Request Guidelines
+- Commits: concise subject, imperative mood; explain why and what. Scope changes to a single concern.
+- PRs: include description, linked issues, test plan (commands + results), and impact notes (e.g., proto changes require running tools/build_proto_python.sh). Update docs (web-docs/sidebars.ts) if moving/adding docs.

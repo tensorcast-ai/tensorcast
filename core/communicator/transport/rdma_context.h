@@ -42,6 +42,9 @@ class RdmaContext {
 
   rdma_transport_t create_transport(const std::string& dev_name);
 
+  // Expose list of RDMA devices for warmup/registration.
+  const std::vector<net_dev_t>& list_devs() const { return devs_; }
+
  private:
   result_t ibv_init();
 

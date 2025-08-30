@@ -8,6 +8,7 @@
 #include "absl/strings/str_format.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/replica/transfer_constants.h"
+#include "core/store/components/uma_lease_provider.h"
 
 namespace tensorcast::store {
 
@@ -66,20 +67,15 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     auto ranges = coalesce_ranges(std::move(chunk_vec));
     constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
     size_t range_idx = 0;
-    rec.cpu_tokens.reserve(ranges.size());
+    // NOTE: Phase 1 — do not hold DVMP pin leases across the export lifetime.
+    // Staging in the transport path will memcpy into pinned buffers and release
+    // any short-lived leases immediately (to be added in a later phase).
     for (const auto& [start, end] : ranges) {
       uint64_t va_off = static_cast<uint64_t>(start) * kChunk;
       uint64_t va_end = std::min<uint64_t>(info.artifact_size, (static_cast<uint64_t>(end) + 1) * kChunk);
       uint64_t length = (va_end > va_off) ? (va_end - va_off) : 0;
       if (length == 0)
         continue;
-
-      // Acquire pin lease via UMA direct write token (encapsulates DVMP pin)
-      std::array<VaRange, 1> one{{VaRange{va_off, length}}};
-      auto token_or = uma_->create_direct_write_token(key, absl::MakeSpan(one));
-      if (!token_or.ok())
-        return token_or.status();
-      rec.cpu_tokens.push_back(std::move(*token_or));
 
       // Bounds check before pointer arithmetic
       if (va_off >= info.artifact_size) {
@@ -88,7 +84,18 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.artifact_id, range_idx++);
-      auto ret = comm_engine.register_tensor(tensor_key, addr, length, info.comm_dev_type, info.device_id);
+      communicator::CommunicateEngine::RegisterTensorOptions opts;
+      // Avoid registering an MR for DVMP logical windows; CPU path will be staged for TCP
+      opts.register_mr = false;
+      // Hint: CPU staged when policy requires. For Phase 1 (TCP), staging happens in transport.
+      opts.needs_staging = false;
+      opts.async = false;
+      // Register UMA lease mapping for this exported DVMP window to support
+      // short-lived pin leases during staged transfers.
+      store::UmaLeaseProvider::instance()->register_mapping(tensor_key, key, va_off, uma_);
+
+      auto ret = comm_engine.register_tensor_ex(
+          tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
         return absl::InternalError("Failed to register CPU chunk-range tensor");
       }

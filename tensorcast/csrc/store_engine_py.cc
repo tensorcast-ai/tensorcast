@@ -21,6 +21,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/communicator/engine/communicator_config.h"
 
 namespace py = pybind11;
 
@@ -626,6 +627,91 @@ Missing keys fall back to sensible defaults.)pbdoc");
 shared CommunicateEngine. Use this instance to inject the engine into
 StoreEngineOptions so multiple StoreEngine objects share the same
 transport layer.)pbdoc")
+      .def_static(
+          "from_config",
+          [](const std::string& listen_addr, uint16_t port, const py::dict& cfg) {
+            using tensorcast::communicator::CommunicatorConfig;
+            CommunicatorConfig ccfg;
+            auto get_bool = [&cfg](const char* key, bool fb) {
+              if (cfg.contains(key) && !cfg[key].is_none()) return cfg[key].cast<bool>();
+              return fb;
+            };
+            ccfg.enable_rdma = get_bool("enable_rdma", ccfg.enable_rdma);
+
+            if (cfg.contains("stager") && !cfg["stager"].is_none()) {
+              auto st = cfg["stager"].cast<py::dict>();
+              auto gb = [&st](const char* k, bool fb) { return (st.contains(k) && !st[k].is_none()) ? st[k].cast<bool>() : fb; };
+              auto gi = [&st](const char* k, int fb) { return (st.contains(k) && !st[k].is_none()) ? st[k].cast<int>() : fb; };
+              auto gu32 = [&st](const char* k, uint32_t fb) { return (st.contains(k) && !st[k].is_none()) ? st[k].cast<uint32_t>() : fb; };
+              ccfg.stager.stage_cpu_for_rdma = gb("stage_cpu_for_rdma", ccfg.stager.stage_cpu_for_rdma);
+              ccfg.stager.direct_mr_max_bytes = gu32("direct_mr_max_bytes", ccfg.stager.direct_mr_max_bytes);
+              ccfg.stager.max_inflight_direct_mr = gi("max_inflight_direct_mr", ccfg.stager.max_inflight_direct_mr);
+              ccfg.stager.stage_chunk_mb_cpu = gu32("stage_chunk_mb_cpu", ccfg.stager.stage_chunk_mb_cpu);
+              ccfg.stager.stage_chunk_mb_gpu = gu32("stage_chunk_mb_gpu", ccfg.stager.stage_chunk_mb_gpu);
+              ccfg.stager.buffers_per_flow = gi("buffers_per_flow", ccfg.stager.buffers_per_flow);
+            }
+            if (cfg.contains("rdma") && !cfg["rdma"].is_none()) {
+              auto rd = cfg["rdma"].cast<py::dict>();
+              auto gi = [&rd](const char* k, int fb) { return (rd.contains(k) && !rd[k].is_none()) ? rd[k].cast<int>() : fb; };
+              auto gu32 = [&rd](const char* k, uint32_t fb) { return (rd.contains(k) && !rd[k].is_none()) ? rd[k].cast<uint32_t>() : fb; };
+              ccfg.rdma.outstanding_wr = gi("outstanding_wr", ccfg.rdma.outstanding_wr);
+              ccfg.rdma.ack_ttl_ms = gu32("ack_ttl_ms", ccfg.rdma.ack_ttl_ms);
+            }
+            if (cfg.contains("pool") && !cfg["pool"].is_none()) {
+              auto pl = cfg["pool"].cast<py::dict>();
+              auto gb = [&pl](const char* k, bool fb) { return (pl.contains(k) && !pl[k].is_none()) ? pl[k].cast<bool>() : fb; };
+              auto gu64 = [&pl](const char* k, uint64_t fb) { return (pl.contains(k) && !pl[k].is_none()) ? pl[k].cast<uint64_t>() : fb; };
+              ccfg.pool.preregister_mr = gb("preregister_mr", ccfg.pool.preregister_mr);
+              ccfg.pool.pool_size_bytes = gu64("pool_size_bytes", ccfg.pool.pool_size_bytes);
+              ccfg.pool.chunk_bytes = gu64("chunk_bytes", ccfg.pool.chunk_bytes);
+            }
+            if (cfg.contains("transport") && !cfg["transport"].is_none()) {
+              auto tr = cfg["transport"].cast<py::dict>();
+              auto gi = [&tr](const char* k, int fb) { return (tr.contains(k) && !tr[k].is_none()) ? tr[k].cast<int>() : fb; };
+              ccfg.transport.tcp_conn_count = gi("tcp_conn_count", ccfg.transport.tcp_conn_count);
+            }
+            if (cfg.contains("affinity") && !cfg["affinity"].is_none()) {
+              auto af = cfg["affinity"].cast<py::dict>();
+              auto gb = [&af](const char* k, bool fb) { return (af.contains(k) && !af[k].is_none()) ? af[k].cast<bool>() : fb; };
+              ccfg.affinity.enable = gb("enable", ccfg.affinity.enable);
+            }
+            if (cfg.contains("simple_numa") && !cfg["simple_numa"].is_none()) {
+              auto sn = cfg["simple_numa"].cast<py::dict>();
+              auto gb = [&sn](const char* k, bool fb) { return (sn.contains(k) && !sn[k].is_none()) ? sn[k].cast<bool>() : fb; };
+              ccfg.simple_numa.enable = gb("enable", ccfg.simple_numa.enable);
+              if (sn.contains("nodes") && !sn["nodes"].is_none()) {
+                auto nodes = sn["nodes"].cast<py::list>();
+                ccfg.simple_numa.nodes.clear();
+                for (auto item : nodes) {
+                  auto nd = item.cast<py::dict>();
+                  tensorcast::communicator::SimpleNumaNode node{};
+                  if (nd.contains("id") && !nd["id"].is_none()) node.id = nd["id"].cast<int>();
+                  if (nd.contains("is_default") && !nd["is_default"].is_none()) node.is_default = nd["is_default"].cast<bool>();
+                  if (nd.contains("nics") && !nd["nics"].is_none()) node.nics = nd["nics"].cast<std::vector<std::string>>();
+                  if (nd.contains("gpus") && !nd["gpus"].is_none()) node.gpus = nd["gpus"].cast<std::vector<int>>();
+                  ccfg.simple_numa.nodes.emplace_back(std::move(node));
+                }
+              }
+            }
+
+            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+            absl::Status st;
+            {
+              py::gil_scoped_release release;
+              st = mgr->initialize_with_config(listen_addr, port, ccfg);
+            }
+            if (!st.ok()) {
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
+            }
+            return mgr;
+          },
+          py::arg("listen_addr") = std::string("0.0.0.0"),
+          py::arg("port") = 9090,
+          py::arg("config"),
+          R"pbdoc(Create a CommunicationManager from a typed communicator config dict.
+
+Dict schema mirrors CommunicatorSettings (stager/rdma/pool/transport/affinity).
+This overload calls the typed-config initialization path in C++.)pbdoc")
       .def(
           "is_enabled",
           &tensorcast::store::CommunicationManager::is_enabled,

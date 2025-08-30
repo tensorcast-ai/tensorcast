@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/engine/communicator_config.h"
 #include "core/store/communication_types.h"
 
 namespace tensorcast::store {
@@ -47,6 +48,12 @@ class CommunicationManager {
    * @return Status indicating success or failure.
    */
   absl::Status initialize(const std::string& listen_addr, uint16_t listen_port, bool enable_rdma = false);
+
+  // Initialize with typed communicator config
+  absl::Status initialize_with_config(
+      const std::string& listen_addr,
+      uint16_t listen_port,
+      const tensorcast::communicator::CommunicatorConfig& config);
 
   /**
    * @brief Check if communication is enabled.

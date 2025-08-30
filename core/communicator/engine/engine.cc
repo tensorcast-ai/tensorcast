@@ -8,12 +8,18 @@
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_split.h"
+#include "absl/strings/ascii.h"
 
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/engine/engine.h"
+#include "core/communicator/engine/dram_stager.h"
 #include "core/communicator/engine/message.h"
+#include "core/communicator/engine/gpu_net_stager.h"
 #include "core/communicator/engine/protocol.h"
+#include "core/communicator/engine/uma_residency_provider.h"
 #include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
@@ -24,6 +30,10 @@ ENV_PARAM_STR(DEFAULT_DEV, "");
 ENV_PARAM(GPU_TCP_STAGER_CHUNK_SIZE_MB, 64); // Default 64MB chunks
 ENV_PARAM(GPU_TCP_STAGER_NUM_BUFFERS, 2); // Default 2 buffers for double buffering
 ENV_PARAM(GPU_TCP_RECV_NUM_BUFFERS, 4); // Default 4 buffers for GPU receive operations
+ENV_PARAM(RDMA_ACK_TTL_MS, 30000);
+ENV_PARAM(STAGER_NUMA_ENABLE, 0);
+ENV_PARAM_STR(STAGER_NUMA_GPU_MAP, "");    // Format: "0:0,1;1:2,3"
+ENV_PARAM_STR(STAGER_NUMA_NIC_MAP, "");    // Format: "0:mlx5_0,mlx5_1;1:mlx5_2"
 
 CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_sec)
     : stop_(false),
@@ -38,23 +48,219 @@ CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_s
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
 
+  // Default UMA-backed residency provider
+  residency_provider_ = std::make_shared<UmaResidencyProvider>();
+
+  // Staging resources (always available)
+  const size_t chunk_size = GPU_TCP_STAGER_CHUNK_SIZE_MB * 1024 * 1024;
+  const size_t num_buffers = GPU_TCP_STAGER_NUM_BUFFERS;
+  const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS;
+  const size_t total_pool_size = chunk_size * (num_buffers + recv_num_buffers);
+
+  gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
+  gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, gpu_memory_pool_);
+  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_tcp_stager_);
+  memory_stager_ = std::make_shared<DRAMStager>(gpu_memory_pool_, /*num_buffers_hint=*/num_buffers);
+  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
+    ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+  }
+
+  VLOG(2) << "Initialized stagers with " << num_buffers << " buffers of " << GPU_TCP_STAGER_CHUNK_SIZE_MB
+          << " MB each; shared pinned pool size " << total_pool_size / (1024 * 1024) << " MB";
+
   if (enable_rdma_) {
     rdma_context_ = std::make_shared<RdmaContext>();
-  } else {
-    const size_t chunk_size = GPU_TCP_STAGER_CHUNK_SIZE_MB * 1024 * 1024;
-    const size_t num_buffers = GPU_TCP_STAGER_NUM_BUFFERS;
+    mr_cache_ = std::make_unique<MrCache>();
 
-    // Create a shared memory pool for both staging and receiving
-    // The pool should be large enough for both send and receive operations
-    const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS;
-    const size_t total_pool_size = chunk_size * (num_buffers + recv_num_buffers);
+    // If NUMA mapping is enabled, construct per-node pools & stagers
+    if (STAGER_NUMA_ENABLE) {
+      // Parse maps: node->GPU ids and node->NIC names
+      std::unordered_map<int, std::vector<int>> node_gpus;
+      std::unordered_map<int, std::vector<std::string>> node_nics;
+      auto parse_gpu_map = [](const std::string& s) {
+        std::unordered_map<int, std::vector<int>> out;
+        for (absl::string_view part : absl::StrSplit(s, ';', absl::SkipEmpty())) {
+          part = absl::StripAsciiWhitespace(part);
+          size_t pos = part.find(':');
+          if (pos == absl::string_view::npos) continue;
+          absl::string_view node_sv = absl::StripAsciiWhitespace(part.substr(0, pos));
+          absl::string_view list_sv = absl::StripAsciiWhitespace(part.substr(pos + 1));
+          int node_id = 0;
+          if (!absl::SimpleAtoi(node_sv, &node_id)) continue;
+          std::vector<int> ids;
+          for (absl::string_view idsv : absl::StrSplit(list_sv, ',', absl::SkipEmpty())) {
+            idsv = absl::StripAsciiWhitespace(idsv);
+            int id = -1;
+            if (absl::SimpleAtoi(idsv, &id)) ids.push_back(id);
+          }
+          if (!ids.empty()) out[node_id] = std::move(ids);
+        }
+        return out;
+      };
+      auto parse_nic_map = [](const std::string& s) {
+        std::unordered_map<int, std::vector<std::string>> out;
+        for (absl::string_view part : absl::StrSplit(s, ';', absl::SkipEmpty())) {
+          part = absl::StripAsciiWhitespace(part);
+          size_t pos = part.find(':');
+          if (pos == absl::string_view::npos) continue;
+          absl::string_view node_sv = absl::StripAsciiWhitespace(part.substr(0, pos));
+          absl::string_view list_sv = absl::StripAsciiWhitespace(part.substr(pos + 1));
+          int node_id = 0;
+          if (!absl::SimpleAtoi(node_sv, &node_id)) continue;
+          std::vector<std::string> names;
+          for (absl::string_view nsv : absl::StrSplit(list_sv, ',', absl::SkipEmpty())) {
+            nsv = absl::StripAsciiWhitespace(nsv);
+            if (!nsv.empty()) names.emplace_back(nsv);
+          }
+          if (!names.empty()) out[node_id] = std::move(names);
+        }
+        return out;
+      };
 
-    gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
-    gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, gpu_memory_pool_);
+      node_gpus = parse_gpu_map(STAGER_NUMA_GPU_MAP);
+      node_nics = parse_nic_map(STAGER_NUMA_NIC_MAP);
 
-    VLOG(2) << "Initialized GPU TCP stager with " << num_buffers << " buffers of " << GPU_TCP_STAGER_CHUNK_SIZE_MB
-            << " MB each";
-    VLOG(2) << "Initialized shared pinned memory pool with total size " << total_pool_size / (1024 * 1024) << " MB";
+      // Build set of unique node ids
+      std::unordered_set<int> node_ids;
+      for (auto& kv : node_gpus) node_ids.insert(kv.first);
+      for (auto& kv : node_nics) node_ids.insert(kv.first);
+
+      for (int node_id : node_ids) {
+        auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
+        numa_pools_.push_back(pool);
+        auto cpu_stager = std::make_shared<DRAMStager>(pool, /*num_buffers_hint=*/num_buffers);
+        if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
+          ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+        }
+        auto gpu_stager = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, pool);
+        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_stager);
+
+        // Map GPU ids
+        auto itg = node_gpus.find(node_id);
+        if (itg != node_gpus.end()) {
+          for (int gid : itg->second) {
+            gpu_stagers_[gid] = gpu_stager;
+            gpu_mem_stagers_[gid] = gpu_mem_stager;
+          }
+        }
+        // Map NIC names
+        auto itn = node_nics.find(node_id);
+        if (itn != node_nics.end()) {
+          for (const auto& nic : itn->second) {
+            nic_cpu_stagers_[nic] = cpu_stager;
+          }
+        }
+      }
+    }
+
+    // Pre-register MRs for all pool buffers across available PDs (default and NUMA pools)
+    int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+    std::vector<std::shared_ptr<store::PinnedMemoryPool>> pools;
+    pools.push_back(gpu_memory_pool_);
+    for (auto& p : numa_pools_) pools.push_back(p);
+    for (const auto& dev : rdma_context_->list_devs()) {
+      for (auto& pool : pools) {
+        auto buffers = pool->list_buffers();
+        for (auto ptr : buffers) {
+          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->chunk_size(), access);
+          if (mr == nullptr) {
+            LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
+          }
+        }
+      }
+    }
+  }
+}
+
+CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t channel_expire_sec)
+    : stop_(false),
+      inited_(false),
+      server_context_(new TcpContext()),
+      client_context_(new TcpContext()),
+      enable_rdma_(cfg.enable_rdma),
+      mtcp_conn_count_(cfg.transport.tcp_conn_count),
+      ack_ttl_ms_(cfg.rdma.ack_ttl_ms),
+      config_(cfg),
+      channel_expire_(channel_expire_sec) {
+  common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
+  request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
+  gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
+
+  // Default UMA-backed residency provider
+  residency_provider_ = std::make_shared<UmaResidencyProvider>();
+
+  // Staging resources sized from config
+  const size_t gpu_chunk_size =
+      (config_.stager.stage_chunk_mb_gpu > 0 ? config_.stager.stage_chunk_mb_gpu : 16) * 1024ull * 1024ull;
+  const size_t cpu_chunk_size =
+      (config_.stager.stage_chunk_mb_cpu > 0 ? config_.stager.stage_chunk_mb_cpu : 4) * 1024ull * 1024ull;
+  const size_t num_buffers = (config_.stager.buffers_per_flow > 0 ? config_.stager.buffers_per_flow : 4);
+  const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS; // keep existing knob for now
+  const size_t total_pool_size = config_.pool.pool_size_bytes > 0
+                                     ? config_.pool.pool_size_bytes
+                                     : gpu_chunk_size * (num_buffers + recv_num_buffers);
+
+  // GPU staging pool and stager
+  gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
+  gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
+  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_tcp_stager_);
+
+  // CPU staging pool honors CPU chunk size; size conservatively for one flow
+  if (cpu_chunk_size != gpu_chunk_size) {
+    const size_t cpu_pool_size = cpu_chunk_size * num_buffers; // minimal to honor buffers_per_flow
+    cpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(cpu_pool_size, cpu_chunk_size);
+  }
+  auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
+  memory_stager_ = std::make_shared<DRAMStager>(dram_pool, /*num_buffers_hint=*/num_buffers);
+  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
+    ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+  }
+
+  if (enable_rdma_) {
+    rdma_context_ = std::make_shared<RdmaContext>();
+    mr_cache_ = std::make_unique<MrCache>();
+
+    if (config_.simple_numa.enable) {
+      for (const auto& node : config_.simple_numa.nodes) {
+        auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
+        numa_pools_.push_back(pool);
+        auto cpu_stager = std::make_shared<DRAMStager>(pool, /*num_buffers_hint=*/num_buffers);
+        if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
+          ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+        }
+        auto gpu_stager = std::make_shared<GpuTcpStager>(gpu_chunk_size, num_buffers, pool);
+        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_stager);
+        // Map GPU ids
+        for (int gid : node.gpus) {
+          gpu_stagers_[gid] = gpu_stager;
+          gpu_mem_stagers_[gid] = gpu_mem_stager;
+        }
+        // Map NIC names
+        for (const auto& nic : node.nics) {
+          nic_cpu_stagers_[nic] = cpu_stager;
+        }
+      }
+    }
+
+    // Preregister MRs for all pools
+    int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+    std::vector<std::shared_ptr<store::PinnedMemoryPool>> pools;
+    pools.push_back(gpu_memory_pool_);
+    if (cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
+      pools.push_back(cpu_memory_pool_);
+    }
+    for (auto& p : numa_pools_) pools.push_back(p);
+    for (const auto& dev : rdma_context_->list_devs()) {
+      for (auto& pool : pools) {
+        auto buffers = pool->list_buffers();
+        for (auto ptr : buffers) {
+          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->chunk_size(), access);
+          if (mr == nullptr) {
+            LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
+          }
+        }
+      }
+    }
   }
 }
 
@@ -74,6 +280,19 @@ CommunicateEngine::~CommunicateEngine() {
   }
 
   pending_requests_.clear();
+}
+
+void CommunicateEngine::set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider) {
+  if (!memory_stager_) return;
+  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
+    ds->set_lease_provider(std::move(provider));
+  }
+  // Also propagate to NUMA CPU stagers if present
+  for (auto& kv : nic_cpu_stagers_) {
+    if (auto ds2 = std::dynamic_pointer_cast<DRAMStager>(kv.second)) {
+      ds2->set_lease_provider(provider);
+    }
+  }
 }
 
 absl::Status CommunicateEngine::init(const std::string& ip, uint16_t port, int conn_count) {
@@ -138,6 +357,20 @@ absl::Status CommunicateEngine::register_tensor(
     int dev_type,
     int dev_id,
     bool async) {
+  RegisterTensorOptions opts;
+  opts.register_mr = true;
+  opts.needs_staging = (!enable_rdma_ && dev_type == COMMUNICATE_ENGINE_DEV_GPU);
+  opts.async = async;
+  return register_tensor_ex(tensor_key, addr, bytes, dev_type, dev_id, opts);
+}
+
+absl::Status CommunicateEngine::register_tensor_ex(
+    const std::string& tensor_key,
+    uint64_t addr,
+    uint64_t bytes,
+    int dev_type,
+    int dev_id,
+    const RegisterTensorOptions& opts) {
   // Check for zero-size tensor
   if (bytes == 0) {
     return absl::InvalidArgumentError("Cannot register zero-size tensor");
@@ -170,14 +403,14 @@ absl::Status CommunicateEngine::register_tensor(
     tensor->set_device_id(dev_id);
   }
 
-  // Mark tensors that need GPU->CPU staging in TCP mode
-  if (!enable_rdma_ && dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
+  // Mark tensors that need staging if requested by policy
+  if (opts.needs_staging) {
     tensor->set_needs_staging(true);
   }
 
-  if (enable_rdma_) {
+  if (enable_rdma_ && opts.register_mr) {
     net_dev->reg_async(tensor);
-    if (!async) {
+    if (!opts.async) {
       if (tensor->get_mr() == nullptr) {
         return absl::InternalError("failed to register mr");
       }
@@ -449,38 +682,314 @@ result_t CommunicateEngine::on_receive_request(
         payload->reason = TENSORCAST_READ_FAILED_OVERFLOW;
         COMM_CHECK(t->send(rsp));
       } else {
-        auto rsp = EngineMessage::make_message<ProtoReadResponse>(ENGINE_OP_READ_RESPONSE);
-        auto* payload = rsp->get_payload<ProtoReadResponse>();
-        memcpy(payload->tensor_key, req->tensor_key, kMaxTensorNameLen);
-        payload->offset = req->offset;
+        // Build response depending on transport type
         if (enable_rdma_ && req->transport_type == ENGINE_TRANSPORT_RDMA) {
-          payload->transport_type = ENGINE_TRANSPORT_RDMA;
           auto dev = tensor->get_dev();
-          STRNCPY(payload->nic_name, dev->get_name(), kMaxDevName);
           tensor->wait_read_ready();
-          auto* mr = tensor->get_mr();
-          payload->addr = tensor->get_uint64_addr() + req->offset;
-          payload->rkey = mr->rkey;
-          payload->bytes = req->bytes;
+
+          // Determine if staging is needed and compute segmenting
+          bool use_direct_cpu_mr = false;
+          bool do_stage = false;
+          if (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) {
+            if (config_.stager.stage_cpu_for_rdma) {
+              do_stage = true;
+            } else {
+              const bool under_size = req->bytes <= config_.stager.direct_mr_max_bytes;
+              const bool under_inflight = inflight_direct_mr_.load() < config_.stager.max_inflight_direct_mr;
+              const bool hot = residency_provider_ && residency_provider_->is_hot(tensor_key, req->offset, req->bytes);
+              use_direct_cpu_mr = under_size && under_inflight && hot;
+              do_stage = !use_direct_cpu_mr;
+            }
+          } else {
+            // GPU is always staged (TCP or RDMA)
+            do_stage = true;
+          }
+          size_t max_seg_bytes = static_cast<size_t>(req->bytes);
+          std::shared_ptr<MemoryStager> cpu_stager_sptr;
+          std::shared_ptr<MemoryStager> gpu_stager_sptr;
+          if (do_stage) {
+            if (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) {
+              cpu_stager_sptr = get_cpu_stager_for_nic(dev->get_name());
+              if (!cpu_stager_sptr) cpu_stager_sptr = memory_stager_;
+              max_seg_bytes = cpu_stager_sptr ? cpu_stager_sptr->get_chunk_size() : static_cast<size_t>(req->bytes);
+            } else {
+              gpu_stager_sptr = get_gpu_mem_stager_for_id(tensor->get_device_id());
+              if (!gpu_stager_sptr) gpu_stager_sptr = gpu_memory_stager_;
+              max_seg_bytes = gpu_stager_sptr ? gpu_stager_sptr->get_chunk_size() : static_cast<size_t>(req->bytes);
+            }
+            if (max_seg_bytes == 0) max_seg_bytes = static_cast<size_t>(req->bytes);
+          }
+
+          const uint64_t total = req->bytes;
+          const uint64_t start_off = req->offset;
+          // Avoid per-segment mixed modes: if using direct MR for CPU, use a single segment
+          uint32_t num_segments = do_stage ? static_cast<uint32_t>((total + max_seg_bytes - 1) / max_seg_bytes) : 1u;
+
+          // Allocate EX message with all segments
+          auto rsp = std::make_shared<EngineMessage>(
+              ENGINE_OP_READ_RESPONSE_EX,
+              static_cast<uint32_t>(sizeof(ProtoReadResponseExHeader) + num_segments * sizeof(ProtoReadResponseExSeg)));
+          auto* hdr = rsp->get_payload<ProtoReadResponseExHeader>();
+          memcpy(hdr->tensor_key, req->tensor_key, kMaxTensorNameLen);
+          hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+          hdr->staged = 0;
+          STRNCPY(hdr->nic_name, dev->get_name(), kMaxDevName);
+          hdr->num_segments = num_segments;
+
+          for (uint32_t i = 0; i < num_segments; ++i) {
+            uint64_t off = start_off + static_cast<uint64_t>(i) * max_seg_bytes;
+            uint64_t remain = total - (off - start_off);
+            uint32_t seg_bytes = static_cast<uint32_t>(std::min<uint64_t>(remain, max_seg_bytes));
+            auto* seg_pl = reinterpret_cast<ProtoReadResponseExSeg*>(
+                reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
+            seg_pl->offset = off;
+            seg_pl->bytes = seg_bytes;
+            if (do_stage) {
+              void* host_ptr = nullptr;
+              struct ibv_mr* staged_mr = nullptr;
+              int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+              MemoryStager* used_stager = nullptr;
+              if (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) {
+                CHECK(cpu_stager_sptr != nullptr) << "CPU staging requested but MemoryStager is null";
+                used_stager = cpu_stager_sptr.get();
+                auto staged = cpu_stager_sptr->stage(tensor, off, seg_bytes);
+                if (!staged.ok()) {
+                  auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                  auto* pf = rspf->get_payload<ProtoReadFailed>();
+                  memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                  pf->offset = off;
+                  pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                  COMM_CHECK(t->send(rspf));
+                  break;
+                }
+                host_ptr = *staged;
+              } else {
+                CHECK(gpu_stager_sptr != nullptr) << "GPU staging requested but MemoryStager is null";
+                used_stager = gpu_stager_sptr.get();
+                auto staged = gpu_stager_sptr->stage(tensor, off, seg_bytes);
+                if (!staged.ok()) {
+                  auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                  auto* pf = rspf->get_payload<ProtoReadFailed>();
+                  memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                  pf->offset = off;
+                  pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                  COMM_CHECK(t->send(rspf));
+                  break;
+                }
+                host_ptr = *staged;
+              }
+
+              if (mr_cache_) {
+                staged_mr = mr_cache_->get_or_register(dev->get_pd(), gsl::not_null<void*>{host_ptr}, seg_bytes, access);
+                if (staged_mr == nullptr) {
+                  auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                  auto* pf = rspf->get_payload<ProtoReadFailed>();
+                  memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                  pf->offset = off;
+                  pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                  COMM_CHECK(t->send(rspf));
+                  break;
+                }
+              } else {
+                if (dev->reg_mr(&staged_mr, host_ptr, seg_bytes, access) != SUCCESS) {
+                  auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                  auto* pf = rspf->get_payload<ProtoReadFailed>();
+                  memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                  pf->offset = off;
+                  pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                  COMM_CHECK(t->send(rspf));
+                  break;
+                }
+              }
+              seg_pl->addr = reinterpret_cast<uint64_t>(host_ptr);
+              seg_pl->rkey = staged_mr->rkey;
+              hdr->staged = 1;
+
+              StagedRdmaSegment seg;
+              seg.ptr = host_ptr;
+              seg.bytes = seg_bytes;
+              seg.mr = staged_mr;
+              seg.kind = (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU) ?
+                             StagedRdmaSegment::Kind::CPU :
+                             StagedRdmaSegment::Kind::GPU;
+              seg.ts_us = get_us();
+              seg.deregister_mr = (mr_cache_ == nullptr);
+              seg.stager_ptr = used_stager;
+              const std::string seg_req_key = get_request_key(tensor_key, off);
+              {
+                absl::MutexLock lk(&staged_mu_);
+                staged_segments_.put(seg_req_key, std::move(seg));
+              }
+            } else {
+              const uint64_t addr_u64 = tensor->get_uint64_addr() + off;
+              struct ibv_mr* use_mr = tensor->get_mr();
+              int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+              bool ephemeral = false;
+              if (use_mr == nullptr && use_direct_cpu_mr) {
+                // Register an ephemeral MR for this small CPU slab
+                if (dev->reg_mr(&use_mr, reinterpret_cast<void*>(addr_u64), seg_bytes, access) != SUCCESS) {
+                  auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                  auto* pf = rspf->get_payload<ProtoReadFailed>();
+                  memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                  pf->offset = off;
+                  pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                  COMM_CHECK(t->send(rspf));
+                  break;
+                }
+                ephemeral = true;
+                inflight_direct_mr_.fetch_add(1);
+              }
+              if (use_mr == nullptr) {
+                auto rspf = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+                auto* pf = rspf->get_payload<ProtoReadFailed>();
+                memcpy(pf->tensor_key, req->tensor_key, kMaxTensorNameLen);
+                pf->offset = off;
+                pf->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+                COMM_CHECK(t->send(rspf));
+                break;
+              }
+              seg_pl->addr = addr_u64;
+              seg_pl->rkey = use_mr->rkey;
+              if (ephemeral) {
+                // Track for TTL-based deregistration (no ACK for direct MR)
+                StagedRdmaSegment seg;
+                seg.ptr = nullptr;
+                seg.bytes = seg_bytes;
+                seg.mr = use_mr;
+                seg.kind = StagedRdmaSegment::Kind::CPU;
+                seg.ts_us = get_us();
+                seg.deregister_mr = true;
+                seg.stager_ptr = nullptr;
+                const std::string seg_req_key = get_request_key(tensor_key, off);
+                {
+                  absl::MutexLock lk(&staged_mu_);
+                  staged_segments_.put(seg_req_key, std::move(seg));
+                }
+              }
+            }
+          }
+          COMM_CHECK(t->send(rsp));
         } else {
-          // using mtcp transport
+          // MTCP path: stream data and reply with legacy READ_RESPONSE for compatibility
+          auto rsp = EngineMessage::make_message<ProtoReadResponse>(ENGINE_OP_READ_RESPONSE);
+          auto* payload = rsp->get_payload<ProtoReadResponse>();
+          memcpy(payload->tensor_key, req->tensor_key, kMaxTensorNameLen);
+          payload->offset = req->offset;
           auto write_request = std::make_shared<WriteRequest>(tensor, payload->tensor_key, req->offset, req->bytes);
           auto transport = channel->get_mtcp();
           if (transport == nullptr) {
             transport = std::make_shared<MTcpTransport>(mtcp_conn_count_);
             channel->set_transport(transport);
           }
-          if (gpu_tcp_stager_) {
-            transport->set_gpu_tcp_stager(gpu_tcp_stager_);
-          }
-          if (gpu_memory_pool_) {
-            transport->set_memory_pool(gpu_memory_pool_);
-          }
+          if (gpu_tcp_stager_) transport->set_gpu_tcp_stager(gpu_tcp_stager_);
+          if (gpu_memory_stager_) transport->set_gpu_memory_stager(gpu_memory_stager_);
+          if (gpu_memory_pool_) transport->set_memory_pool(gpu_memory_pool_);
+          if (memory_stager_) transport->set_memory_stager(memory_stager_);
           transport->send(write_request);
           payload->transport_type = ENGINE_TRANSPORT_MTCP;
           payload->bytes = req->bytes;
+          payload->addr = 0;
+          payload->rkey = 0;
+          payload->staged = 0;
+          STRCPY(payload->nic_name, "");
+          COMM_CHECK(t->send(rsp));
         }
-        COMM_CHECK(t->send(rsp));
+      }
+      break;
+    }
+    case ENGINE_OP_RDMA_READ_DONE: {
+      auto* ack = msg->get_payload<ProtoRdmaReadDone>();
+      const std::string tensor_key = reinterpret_cast<char*>(ack->tensor_key);
+      const std::string req_key = get_request_key(tensor_key, ack->offset);
+      StagedRdmaSegment seg;
+      {
+        absl::MutexLock lk(&staged_mu_);
+        seg = staged_segments_.get(req_key);
+        if (seg.ptr != nullptr || seg.mr != nullptr) {
+          staged_segments_.del(req_key);
+        } else {
+          // not found
+          seg.ptr = nullptr;
+        }
+      }
+      if (seg.ptr != nullptr || seg.mr != nullptr) {
+        // Deregister MR and release buffer
+        if (seg.mr && seg.deregister_mr) {
+          CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr");
+          if (seg.ptr == nullptr) {
+            // Ephemeral direct-MR case: decrement inflight counter
+            inflight_direct_mr_.fetch_sub(1);
+          }
+        }
+        if (seg.ptr) {
+          // Use the stager that produced the buffer if available
+          if (seg.stager_ptr != nullptr) {
+            auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+            if (!st.ok()) {
+              LOG(WARNING) << "Failed to release staged buffer on ACK: " << st;
+            }
+          } else if (memory_stager_) {
+            auto st = memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+            if (!st.ok()) {
+              LOG(WARNING) << "Failed to release staged buffer on ACK (default CPU stager): " << st;
+            }
+          } else if (gpu_memory_stager_) {
+            auto st = gpu_memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+            if (!st.ok()) {
+              LOG(WARNING) << "Failed to release staged buffer on ACK (default GPU stager): " << st;
+            }
+          }
+        }
+      } else {
+        LOG(WARNING) << "RDMA_READ_DONE for unknown key: " << req_key;
+      }
+      break;
+    }
+    case ENGINE_OP_RDMA_READ_DONE_EX: {
+      auto* hdr = msg->get_payload<ProtoRdmaReadDoneExHeader>();
+      const std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
+      for (uint32_t i = 0; i < hdr->num_segments; ++i) {
+        auto* s = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
+            reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoRdmaReadDoneExHeader) + i * sizeof(ProtoRdmaReadDoneExSeg));
+        const std::string req_key = get_request_key(tensor_key, s->offset);
+        StagedRdmaSegment seg;
+        {
+          absl::MutexLock lk(&staged_mu_);
+          seg = staged_segments_.get(req_key);
+          if (seg.ptr != nullptr || seg.mr != nullptr) {
+            staged_segments_.del(req_key);
+          } else {
+            seg.ptr = nullptr;
+          }
+        }
+        if (seg.ptr != nullptr || seg.mr != nullptr) {
+        if (seg.mr && seg.deregister_mr) {
+          CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr");
+          if (seg.ptr == nullptr) {
+            inflight_direct_mr_.fetch_sub(1);
+          }
+        }
+        if (seg.ptr) {
+          if (seg.stager_ptr != nullptr) {
+            auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+            if (!st.ok()) {
+                LOG(WARNING) << "Failed to release staged buffer on ACK_EX: " << st;
+              }
+            } else if (memory_stager_) {
+              auto st = memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+              if (!st.ok()) {
+                LOG(WARNING) << "Failed to release staged buffer on ACK_EX (default CPU stager): " << st;
+              }
+            } else if (gpu_memory_stager_) {
+              auto st = gpu_memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+              if (!st.ok()) {
+                LOG(WARNING) << "Failed to release staged buffer on ACK_EX (default GPU stager): " << st;
+              }
+            }
+          }
+        } else {
+          LOG(WARNING) << "RDMA_READ_DONE_EX for unknown key: " << req_key;
+        }
       }
       break;
     }
@@ -564,6 +1073,19 @@ result_t CommunicateEngine::on_receive_response(
           COMM_CHECK(t->send(req));
           channel->set_transport(tensor->get_dev()->get_name(), peer_dev_name, transport);
         }
+        // Set per-request ACK action if server indicated staged response
+        if (rsp->staged) {
+          const std::string staged_key = tensor_key;
+          const uint64_t staged_off = rsp->offset;
+          auto ctrl = channel->get_control();
+          read_request->set_ack_action([ctrl, staged_key, staged_off]() {
+            auto ack = EngineMessage::make_message<ProtoRdmaReadDone>(ENGINE_OP_RDMA_READ_DONE);
+            auto* pl = ack->get_payload<ProtoRdmaReadDone>();
+            STRNCPY(pl->tensor_key, staged_key.c_str(), kMaxTensorNameLen);
+            pl->offset = staged_off;
+            COMM_CHECK(ctrl->send(ack));
+          });
+        }
         CHECK_WARN(transport->read(read_request), "failed to read");
       } else {
         auto transport = channel->get_mtcp();
@@ -584,6 +1106,9 @@ result_t CommunicateEngine::on_receive_response(
         if (gpu_memory_pool_) {
           transport->set_memory_pool(gpu_memory_pool_);
         }
+        if (memory_stager_) {
+          transport->set_memory_stager(memory_stager_);
+        }
 
         LOG(INFO) << "[on_receive_response] Starting MTCP recv for " << tensor_key;
         CHECK_WARN(transport->recv(read_request), "failed to read");
@@ -591,6 +1116,83 @@ result_t CommunicateEngine::on_receive_response(
 
       pending_requests_.del(req_key);
       LOG(INFO) << "[on_receive_response] Removed pending request for " << req_key;
+      break;
+    }
+    case ENGINE_OP_READ_RESPONSE_EX: {
+      auto* hdr = msg->get_payload<ProtoReadResponseExHeader>();
+      std::string tensor_key = reinterpret_cast<char*>(hdr->tensor_key);
+      std::string peer_dev_name = reinterpret_cast<char*>(hdr->nic_name);
+
+      LOG(INFO) << "[on_receive_response] READ_RESPONSE_EX: key=" << tensor_key << " segs=" << hdr->num_segments
+                << " transport=" << (hdr->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
+
+      auto* seg0 = reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
+      auto req_key = get_request_key(tensor_key, seg0->offset);
+      auto read_request = pending_requests_.get(req_key);
+      if (read_request == nullptr) {
+        LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX: pending request not found for " << req_key;
+        break;
+      }
+      read_request->record_request_response();
+
+      if (enable_rdma_ && hdr->transport_type == ENGINE_TRANSPORT_RDMA) {
+        CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
+
+        auto tensor = read_request->get_local_tensor();
+        auto transport = channel->get_rdma(tensor->get_dev()->get_name(), peer_dev_name);
+        if (transport == nullptr) {
+          transport = rdma_context_->create_transport(tensor->get_dev()->get_name());
+          auto req = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+          auto* payload = req->get_payload<ProtoRdmaConnectRequest>();
+          COMM_CHECK(transport->get_local_info(&payload->qp_info));
+          STRNCPY(payload->src_dev_name, tensor->get_dev()->get_name(), kMaxDevName);
+          STRNCPY(payload->dst_dev_name, peer_dev_name.c_str(), kMaxDevName);
+          COMM_CHECK(t->send(req));
+          channel->set_transport(tensor->get_dev()->get_name(), peer_dev_name, transport);
+        }
+        // Build RDMA segment list and offsets for batched ACK
+        std::vector<RdmaTransport::RdmaReadSeg> rdma_segs;
+        rdma_segs.reserve(hdr->num_segments);
+        std::vector<uint64_t> ack_offsets;
+        ack_offsets.reserve(hdr->num_segments);
+        uint64_t base_off = read_request->remote_offset_;
+        for (uint32_t i = 0; i < hdr->num_segments; ++i) {
+          auto* s = reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
+          RdmaTransport::RdmaReadSeg seg{};
+          seg.remote_addr = s->addr;
+          seg.rkey = s->rkey;
+          seg.length = s->bytes;
+          seg.local_addr = tensor->get_uint64_addr() + (s->offset - base_off);
+          rdma_segs.emplace_back(seg);
+          ack_offsets.emplace_back(s->offset);
+        }
+        // Set per-request ACK action to send batched ACK_EX for all segments
+        if (hdr->staged) {
+          auto ctrl = channel->get_control();
+          const std::string staged_key = tensor_key;
+          auto offsets = std::make_shared<std::vector<uint64_t>>(std::move(ack_offsets));
+          read_request->set_ack_action([ctrl, staged_key, offsets]() {
+            auto ack = std::make_shared<EngineMessage>(
+                ENGINE_OP_RDMA_READ_DONE_EX,
+                static_cast<uint32_t>(sizeof(ProtoRdmaReadDoneExHeader) + offsets->size() * sizeof(ProtoRdmaReadDoneExSeg)));
+            auto* h = ack->get_payload<ProtoRdmaReadDoneExHeader>();
+            STRNCPY(h->tensor_key, staged_key.c_str(), kMaxTensorNameLen);
+            h->num_segments = static_cast<uint32_t>(offsets->size());
+            for (size_t i = 0; i < offsets->size(); ++i) {
+              auto* s = reinterpret_cast<ProtoRdmaReadDoneExSeg*>(
+                  reinterpret_cast<uint8_t*>(h) + sizeof(ProtoRdmaReadDoneExHeader) + i * sizeof(ProtoRdmaReadDoneExSeg));
+              s->offset = (*offsets)[i];
+            }
+            COMM_CHECK(ctrl->send(ack));
+          });
+        }
+        CHECK_WARN(transport->read_multi(read_request, rdma_segs), "failed to read (multi)");
+      } else {
+        LOG(ERROR) << "[on_receive_response] READ_RESPONSE_EX without RDMA not supported";
+        read_request->set_result(absl::InternalError("READ_RESPONSE_EX without RDMA not supported"));
+      }
+      // Remove pending entry now; completion is tracked via the request future and ACK action
+      pending_requests_.del(req_key);
       break;
     }
     case ENGINE_OP_RDMA_CONNECT_FAILED: {
@@ -679,7 +1281,75 @@ void CommunicateEngine::do_channel_gc_loop() {
     }
 
     pairs.clear();
+
+    // Reap expired staged RDMA segments if ACK missing
+    const uint64_t ttl_ms = ack_ttl_ms_ ? ack_ttl_ms_ : RDMA_ACK_TTL_MS;
+    if (ttl_ms > 0) {
+      auto staged_pairs = staged_segments_.pairs();
+      for (auto& kv : staged_pairs) {
+        const auto& key = kv.first;
+        auto seg = kv.second;
+        if (seg.ts_us > 0) {
+          uint64_t age_ms = (get_us() - seg.ts_us) / 1000;
+          if (age_ms > ttl_ms) {
+            LOG(WARNING) << "Reaping staged RDMA segment due to missing ACK: " << key;
+            {
+              absl::MutexLock lk(&staged_mu_);
+              // Ensure it's still present
+              auto cur = staged_segments_.get(key);
+              if (cur.ptr == seg.ptr && cur.mr == seg.mr) {
+                staged_segments_.del(key);
+              } else {
+                continue;
+              }
+            }
+            if (seg.mr && seg.deregister_mr) {
+              CHECK_WARN(wrap_ibv_dereg_mr(seg.mr), "failed to dereg staged mr (reap)");
+              if (seg.ptr == nullptr) {
+                inflight_direct_mr_.fetch_sub(1);
+              }
+            }
+            if (seg.ptr) {
+              if (seg.stager_ptr != nullptr) {
+                auto st = seg.stager_ptr->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                if (!st.ok()) {
+                  LOG(WARNING) << "Failed to release staged buffer (reap): " << st;
+                }
+              } else if (memory_stager_) {
+                auto st = memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                if (!st.ok()) {
+                  LOG(WARNING) << "Failed to release staged buffer (reap, default CPU): " << st;
+                }
+              } else if (gpu_memory_stager_) {
+                auto st = gpu_memory_stager_->release_staged_buffer(gsl::not_null<void*>{seg.ptr});
+                if (!st.ok()) {
+                  LOG(WARNING) << "Failed to release staged buffer (reap, default GPU): " << st;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
+}
+
+std::shared_ptr<MemoryStager> CommunicateEngine::get_cpu_stager_for_nic(const std::string& nic_name) const {
+  auto it = nic_cpu_stagers_.find(nic_name);
+  if (it != nic_cpu_stagers_.end()) return it->second;
+  return nullptr;
+}
+
+std::shared_ptr<GpuTcpStager> CommunicateEngine::get_gpu_stager_for_id(int gpu_id) const {
+  auto it = gpu_stagers_.find(gpu_id);
+  if (it != gpu_stagers_.end()) return it->second;
+  return nullptr;
+}
+
+std::shared_ptr<MemoryStager> CommunicateEngine::get_gpu_mem_stager_for_id(int gpu_id) const {
+  auto it = gpu_mem_stagers_.find(gpu_id);
+  if (it != gpu_mem_stagers_.end()) return it->second;
+  return nullptr;
 }
 
 } // namespace tensorcast::communicator
