@@ -25,7 +25,7 @@
    d) **TCP 路径**：
       i. 若 tensor 在 CPU → 直接把 *(addr+offset)* 切块塞入 MTcpTransport::send_queue_。
       ii. 若 tensor 在 GPU 且 `needs_staging()` →
-          1. 调用 `GpuTcpStager::stage_scoped()`，把 (offset,bytes) GPU→Pinned CPU。
+          1. 调用 `GpuNetStager::stage()`，把 (offset,bytes) GPU→Pinned CPU。
           2. 取得 ScopedStagedBuffer，放入 MTcpTransport 作为待发送 chunk；
              buffer 在 send 完成（future get）后自动归还。
           3. 循环直到本次 ReadRequest 所需字节全部发送。
@@ -61,7 +61,7 @@ flowchart LR
     RT["request_thread_\n(do_read_request_loop)"]
     CH_T["Channel (TCP/RDMA)"]
     MTCP_T["MTcpTransport (recv)"]
-    STAGER_T["GpuTcpStager (optional H2D)"]
+    STAGER_T["GpuNetStager (optional H2D)"]
     MM_T["MemoryManager"]
   end
 
@@ -74,7 +74,7 @@ flowchart LR
     CE_S["CommunicateEngine (source)"]
     CH_S["Channel (TCP/RDMA)"]
     MTCP_S["MTcpTransport (send)"]
-    STAGER_S["GpuTcpStager (optional D2H)"]
+    STAGER_S["GpuNetStager (optional D2H)"]
     STORE["PartitionTensorStore"]
     Tensor[("Tensor (CPU/GPU)")]
   end
@@ -117,7 +117,7 @@ flowchart LR
    • 大量并发 reader 时 host-mem 竞争加剧，延迟抖动 ↑。
 
 4. **CUDA event / stream 数量不足**
-   • GpuTcpStager 每个 chunk只分配一个 cudaEvent；并发 > num_chunks 时等待事件可形成隐形瓶颈。
+   • GpuNetStager 每个 chunk只分配一个 cudaEvent；并发 > num_chunks 时等待事件可形成隐形瓶颈。
 
 5. **Channel 发起/GC 频繁**
    • 在压力测试里每个 reader 创建独立 CommunicateEngine→Channel；hand-shake (listen + connect) & 2 秒 GC 周期会插入额外 RTT。

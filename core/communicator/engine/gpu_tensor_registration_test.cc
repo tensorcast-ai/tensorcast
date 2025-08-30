@@ -30,14 +30,14 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register GPU tensor
-    auto status = engine->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts; opts.register_mr=false; opts.needs_staging=true; opts.async=false;
+    auto status = engine->register_tensor_ex(
         "test_gpu_tensor",
         reinterpret_cast<uint64_t>(gpu_ptr),
         tensor_size,
         COMMUNICATE_ENGINE_DEV_GPU,
         0, // device_id
-        false // sync
-    );
+        opts);
     REQUIRE(status.ok());
 
     // Cleanup

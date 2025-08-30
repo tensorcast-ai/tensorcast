@@ -35,7 +35,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   // ---------------------------------------------------------------------------
   SKIP_IF_NO_CUDA();
 
-  // RDMA is explicitly disabled via constructor parameter in CommunicateEngine and StoreEngine.
+  // RDMA is explicitly disabled via typed CommunicatorConfig in CommunicateEngine and StoreEngine.
 
   const std::size_t artifact_size = 8 * 1024 * 1024; // 8 MiB
 
@@ -58,14 +58,18 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // Register the GPU buffer so that it can be fetched remotely.
   const char* kRemoteKey = "remote_model_weights";
+  communicator::CommunicateEngine::RegisterTensorOptions reg_opts;
+  reg_opts.register_mr = false; // RDMA disabled for this engine
+  reg_opts.needs_staging = true; // GPU over TCP requires staging
+  reg_opts.async = false;
   REQUIRE(src_engine
-              ->register_tensor(
+              ->register_tensor_ex(
                   kRemoteKey,
                   reinterpret_cast<uint64_t>(src_gpu_ptr),
                   artifact_size,
                   COMMUNICATE_ENGINE_DEV_GPU,
                   /*dev_id=*/0,
-                  /*async=*/false)
+                  reg_opts)
               .ok());
 
   // ---------------------------------------------------------------------------

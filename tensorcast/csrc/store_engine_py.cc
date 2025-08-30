@@ -644,8 +644,6 @@ transport layer.)pbdoc")
               auto gi = [&st](const char* k, int fb) { return (st.contains(k) && !st[k].is_none()) ? st[k].cast<int>() : fb; };
               auto gu32 = [&st](const char* k, uint32_t fb) { return (st.contains(k) && !st[k].is_none()) ? st[k].cast<uint32_t>() : fb; };
               ccfg.stager.stage_cpu_for_rdma = gb("stage_cpu_for_rdma", ccfg.stager.stage_cpu_for_rdma);
-              ccfg.stager.direct_mr_max_bytes = gu32("direct_mr_max_bytes", ccfg.stager.direct_mr_max_bytes);
-              ccfg.stager.max_inflight_direct_mr = gi("max_inflight_direct_mr", ccfg.stager.max_inflight_direct_mr);
               ccfg.stager.stage_chunk_mb_cpu = gu32("stage_chunk_mb_cpu", ccfg.stager.stage_chunk_mb_cpu);
               ccfg.stager.stage_chunk_mb_gpu = gu32("stage_chunk_mb_gpu", ccfg.stager.stage_chunk_mb_gpu);
               ccfg.stager.buffers_per_flow = gi("buffers_per_flow", ccfg.stager.buffers_per_flow);

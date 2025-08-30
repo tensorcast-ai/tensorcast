@@ -43,11 +43,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register the tensor
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "shared_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    communicator::CommunicateEngine::RegisterTensorOptions ro1; ro1.register_mr=false; ro1.needs_staging=true; ro1.async=false;
+    REQUIRE(source_engine
+                ->register_tensor_ex(
+                    "shared_tensor",
+                    reinterpret_cast<uint64_t>(gpu_ptr),
+                    tensor_size,
+                    COMMUNICATE_ENGINE_DEV_GPU,
+                    0,
+                    ro1)
+                .ok());
 
     // Create multiple target engines
     const int num_readers = 4;
@@ -199,8 +204,13 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       }
       source_ptrs.push_back(ptr);
 
+      communicator::CommunicateEngine::RegisterTensorOptions r;
+      r.register_mr = false;
+      r.needs_staging = (spec.source_type == COMMUNICATE_ENGINE_DEV_GPU);
+      r.async = false;
       REQUIRE(source_engine
-                  ->register_tensor(spec.name, reinterpret_cast<uint64_t>(ptr), spec.size, spec.source_type, 0, false)
+                  ->register_tensor_ex(
+                      spec.name, reinterpret_cast<uint64_t>(ptr), spec.size, spec.source_type, 0, r)
                   .ok());
     }
 
@@ -274,14 +284,15 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 99);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
+    communicator::CommunicateEngine::RegisterTensorOptions ro2; ro2.register_mr=false; ro2.needs_staging=true; ro2.async=false;
     REQUIRE(source_engine
-                ->register_tensor(
+                ->register_tensor_ex(
                     "exhaustion_test",
                     reinterpret_cast<uint64_t>(gpu_ptr),
                     tensor_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
                     0,
-                    false)
+                    ro2)
                 .ok());
 
     // Create many concurrent readers (more than staging buffers)
@@ -407,11 +418,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "offset_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    communicator::CommunicateEngine::RegisterTensorOptions ro3; ro3.register_mr=false; ro3.needs_staging=true; ro3.async=false;
+    REQUIRE(source_engine
+                ->register_tensor_ex(
+                    "offset_test",
+                    reinterpret_cast<uint64_t>(gpu_ptr),
+                    tensor_size,
+                    COMMUNICATE_ENGINE_DEV_GPU,
+                    0,
+                    ro3)
+                .ok());
 
     // Multiple readers reading different offsets concurrently
     struct ReadSpec {
@@ -782,10 +798,11 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "pressure_tensor_" + std::to_string(i);
+      communicator::CommunicateEngine::RegisterTensorOptions ro4; ro4.register_mr=false; ro4.needs_staging=true; ro4.async=false;
       REQUIRE(
           source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
+              ->register_tensor_ex(
+                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, ro4)
               .ok());
     }
 

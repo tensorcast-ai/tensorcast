@@ -12,7 +12,8 @@ int run_server() {
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
   memset(addr, 0, g_count);
-  engine.register_tensor("cpu-ce-test-tensor", reinterpret_cast<uint64_t>(addr), g_count, 0, 1);
+  communicator::CommunicateEngine::RegisterTensorOptions opts; opts.register_mr=false; opts.needs_staging=false; opts.async=false;
+  engine.register_tensor_ex("cpu-ce-test-tensor", reinterpret_cast<uint64_t>(addr), g_count, 0, 1, opts);
   while (true) {
     std::this_thread::yield();
   }

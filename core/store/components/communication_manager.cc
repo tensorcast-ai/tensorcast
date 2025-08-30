@@ -79,12 +79,17 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
     std::string key = absl::StrCat("buffer_", i, "_", reinterpret_cast<uintptr_t>(buffer_addresses[i]));
 
     // Register the tensor/buffer
-    auto status = comm_engine_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = comm_engine_->is_rdma_enabled();
+    opts.needs_staging = (!comm_engine_->is_rdma_enabled() && device_id >= 0);
+    opts.async = false;
+    auto status = comm_engine_->register_tensor_ex(
         key,
         reinterpret_cast<uint64_t>(buffer_addresses[i]),
         buffer_sizes[i],
         device_id >= 0 ? communicator::COMMUNICATE_ENGINE_DEV_GPU : communicator::COMMUNICATE_ENGINE_DEV_CPU,
-        device_id >= 0 ? device_id : 0);
+        device_id >= 0 ? device_id : 0,
+        opts);
 
     if (!status.ok()) {
       return absl::InternalError(absl::StrCat("Failed to register buffer ", i, ": ", status.message()));

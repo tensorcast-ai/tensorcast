@@ -49,12 +49,17 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Register CPU tensor synchronously") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    auto status = fixture.server_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = false;
+    opts.needs_staging = false;
+    opts.async = false;
+    auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::COMMUNICATE_ENGINE_DEV_CPU,
-        -1);
+        -1,
+        opts);
     REQUIRE(status.ok());
   }
 
@@ -64,38 +69,49 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
 
     // Note: It appears TCP engine now accepts GPU tensor registration
     // but may handle it internally (possibly as CPU memory)
-    auto status = fixture.server_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts1;
+    opts1.register_mr = false;
+    opts1.needs_staging = true; // GPU over TCP requires staging
+    opts1.async = true;
+    auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::COMMUNICATE_ENGINE_DEV_GPU,
         0,
-        true);
+        opts1);
     REQUIRE(status.ok()); // Updated to match actual behavior
 
     // Unregister before re-registering with same key
     status = fixture.server_->unregister_tensor(KEY);
     REQUIRE(status.ok());
 
-    status = fixture.server_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts2;
+    opts2.register_mr = false;
+    opts2.needs_staging = false;
+    opts2.async = true;
+    status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
-        true);
+        opts2);
     REQUIRE(status.ok());
   }
 
   SECTION("Register and unregister CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    auto status = fixture.server_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts3;
+    opts3.register_mr = false; opts3.needs_staging = false; opts3.async = false;
+    auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::COMMUNICATE_ENGINE_DEV_CPU,
-        -1);
+        -1,
+        opts3);
     REQUIRE(status.ok());
 
     status = fixture.server_->unregister_tensor(KEY);
@@ -112,12 +128,14 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Read CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    auto status = fixture.server_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts4; opts4.register_mr=false; opts4.needs_staging=false; opts4.async=false;
+    auto status = fixture.server_->register_tensor_ex(
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::COMMUNICATE_ENGINE_DEV_CPU,
-        -1);
+        -1,
+        opts4);
     REQUIRE(status.ok());
 
     // Test reading with various offsets

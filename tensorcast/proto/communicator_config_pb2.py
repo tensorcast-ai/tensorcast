@@ -15,7 +15,7 @@ _sym_db = _symbol_database.Default()
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\x19\x63ommunicator_config.proto\x12\x0c\x63ommunicator"\xb9\x01\n\x0cStagerConfig\x12\x1a\n\x12stage_cpu_for_rdma\x18\x01 \x01(\x08\x12\x1b\n\x13\x64irect_mr_max_bytes\x18\x02 \x01(\r\x12\x1e\n\x16max_inflight_direct_mr\x18\x03 \x01(\x05\x12\x1a\n\x12stage_chunk_mb_cpu\x18\x04 \x01(\r\x12\x1a\n\x12stage_chunk_mb_gpu\x18\x05 \x01(\r\x12\x18\n\x10\x62uffers_per_flow\x18\x06 \x01(\x05"8\n\nRdmaConfig\x12\x16\n\x0eoutstanding_wr\x18\x01 \x01(\x05\x12\x12\n\nack_ttl_ms\x18\x02 \x01(\r"R\n\nPoolConfig\x12\x16\n\x0epreregister_mr\x18\x01 \x01(\x08\x12\x17\n\x0fpool_size_bytes\x18\x02 \x01(\x04\x12\x13\n\x0b\x63hunk_bytes\x18\x03 \x01(\x04")\n\x0fTransportConfig\x12\x16\n\x0etcp_conn_count\x18\x01 \x01(\x05" \n\x0e\x41\x66\x66inityConfig\x12\x0e\n\x06\x65nable\x18\x01 \x01(\x08"L\n\x0eSimpleNumaNode\x12\n\n\x02id\x18\x01 \x01(\x05\x12\x0c\n\x04nics\x18\x02 \x03(\t\x12\x0c\n\x04gpus\x18\x03 \x03(\x05\x12\x12\n\nis_default\x18\x04 \x01(\x08"O\n\x10SimpleNumaConfig\x12\x0e\n\x06\x65nable\x18\x01 \x01(\x08\x12+\n\x05nodes\x18\x02 \x03(\x0b\x32\x1c.communicator.SimpleNumaNode"\xbc\x02\n\x12\x43ommunicatorConfig\x12\x13\n\x0b\x65nable_rdma\x18\x01 \x01(\x08\x12*\n\x06stager\x18\x02 \x01(\x0b\x32\x1a.communicator.StagerConfig\x12&\n\x04rdma\x18\x03 \x01(\x0b\x32\x18.communicator.RdmaConfig\x12&\n\x04pool\x18\x04 \x01(\x0b\x32\x18.communicator.PoolConfig\x12\x30\n\ttransport\x18\x05 \x01(\x0b\x32\x1d.communicator.TransportConfig\x12.\n\x08\x61\x66\x66inity\x18\x06 \x01(\x0b\x32\x1c.communicator.AffinityConfig\x12\x33\n\x0bsimple_numa\x18\x07 \x01(\x0b\x32\x1e.communicator.SimpleNumaConfigb\x06proto3'
+    b'\n\x19\x63ommunicator_config.proto\x12\x0c\x63ommunicator"|\n\x0cStagerConfig\x12\x1a\n\x12stage_cpu_for_rdma\x18\x01 \x01(\x08\x12\x1a\n\x12stage_chunk_mb_cpu\x18\x02 \x01(\r\x12\x1a\n\x12stage_chunk_mb_gpu\x18\x03 \x01(\r\x12\x18\n\x10\x62uffers_per_flow\x18\x04 \x01(\x05"8\n\nRdmaConfig\x12\x16\n\x0eoutstanding_wr\x18\x01 \x01(\x05\x12\x12\n\nack_ttl_ms\x18\x02 \x01(\r"R\n\nPoolConfig\x12\x16\n\x0epreregister_mr\x18\x01 \x01(\x08\x12\x17\n\x0fpool_size_bytes\x18\x02 \x01(\x04\x12\x13\n\x0b\x63hunk_bytes\x18\x03 \x01(\x04")\n\x0fTransportConfig\x12\x16\n\x0etcp_conn_count\x18\x01 \x01(\x05" \n\x0e\x41\x66\x66inityConfig\x12\x0e\n\x06\x65nable\x18\x01 \x01(\x08"L\n\x0eSimpleNumaNode\x12\n\n\x02id\x18\x01 \x01(\x05\x12\x0c\n\x04nics\x18\x02 \x03(\t\x12\x0c\n\x04gpus\x18\x03 \x03(\x05\x12\x12\n\nis_default\x18\x04 \x01(\x08"O\n\x10SimpleNumaConfig\x12\x0e\n\x06\x65nable\x18\x01 \x01(\x08\x12+\n\x05nodes\x18\x02 \x03(\x0b\x32\x1c.communicator.SimpleNumaNode"\xbc\x02\n\x12\x43ommunicatorConfig\x12\x13\n\x0b\x65nable_rdma\x18\x01 \x01(\x08\x12*\n\x06stager\x18\x02 \x01(\x0b\x32\x1a.communicator.StagerConfig\x12&\n\x04rdma\x18\x03 \x01(\x0b\x32\x18.communicator.RdmaConfig\x12&\n\x04pool\x18\x04 \x01(\x0b\x32\x18.communicator.PoolConfig\x12\x30\n\ttransport\x18\x05 \x01(\x0b\x32\x1d.communicator.TransportConfig\x12.\n\x08\x61\x66\x66inity\x18\x06 \x01(\x0b\x32\x1c.communicator.AffinityConfig\x12\x33\n\x0bsimple_numa\x18\x07 \x01(\x0b\x32\x1e.communicator.SimpleNumaConfigb\x06proto3'
 )
 
 _globals = globals()
@@ -23,20 +23,20 @@ _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "communicator_config_pb2", _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
     DESCRIPTOR._options = None
-    _globals["_STAGERCONFIG"]._serialized_start = 44
-    _globals["_STAGERCONFIG"]._serialized_end = 229
-    _globals["_RDMACONFIG"]._serialized_start = 231
-    _globals["_RDMACONFIG"]._serialized_end = 287
-    _globals["_POOLCONFIG"]._serialized_start = 289
-    _globals["_POOLCONFIG"]._serialized_end = 371
-    _globals["_TRANSPORTCONFIG"]._serialized_start = 373
-    _globals["_TRANSPORTCONFIG"]._serialized_end = 414
-    _globals["_AFFINITYCONFIG"]._serialized_start = 416
-    _globals["_AFFINITYCONFIG"]._serialized_end = 448
-    _globals["_SIMPLENUMANODE"]._serialized_start = 450
-    _globals["_SIMPLENUMANODE"]._serialized_end = 526
-    _globals["_SIMPLENUMACONFIG"]._serialized_start = 528
-    _globals["_SIMPLENUMACONFIG"]._serialized_end = 607
-    _globals["_COMMUNICATORCONFIG"]._serialized_start = 610
-    _globals["_COMMUNICATORCONFIG"]._serialized_end = 926
+    _globals["_STAGERCONFIG"]._serialized_start = 43
+    _globals["_STAGERCONFIG"]._serialized_end = 167
+    _globals["_RDMACONFIG"]._serialized_start = 169
+    _globals["_RDMACONFIG"]._serialized_end = 225
+    _globals["_POOLCONFIG"]._serialized_start = 227
+    _globals["_POOLCONFIG"]._serialized_end = 309
+    _globals["_TRANSPORTCONFIG"]._serialized_start = 311
+    _globals["_TRANSPORTCONFIG"]._serialized_end = 352
+    _globals["_AFFINITYCONFIG"]._serialized_start = 354
+    _globals["_AFFINITYCONFIG"]._serialized_end = 386
+    _globals["_SIMPLENUMANODE"]._serialized_start = 388
+    _globals["_SIMPLENUMANODE"]._serialized_end = 464
+    _globals["_SIMPLENUMACONFIG"]._serialized_start = 466
+    _globals["_SIMPLENUMACONFIG"]._serialized_end = 545
+    _globals["_COMMUNICATORCONFIG"]._serialized_start = 548
+    _globals["_COMMUNICATORCONFIG"]._serialized_end = 864
 # @@protoc_insertion_point(module_scope)

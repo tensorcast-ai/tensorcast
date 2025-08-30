@@ -3,7 +3,7 @@
 ## 1. Overview
 
 ### Problem
-In TCP mode, GPU tensors cannot be directly registered, so we stage via `GpuTcpStager` with a small pinned buffer. For CPU tensors, current RDMA export registers DVMP VA ranges directly which pins large pageable regions (e.g., 600+ GB) and violates DVMP’s design (eviction/preemption, pin-lease scope). With upcoming CUDA VMM for GPU, registering entire GPU tensors is also unacceptable.
+In TCP mode, GPU tensors cannot be directly registered, so we stage via the unified GPU MemoryStager (`GpuNetStager`) with a small pinned buffer. For CPU tensors, RDMA no longer advertises DVMP VA; the server stages requested slices into pinned buffers.
 
 ### Goals
 - CPU tensors: segmented copy from DVMP VA into small pinned buffers; immediately release DVMP pin leases after copy.
@@ -66,11 +66,7 @@ if (enable_rdma_ && req->transport_type == ENGINE_TRANSPORT_RDMA) {
 - Directly advertises the remote MR of the registered DVMP window or GPU allocation.
 
 ### GPU staging for TCP already exists
-```33:92:/workspace/core/communicator/engine/gpu_tcp_stager.cc
-GpuTcpStager::GpuTcpStager(size_t chunk_size, size_t num_chunks, std::shared_ptr<store::PinnedMemoryPool> pool)
-...
-VLOG(1) << "GpuTcpStager initialized with ...";
-```
+// Deleted legacy class: `GpuTcpStager`. Use `GpuNetStager` (MemoryStager) instead.
 - TCP sends use a staged D2H buffer; pinned pool is created in engine when RDMA is disabled.
 
 ### Pinned pool (host) today (no RDMA MR pre-reg yet)
@@ -103,7 +99,7 @@ MemoryStager <|.. DRAMStager
 MemoryStager <|.. GpuNetStager
 ```
 - `DRAMStager`: DVMP VA (CPU) -> host pinned buffer (memcpy). Acquires DVMP pin lease for `[va_off, len]`, copies to pool buffer, immediately releases DVMP pin (lease kept only during memcpy), returns pool slice; if RDMA, also provides pre-registered MR.
-- `GpuNetStager`: VRAM -> host pinned (cudaMemcpyAsync D2H + event). Returns pool slice; if RDMA, also MR. Reuses logic from `GpuTcpStager`.
+- `GpuNetStager`: VRAM -> host pinned (cudaMemcpyAsync D2H + event). Returns pool slice; if RDMA, also MR.
 
 Key properties:
 - Small, bounded buffers; DVMP pins are held just during copy, then released.
@@ -112,7 +108,7 @@ Key properties:
 
 ### 3.2 Transport behavior with staging
 - Server READ handling:
-  - RDMA path: server stages requested slice via stager; returns RDMA `addr/rkey/bytes` of the pool MR in READ_RESPONSE; waits for client ACK to release buffer.
+  - RDMA path: server stages requested slice via stager; returns RDMA `addr/rkey/bytes` of the pool MR in READ_RESPONSE_EX; waits for client batched ACK_EX to release buffers.
   - MTCP path: server stages (CPU and GPU) and enqueues staged buffer chunks to `MTcpTransport` send queue; RAII returns buffer when send completes.
 - Client remains unchanged for MTCP; for RDMA, after completion, send ACK.
 
@@ -128,10 +124,10 @@ sequenceDiagram
   Client->>Server: READ_REQUEST (offset, bytes, prefer=RDMA)
   Server->>Stager: stage(offset, bytes)
   Stager-->>Server: StageToken{host_ptr, bytes, mr}
-  Server->>Client: READ_RESPONSE{addr, rkey, bytes}
+  Server->>Client: READ_RESPONSE_EX{segs=[addr, rkey, bytes]}
   Client->>NIC: RDMA READ
   NIC-->>Client: complete
-  Client->>Server: RDMA_READ_DONE (req_key)
+  Client->>Server: RDMA_READ_DONE_EX (offsets)
   Server->>Stager: token.complete()
 ```
 
@@ -166,11 +162,11 @@ sequenceDiagram
 
 This guarantees large artifacts are never pinned as a whole.
 
-### 3.7 Protocol additions
-- New op: `ENGINE_OP_RDMA_READ_DONE` (Client ➜ Server) with `{tensor_key, offset, bytes}` or `req_key`.
-- Server releases staged resources on ACK. If ACK missing, apply TTL reap (`rdma.ack_ttl_ms`).
-
-Backward compatibility: If server responds with a direct MR (legacy), client behavior unchanged. The ACK is only required for staged RDMA responses (server advertises a flag in READ_RESPONSE reserved bits).
+### 3.7 Protocol updates (EX-only)
+- Responses use `ENGINE_OP_READ_RESPONSE_EX` for both RDMA and MTCP.
+- ACKs use `ENGINE_OP_RDMA_READ_DONE_EX` (Client ➜ Server) with `{tensor_key, offsets[]}`.
+- Server releases staged resources on batched ACK_EX. If ACK missing, apply TTL reap (`rdma.ack_ttl_ms`).
+Legacy single-segment ops are removed.
 
 ## 4. Implementation Approach
 
@@ -191,7 +187,7 @@ Backward compatibility: If server responds with a direct MR (legacy), client beh
   - Track inflight staged tokens keyed by `req_key`; release on `RDMA_READ_DONE`.
 - MTcpTransport: replace GPU-only staging with MemoryStager usage for both CPU and GPU.
 - PinnedMemoryPool: add NUMA placement and per-PD MR registry (cache). Export `get_or_register_mr(pd, buffer_ptr)`.
-- RdmaTransport / RdmaThread: on client completion, send `RDMA_READ_DONE`.
+- RdmaTransport / RdmaThread: on client completion, send `RDMA_READ_DONE_EX`.
 
 ### 4.3 Unified Configuration
 
@@ -202,8 +198,6 @@ This RFC adopts a unified, layered configuration model across C++ and Python, re
 - CommunicatorConfig (C++/Proto/Python mirrored) encapsulates all knobs required by staged P2P:
   - stager:
     - `stage_cpu_for_rdma: bool` (default: true)
-    - `direct_mr_max_bytes: uint64` (default: 4 MiB)
-    - `max_inflight_direct_mr: int` (default: 32)
     - `stage_chunk_mb_cpu: uint32` (default: 4)
     - `stage_chunk_mb_gpu: uint32` (default: 16)
     - `buffers_per_flow: int` (default: 4)
@@ -302,9 +296,9 @@ communicator:
 - In `ChunkExportService`, keep keys but set `register_mr=false` for CPU DVMP ranges.
 - Metrics: staged_bytes_total{cpu}, dvmp_pin_lease_duration_ms, pool_pressure.
 
-### Phase 2 — RDMA: staged responses and ACK
-- Add `ENGINE_OP_RDMA_READ_DONE` and ACK handling on both sides.
-- Server RDMA READ path uses MemoryStager for CPU and GPU; responds with pool MR.
+### Phase 2 — RDMA: staged responses and ACK (EX-only)
+- Use `ENGINE_OP_RDMA_READ_DONE_EX` and batched ACK handling on both sides.
+- Server RDMA READ path uses MemoryStager for CPU and GPU; responds with pool MR using `READ_RESPONSE_EX`.
 - Add MR cache in pinned pool per PD; pre-register MRs on pool init for registered NICs.
  - Introduce `CommunicatorConfig` and config loaders; migrate all engine env reads to typed config access.
 
@@ -314,7 +308,7 @@ communicator:
 - No auto-discovery; selection falls back to default on ambiguity.
 
 ### Phase 4 — Cleanup and policy knobs
-- Optional: enable direct MR for small CPU slabs (disable staging) via policy; default remains staged.
+- DirectMR path removed; RDMA is staged-only.
 - Expand tests across all combinations.
 
 ## 7. File Modification Table
@@ -323,11 +317,11 @@ communicator:
 |---|---|---|
 | Memory staging | `core/communicator/engine/memory_stager.{h,cc}` | NEW interface + StageToken |
 | CPU stager | `core/communicator/engine/dram_stager.{h,cc}` | NEW: DVMP->pinned memcpy + DVMP lease RAII |
-| GPU stager | `core/communicator/engine/gpu_net_stager.{h,cc}` | NEW: Adapt from `GpuTcpStager` with MR support |
+| GPU stager | `core/communicator/engine/gpu_net_stager.h` | Unified GPU MemoryStager with MR support |
 | Pool MR cache | `core/common/memory/pinned_memory_pool.{h,cc}` | Add NUMA + MR registry per PD |
 | Registration opts | `core/communicator/engine/engine.{h,cc}` | Add `RegisterTensorOptions`; avoid MR for DVMP windows |
 | Server RDMA path | `core/communicator/engine/engine.cc` | Use MemoryStager and ACK inflight tracking |
-| Protocol | `core/communicator/engine/protocol.h` | Add `ENGINE_OP_RDMA_READ_DONE` |
+| Protocol | `core/communicator/engine/protocol.h` | EX-only: `READ_RESPONSE_EX`, `RDMA_READ_DONE_EX` |
 | MTCP send | `core/communicator/transport/mtcp_transport.{h,cc}` | Use MemoryStager for CPU+GPU; RAII completion |
 | Chunk export | `core/store/replica/chunk_export_service.{h,cc}` | Window tiling + register_mr=false for CPU |
 | Loader source | `core/store/loader/remote_key_source.{h,cc}` | Unchanged externally; may set prefer=RDMA flag |
@@ -353,9 +347,9 @@ sequenceDiagram
   ST->>ST: memcpy(DVMP -> pool)
   ST-->>DV: release pin (immediate)
   ST-->>Sv: StageToken{mr,addr,len}
-  Sv->>Cl: READ_RESPONSE{addr,rkey,len,flag=staged}
+  Sv->>Cl: READ_RESPONSE_EX{segs=[addr,rkey,len],flag=staged}
   Cl->>Sv: RDMA READ
-  Cl-->>Sv: RDMA_READ_DONE
+  Cl-->>Sv: RDMA_READ_DONE_EX
   Sv->>ST: complete()
 ```
 
@@ -370,9 +364,9 @@ sequenceDiagram
   Sv->>ST: stage(off,len)
   ST->>ST: cudaMemcpyAsync(D2H)
   ST-->>Sv: StageToken{mr,addr,len}
-  Sv->>Cl: READ_RESPONSE{addr,rkey,len,flag=staged}
+  Sv->>Cl: READ_RESPONSE_EX{segs=[addr,rkey,len],flag=staged}
   Cl->>Sv: RDMA READ
-  Cl-->>Sv: RDMA_READ_DONE
+  Cl-->>Sv: RDMA_READ_DONE_EX
   Sv->>ST: complete()
 ```
 
@@ -464,7 +458,7 @@ struct RegisterTensorOptions {
 
 This section refines the design with specific knobs and mechanisms to maximize end-to-end throughput while keeping CPU overhead and latency low.
 
-### 14.1 Zero-register (DirectMR) vs Staged policy matrix
+### 14.1 Staged-only RDMA policy
 
 - Default policy:
   - CPU: staged for RDMA (to avoid DVMP pinning) and direct for TCP.
@@ -519,7 +513,7 @@ Knobs:
 
 - Batch READ_RESPONSE messages when a single READ_REQUEST enumerates multiple segments; the server can return a vector of staged segments (addr,rkey,bytes) for pipelined posting by the client.
 - Use inline data for small READ_RESPONSE payloads to reduce latency.
-- ACK (`RDMA_READ_DONE`) batching: client can ACK a group of segments with a bitmap.
+- ACK (`RDMA_READ_DONE_EX`) batching: client can ACK a group of segments with offsets.
 
 Protocol additions (optional, backward compatible):
 - `ENGINE_OP_READ_RESPONSE_EX` with repeated segments.
@@ -638,105 +632,3 @@ Counters and histograms:
   - Expose which pool was used (node id) for each staged segment in verbose logs and metrics.
   - Add config validation to detect overlapping NIC/GPU assignments and choose a single default fallback node.
 
-## 13. Compatibility Debt & Removal Plan (Finalized)
-
-This section captures compatibility items during the transition to unified staging + staged P2P and the Communicator typed configuration. PR-1 through PR-3 are complete in PR #49.
-
-Summary of outcomes (P2 complete):
-- Typed-only configuration: `CommunicatorConfig` is required to construct `CommunicateEngine`; legacy bool constructor removed.
-- All legacy environment variables removed from engine/transport codepaths.
-- RDMA/TCP transport tuning migrated to typed config (`rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`; `transport.connect_timeout_sec`, `transport.tcp_tos`).
-- `DEFAULT_DEV` fallback removed; device selection is typed-config driven. For CPU RDMA when no mapping exists, the engine selects the first available device; GPU selection remains `get_best_dev(gpu_id)`.
-
-### 13.1 GPU Stager Dual-Track (legacy + unified)
-- What: Keep legacy `GpuTcpStager` while introducing `GpuNetStager` (a `MemoryStager` adapter).
-- Where:
-  - Engine members: `gpu_tcp_stager_` (legacy) and `gpu_memory_stager_` (unified)
-  - NUMA maps produce both: `gpu_stagers_` and `gpu_mem_stagers_`
-  - MTCP: `set_gpu_tcp_stager(...)` and `set_gpu_memory_stager(...)`; release paths have fallback to either
-- Rationale: ABI and behavior compatibility for existing callers/tests while unifying server/client staging logic.
-- Removal Plan:
-  - Replace all GPU staging callsites to use `MemoryStager` interface only.
-  - Deprecate `set_gpu_tcp_stager` in MTCP; remove fallback release paths for legacy.
-  - Remove `gpu_stagers_` map after migration; retain `gpu_mem_stagers_` only.
-
-### 13.2 Constructors and Env Config Back-Compat
-- Status: Completed.
-- Changes:
-  - Removed `CommunicateEngine(bool, ...)`; only `CommunicateEngine(const CommunicatorConfig&, ...)` remains.
-  - Removed all environment variable reads; added typed RDMA/TCP tuning fields.
-
-### 13.3 Protocol Compatibility (single-seg vs multi-seg + ACK)
-- What: Support both legacy single-segment (`ENGINE_OP_READ_RESPONSE`, `ENGINE_OP_RDMA_READ_DONE`) and new multi-segment (`READ_RESPONSE_EX`, `RDMA_READ_DONE_EX`).
-- Where: `engine.cc` response/ACK handling; release paths handle both staged and legacy MR return.
-- Rationale: Maintain wire compatibility during incremental rollout.
-- Removal Plan:
-  - Enforce `*_EX` paths only; remove legacy single-segment handlers once all peers updated.
-  - Simplify ACK handling to EX-only and remove duplicated release branches.
-
-### 13.4 RDMA MR Direct-Read Back-Compat
-- What: Retain direct MR advertising (`tensor->get_mr()`) and per-request `dev->reg_mr(...)` fallback; GPU branch remains though policy stages GPU.
-- Where: RDMA READ server path in `engine.cc`.
-- Rationale: Provide an escape hatch (policy gated) and preserve old behavior for small hot CPU slabs.
-- Removal Plan:
-  - Keep DirectMR only via explicit policy; otherwise always stage.
-  - After policy stabilizes, remove general `tensor->get_mr()` advertisement pathway for DVMP windows; keep only staged or small-policy path.
-
-### 13.5 CPU/TCP Direct Send Fallback
-- What: MTCP send/recv path retains direct-CPU send when `MemoryStager` is absent.
-- Where: `mtcp_transport.{h,cc}`
-- Rationale: Gradual adoption of `DRAMStager` without breaking existing behavior.
-- Removal Plan:
-  - Require `MemoryStager` in MTCP for CPU; delete direct-CPU fallback and associated branches.
-
-### 13.6 Registration API Compatibility
-- What: Legacy `register_tensor(...)` and extended `register_tensor_ex(..., RegisterTensorOptions)` both exist.
-- Where: `engine.{h,cc}`
-- Rationale: Avoid churn in existing callers.
-- Removal Plan:
-  - Migrate all internal callsites to `register_tensor_ex` with explicit options; deprecate and remove legacy overload.
-
-### 13.7 Default RDMA Device Selection
-- Status: Completed.
-- Changes: Removed `DEFAULT_DEV` env fallback. RDMA device selection is typed-config driven; CPU path falls back to first PD if needed.
-
-### 13.8 Tracking Table (with owners & milestones)
-
-| ✓ | Item | Area | Owner | Milestone | Current Status | Next Step |
-|---|---|---|---|---|---|---|
-| [ ] | GPU stager dual-track → unified | Engine/MTCP | Communicator (C++) | P3 | In use | Switch all callsites to `MemoryStager`; remove legacy API and fallbacks |
-| [x] | Require `CommunicatorConfig` (typed-only) | Engine | Communicator (C++) | P2 | Done | Typed config mandatory; legacy constructor and env reads removed |
-| [ ] | Protocol legacy ops → `*_EX` only | Engine | Communicator (C++) | P3 | In use | Require EX handlers; remove legacy ops and branches |
-| [ ] | RDMA DirectMR limited to small-slab policy | Engine | Communicator (C++) | P4 | Policy gated | Keep only explicit small-slab path; remove generic DVMP MR advertisement |
-| [ ] | MTCP CPU direct send → stager-required | MTCP | Transport (C++) | P3 | Fallback present | Require `MemoryStager`; delete direct CPU-send branch |
-| [ ] | Registration API → `register_tensor_ex` only | Engine | Communicator (C++) | P3 | Both exist | Migrate callsites to `register_tensor_ex`; remove legacy overload |
-| [x] | Remove `DEFAULT_DEV` fallback | Engine | Communicator (C++) | P2 | Done | Removed env-based fallback; engine selects PD via config or first device |
-
-Notes:
-- Milestones P2/P3/P4 align with Implementation Plan phases (P2: staged RDMA+ACK; P3: NUMA; P4: cleanup/policy knobs).
-- Owners denote responsible sub-team/module; adjust to specific individuals in tracking issues.
-
-### 13.9 Changes Landed (PRs)
-
-- PR-1 (merged): Require `CommunicatorConfig` (typed-only constructor); update core callsites. Included in PR #49.
-- PR-2 (merged): Remove legacy environment variables and env-loading; migrate RDMA/TCP knobs to typed config; delete env helpers. Included in PR #49.
-- PR-3 (merged): Docs migration to typed config; added YAML examples; updated sidebars. Included in PR #49.
-
-- PR-4: Remove legacy constructor and env loader
-  - Change: Delete `CommunicateEngine(bool, ...)` and `CommunicatorConfig::FromEnvDeprecated()`; remove all callsites and CI env setups relying on them.
-  - Pre-reqs: PR-1..3 merged and milestone P3 reached.
-  - Owner: Communicator (C++) — Milestone: P3.
-
-### 13.10 Deprecation Schedule
-
-- P2 (staged RDMA + ACK):
-  - `[x]` `CommunicatorConfig` required (typed-only; legacy constructor removed)
-  - `[x]` Env usage removed; engine no longer reads envs
-
-- P3 (NUMA):
-  - `[ ]` Remove MTCP CPU direct-send fallback; `MemoryStager` required
-  - `[ ]` Remove legacy registration overload after migrating internal callsites
-
-- P4 (cleanup/policy knobs):
-  - `[ ]` Limit DirectMR to small-slab policy only; delete generic DVMP MR advertisement path
-  - `[ ]` Remove legacy GPU TCP stager and all dual-track GPU staging branches

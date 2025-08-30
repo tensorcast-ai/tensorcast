@@ -189,7 +189,7 @@ sc_cc_library(
     ],
 )
 
-# MTCP is part of the engine layer since it depends on gpu_tcp_stager
+# MTCP transport (multi-connection TCP)
 # We'll define it later with the engine components
 
 # RDMA transport (context and transport combined)
@@ -251,7 +251,7 @@ sc_cc_library(
     ],
 )
 
-# MTCP transport (without gpu_tcp_stager which is now in engine subpackage)
+# MTCP transport
 sc_cc_library(
     name = "mtcp_transport_lib",
     srcs = ["transport/mtcp_transport.cc"],
@@ -261,7 +261,6 @@ sc_cc_library(
         ":base_transport_lib",
         ":constants_lib",
         ":memory_stager_lib",
-        ":gpu_tcp_stager_lib",
         ":partition_tensor_lib",
         ":tcp_lib",
         "//core/common:cuda_api_lib",
@@ -272,24 +271,6 @@ sc_cc_library(
     ],
 )
 
-# GPU TCP Stager
-sc_cc_library(
-    name = "gpu_tcp_stager_lib",
-    srcs = ["engine/gpu_tcp_stager.cc"],
-    hdrs = ["engine/gpu_tcp_stager.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":base_transport_lib",
-        ":constants_lib",
-        ":partition_tensor_lib",
-        ":tcp_lib",
-        "//core/common:cuda_api_lib",
-        "//core/common:device_guard_lib",
-        "//core/common:error_handling_lib",
-        "//core/common:pinned_memory_pool_lib",
-        "//core/common:streaming_pinned_buffer_lib",
-    ],
-)
 
 # Unified memory stager interface
 sc_header_only_library(
@@ -298,14 +279,16 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
-# GPU Net Stager adapter (header-only)
+# GPU Net Stager (header-only)
 sc_header_only_library(
     name = "gpu_net_stager_lib",
     hdrs = ["engine/gpu_net_stager.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":memory_stager_lib",
-        ":gpu_tcp_stager_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//core/common:streaming_pinned_buffer_lib",
     ],
 )
 
@@ -342,7 +325,6 @@ sc_cc_library(
     hdrs = ["engine/channel.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":gpu_tcp_stager_lib",
         ":mtcp_transport_lib",
         ":rdma_lib",
     ],
@@ -362,7 +344,6 @@ sc_cc_library(
         ":dram_stager_lib",
         ":mr_cache_lib",
         "//core/store:uma_lease_provider",
-        ":envs_lib",
         ":message_lib",
         ":mtcp_transport_lib",
         ":protocol_lib",
@@ -419,19 +400,6 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "direct_mr_policy_test",
-    srcs = ["engine/direct_mr_policy_test.cc"],
-    tags = ["rdma"],
-    deps = [
-        ":engine_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/store:uma_lease_provider",
-        "//core/store/replica:replica_memory_coordinator",
-        "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)
 
 cc_test(
     name = "tcp_engine_test",
@@ -443,22 +411,6 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "gpu_tcp_stager_test",
-    srcs = ["engine/gpu_tcp_stager_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
-    tags = ["requires_cuda"],
-    deps = [
-        ":gpu_tcp_stager_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "//core/testing:test_helpers",
-        "@catch2//:catch2_main",
-    ],
-)
 
 cc_test(
     name = "gpu_tensor_registration_test",

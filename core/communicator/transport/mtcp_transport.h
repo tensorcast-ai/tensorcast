@@ -25,8 +25,6 @@ extern "C" {
 
 namespace tensorcast::communicator {
 
-// Forward declaration
-class GpuTcpStager;
 
 using chunk_result_t = struct MTcpTransportChunkResult {
   result_t status = SUCCESS;
@@ -107,7 +105,6 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   result_t recv(const read_request_t& request);
 
   void set_conn_count(int conn_count);
-  void set_gpu_tcp_stager(std::shared_ptr<GpuTcpStager> stager);
   void set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool);
   void set_memory_stager(std::shared_ptr<MemoryStager> stager) {
     memory_stager_ = std::move(stager);
@@ -144,16 +141,14 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 
   task_t tasks_[kMaxTcpConns];
 
-  // GPU->CPU staging for TCP transport
-  std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
-  // Unified GPU MemoryStager (preferred when provided)
+  // Unified GPU MemoryStager (required)
   std::shared_ptr<MemoryStager> gpu_memory_stager_;
 
   // GPU receive buffer management
   std::shared_ptr<store::PinnedMemoryPool> memory_pool_;
   std::unique_ptr<store::StreamingPinnedBuffer> gpu_recv_buffer_;
 
-  // Unified memory stager for CPU staging in TCP path
+  // Unified memory stager for CPU staging in TCP path (required)
   std::shared_ptr<MemoryStager> memory_stager_;
 
   // Track outstanding async tasks for proper cleanup

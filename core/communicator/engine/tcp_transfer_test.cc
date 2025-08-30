@@ -14,6 +14,7 @@
 
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
+namespace communicator = tensorcast::communicator;
 
 TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]") {
   SKIP_IF_NO_CUDA();
@@ -51,14 +52,15 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
-    auto status = source_engine->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = false; opts.needs_staging = true; opts.async = false;
+    auto status = source_engine->register_tensor_ex(
         "test_gpu_tensor",
         reinterpret_cast<uint64_t>(source_gpu_ptr),
         tensor_size,
         COMMUNICATE_ENGINE_DEV_GPU,
         0, // device_id
-        false // sync
-    );
+        opts);
     REQUIRE(status.ok());
 
     // Allocate target GPU memory
@@ -123,14 +125,15 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
+    communicator::CommunicateEngine::RegisterTensorOptions opts2; opts2.register_mr=false; opts2.needs_staging=true; opts2.async=false;
     REQUIRE(source_engine
-                ->register_tensor(
+                ->register_tensor_ex(
                     "test_gpu_to_cpu",
                     reinterpret_cast<uint64_t>(source_gpu_ptr),
                     tensor_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
                     0,
-                    false)
+                    opts2)
                 .ok());
 
     // Allocate target CPU memory
@@ -210,14 +213,15 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     }
 
     // Register and transfer
+    communicator::CommunicateEngine::RegisterTensorOptions opts3; opts3.register_mr=false; opts3.needs_staging=true; opts3.async=false;
     REQUIRE(source_engine
-                ->register_tensor(
+                ->register_tensor_ex(
                     "large_tensor",
                     reinterpret_cast<uint64_t>(source_gpu_ptr),
                     tensor_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
                     0,
-                    false)
+                    opts3)
                 .ok());
 
     auto future = target_engine->read_tensor(

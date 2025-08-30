@@ -44,14 +44,18 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
+    communicator::CommunicateEngine::RegisterTensorOptions reg_opts;
+    reg_opts.register_mr = false; // RDMA disabled
+    reg_opts.needs_staging = true; // GPU over TCP requires staging
+    reg_opts.async = false;
     REQUIRE(source_engine
-                ->register_tensor(
+                ->register_tensor_ex(
                     "artifact_key",
                     reinterpret_cast<uint64_t>(source_gpu_ptr),
                     artifact_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
                     0,
-                    false)
+                    reg_opts)
                 .ok());
 
     // Create target engine for loader
@@ -136,13 +140,17 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(memcpy_status.message());
     REQUIRE(memcpy_status.ok());
 
-    auto register_status = source_engine->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions reg_opts2;
+    reg_opts2.register_mr = false;
+    reg_opts2.needs_staging = true;
+    reg_opts2.async = false;
+    auto register_status = source_engine->register_tensor_ex(
         "artifact_key",
         reinterpret_cast<uint64_t>(source_gpu_ptr),
         artifact_size,
         COMMUNICATE_ENGINE_DEV_GPU,
         0,
-        false);
+        reg_opts2);
     CAPTURE(register_status.message());
     REQUIRE(register_status.ok());
 

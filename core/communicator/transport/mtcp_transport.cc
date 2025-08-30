@@ -21,7 +21,6 @@
 #include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
 #include "core/communicator/base/constants.h"
-#include "core/communicator/engine/gpu_tcp_stager.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
 
@@ -287,10 +286,6 @@ void MTcpTransport::set_conn_count(int conn_count) {
   conn_count_ = conn_count;
 }
 
-void MTcpTransport::set_gpu_tcp_stager(std::shared_ptr<GpuTcpStager> stager) {
-  gpu_tcp_stager_ = stager;
-}
-
 void MTcpTransport::set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool) {
   memory_pool_ = pool;
 }
@@ -446,14 +441,13 @@ void MTcpTransport::send_loop() {
         std::vector<future_chunk_result_t> results;
 
         // Check if tensor needs GPU->CPU staging
-        if (tensor->needs_staging() && (gpu_memory_stager_ || gpu_tcp_stager_)) {
+        if (tensor->needs_staging() && gpu_memory_stager_) {
           // Handle GPU tensor with staging - process in batches to avoid buffer exhaustion
           VLOG(1) << "Staging GPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks";
 
           // Process chunks in batches to avoid exhausting staging buffers
           // Use a conservative batch size - leave one buffer free for pipelining
-          const size_t stager_buffers = gpu_memory_stager_ ? gpu_memory_stager_->get_num_buffers()
-                                                           : gpu_tcp_stager_->get_num_buffers();
+          const size_t stager_buffers = gpu_memory_stager_->get_num_buffers();
           const int available_buffers = static_cast<int>(stager_buffers);
           const int batch_size = std::max(1, available_buffers - 1);
 
@@ -478,19 +472,12 @@ void MTcpTransport::send_loop() {
               uint64_t gpu_offset_in_real_chunk = 0;
 
               while (remain_gpu_bytes > 0) {
-                const size_t stager_chunk_size = gpu_memory_stager_ ? gpu_memory_stager_->get_chunk_size()
-                                                                    : gpu_tcp_stager_->get_chunk_size();
+                const size_t stager_chunk_size = gpu_memory_stager_->get_chunk_size();
                 uint64_t gpu_chunk_size = std::min<uint64_t>(remain_gpu_bytes, stager_chunk_size);
 
                 // Stage synchronously for the sub-chunk using unified stager if available
-                absl::StatusOr<void*> staged_result = absl::InvalidArgumentError("");
-                if (gpu_memory_stager_) {
-                  staged_result = gpu_memory_stager_->stage(
-                      tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
-                } else {
-                  staged_result = gpu_tcp_stager_->stage(
-                      tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
-                }
+                absl::StatusOr<void*> staged_result = gpu_memory_stager_->stage(
+                    tensor, global_offset + offset + gpu_offset_in_real_chunk, gpu_chunk_size);
 
                 if (!staged_result.ok()) {
                   LOG(ERROR) << "Failed to stage GPU data: " << staged_result.status();
@@ -512,10 +499,9 @@ void MTcpTransport::send_loop() {
                 auto chunk_future = chunk->get_future();
                 // Keep a copy of the stager for the async releaser
                 auto stager_mem = gpu_memory_stager_;
-                auto stager_tcp = gpu_tcp_stager_;
                 auto release_future = std::async(
                     std::launch::async,
-                    [stager_mem, stager_tcp,
+                    [stager_mem,
                      staged_ptr,
                      chunk_future = std::move(chunk_future),
                      idx,
@@ -523,12 +509,7 @@ void MTcpTransport::send_loop() {
                       VLOG(2) << "[MTcpTransport::send_loop] Release task #" << idx
                               << " waiting for send to complete (sub-chunk offset=" << gpu_offset_in_real_chunk << ")";
                       auto result = chunk_future.get();
-                      absl::Status release_status;
-                      if (stager_mem) {
-                        release_status = stager_mem->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
-                      } else {
-                        release_status = stager_tcp->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
-                      }
+                      absl::Status release_status = stager_mem->release_staged_buffer(gsl::not_null<void*>{staged_ptr});
                       if (!release_status.ok()) {
                         LOG(ERROR) << "Failed to release staged buffer: " << release_status;
                       }
@@ -565,7 +546,7 @@ void MTcpTransport::send_loop() {
             }
           }
         } else {
-          // CPU tensor path
+          // CPU tensor path (MemoryStager required)
           if (memory_stager_) {
             // Stage CPU data into pinned buffers to avoid direct DVMP window exposure
             VLOG(1) << "Staging CPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks";
@@ -645,17 +626,12 @@ void MTcpTransport::send_loop() {
               }
             }
           } else {
-            // Regular direct CPU send path
-            for (uint64_t offset = 0; offset < bytes; offset += chunk_size) {
-              auto real_chunk_size = chunk_size;
-              if (offset + real_chunk_size > bytes) {
-                real_chunk_size = bytes - offset;
-              }
-              auto chunk = std::make_shared<MTcpTransportChunk>(
-                  global_offset + offset + tensor->get_addr<uint8_t>(), real_chunk_size);
-              tasks_[idx]->push_send(chunk);
-              results.push_back(chunk->get_future());
-              idx++;
+            LOG(ERROR) << "MTcpTransport CPU path requires MemoryStager; none set";
+            // Fail this request
+            for (; idx < conn_count_; idx++) {
+              auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
+              fail_chunk->set_result(TRANSPORT_FAILED);
+              results.push_back(fail_chunk->get_future());
             }
           }
         }

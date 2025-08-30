@@ -36,7 +36,7 @@ flowchart TB
       TR[Transport Layer]
       MTCP[MTcpTransport]
       RDMA[RdmaTransport]
-      STAGER[GpuTcpStager]
+      STAGER[GpuNetStager]
     end
 
     subgraph "Worker Threads"
@@ -63,7 +63,7 @@ flowchart TB
 * **Channel** — Manages logical connections (control + data) to remote peers
 * **Transport Layer** — Pluggable I/O mechanisms: TCP, Multi-TCP (MTCP), RDMA
 * **PartitionTensorStore** — Thread-safe registry for local tensors
-* **GpuTcpStager** — GPU→CPU staging for TCP transport (when RDMA disabled)
+* **GpuNetStager** — GPU→CPU staging for TCP transport (when RDMA disabled)
 
 ---
 
@@ -180,7 +180,7 @@ classDiagram
     -PartitionTensorStore store_
     -thread request_thread_
     -thread gc_thread_
-    -GpuTcpStager gpu_tcp_stager_
+    -GpuNetStager gpu_memory_stager_
 
     +read_tensor() thread_safe
     +register_tensor() thread_safe
@@ -261,8 +261,8 @@ With the complete implementation, TCP mode now supports all transfer combination
 | ------ | ------ | -------------------------------------------------- | ------ |
 | CPU    | CPU    | Direct transfer                                    | ✅      |
 | CPU    | GPU    | Network→StreamingPinnedBuffer→GPU                  | ✅      |
-| GPU    | CPU    | GPU→GpuTcpStager→Network                           | ✅      |
-| GPU    | GPU    | GPU→GpuTcpStager→Network→StreamingPinnedBuffer→GPU | ✅      |
+| GPU    | CPU    | GPU→GpuNetStager→Network                           | ✅      |
+| GPU    | GPU    | GPU→GpuNetStager→Network→StreamingPinnedBuffer→GPU | ✅      |
 
 ### 3.6 Complete Data Transfer Architecture for TCP Mode
 
@@ -273,7 +273,7 @@ flowchart TB
     subgraph "Source Node"
         SrcCPU["CPU Tensor"]
         SrcGPU["GPU Tensor"]
-        SrcStager["GpuTcpStager<br/>(GPU→CPU staging)"]
+        SrcStager["GpuNetStager<br/>(GPU→CPU staging)"]
         SrcMTCP["MTcpTransport<br/>(send)"]
     end
 
@@ -430,7 +430,7 @@ sequenceDiagram
   participant App
   participant Engine
   participant ReqThread as Request Thread
-  participant SrcStager as Source GpuTcpStager
+  participant SrcStager as Source GpuNetStager
   participant Network as MTCP Network
   participant TgtBuffer as Target StreamingBuffer
   participant GPU as Target GPU
@@ -531,7 +531,7 @@ The Communicator uses a compact binary – **EngineMessage** – to exchange con
 | Op-code                           | Direction       | Purpose                                                   | When Triggered                                                          |
 | --------------------------------- | --------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `ENGINE_OP_READ_REQUEST`          | Client ➜ Server | Request a tensor slice (offset + bytes)                   | `read_tensor()` sends request from **request_thread_**.                 |
-| `ENGINE_OP_READ_RESPONSE`         | Server ➜ Client | Acknowledge READ and indicate transport route (MTCP/RDMA) | Server side of `on_receive_request()` ↠ client `on_receive_response()`. |
+| `ENGINE_OP_READ_RESPONSE_EX`      | Server ➜ Client | Multi-segment response and transport indicator (MTCP/RDMA) | Server side of `on_receive_request()` ↠ client `on_receive_response()`. |
 | `ENGINE_OP_READ_FAILED`           | Server ➜ Client | Read cannot be served (tensor missing / overflow)         | Validation failure inside `on_receive_request()`.                       |
 | `ENGINE_OP_RDMA_CONNECT_REQUEST`  | Client ➜ Server | Propose an RDMA QP handshake for a NIC pair               | Issued lazily when first RDMA READ is required.                         |
 | `ENGINE_OP_RDMA_CONNECT_RESPONSE` | Server ➜ Client | Return remote QP info so client can **RTR/RTS**           | `channel->get_rdma()` handshake path.                                   |
@@ -576,7 +576,7 @@ sequenceDiagram
     Channel->>Server: READ_REQUEST (TCP)
     Server->>Server: Validate & Locate Tensor
     alt Success
-        Server-->>Channel: ENGINE_OP_READ_RESPONSE
+        Server-->>Channel: ENGINE_OP_READ_RESPONSE_EX
         Channel-->>Client: on_receive_response()
         alt RDMA Path
             Client->>Transport: rdma.read()
@@ -599,7 +599,7 @@ stateDiagram-v2
     Created --> Queued: request_queue_.push()
     Queued --> Sent: READ_REQUEST dispatched
     Sent --> WaitingResponse
-    WaitingResponse --> Transporting: READ_RESPONSE ok
+    WaitingResponse --> Transporting: READ_RESPONSE_EX ok
     Transporting --> Completed: Data copied (MTCP) / RDMA done
     WaitingResponse --> Failed: READ_FAILED or disconnect
     Transporting --> Failed: IO Error

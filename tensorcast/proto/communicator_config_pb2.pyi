@@ -14,29 +14,21 @@ DESCRIPTOR: _descriptor.FileDescriptor
 class StagerConfig(_message.Message):
     __slots__ = (
         "stage_cpu_for_rdma",
-        "direct_mr_max_bytes",
-        "max_inflight_direct_mr",
         "stage_chunk_mb_cpu",
         "stage_chunk_mb_gpu",
         "buffers_per_flow",
     )
     STAGE_CPU_FOR_RDMA_FIELD_NUMBER: _ClassVar[int]
-    DIRECT_MR_MAX_BYTES_FIELD_NUMBER: _ClassVar[int]
-    MAX_INFLIGHT_DIRECT_MR_FIELD_NUMBER: _ClassVar[int]
     STAGE_CHUNK_MB_CPU_FIELD_NUMBER: _ClassVar[int]
     STAGE_CHUNK_MB_GPU_FIELD_NUMBER: _ClassVar[int]
     BUFFERS_PER_FLOW_FIELD_NUMBER: _ClassVar[int]
     stage_cpu_for_rdma: bool
-    direct_mr_max_bytes: int
-    max_inflight_direct_mr: int
     stage_chunk_mb_cpu: int
     stage_chunk_mb_gpu: int
     buffers_per_flow: int
     def __init__(
         self,
         stage_cpu_for_rdma: bool = ...,
-        direct_mr_max_bytes: _Optional[int] = ...,
-        max_inflight_direct_mr: _Optional[int] = ...,
         stage_chunk_mb_cpu: _Optional[int] = ...,
         stage_chunk_mb_gpu: _Optional[int] = ...,
         buffers_per_flow: _Optional[int] = ...,

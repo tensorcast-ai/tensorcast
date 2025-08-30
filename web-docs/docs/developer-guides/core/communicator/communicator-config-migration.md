@@ -17,6 +17,10 @@ Why: The unified MemoryStager and staged P2P require a consistent, typed configu
 ## Migration Steps
 
 - Replace legacy constructors with the `CommunicatorConfig` constructor in all engine callsites.
+- Replace `register_tensor(...)` with `register_tensor_ex(..., RegisterTensorOptions)` and set options explicitly:
+  - `register_mr=true` when RDMA is enabled and you want preregistered MRs.
+  - `needs_staging=true` for GPU tensors over TCP (and for any path you want forced staging).
+  - `async=true` to avoid blocking on MR registration when applicable.
 - Build `CommunicatorConfig` via CLI args or a config file (recommended: YAML).
 - Remove direct env reads from services; inject typed config into the daemon and clients.
 - Remove any env usage in deployment scripts; switch to config files or explicit injection.
@@ -71,11 +75,11 @@ communicator:
 
 ## Failure Modes (by design)
 
-- Missing typed config and gate unset: Engine construction fails fast with a clear error.
-- Gate set but env missing required fields: Deprecated env loader warns and fills only available fields; validation should fail for missing required fields.
+- Missing typed config: Engine construction fails fast with a clear error. The engine no longer supports any environment-variable based configuration.
+- Env-only configuration: Unsupported. Provide a typed config (e.g., via YAML or explicit injection). Missing required fields produce validation errors.
 
 ## Checklist
 
 - [ ] All Communicator constructions use `CommunicatorConfig`.
 - [ ] Services load YAML and inject typed config.
-- [ ] No env reads in core codepaths; deprecated loader only used by legacy shim.
+- [ ] No env reads in core codepaths.

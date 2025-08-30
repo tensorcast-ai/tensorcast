@@ -10,8 +10,6 @@ namespace tensorcast::communicator {
 
 struct StagerConfig {
   bool stage_cpu_for_rdma = true;
-  uint32_t direct_mr_max_bytes = 4 * 1024 * 1024; // 4 MiB
-  int max_inflight_direct_mr = 32;
   uint32_t stage_chunk_mb_cpu = 4;
   uint32_t stage_chunk_mb_gpu = 16;
   int buffers_per_flow = 4;
