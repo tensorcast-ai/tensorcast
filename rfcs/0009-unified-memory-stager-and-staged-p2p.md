@@ -210,6 +210,9 @@ This RFC adopts a unified, layered configuration model across C++ and Python, re
   - rdma:
     - `outstanding_wr: int` (default: 64)
     - `ack_ttl_ms: int` (default: 30000)
+    - `traffic_class: int` (default: 186)
+    - `qp_timeout: int` (default: 20)
+    - `qp_retry: int` (default: 7)
   - pool:
     - `preregister_mr: bool` (default: true)
     - `pool_size_bytes: uint64` (default: 8 GiB)
@@ -218,6 +221,8 @@ This RFC adopts a unified, layered configuration model across C++ and Python, re
     - `simple_numa.nodes: list<SimpleNumaNode>`
   - transport:
     - `tcp_conn_count: int` (default: 8)
+    - `connect_timeout_sec: int` (default: 10)
+    - `tcp_tos: int` (default: 0)
   - affinity:
     - `enable: bool` (default: false; reserved for future CPU pinning; masks not yet supported)
 
@@ -229,7 +234,7 @@ Where `SimpleNumaNode` is:
 - `default: bool` — optional; if true, used as fallback when selection is ambiguous
 
 Implementations:
-- C++: `core/communicator/engine/communicator_config.{h,cc}`
+- C++: `core/communicator/engine/communicator_config.h`
 - Proto: `proto/communicator_config.proto` (generated to C++/Python)
 - Python: Pydantic model `CommunicatorSettings` (e.g. `scstore/store_daemon/communicator_settings.py`)
 
@@ -252,6 +257,9 @@ communicator:
   rdma:
     outstanding_wr: 64
     ack_ttl_ms: 30000
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
   pool:
     preregister_mr: true
     pool_size_bytes: 8589934592   # 8 GiB
@@ -268,6 +276,8 @@ communicator:
           gpus: [2, 3]
   transport:
     tcp_conn_count: 8
+    connect_timeout_sec: 10
+    tcp_tos: 0
   affinity:
     enable: false
 ```
@@ -628,9 +638,15 @@ Counters and histograms:
   - Expose which pool was used (node id) for each staged segment in verbose logs and metrics.
   - Add config validation to detect overlapping NIC/GPU assignments and choose a single default fallback node.
 
-## 13. Compatibility Debt & Removal Plan
+## 13. Compatibility Debt & Removal Plan (Finalized)
 
-This section lists code paths intentionally retained for backward compatibility during the transition to unified staging + staged P2P. Each item includes the rationale, affected areas, and a deprecation/removal plan to track progress.
+This section captures compatibility items during the transition to unified staging + staged P2P and the Communicator typed configuration. PR-1 through PR-3 are complete in PR #49.
+
+Summary of outcomes (P2 complete):
+- Typed-only configuration: `CommunicatorConfig` is required to construct `CommunicateEngine`; legacy bool constructor removed.
+- All legacy environment variables removed from engine/transport codepaths.
+- RDMA/TCP transport tuning migrated to typed config (`rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`; `transport.connect_timeout_sec`, `transport.tcp_tos`).
+- `DEFAULT_DEV` fallback removed; device selection is typed-config driven. For CPU RDMA when no mapping exists, the engine selects the first available device; GPU selection remains `get_best_dev(gpu_id)`.
 
 ### 13.1 GPU Stager Dual-Track (legacy + unified)
 - What: Keep legacy `GpuTcpStager` while introducing `GpuNetStager` (a `MemoryStager` adapter).
@@ -645,14 +661,10 @@ This section lists code paths intentionally retained for backward compatibility 
   - Remove `gpu_stagers_` map after migration; retain `gpu_mem_stagers_` only.
 
 ### 13.2 Constructors and Env Config Back-Compat
-- What: Dual constructors and environment variable reads remain.
-- Where:
-  - Constructors: `CommunicateEngine(bool enable_rdma, ...)` and `CommunicateEngine(const CommunicatorConfig&, ...)` coexist
-  - Env reads: `DEFAULT_DEV`, `GPU_TCP_STAGER_CHUNK_SIZE_MB`, `GPU_TCP_STAGER_NUM_BUFFERS`, `GPU_TCP_RECV_NUM_BUFFERS`, `RDMA_ACK_TTL_MS`, `STAGER_NUMA_ENABLE`, `STAGER_NUMA_GPU_MAP`, `STAGER_NUMA_NIC_MAP`
-- Rationale: Allow legacy deployments to run without typed config immediately.
-- Removal Plan:
-  - Gate all configuration through `CommunicatorConfig` (typed); mark env reads deprecated.
-  - Remove legacy constructor; provide thin helpers to build `CommunicatorConfig` from explicit params.
+- Status: Completed.
+- Changes:
+  - Removed `CommunicateEngine(bool, ...)`; only `CommunicateEngine(const CommunicatorConfig&, ...)` remains.
+  - Removed all environment variable reads; added typed RDMA/TCP tuning fields.
 
 ### 13.3 Protocol Compatibility (single-seg vs multi-seg + ACK)
 - What: Support both legacy single-segment (`ENGINE_OP_READ_RESPONSE`, `ENGINE_OP_RDMA_READ_DONE`) and new multi-segment (`READ_RESPONSE_EX`, `RDMA_READ_DONE_EX`).
@@ -684,12 +696,9 @@ This section lists code paths intentionally retained for backward compatibility 
 - Removal Plan:
   - Migrate all internal callsites to `register_tensor_ex` with explicit options; deprecate and remove legacy overload.
 
-### 13.7 Default RDMA Device Fallback
-- What: Use `DEFAULT_DEV` env when automatic selection fails.
-- Where: `get_net_dev(...)` in `engine.cc`.
-- Rationale: Provide robust fallback for environments without full PCI/GID discovery.
-- Removal Plan:
-  - Make RDMA device selection strictly typed/config-driven; remove `DEFAULT_DEV` fallback once config is mandatory.
+### 13.7 Default RDMA Device Selection
+- Status: Completed.
+- Changes: Removed `DEFAULT_DEV` env fallback. RDMA device selection is typed-config driven; CPU path falls back to first PD if needed.
 
 ### 13.8 Tracking Table (with owners & milestones)
 
@@ -707,27 +716,11 @@ Notes:
 - Milestones P2/P3/P4 align with Implementation Plan phases (P2: staged RDMA+ACK; P3: NUMA; P4: cleanup/policy knobs).
 - Owners denote responsible sub-team/module; adjust to specific individuals in tracking issues.
 
-### 13.9 Default Flips & Env Deprecations — Removal PR Plan
+### 13.9 Changes Landed (PRs)
 
-This sub-section defines concrete PRs to flip defaults and start removals. The goal is to make typed configuration mandatory and phase out legacy environment variables.
-
-- PR-1: Require `CommunicatorConfig` injection (flip default)
-  - Change: Make the `CommunicateEngine(const CommunicatorConfig&, ...)` constructor the only supported path in new code paths; keep legacy constructor as deprecated shim that immediately builds a `CommunicatorConfig` from explicit params only (no env reads).
-  - Behavior: If engine is constructed without `CommunicatorConfig`, emit a deprecation warning once per process and proceed via a temporary `CommunicatorConfig::FromEnvDeprecated()` builder (see PR-2). Tests and services switch to injecting typed config.
-  - Affected: `core/communicator/engine/engine.{h,cc}`, daemon service wiring, Python client wiring.
-  - Owner: Communicator (C++) — Milestone: P2.
-
-- PR-2: Remove legacy environment variables
-  - Change: Delete all env-based configuration from engine codepaths. Require typed `CommunicatorConfig` exclusively.
-  - Removed envs (use typed config instead): `DEFAULT_DEV`, `GPU_TCP_STAGER_CHUNK_SIZE_MB`, `GPU_TCP_STAGER_NUM_BUFFERS`,
-    `GPU_TCP_RECV_NUM_BUFFERS`, `RDMA_ACK_TTL_MS`, `STAGER_NUMA_ENABLE`, `STAGER_NUMA_GPU_MAP`, `STAGER_NUMA_NIC_MAP`.
-  - Affected: `core/communicator/engine/engine.{h,cc}`; tests and callsites updated to construct via `CommunicatorConfig`.
-  - Owner: Communicator (C++) — Milestone: P2.
-
-- PR-3: Update docs and examples to typed config only
-  - Change: Remove env-based examples from README and internal docs; add YAML examples mapping to `CommunicatorConfig` schema.
-  - Affected: `README.md`, developer guides.
-  - Owner: Docs — Milestone: P2.
+- PR-1 (merged): Require `CommunicatorConfig` (typed-only constructor); update core callsites. Included in PR #49.
+- PR-2 (merged): Remove legacy environment variables and env-loading; migrate RDMA/TCP knobs to typed config; delete env helpers. Included in PR #49.
+- PR-3 (merged): Docs migration to typed config; added YAML examples; updated sidebars. Included in PR #49.
 
 - PR-4: Remove legacy constructor and env loader
   - Change: Delete `CommunicateEngine(bool, ...)` and `CommunicatorConfig::FromEnvDeprecated()`; remove all callsites and CI env setups relying on them.
@@ -741,7 +734,6 @@ This sub-section defines concrete PRs to flip defaults and start removals. The g
   - `[x]` Env usage removed; engine no longer reads envs
 
 - P3 (NUMA):
-  - `[ ]` Remove `DEFAULT_DEV` fallback; NIC selection must come from typed config
   - `[ ]` Remove MTCP CPU direct-send fallback; `MemoryStager` required
   - `[ ]` Remove legacy registration overload after migrating internal callsites
 
