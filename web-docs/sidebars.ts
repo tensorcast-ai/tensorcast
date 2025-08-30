@@ -95,6 +95,7 @@ const sidebars: SidebarsConfig = {
           },
           items: [
             'developer-guides/core/communicator/engine-tensor-io',
+            'developer-guides/core/communicator/communicator-config-migration',
           ],
         },
       ],
