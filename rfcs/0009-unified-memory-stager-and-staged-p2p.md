@@ -696,7 +696,7 @@ This section lists code paths intentionally retained for backward compatibility 
 | ✓ | Item | Area | Owner | Milestone | Current Status | Next Step |
 |---|---|---|---|---|---|---|
 | [ ] | GPU stager dual-track → unified | Engine/MTCP | Communicator (C++) | P3 | In use | Switch all callsites to `MemoryStager`; remove legacy API and fallbacks |
-| [ ] | Require `CommunicatorConfig` (flip default) | Engine | Communicator (C++) | P2 | In use | Make typed config mandatory; deprecate legacy constructor and env reads |
+| [x] | Require `CommunicatorConfig` (typed-only) | Engine | Communicator (C++) | P2 | Done | Typed config mandatory; legacy constructor and env reads removed |
 | [ ] | Protocol legacy ops → `*_EX` only | Engine | Communicator (C++) | P3 | In use | Require EX handlers; remove legacy ops and branches |
 | [ ] | RDMA DirectMR limited to small-slab policy | Engine | Communicator (C++) | P4 | Policy gated | Keep only explicit small-slab path; remove generic DVMP MR advertisement |
 | [ ] | MTCP CPU direct send → stager-required | MTCP | Transport (C++) | P3 | Fallback present | Require `MemoryStager`; delete direct CPU-send branch |
@@ -717,19 +717,11 @@ This sub-section defines concrete PRs to flip defaults and start removals. The g
   - Affected: `core/communicator/engine/engine.{h,cc}`, daemon service wiring, Python client wiring.
   - Owner: Communicator (C++) — Milestone: P2.
 
-- PR-2: Deprecate and gate legacy environment variables
-  - Change: Introduce a centralized deprecated-env loader `CommunicatorConfig::FromEnvDeprecated()` used only by the legacy shim in PR-1 and gated by `TENSORCAST_ALLOW_LEGACY_ENV=1` (default off). When enabled, it logs a warning mapping each env var to its typed config field.
-  - Env vars to deprecate and replacement fields:
-    - `DEFAULT_DEV` → `pool.simple_numa.nodes[n].nics` selection and explicit NIC choice via typed config
-    - `GPU_TCP_STAGER_CHUNK_SIZE_MB` → `stager.stage_chunk_mb_gpu`
-    - `GPU_TCP_STAGER_NUM_BUFFERS` → `stager.buffers_per_flow`
-    - `GPU_TCP_RECV_NUM_BUFFERS` → `stager.buffers_per_flow` (receiver buffering unified under stager policy)
-    - `RDMA_ACK_TTL_MS` → `rdma.ack_ttl_ms`
-    - `STAGER_NUMA_ENABLE` → `pool.simple_numa.enable`
-    - `STAGER_NUMA_GPU_MAP` → `pool.simple_numa.nodes[].gpus`
-    - `STAGER_NUMA_NIC_MAP` → `pool.simple_numa.nodes[].nics`
-  - Behavior: With `TENSORCAST_ALLOW_LEGACY_ENV` unset, env values are ignored; process fails fast if no typed config is provided. With the flag set, envs are loaded with WARN-level deprecation logs and a telemetry counter `communicator.deprecated_env_used` is incremented.
-  - Affected: `core/communicator/engine/communicator_config.{h,cc}` (add FromEnvDeprecated), daemon config loader, docs.
+- PR-2: Remove legacy environment variables
+  - Change: Delete all env-based configuration from engine codepaths. Require typed `CommunicatorConfig` exclusively.
+  - Removed envs (use typed config instead): `DEFAULT_DEV`, `GPU_TCP_STAGER_CHUNK_SIZE_MB`, `GPU_TCP_STAGER_NUM_BUFFERS`,
+    `GPU_TCP_RECV_NUM_BUFFERS`, `RDMA_ACK_TTL_MS`, `STAGER_NUMA_ENABLE`, `STAGER_NUMA_GPU_MAP`, `STAGER_NUMA_NIC_MAP`.
+  - Affected: `core/communicator/engine/engine.{h,cc}`; tests and callsites updated to construct via `CommunicatorConfig`.
   - Owner: Communicator (C++) — Milestone: P2.
 
 - PR-3: Update docs and examples to typed config only
@@ -745,8 +737,8 @@ This sub-section defines concrete PRs to flip defaults and start removals. The g
 ### 13.10 Deprecation Schedule
 
 - P2 (staged RDMA + ACK):
-  - `[ ]` `CommunicatorConfig` required by default (legacy shim logs WARN once per process)
-  - `[ ]` Env usage gated by `TENSORCAST_ALLOW_LEGACY_ENV=1` and logs WARN per variable
+  - `[x]` `CommunicatorConfig` required (typed-only; legacy constructor removed)
+  - `[x]` Env usage removed; engine no longer reads envs
 
 - P3 (NUMA):
   - `[ ]` Remove `DEFAULT_DEV` fallback; NIC selection must come from typed config

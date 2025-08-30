@@ -29,7 +29,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg1; cfg1.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a large GPU tensor
@@ -59,7 +60,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       REQUIRE(target_port > 0);
       target_ports.push_back(target_port);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
 
@@ -103,7 +105,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 128 * 1024; // 128KB - large to ensure slow transfer
@@ -122,7 +125,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int target_port = find_available_port(source_port + 10);
     REQUIRE(target_port > 0);
 
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg2; cfg2.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     void* target_buffer = std::malloc(tensor_size);
@@ -169,12 +173,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Create engines
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg3; cfg3.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     int target_port = find_available_port(source_port + 10);
     REQUIRE(target_port > 0);
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg4; cfg4.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Prepare source tensors
@@ -255,7 +261,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg5; cfg5.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg5);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a moderately sized GPU tensor
@@ -288,7 +295,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
 
@@ -384,7 +392,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 128 * 1024; // 128KB
@@ -426,7 +435,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       engines.push_back(engine);
 
@@ -499,7 +509,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 16 * 1024; // 16KB
@@ -533,7 +544,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         }
 
         // Create new engine for each cycle
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for cycle " << i << ": " << init_status;
@@ -610,7 +622,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensors on different GPUs
@@ -659,7 +672,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return false;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for transfer " << i << ": " << init_status;
@@ -744,7 +758,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create multiple large tensors to stress memory
@@ -790,7 +805,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for tensor " << i << ": " << init_status;
@@ -862,7 +878,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensor that requires exactly one staging buffer
@@ -891,7 +908,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       holder_engines.push_back(engine);
 
@@ -927,7 +945,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 100 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       waiter_engines.push_back(engine);
 
@@ -1009,7 +1028,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Test various sizes around chunk boundaries
@@ -1061,7 +1081,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return false;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for boundary tensor " << i << ": " << init_status;
@@ -1131,7 +1152,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 32 * 1024; // 32KB
@@ -1170,7 +1192,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for reader " << reader_id << ": " << init_status;
@@ -1277,7 +1300,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg15; cfg15.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg15);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 32 * 1024; // 32KB
@@ -1311,7 +1335,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg16; cfg16.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg16);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for iteration " << i << ": " << init_status;
@@ -1395,7 +1420,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int final_port = find_available_port(source_port + 200);
       REQUIRE(final_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", final_port).ok());
 
       void* final_buffer = std::malloc(tensor_size);

@@ -22,41 +22,14 @@
 #include "core/communicator/engine/gpu_net_stager.h"
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/uma_residency_provider.h"
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
 
 namespace tensorcast::communicator {
 
-// Deprecated envs are no longer read directly in engine codepaths.
-// See CommunicatorConfig::FromEnvDeprecated for the gated loader used by the legacy shim.
+// Engine is fully typed-config driven; no environment-variable reads here.
 
-namespace {
-// One-time deprecation warning for legacy constructor usage
-std::atomic<bool> g_comm_engine_legacy_ctor_warned{false};
-
-inline tensorcast::communicator::CommunicatorConfig make_legacy_shim_config(bool enable_rdma) {
-  // Gate deprecated env usage; if allowed, build config from envs, else use
-  // typed defaults.
-  const char* gate = std::getenv("TENSORCAST_ALLOW_LEGACY_ENV");
-  if (gate && (*gate == '1' || *gate == 't' || *gate == 'T' || *gate == 'y' || *gate == 'Y')) {
-    return tensorcast::communicator::CommunicatorConfig::FromEnvDeprecated(enable_rdma, /*log_warnings=*/true);
-  }
-  tensorcast::communicator::CommunicatorConfig cfg;
-  cfg.enable_rdma = enable_rdma;
-  cfg.transport.tcp_conn_count = tensorcast::communicator::kMTcpConnCount;
-  return cfg;
-}
-} // namespace
-
-CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_sec)
-    : CommunicateEngine(make_legacy_shim_config(enable_rdma), channel_expire_sec) {
-  bool expected = false;
-  if (g_comm_engine_legacy_ctor_warned.compare_exchange_strong(expected, true)) {
-    LOG(WARNING) << "CommunicateEngine(bool) is deprecated and will be removed. "
-                 << "Construct with CommunicatorConfig instead (see docs: developer-guides/core/communicator/communicator-config-migration).";
-  }
-}
+// No legacy constructors; typed CommunicatorConfig is required.
 
 CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t channel_expire_sec)
     : stop_(false),
@@ -69,7 +42,6 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       config_(cfg),
       channel_expire_(channel_expire_sec) {
   common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
-  legacy_env_allowed_ = cfg.legacy_env_mode;
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
 
@@ -106,10 +78,6 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
   if (enable_rdma_) {
     rdma_context_ = std::make_shared<RdmaContext>();
     mr_cache_ = std::make_unique<MrCache>();
-    // Mark legacy env mode for guarded fallbacks
-    if (config_.legacy_env_mode) {
-      VLOG(1) << "CommunicateEngine constructed in legacy-env mode (guarded)";
-    }
 
     if (config_.simple_numa.enable) {
       for (const auto& node : config_.simple_numa.nodes) {
@@ -1126,25 +1094,8 @@ net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
       net_dev = rdma_context_->get_best_dev(dev_id);
     }
     if (net_dev == nullptr) {
-      // If legacy env mode is allowed, honor TENSORCAST_COMM_DEFAULT_DEV as a fallback.
-      if (legacy_env_allowed_) {
-        std::string default_dev = get_env("TENSORCAST_COMM_DEFAULT_DEV", "");
-        if (default_dev.empty()) {
-          LOG(WARNING) << "failed to get net dev for gpu=" << dev_id;
-          return nullptr;
-        }
-
-        LOG(WARNING) << "failed to find a net dev for gpu" << dev_id
-                     << ", automatically, use the default net dev " << default_dev;
-        net_dev = rdma_context_->get_dev(default_dev);
-        if (net_dev == nullptr) {
-          LOG(WARNING) << "failed to get default net dev " << default_dev;
-          return nullptr;
-        }
-      } else {
-        LOG(WARNING) << "failed to get net dev for gpu=" << dev_id << "; no legacy env fallback allowed";
-        return nullptr;
-      }
+      LOG(WARNING) << "failed to get net dev for gpu=" << dev_id << "; provide explicit device mapping in config";
+      return nullptr;
     }
   }
   return net_dev;

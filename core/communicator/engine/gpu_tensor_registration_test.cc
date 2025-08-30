@@ -16,7 +16,8 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
 
   SECTION("Register GPU tensor in TCP mode") {
     // Create engine in TCP mode
-    auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Allocate GPU memory

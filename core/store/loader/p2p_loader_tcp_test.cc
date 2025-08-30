@@ -31,7 +31,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0);
 
     // Set up source engine with GPU tensor
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg1; cfg1.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
@@ -54,7 +55,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
                 .ok());
 
     // Create target engine for loader
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg2; cfg2.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Create P2PLoader with GPU source configuration (updated API)
@@ -116,7 +118,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0); // "Failed to find available port for GPU-to-CPU P2P target engine"
 
     // Similar test but with CPU target
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg3; cfg3.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
@@ -143,7 +146,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(register_status.message());
     REQUIRE(register_status.ok());
 
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg4; cfg4.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());

@@ -20,9 +20,11 @@ struct RdmaTestFixture {
   uint32_t client_buf_[BUF_SIZE];
 
   RdmaTestFixture() {
-    server_ = new communicator::CommunicateEngine(true, 30);
+    communicator::CommunicatorConfig srv_cfg; srv_cfg.enable_rdma = true;
+    server_ = new communicator::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
-    client_ = new communicator::CommunicateEngine(true, 30);
+    communicator::CommunicatorConfig cli_cfg; cli_cfg.enable_rdma = true;
+    client_ = new communicator::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
     for (uint32_t i = 0; i < BUF_SIZE; i++) {

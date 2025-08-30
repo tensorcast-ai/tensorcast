@@ -6,12 +6,12 @@ sidebar_label: CommunicatorConfig Migration
 
 This guide explains how to migrate from environment-variable based configuration to the typed `CommunicatorConfig` required by the Communicator engine.
 
-Why: The unified MemoryStager and staged P2P require a consistent, typed configuration model across C++ and Python. Env-based knobs are deprecated and gated.
+Why: The unified MemoryStager and staged P2P require a consistent, typed configuration model across C++ and Python. Env-based knobs are removed.
 
 ## Summary
 
 - New default: `CommunicatorConfig` is required at construction.
-- Legacy envs are gated behind `TENSORCAST_ALLOW_LEGACY_ENV=1` (temporary), with WARN logs and metrics.
+- Legacy envs are removed; use typed config fields instead.
 - Config sources: explicit injection (CLI/code) > file (YAML/JSON/TOML) > built-in defaults.
 
 ## Migration Steps
@@ -19,7 +19,7 @@ Why: The unified MemoryStager and staged P2P require a consistent, typed configu
 - Replace legacy constructors with the `CommunicatorConfig` constructor in all engine callsites.
 - Build `CommunicatorConfig` via CLI args or a config file (recommended: YAML).
 - Remove direct env reads from services; inject typed config into the daemon and clients.
-- If a legacy deployment must use envs temporarily, set `TENSORCAST_ALLOW_LEGACY_ENV=1` and plan removal.
+- Remove any env usage in deployment scripts; switch to config files or explicit injection.
 
 ## Example YAML
 
@@ -74,4 +74,3 @@ communicator:
 - [ ] All Communicator constructions use `CommunicatorConfig`.
 - [ ] Services load YAML and inject typed config.
 - [ ] No env reads in core codepaths; deprecated loader only used by legacy shim.
-

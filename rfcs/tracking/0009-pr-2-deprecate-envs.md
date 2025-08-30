@@ -1,33 +1,25 @@
-# Tracking Issue — PR-2: Deprecate and gate legacy environment variables
+# Tracking Issue — PR-2: Remove legacy environment variables
 
 - Owner: Communicator (C++)
 - Milestone: P2 (staged RDMA + ACK)
-- Status: Planned
+- Status: Completed
 - RFC: rfcs/0009-unified-memory-stager-and-staged-p2p.md (Section 13.9)
 
 ## Goals
-- Gate legacy env-based configuration behind `TENSORCAST_ALLOW_LEGACY_ENV=1` (default off).
-- Provide a temporary `CommunicatorConfig::FromEnvDeprecated()` used only by the legacy shim.
-- Log WARN once per variable and emit telemetry on use.
+- Remove legacy env-based configuration entirely from engine codepaths.
+- Require typed `CommunicatorConfig` everywhere.
 
-## Env mapping
-- `DEFAULT_DEV` → `pool.simple_numa.nodes[n].nics`
-- `GPU_TCP_STAGER_CHUNK_SIZE_MB` → `stager.stage_chunk_mb_gpu`
-- `GPU_TCP_STAGER_NUM_BUFFERS` → `stager.buffers_per_flow`
-- `GPU_TCP_RECV_NUM_BUFFERS` → `stager.buffers_per_flow`
-- `RDMA_ACK_TTL_MS` → `rdma.ack_ttl_ms`
-- `STAGER_NUMA_ENABLE` → `pool.simple_numa.enable`
-- `STAGER_NUMA_GPU_MAP` → `pool.simple_numa.nodes[].gpus`
-- `STAGER_NUMA_NIC_MAP` → `pool.simple_numa.nodes[].nics`
+## Env mapping (doc-only)
+- Previously used envs (now unsupported): `DEFAULT_DEV`, `GPU_TCP_STAGER_CHUNK_SIZE_MB`, `GPU_TCP_STAGER_NUM_BUFFERS`,
+  `GPU_TCP_RECV_NUM_BUFFERS`, `RDMA_ACK_TTL_MS`, `STAGER_NUMA_ENABLE`, `STAGER_NUMA_GPU_MAP`, `STAGER_NUMA_NIC_MAP`.
+  Use typed config fields instead (see CommunicatorConfig schema in RFC-0009).
 
 ## Tasks
-- [ ] Implement `CommunicatorConfig::FromEnvDeprecated()` builder (guarded by `TENSORCAST_ALLOW_LEGACY_ENV`).
-- [ ] Add WARN logs mapping each env var to its typed field.
-- [ ] Add counter metric `communicator.deprecated_env_used` with labels per variable.
-- [ ] Ensure main codepaths do not read env directly.
-- [ ] Update docs to show typed config alternatives and flag semantics.
+- [x] Remove all direct env reads from `engine.cc`.
+- [x] Delete any deprecated env loaders and gates.
+- [x] Update tests and callsites to construct via `CommunicatorConfig`.
+- [x] Update docs to show typed config only.
 
 ## Acceptance
-- [ ] With gate disabled (default), envs are ignored and engine requires typed config.
-- [ ] With gate enabled, envs load with WARN logs and metrics increment.
-
+- [x] Engine compiles with no env reads; typed config required.
+- [x] No occurrence of legacy constructor in repository.

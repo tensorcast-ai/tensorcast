@@ -13,6 +13,7 @@
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
 
+using namespace tensorcast;;
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
 
@@ -20,7 +21,8 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
 
   SECTION("Invalid tensor registration") {
-    auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Try to register with invalid device ID
@@ -94,7 +96,8 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Zero-size transfer handling") {
-    auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg; cfg.enable_rdma = false; /* disable RDMA */
+    auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;

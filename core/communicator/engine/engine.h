@@ -30,7 +30,6 @@ namespace tensorcast::communicator {
 
  class CommunicateEngine {
  public:
-  explicit CommunicateEngine(bool enable_rdma = false, uint32_t channel_expire_sec = 0);
   explicit CommunicateEngine(const CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
   ~CommunicateEngine();
@@ -169,8 +168,6 @@ namespace tensorcast::communicator {
   uint32_t ack_ttl_ms_ = 30000;
   CommunicatorConfig config_{}; // defaults unless provided
   std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
-  // True when constructed with legacy env config (PR-2 gate enabled)
-  bool legacy_env_allowed_ = false;
 
   uint64_t channel_expire_;
 

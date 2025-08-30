@@ -45,7 +45,9 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   int src_port = find_available_port(51000);
   REQUIRE(src_port > 0);
 
-  auto src_engine = std::make_shared<CommunicateEngine>(false /* enable_rdma = false */);
+  communicator::CommunicatorConfig cfg;
+  cfg.enable_rdma = false; /* disable RDMA */
+  auto src_engine = std::make_shared<CommunicateEngine>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
 
   // Allocate GPU memory and fill with a deterministic pattern.
