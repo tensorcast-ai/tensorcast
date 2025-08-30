@@ -2,6 +2,7 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -35,140 +36,25 @@ ENV_PARAM(STAGER_NUMA_ENABLE, 0);
 ENV_PARAM_STR(STAGER_NUMA_GPU_MAP, "");    // Format: "0:0,1;1:2,3"
 ENV_PARAM_STR(STAGER_NUMA_NIC_MAP, "");    // Format: "0:mlx5_0,mlx5_1;1:mlx5_2"
 
+namespace {
+// One-time deprecation warning for legacy constructor usage
+std::atomic<bool> g_comm_engine_legacy_ctor_warned{false};
+
+inline tensorcast::communicator::CommunicatorConfig make_legacy_shim_config(bool enable_rdma) {
+  tensorcast::communicator::CommunicatorConfig cfg;
+  cfg.enable_rdma = enable_rdma;
+  cfg.transport.tcp_conn_count = tensorcast::communicator::kMTcpConnCount;
+  // All other fields use typed defaults defined in CommunicatorConfig.
+  return cfg;
+}
+} // namespace
+
 CommunicateEngine::CommunicateEngine(bool enable_rdma, uint32_t channel_expire_sec)
-    : stop_(false),
-      inited_(false),
-      server_context_(new TcpContext()),
-      client_context_(new TcpContext()),
-      enable_rdma_(enable_rdma),
-      mtcp_conn_count_(kMTcpConnCount),
-      channel_expire_(channel_expire_sec) {
-  // Record RDMA availability globally for capability-driven code paths.
-  common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
-  request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
-  gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
-
-  // Default UMA-backed residency provider
-  residency_provider_ = std::make_shared<UmaResidencyProvider>();
-
-  // Staging resources (always available)
-  const size_t chunk_size = GPU_TCP_STAGER_CHUNK_SIZE_MB * 1024 * 1024;
-  const size_t num_buffers = GPU_TCP_STAGER_NUM_BUFFERS;
-  const size_t recv_num_buffers = GPU_TCP_RECV_NUM_BUFFERS;
-  const size_t total_pool_size = chunk_size * (num_buffers + recv_num_buffers);
-
-  gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
-  gpu_tcp_stager_ = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, gpu_memory_pool_);
-  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gsl::not_null<std::shared_ptr<GpuTcpStager>>{gpu_tcp_stager_});
-  memory_stager_ = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{gpu_memory_pool_}, /*num_buffers_hint=*/num_buffers);
-  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
-    ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
-  }
-
-  VLOG(2) << "Initialized stagers with " << num_buffers << " buffers of " << GPU_TCP_STAGER_CHUNK_SIZE_MB
-          << " MB each; shared pinned pool size " << total_pool_size / (1024 * 1024) << " MB";
-
-  if (enable_rdma_) {
-    rdma_context_ = std::make_shared<RdmaContext>();
-    mr_cache_ = std::make_unique<MrCache>();
-
-    // If NUMA mapping is enabled, construct per-node pools & stagers
-    if (STAGER_NUMA_ENABLE) {
-      // Parse maps: node->GPU ids and node->NIC names
-      std::unordered_map<int, std::vector<int>> node_gpus;
-      std::unordered_map<int, std::vector<std::string>> node_nics;
-      auto parse_gpu_map = [](const std::string& s) {
-        std::unordered_map<int, std::vector<int>> out;
-        for (absl::string_view part : absl::StrSplit(s, ';', absl::SkipEmpty())) {
-          part = absl::StripAsciiWhitespace(part);
-          size_t pos = part.find(':');
-          if (pos == absl::string_view::npos) continue;
-          absl::string_view node_sv = absl::StripAsciiWhitespace(part.substr(0, pos));
-          absl::string_view list_sv = absl::StripAsciiWhitespace(part.substr(pos + 1));
-          int node_id = 0;
-          if (!absl::SimpleAtoi(node_sv, &node_id)) continue;
-          std::vector<int> ids;
-          for (absl::string_view idsv : absl::StrSplit(list_sv, ',', absl::SkipEmpty())) {
-            idsv = absl::StripAsciiWhitespace(idsv);
-            int id = -1;
-            if (absl::SimpleAtoi(idsv, &id)) ids.push_back(id);
-          }
-          if (!ids.empty()) out[node_id] = std::move(ids);
-        }
-        return out;
-      };
-      auto parse_nic_map = [](const std::string& s) {
-        std::unordered_map<int, std::vector<std::string>> out;
-        for (absl::string_view part : absl::StrSplit(s, ';', absl::SkipEmpty())) {
-          part = absl::StripAsciiWhitespace(part);
-          size_t pos = part.find(':');
-          if (pos == absl::string_view::npos) continue;
-          absl::string_view node_sv = absl::StripAsciiWhitespace(part.substr(0, pos));
-          absl::string_view list_sv = absl::StripAsciiWhitespace(part.substr(pos + 1));
-          int node_id = 0;
-          if (!absl::SimpleAtoi(node_sv, &node_id)) continue;
-          std::vector<std::string> names;
-          for (absl::string_view nsv : absl::StrSplit(list_sv, ',', absl::SkipEmpty())) {
-            nsv = absl::StripAsciiWhitespace(nsv);
-            if (!nsv.empty()) names.emplace_back(nsv);
-          }
-          if (!names.empty()) out[node_id] = std::move(names);
-        }
-        return out;
-      };
-
-      node_gpus = parse_gpu_map(STAGER_NUMA_GPU_MAP);
-      node_nics = parse_nic_map(STAGER_NUMA_NIC_MAP);
-
-      // Build set of unique node ids
-      std::unordered_set<int> node_ids;
-      for (auto& kv : node_gpus) node_ids.insert(kv.first);
-      for (auto& kv : node_nics) node_ids.insert(kv.first);
-
-      for (int node_id : node_ids) {
-        auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, chunk_size);
-        numa_pools_.push_back(pool);
-        auto cpu_stager = std::make_shared<DRAMStager>(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
-        if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
-          ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
-        }
-        auto gpu_stager = std::make_shared<GpuTcpStager>(chunk_size, num_buffers, pool);
-        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_stager);
-
-        // Map GPU ids
-        auto itg = node_gpus.find(node_id);
-        if (itg != node_gpus.end()) {
-          for (int gid : itg->second) {
-            gpu_stagers_[gid] = gpu_stager;
-            gpu_mem_stagers_[gid] = gpu_mem_stager;
-          }
-        }
-        // Map NIC names
-        auto itn = node_nics.find(node_id);
-        if (itn != node_nics.end()) {
-          for (const auto& nic : itn->second) {
-            nic_cpu_stagers_[nic] = cpu_stager;
-          }
-        }
-      }
-    }
-
-    // Pre-register MRs for all pool buffers across available PDs (default and NUMA pools)
-    int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-    std::vector<std::shared_ptr<store::PinnedMemoryPool>> pools;
-    pools.push_back(gpu_memory_pool_);
-    for (auto& p : numa_pools_) pools.push_back(p);
-    for (const auto& dev : rdma_context_->list_devs()) {
-      for (auto& pool : pools) {
-        auto buffers = pool->list_buffers();
-        for (auto ptr : buffers) {
-          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->chunk_size(), access);
-          if (mr == nullptr) {
-            LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
-          }
-        }
-      }
-    }
+    : CommunicateEngine(make_legacy_shim_config(enable_rdma), channel_expire_sec) {
+  bool expected = false;
+  if (g_comm_engine_legacy_ctor_warned.compare_exchange_strong(expected, true)) {
+    LOG(WARNING) << "CommunicateEngine(bool) is deprecated and will be removed. "
+                 << "Construct with CommunicatorConfig instead (see docs: developer-guides/core/communicator/communicator-config-migration).";
   }
 }
 
