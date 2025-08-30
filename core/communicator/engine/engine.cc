@@ -10,9 +10,7 @@
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
-#include "absl/strings/numbers.h"
-#include "absl/strings/str_split.h"
-#include "absl/strings/ascii.h"
+// absl string utilities no longer needed in typed-config engine
 
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
