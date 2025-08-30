@@ -105,7 +105,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 - `/core/store/`: Artifact lifecycle management and memory optimization. **The Store Engine used by ArtifactLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `tensorcast/csrc/store_engine_py.cc`**.
 - `/core/communicator/`: RDMA/TCP communication engines
 - `/tensorcast/global_store/`: Centralized metadata registry with DuckDB backend
-- `/tensorcast/store_daemon/`: Local artifact storage service
+- `/daemon/`: C++ StoreDaemon service (Python layer provides CLI/manager only)
 - `/tests/`: Comprehensive C++ and Python test suites
 
 ### Build Systems

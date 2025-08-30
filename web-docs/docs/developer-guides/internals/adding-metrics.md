@@ -153,7 +153,7 @@ You can safely update metrics from multiple threads without external synchroniza
 
 ## 4. Verify Locally
 
-1. Start the StoreDaemon (`python -m tensorcast.store_daemon ...`).
+1. Start the StoreDaemon using the CLI (`tensorcast start ...`).
 2. Curl the metrics endpoint:
    ```bash
    curl http://localhost:9091/metrics | grep my_feature

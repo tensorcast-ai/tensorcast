@@ -15,7 +15,7 @@ import pytest
 from unittest import mock
 
 from tensorcast.daemon_manager import DaemonManager, ensure_daemon_running
-from tensorcast.store_daemon.config import StoreDaemonConfig, ServerConfig
+from tensorcast.daemon_config import StoreDaemonConfig, ServerConfig
 from tensorcast.logger import init_logger
 from pathlib import Path
 from pydantic import ByteSize

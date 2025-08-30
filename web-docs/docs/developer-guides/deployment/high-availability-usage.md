@@ -73,8 +73,8 @@ global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 ### Starting Store Daemon with HA
 
 ```python
-from tensorcast.store_daemon.servicer import StoreDaemonServicer
-from tensorcast.store_daemon.config import StoreDaemonConfig
+# C++ daemon is now the implementation; use Python config models to launch it
+from tensorcast.daemon_config import StoreDaemonConfig
 
 # Configure with HA enabled
 config = StoreDaemonConfig(

@@ -100,7 +100,7 @@ communicator:
     tcp_tos: 0
 ```
 
-Pass this to the StoreDaemon via the Python loader (see `tensorcast.store_daemon.config`). When `communicator` is present,
+Pass this to the StoreDaemon via the Python loader (see `tensorcast.daemon_config`). When `communicator` is present,
 the daemon initializes the communication engine using these typed settings (no environment variables).
 
 

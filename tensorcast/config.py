@@ -59,9 +59,9 @@ def init(
     """
 
     # Import here to avoid circular imports
+    from tensorcast.daemon_config import ServerConfig, StoreDaemonConfig
     from tensorcast.daemon_manager import ensure_daemon_running, get_daemon_manager
     from tensorcast.logger import init_logger
-    from tensorcast.store_daemon.config import ServerConfig, StoreDaemonConfig
     from tensorcast.torch_util import set_daemon_address
     from tensorcast.utils import to_num_bytes
 

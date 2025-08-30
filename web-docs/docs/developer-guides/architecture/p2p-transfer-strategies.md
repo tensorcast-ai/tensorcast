@@ -238,9 +238,7 @@ sequenceDiagram
 ### Key Components and File Locations
 
 #### Python Layer
-- **ArtifactLoader** (`tensorcast/store_daemon/artifact_loader.py`)
-  - Simplified to call `store_engine.materialize_replica()` with AUTO mode
-  - No longer handles P2P vs disk decisions
+- Thin CLI and daemon manager used to configure and launch the C++ daemon
 
 #### C++ Core Components
 - **StoreEngine** (`core/store/store_engine.h/cc`)
