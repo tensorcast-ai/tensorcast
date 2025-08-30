@@ -16,6 +16,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/testing/test_helpers.h"
 
+using namespace tensorcast;
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
 
