@@ -2,15 +2,10 @@
 
 #include <utility>
 
-#include "core/communicator/misc/envs.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_transport.h"
 
 namespace tensorcast::communicator {
-
-ENV_PARAM(RDMA_TOS, 186);
-ENV_PARAM(RDMA_TIMEOUT, 20);
-ENV_PARAM(RDMA_RETRY, 7);
 
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
@@ -113,7 +108,7 @@ result_t RdmaTransport::do_modify_qp_rtr() {
   qp_attr.ah_attr.grh.flow_label = 0;
   qp_attr.ah_attr.grh.sgid_index = gid_idx_;
   qp_attr.ah_attr.grh.hop_limit = 255;
-  qp_attr.ah_attr.grh.traffic_class = RDMA_TOS;
+  qp_attr.ah_attr.grh.traffic_class = context_->traffic_class();
   qp_attr.ah_attr.sl = 0;
   qp_attr.ah_attr.src_path_bits = 0;
   qp_attr.ah_attr.port_num = peer_info_.ib_port;
@@ -129,8 +124,8 @@ result_t RdmaTransport::do_modify_qp_rts() {
   struct ibv_qp_attr qp_attr{};
   CLEAR(qp_attr);
   qp_attr.qp_state = IBV_QPS_RTS;
-  qp_attr.timeout = RDMA_TIMEOUT;
-  qp_attr.retry_cnt = RDMA_RETRY;
+  qp_attr.timeout = context_->qp_timeout();
+  qp_attr.retry_cnt = context_->qp_retry();
   qp_attr.rnr_retry = 7;
   qp_attr.sq_psn = 0;
   qp_attr.max_rd_atomic = 1;
@@ -163,6 +158,7 @@ result_t RdmaTransport::do_post_send() {
   }
 
   req->record_rdma_queue_done();
+  req->set_expected_completions(1);
 
   struct ibv_send_wr read_wr{};
   struct ibv_send_wr* read_bad_wr;
@@ -199,6 +195,60 @@ result_t RdmaTransport::do_post_send() {
   return SUCCESS;
 }
 
+result_t RdmaTransport::read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs) {
+  if (segs.empty()) {
+    return FAILED;
+  }
+
+  // Ensure QP is ready
+  if (!ready_.load()) {
+    CHECK_WARN(do_modify_qp_rtr(), "failed to modify qp rtr");
+    CHECK_WARN(do_modify_qp_rts(), "failed to modify qp rts");
+    ready_.store(true);
+  }
+
+  // Prepare batch of WRs
+  std::vector<ibv_send_wr> wrs(segs.size());
+  std::vector<ibv_sge> sges(segs.size());
+  struct ibv_send_wr* bad_wr = nullptr;
+
+  auto mr = request->get_local_tensor()->get_mr();
+  request->record_rdma_queue_done();
+  request->set_expected_completions(static_cast<int>(segs.size()));
+
+  for (size_t i = 0; i < segs.size(); ++i) {
+    auto& wr = wrs[i];
+    auto& sge = sges[i];
+    CLEAR(wr);
+    CLEAR(sge);
+    wr.wr_id = transport_idx_;
+    wr.opcode = IBV_WR_RDMA_READ;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.num_sge = 1;
+    wr.sg_list = &sge;
+    wr.wr.rdma.remote_addr = segs[i].remote_addr;
+    wr.wr.rdma.rkey = segs[i].rkey;
+    sge.addr = segs[i].local_addr;
+    sge.length = segs[i].length;
+    sge.lkey = mr->lkey;
+    wr.next = (i + 1 < segs.size()) ? &wrs[i + 1] : nullptr;
+  }
+
+  // Track N inflight completions for this request
+  for (size_t i = 0; i < segs.size(); ++i) {
+    inflight_queue_.push(request);
+  }
+
+  auto res = wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
+  if (res) {
+    request->set_result(
+        absl::InternalError(
+            absl::StrFormat("rdma post_send (multi) failed: return=%d, error=%s", res, strerror(errno))));
+    return FAILED;
+  }
+  return SUCCESS;
+}
+
 result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
   if (wc->opcode == IBV_WC_RDMA_READ) {
     auto req = inflight_queue_.pop(true);
@@ -207,7 +257,11 @@ result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {
-      req->set_result(absl::OkStatus());
+      if (req->mark_completion_and_is_done()) {
+        req->set_result(absl::OkStatus());
+        // Invoke per-request ACK once, after aggregate completion
+        req->invoke_ack_action_once();
+      }
     } else {
       LOG(WARNING) << "process err wc: status=" << wc->status;
       req->set_result(

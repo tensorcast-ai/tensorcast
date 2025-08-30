@@ -16,6 +16,7 @@
 #include "core/communicator/engine/engine.h"
 #include "core/testing/test_helpers.h"
 
+using namespace tensorcast;
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
 
@@ -29,7 +30,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg1;
+    cfg1.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a large GPU tensor
@@ -42,10 +45,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register the tensor
+    communicator::CommunicateEngine::RegisterTensorOptions ro1;
+    ro1.register_mr = false;
+    ro1.needs_staging = true;
+    ro1.async = false;
     REQUIRE(
         source_engine
-            ->register_tensor(
-                "shared_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
+            ->register_tensor_ex(
+                "shared_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, ro1)
             .ok());
 
     // Create multiple target engines
@@ -59,7 +66,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       REQUIRE(target_port > 0);
       target_ports.push_back(target_port);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
 
@@ -103,7 +112,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 128 * 1024; // 128KB - large to ensure slow transfer
@@ -113,16 +124,24 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 88);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "large_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "large_tensor", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     int target_port = find_available_port(source_port + 10);
     REQUIRE(target_port > 0);
 
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg2;
+    cfg2.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     void* target_buffer = std::malloc(tensor_size);
@@ -169,12 +188,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     // Create engines
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg3;
+    cfg3.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     int target_port = find_available_port(source_port + 10);
     REQUIRE(target_port > 0);
-    auto target_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg4;
+    cfg4.enable_rdma = false; /* disable RDMA */
+    auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Prepare source tensors
@@ -193,8 +216,12 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       }
       source_ptrs.push_back(ptr);
 
+      communicator::CommunicateEngine::RegisterTensorOptions r;
+      r.register_mr = false;
+      r.needs_staging = (spec.source_type == COMMUNICATE_ENGINE_DEV_GPU);
+      r.async = false;
       REQUIRE(source_engine
-                  ->register_tensor(spec.name, reinterpret_cast<uint64_t>(ptr), spec.size, spec.source_type, 0, false)
+                  ->register_tensor_ex(spec.name, reinterpret_cast<uint64_t>(ptr), spec.size, spec.source_type, 0, r)
                   .ok());
     }
 
@@ -255,7 +282,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg5;
+    cfg5.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg5);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create a moderately sized GPU tensor
@@ -267,15 +296,15 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 99);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(source_engine
-                ->register_tensor(
-                    "exhaustion_test",
-                    reinterpret_cast<uint64_t>(gpu_ptr),
-                    tensor_size,
-                    COMMUNICATE_ENGINE_DEV_GPU,
-                    0,
-                    false)
-                .ok());
+    communicator::CommunicateEngine::RegisterTensorOptions ro2;
+    ro2.register_mr = false;
+    ro2.needs_staging = true;
+    ro2.async = false;
+    REQUIRE(
+        source_engine
+            ->register_tensor_ex(
+                "exhaustion_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, ro2)
+            .ok());
 
     // Create many concurrent readers (more than staging buffers)
     const int num_readers = 8; // More than the default 2 staging buffers
@@ -288,7 +317,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
 
@@ -384,7 +415,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 128 * 1024; // 128KB
@@ -398,11 +431,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "offset_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    communicator::CommunicateEngine::RegisterTensorOptions ro3;
+    ro3.register_mr = false;
+    ro3.needs_staging = true;
+    ro3.async = false;
+    REQUIRE(source_engine
+                ->register_tensor_ex(
+                    "offset_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, ro3)
+                .ok());
 
     // Multiple readers reading different offsets concurrently
     struct ReadSpec {
@@ -426,7 +462,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       engines.push_back(engine);
 
@@ -499,7 +537,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 16 * 1024; // 16KB
@@ -509,11 +549,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 111);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "cycling_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "cycling_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     // Rapidly create connections, transfer, and close
     const int num_cycles = 10;
@@ -533,7 +579,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         }
 
         // Create new engine for each cycle
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg;
+        cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for cycle " << i << ": " << init_status;
@@ -610,7 +658,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensors on different GPUs
@@ -628,15 +678,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "gpu_tensor_" + std::to_string(gpu_id);
-      REQUIRE(source_engine
-                  ->register_tensor(
-                      tensor_name,
-                      reinterpret_cast<uint64_t>(gpu_ptr),
-                      tensor_size,
-                      COMMUNICATE_ENGINE_DEV_GPU,
-                      gpu_id,
-                      false)
-                  .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(source_engine
+                    ->register_tensor_ex(
+                        tensor_name,
+                        reinterpret_cast<uint64_t>(gpu_ptr),
+                        tensor_size,
+                        COMMUNICATE_ENGINE_DEV_GPU,
+                        gpu_id,
+                        opts)
+                    .ok());
+      }
 
       LOG(INFO) << "Registered tensor on GPU " << gpu_id;
     }
@@ -659,7 +715,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return false;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg;
+        cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for transfer " << i << ": " << init_status;
@@ -744,7 +802,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create multiple large tensors to stress memory
@@ -767,11 +827,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "pressure_tensor_" + std::to_string(i);
-      REQUIRE(
-          source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-              .ok());
+      communicator::CommunicateEngine::RegisterTensorOptions ro4;
+      ro4.register_mr = false;
+      ro4.needs_staging = true;
+      ro4.async = false;
+      REQUIRE(source_engine
+                  ->register_tensor_ex(
+                      tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, ro4)
+                  .ok());
     }
 
     LOG(INFO) << "Allocated " << gpu_ptrs.size() << " tensors";
@@ -790,7 +853,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg;
+        cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for tensor " << i << ": " << init_status;
@@ -862,7 +927,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Create tensor that requires exactly one staging buffer
@@ -874,11 +941,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 123);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(
-        source_engine
-            ->register_tensor(
-                "deadlock_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-            .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(source_engine
+                  ->register_tensor_ex(
+                      "deadlock_test",
+                      reinterpret_cast<uint64_t>(gpu_ptr),
+                      tensor_size,
+                      COMMUNICATE_ENGINE_DEV_GPU,
+                      0,
+                      opts)
+                  .ok());
+    }
 
     // Create readers that will hold staging buffers
     const int num_holders = 2; // Equal to default staging buffers
@@ -891,7 +968,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 10 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       holder_engines.push_back(engine);
 
@@ -927,7 +1006,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int target_port = find_available_port(source_port + 100 + i * 10);
       REQUIRE(target_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       waiter_engines.push_back(engine);
 
@@ -1009,7 +1090,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     // Test various sizes around chunk boundaries
@@ -1039,11 +1122,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       std::string tensor_name = "boundary_tensor_" + std::to_string(i);
       tensor_names.push_back(tensor_name);
 
-      REQUIRE(
-          source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), test_sizes[i], COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-              .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(source_engine
+                    ->register_tensor_ex(
+                        tensor_name,
+                        reinterpret_cast<uint64_t>(gpu_ptr),
+                        test_sizes[i],
+                        COMMUNICATE_ENGINE_DEV_GPU,
+                        0,
+                        opts)
+                    .ok());
+      }
 
       LOG(INFO) << "Registered tensor " << i << " with size " << test_sizes[i] << " ("
                 << (double)test_sizes[i] / chunk_size << " chunks)";
@@ -1061,7 +1154,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return false;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg;
+        cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for boundary tensor " << i << ": " << init_status;
@@ -1131,7 +1226,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 32 * 1024; // 32KB
@@ -1149,11 +1246,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "dynamic_tensor_" + std::to_string(i);
-      REQUIRE(
-          source_engine
-              ->register_tensor(
-                  tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-              .ok());
+      {
+        CommunicateEngine::RegisterTensorOptions opts;
+        opts.register_mr = false;
+        opts.needs_staging = true;
+        opts.async = false;
+        REQUIRE(
+            source_engine
+                ->register_tensor_ex(
+                    tensor_name, reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+                .ok());
+      }
     }
 
     std::atomic<bool> stop_flag(false);
@@ -1170,7 +1273,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg;
+        cfg.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for reader " << reader_id << ": " << init_status;
@@ -1232,15 +1337,21 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         auto test_data = create_test_pattern(tensor_size, 170 + i + cycle * 10);
         REQUIRE(tensorcast::cuda::memcpy(gpu_ptrs[i], test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-        REQUIRE(source_engine
-                    ->register_tensor(
-                        tensor_name,
-                        reinterpret_cast<uint64_t>(gpu_ptrs[i]),
-                        tensor_size,
-                        COMMUNICATE_ENGINE_DEV_GPU,
-                        0,
-                        false)
-                    .ok());
+        {
+          CommunicateEngine::RegisterTensorOptions opts;
+          opts.register_mr = false;
+          opts.needs_staging = true;
+          opts.async = false;
+          REQUIRE(source_engine
+                      ->register_tensor_ex(
+                          tensor_name,
+                          reinterpret_cast<uint64_t>(gpu_ptrs[i]),
+                          tensor_size,
+                          COMMUNICATE_ENGINE_DEV_GPU,
+                          0,
+                          opts)
+                      .ok());
+        }
       }
 
       LOG(INFO) << "Completed registration cycle " << cycle;
@@ -1277,7 +1388,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto source_engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg15;
+    cfg15.enable_rdma = false; /* disable RDMA */
+    auto source_engine = std::make_shared<CommunicateEngine>(cfg15);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 32 * 1024; // 32KB
@@ -1287,10 +1400,17 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 180);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    REQUIRE(source_engine
-                ->register_tensor(
-                    "raii_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, false)
-                .ok());
+    {
+      CommunicateEngine::RegisterTensorOptions opts;
+      opts.register_mr = false;
+      opts.needs_staging = true;
+      opts.async = false;
+      REQUIRE(
+          source_engine
+              ->register_tensor_ex(
+                  "raii_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+              .ok());
+    }
 
     // Test multiple scenarios
     const int num_iterations = 10;
@@ -1311,7 +1431,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+        communicator::CommunicatorConfig cfg16;
+        cfg16.enable_rdma = false; /* disable RDMA */
+        auto engine = std::make_shared<CommunicateEngine>(cfg16);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for iteration " << i << ": " << init_status;
@@ -1395,7 +1517,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       int final_port = find_available_port(source_port + 200);
       REQUIRE(final_port > 0);
 
-      auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+      communicator::CommunicatorConfig cfg;
+      cfg.enable_rdma = false; /* disable RDMA */
+      auto engine = std::make_shared<CommunicateEngine>(cfg);
       REQUIRE(engine->init("127.0.0.1", final_port).ok());
 
       void* final_buffer = std::malloc(tensor_size);

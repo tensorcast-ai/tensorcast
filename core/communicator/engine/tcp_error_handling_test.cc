@@ -9,10 +9,12 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/communicator/engine/engine.h"
-#include "core/communicator/engine/gpu_tcp_stager.h"
+#include "core/communicator/engine/gpu_net_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
 
+using namespace tensorcast;
+;
 using namespace tensorcast::communicator;
 using namespace tensorcast::communicator::test;
 
@@ -20,17 +22,23 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
 
   SECTION("Invalid tensor registration") {
-    auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Try to register with invalid device ID
-    auto status = engine->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = false;
+    opts.needs_staging = true;
+    opts.async = false;
+    auto status = engine->register_tensor_ex(
         "invalid_tensor",
         0x12345678,
         1024,
         COMMUNICATE_ENGINE_DEV_GPU,
         999, // Invalid device ID
-        false);
+        opts);
     REQUIRE(!status.ok());
     INFO("Error message should mention invalid device, but got: " << status.message());
     // Accept various error messages about invalid GPU/device
@@ -40,8 +48,9 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Staging buffer exhaustion recovery") {
-    // Create a stager with very limited buffers
-    GpuTcpStager stager(1024 * 1024, 1); // 1MB, only 1 buffer
+    // Create a GPU stager with very limited buffers
+    auto pool = std::make_shared<tensorcast::store::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    GpuNetStager stager(1024 * 1024, 1, pool); // 1MB, only 1 buffer
 
     // Allocate GPU memory
     void* gpu_ptr;
@@ -53,20 +62,18 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Try to stage again without releasing - should timeout quickly
     std::atomic<bool> staging_completed(false);
-    absl::StatusOr<ScopedStagedBuffer> staged2_result;
+    absl::StatusOr<void*> staged2_ptr;
     std::thread staging_thread;
 
     // Stage once with RAII - should succeed
     {
-      auto result1 = stager.stage_scoped(tensor, 0, 512 * 1024);
-      REQUIRE(result1.ok());
-      auto staged1 = std::move(*result1);
-      REQUIRE(staged1.valid());
-      REQUIRE(staged1.data() != nullptr);
-      REQUIRE(staged1.size() == 512 * 1024);
+      auto ptr1_or = stager.stage(tensor, 0, 512 * 1024);
+      REQUIRE(ptr1_or.ok());
+      void* staged1 = *ptr1_or;
+      REQUIRE(staged1 != nullptr);
 
       staging_thread = std::thread([&]() {
-        staged2_result = stager.stage_scoped(tensor, 512 * 1024, 512 * 1024);
+        staged2_ptr = stager.stage(tensor, 512 * 1024, 512 * 1024);
         staging_completed = true;
       });
 
@@ -75,18 +82,16 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
       INFO("Second staging request should be blocked while first buffer is in use, but it completed immediately");
       REQUIRE(!staging_completed);
 
-      // Buffer is automatically released when staged1 goes out of scope
+      // Release the first buffer to allow the second staging to proceed
+      REQUIRE(stager.release_staged_buffer(gsl::not_null<void*>{staged1}).ok());
     }
 
     // Wait for thread to complete
     staging_thread.join();
     REQUIRE(staging_completed);
-
-    // The second staging should have succeeded after the first buffer was released
-    INFO(
-        "Second staging should succeed after first buffer release, but failed with: "
-        << (staged2_result.ok() ? "OK" : staged2_result.status().message()));
-    REQUIRE(staged2_result.ok());
+    REQUIRE(staged2_ptr.ok());
+    // Release the second buffer
+    REQUIRE(stager.release_staged_buffer(gsl::not_null<void*>{*staged2_ptr}).ok());
 
     // No manual release needed - RAII handles it automatically
 
@@ -94,20 +99,26 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Zero-size transfer handling") {
-    auto engine = std::make_shared<CommunicateEngine>(false /* disable RDMA */);
+    communicator::CommunicatorConfig cfg;
+    cfg.enable_rdma = false; /* disable RDMA */
+    auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;
     REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024).ok());
 
     // Register with zero size should fail
-    auto status = engine->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = false;
+    opts.needs_staging = true;
+    opts.async = false;
+    auto status = engine->register_tensor_ex(
         "zero_size",
         reinterpret_cast<uint64_t>(gpu_ptr),
         0, // Zero size
         COMMUNICATE_ENGINE_DEV_GPU,
         0,
-        false);
+        opts);
     INFO("Expected tensor registration to fail with zero size, but it succeeded");
     REQUIRE(!status.ok());
     INFO("Error message should mention zero/empty size issue, but got: " << status.message());
@@ -119,7 +130,8 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Out of bounds staging") {
-    GpuTcpStager stager(1024 * 1024, 2);
+    auto pool = std::make_shared<tensorcast::store::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    GpuNetStager stager(1024 * 1024, 2, pool);
 
     void* gpu_ptr;
     const std::size_t tensor_size = 1024 * 1024;

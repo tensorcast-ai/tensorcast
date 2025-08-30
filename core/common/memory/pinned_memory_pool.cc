@@ -149,4 +149,16 @@ size_t PinnedMemoryPool::get_available_size() const {
   return free_list_.size() * chunk_size_;
 }
 
+std::vector<gsl::not_null<char*>> PinnedMemoryPool::list_buffers() const {
+  std::vector<gsl::not_null<char*>> out;
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    out.reserve(pool_.size());
+    for (auto* ptr : pool_) {
+      out.push_back(gsl::not_null<char*>{ptr});
+    }
+  }
+  return out;
+}
+
 } // namespace tensorcast::store

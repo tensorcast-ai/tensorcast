@@ -116,6 +116,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
+        ":uma_lease_provider",
         "//core/communicator:engine_lib",
     ],
 )
@@ -404,5 +405,31 @@ sc_header_only_library(
     deps = [
         "//core/testing:common",
         "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
+    name = "uma_lease_provider",
+    srcs = ["components/uma_lease_provider.cc"],
+    hdrs = ["components/uma_lease_provider.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_types",
+        "//core/communicator:dram_stager_lib",
+        "//core/store/replica:replica_memory_coordinator",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_test(
+    name = "uma_lease_provider_test",
+    srcs = ["components/uma_lease_provider_test.cc"],
+    deps = [
+        ":uma_lease_provider",
+        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/store/replica:replica_memory_coordinator",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )

@@ -3,7 +3,10 @@
 #ifndef CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
+#include <atomic>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "absl/status/status.h"
 
@@ -15,15 +18,19 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/gpu_tcp_stager.h"
+#include "core/communicator/engine/communicator_config.h"
+#include "core/communicator/engine/dram_stager.h"
+#include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/engine/message.h"
+#include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
+#include "core/communicator/misc/ibv_wrap.h"
 
 namespace tensorcast::communicator {
 
 class CommunicateEngine {
  public:
-  explicit CommunicateEngine(bool enable_rdma = false, uint32_t channel_expire_sec = 0);
+  explicit CommunicateEngine(const CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
   ~CommunicateEngine();
 
@@ -68,13 +75,20 @@ class CommunicateEngine {
    * @return if async, the status is always Ok,
    *    otherwise return the ib registration status
    */
-  absl::Status register_tensor(
+  struct RegisterTensorOptions {
+    bool register_mr = true; // Skip MR registration when false
+    bool needs_staging = false; // Hint for transports that staging is required
+    bool async = false; // Async MR registration when applicable
+  };
+
+  // Extended registration with options.
+  absl::Status register_tensor_ex(
       const std::string& tensor_key,
       uint64_t tensor_addr,
       uint64_t tensor_bytes,
       int dev_type,
       int dev_id,
-      bool async = false);
+      const RegisterTensorOptions& opts);
 
   /**
    * Unregister a tensor from communication engine
@@ -91,6 +105,18 @@ class CommunicateEngine {
    */
   absl::Status close_connection(const std::string& dst_ip, uint16_t dst_port);
 
+  // Inject a UMA-backed lease provider for DRAM staging (optional).
+  void set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider);
+
+  // Lightweight UMA residency provider (reserved)
+  struct ResidencyProvider {
+    virtual ~ResidencyProvider() = default;
+    virtual bool is_hot(const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
+  };
+  void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) {
+    residency_provider_ = std::move(provider);
+  }
+
   /**
    * @brief Whether this engine instance was configured with RDMA support.
    * When false the engine falls back to pure TCP transports and only supports
@@ -98,6 +124,11 @@ class CommunicateEngine {
    */
   inline bool is_rdma_enabled() const {
     return enable_rdma_;
+  }
+
+  size_t staged_segments_count_for_test() {
+    absl::MutexLock lk(&staged_mu_);
+    return staged_segments_.pairs().size();
   }
 
  private:
@@ -126,17 +157,54 @@ class CommunicateEngine {
   std::thread gc_thread_;
   bool enable_rdma_;
   int mtcp_conn_count_;
+  uint32_t ack_ttl_ms_ = 30000;
+  CommunicatorConfig config_{}; // defaults unless provided
+  std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
 
   uint64_t channel_expire_;
 
-  // GPU->CPU staging for TCP transport
-  std::shared_ptr<GpuTcpStager> gpu_tcp_stager_;
+  // GPU->CPU staging uses unified GPU MemoryStager only
+  std::shared_ptr<MemoryStager> gpu_memory_stager_;
 
   // Shared pinned memory pool for GPU operations
   std::shared_ptr<store::PinnedMemoryPool> gpu_memory_pool_;
+  // Dedicated pinned memory pool for CPU staging when configured with a
+  // different chunk size than GPU. Falls back to gpu_memory_pool_ when null.
+  std::shared_ptr<store::PinnedMemoryPool> cpu_memory_pool_;
+
+  // Unified memory stager (CPU staging in TCP path)
+  std::shared_ptr<MemoryStager> memory_stager_;
+  std::unique_ptr<MrCache> mr_cache_;
+
+  // --- RDMA staged response tracking (server-side) ---
+  struct StagedRdmaSegment {
+    void* ptr = nullptr;
+    size_t bytes = 0;
+    ibv_mr* mr = nullptr;
+    enum class Kind { CPU, GPU } kind = Kind::CPU;
+    uint64_t ts_us = 0;
+    bool deregister_mr = true;
+    // Remember which stager produced the buffer (CPU or GPU)
+    MemoryStager* stager_ptr = nullptr;
+  };
+  // key: request key "<tensor_key>:<offset>"
+  absl::Mutex staged_mu_;
+  Map<std::string, StagedRdmaSegment> staged_segments_;
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;
+
+  // --- Simple NUMA mapping (Phase 3) ---
+  // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)
+  std::unordered_map<std::string, std::shared_ptr<MemoryStager>> nic_cpu_stagers_;
+  // Mapping from GPU id -> MemoryStager (GpuNetStager adapter per NUMA node)
+  std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_mem_stagers_;
+  // Keep pools alive and accessible for MR preregistration
+  std::vector<std::shared_ptr<store::PinnedMemoryPool>> numa_pools_;
+
+  // Helpers to select NUMA-aware stagers
+  std::shared_ptr<MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
+  std::shared_ptr<MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
 };
 
 } // namespace tensorcast::communicator

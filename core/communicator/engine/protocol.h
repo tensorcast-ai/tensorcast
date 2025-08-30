@@ -17,7 +17,7 @@ constexpr static uint32_t kHeaderPrefix = 0xAABBAABB;
 enum {
   ENGINE_OP_INVALID = 0,
   ENGINE_OP_READ_REQUEST,
-  ENGINE_OP_READ_RESPONSE,
+  ENGINE_OP_READ_RESPONSE_EX,
   ENGINE_OP_READ_FAILED,
   ENGINE_OP_RDMA_CONNECT_REQUEST,
   ENGINE_OP_RDMA_CONNECT_RESPONSE,
@@ -25,6 +25,7 @@ enum {
   ENGINE_OP_MTCP_CONNECT_REQUEST,
   ENGINE_OP_MTCP_CONNECT_RESPONSE,
   ENGINE_OP_MTCP_CONNECT_FAILED,
+  ENGINE_OP_RDMA_READ_DONE_EX,
   ENGINE_OP_CLOSE,
 };
 
@@ -85,10 +86,17 @@ struct ProtoReadRequest {
   uint64_t bytes;
 };
 
-struct ProtoReadResponse {
+// Variable-length response supporting multiple segments.
+// Layout: [ProtoReadResponseExHeader][ProtoReadResponseExSeg[num_segments]]
+struct ProtoReadResponseExHeader {
   char tensor_key[kMaxTensorNameLen];
   uint8_t transport_type;
+  uint8_t staged; // 1 if segments are staged on server
   char nic_name[kMaxDevName];
+  uint32_t num_segments;
+};
+
+struct ProtoReadResponseExSeg {
   uint64_t addr;
   uint64_t offset;
   uint32_t bytes;
@@ -99,6 +107,16 @@ struct ProtoReadFailed {
   char tensor_key[kMaxTensorNameLen];
   uint64_t offset;
   uint32_t reason;
+};
+
+// Variable-length batched ACK.
+// Layout: [ProtoRdmaReadDoneExHeader][ProtoRdmaReadDoneExSeg[num_segments]]
+struct ProtoRdmaReadDoneExHeader {
+  char tensor_key[kMaxTensorNameLen];
+  uint32_t num_segments;
+};
+struct ProtoRdmaReadDoneExSeg {
+  uint64_t offset;
 };
 
 } // namespace tensorcast::communicator

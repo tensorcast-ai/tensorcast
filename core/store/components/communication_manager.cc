@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "core/store/components/uma_lease_provider.h"
 
 namespace tensorcast::store {
 
@@ -19,7 +20,9 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   // Phase-5: RDMA enable/disable is now explicitly provided by configuration.
   //          Environment variables are no longer consulted at this layer.
 
-  comm_engine_ = std::make_shared<communicator::CommunicateEngine>(enable_rdma);
+  communicator::CommunicatorConfig cfg;
+  cfg.enable_rdma = enable_rdma;
+  comm_engine_ = std::make_shared<communicator::CommunicateEngine>(cfg);
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -29,7 +32,29 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   }
 
   enabled_ = true;
+  // Inject UMA-backed lease provider for CPU staging (DRAM)
+  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
   VLOG(1) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
+  return absl::OkStatus();
+}
+
+absl::Status CommunicationManager::initialize_with_config(
+    const std::string& listen_addr,
+    uint16_t listen_port,
+    const communicator::CommunicatorConfig& config) {
+  comm_engine_ = std::make_shared<communicator::CommunicateEngine>(config);
+
+  auto status = comm_engine_->init(listen_addr, listen_port);
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to initialize communication engine (config): " << status.message();
+    comm_engine_.reset();
+    return status;
+  }
+
+  enabled_ = true;
+  // Inject UMA-backed lease provider for CPU staging (DRAM)
+  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
+  VLOG(1) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
 
@@ -54,12 +79,17 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
     std::string key = absl::StrCat("buffer_", i, "_", reinterpret_cast<uintptr_t>(buffer_addresses[i]));
 
     // Register the tensor/buffer
-    auto status = comm_engine_->register_tensor(
+    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    opts.register_mr = comm_engine_->is_rdma_enabled();
+    opts.needs_staging = (!comm_engine_->is_rdma_enabled() && device_id >= 0);
+    opts.async = false;
+    auto status = comm_engine_->register_tensor_ex(
         key,
         reinterpret_cast<uint64_t>(buffer_addresses[i]),
         buffer_sizes[i],
         device_id >= 0 ? communicator::COMMUNICATE_ENGINE_DEV_GPU : communicator::COMMUNICATE_ENGINE_DEV_CPU,
-        device_id >= 0 ? device_id : 0);
+        device_id >= 0 ? device_id : 0,
+        opts);
 
     if (!status.ok()) {
       return absl::InternalError(absl::StrCat("Failed to register buffer ", i, ": ", status.message()));

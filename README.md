@@ -67,6 +67,42 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
   - The wheel packages the daemon at `tensorcast/bin/tensorcast_daemon` and the CLI will use it automatically.
   - To override, set `TENSORCAST_DAEMON_BIN` to an absolute path to a `tensorcast_daemon` executable.
 
+Example typed CommunicatorConfig (YAML)
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 50052
+  enable_p2p_engine: true
+  enable_rdma: false
+network:
+  p2p_port: 9090
+communicator:
+  enable_rdma: false
+  stager:
+    stage_cpu_for_rdma: true
+    stage_chunk_mb_cpu: 4
+    stage_chunk_mb_gpu: 16
+    buffers_per_flow: 4
+  rdma:
+    outstanding_wr: 64
+    ack_ttl_ms: 30000
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
+  pool:
+    preregister_mr: true
+    pool_size_bytes: 8589934592
+    chunk_bytes: 67108864
+  transport:
+    tcp_conn_count: 8
+    connect_timeout_sec: 10
+    tcp_tos: 0
+```
+
+Pass this to the StoreDaemon via the Python loader (see `tensorcast.store_daemon.config`). When `communicator` is present,
+the daemon initializes the communication engine using these typed settings (no environment variables).
+
 
 ```bash
 # Create a symlink to external packages for header files
@@ -105,7 +141,7 @@ $ ./bazel-bin/tests/cpp/gpu_ce_test -a client -i <SERVER_IP> -p 19099 -c 7438380
 # Artifact Communication Memory Registration Test (Single Process)
 # Tests loading from Disk to CPU/GPU and registering for communication.
 # Requires CUDA for GPU section and P2P capable environment for full registration success.
-$ TENSORCAST_COMM_LOCAL_IP=0.0.0.0 ./bazel-bin/tests/cpp/replica_p2p_registration_test
+$ ./bazel-bin/tests/cpp/replica_p2p_registration_test
 ```
 
 ### Artifact Test (P2P Transfer C/S)

@@ -24,6 +24,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "gsl/pointers"
+
 namespace tensorcast::store {
 
 class PinnedMemoryPool {
@@ -46,12 +48,16 @@ class PinnedMemoryPool {
 
   size_t get_available_size() const;
 
+  // Expose current pool buffers for registration/warmup purposes.
+  // Returns a snapshot copy of buffer base pointers.
+  std::vector<gsl::not_null<char*>> list_buffers() const;
+
   // Forbid copy and assignment
   PinnedMemoryPool(const PinnedMemoryPool&) = delete;
   PinnedMemoryPool& operator=(const PinnedMemoryPool&) = delete;
 
  private:
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::unordered_set<char*> free_list_;
   std::unordered_set<char*> pool_;

@@ -21,10 +21,22 @@ uv run python -m grpc_tools.protoc \
     --proto_path=proto \
     proto/global_store.proto
 
+# Generate communicator_config protobuf files (messages only)
+uv run python -m grpc_tools.protoc \
+    --python_out=tensorcast/proto \
+    --pyi_out=tensorcast/proto \
+    --proto_path=proto \
+    proto/communicator_config.proto
+
 echo "Python protobuf files generated successfully!"
 # Fix import paths in generated *_pb2_grpc.py files
 sed -i 's/^import store_daemon_pb2/import tensorcast.proto.store_daemon_pb2/' tensorcast/proto/store_daemon_pb2_grpc.py
 sed -i 's/^import global_store_pb2/import tensorcast.proto.global_store_pb2/' tensorcast/proto/global_store_pb2_grpc.py
+
+# Fix relative imports in generated non-gRPC modules if necessary
+if [ -f tensorcast/proto/communicator_config_pb2.py ]; then
+  sed -i '1i# mypy: ignore-errors' tensorcast/proto/communicator_config_pb2.py
+fi
 
 # get directory of this script
 current_dir=$(dirname "$0")

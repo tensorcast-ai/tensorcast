@@ -129,6 +129,7 @@ sc_cc_library(
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
+        "//core/store:uma_lease_provider",
         "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",

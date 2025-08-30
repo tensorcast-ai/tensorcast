@@ -132,6 +132,7 @@ sc_cc_library(
         ":error_handling_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
+        "@gsl",
     ],
 )
 

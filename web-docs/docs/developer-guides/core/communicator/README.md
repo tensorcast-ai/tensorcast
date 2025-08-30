@@ -36,7 +36,7 @@ flowchart TB
       TR[Transport Layer]
       MTCP[MTcpTransport]
       RDMA[RdmaTransport]
-      STAGER[GpuTcpStager]
+      STAGER[GpuNetStager]
     end
 
     subgraph "Worker Threads"
@@ -63,7 +63,7 @@ flowchart TB
 * **Channel** — Manages logical connections (control + data) to remote peers
 * **Transport Layer** — Pluggable I/O mechanisms: TCP, Multi-TCP (MTCP), RDMA
 * **PartitionTensorStore** — Thread-safe registry for local tensors
-* **GpuTcpStager** — GPU→CPU staging for TCP transport (when RDMA disabled)
+* **GpuNetStager** — GPU→CPU staging for TCP transport (when RDMA disabled)
 
 ---
 
@@ -180,7 +180,7 @@ classDiagram
     -PartitionTensorStore store_
     -thread request_thread_
     -thread gc_thread_
-    -GpuTcpStager gpu_tcp_stager_
+    -GpuNetStager gpu_memory_stager_
 
     +read_tensor() thread_safe
     +register_tensor() thread_safe
@@ -261,8 +261,8 @@ With the complete implementation, TCP mode now supports all transfer combination
 | ------ | ------ | -------------------------------------------------- | ------ |
 | CPU    | CPU    | Direct transfer                                    | ✅      |
 | CPU    | GPU    | Network→StreamingPinnedBuffer→GPU                  | ✅      |
-| GPU    | CPU    | GPU→GpuTcpStager→Network                           | ✅      |
-| GPU    | GPU    | GPU→GpuTcpStager→Network→StreamingPinnedBuffer→GPU | ✅      |
+| GPU    | CPU    | GPU→GpuNetStager→Network                           | ✅      |
+| GPU    | GPU    | GPU→GpuNetStager→Network→StreamingPinnedBuffer→GPU | ✅      |
 
 ### 3.6 Complete Data Transfer Architecture for TCP Mode
 
@@ -273,7 +273,7 @@ flowchart TB
     subgraph "Source Node"
         SrcCPU["CPU Tensor"]
         SrcGPU["GPU Tensor"]
-        SrcStager["GpuTcpStager<br/>(GPU→CPU staging)"]
+        SrcStager["GpuNetStager<br/>(GPU→CPU staging)"]
         SrcMTCP["MTcpTransport<br/>(send)"]
     end
 
@@ -324,13 +324,13 @@ flowchart TB
 
 ### 3.7 GPU Transfer Optimizations
 
-#### Staging Buffer Configuration
+#### Staging Buffer Configuration (typed)
 
-| Environment Variable                         | Default | Description                           |
-| -------------------------------------------- | ------- | ------------------------------------- |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | 64      | Size of each staging chunk (MB)       |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | 2       | Number of staging buffers for send    |
-| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | 4       | Number of staging buffers for receive |
+Use `CommunicatorConfig` fields instead of env vars:
+
+- stager.stage_chunk_mb_gpu: size of each staging chunk (MB). Default: 16.
+- stager.stage_chunk_mb_cpu: CPU chunk size (MB). Default: 4.
+- stager.buffers_per_flow: number of buffers per flow. Default: 4.
 
 #### Performance Characteristics
 
@@ -430,7 +430,7 @@ sequenceDiagram
   participant App
   participant Engine
   participant ReqThread as Request Thread
-  participant SrcStager as Source GpuTcpStager
+  participant SrcStager as Source GpuNetStager
   participant Network as MTCP Network
   participant TgtBuffer as Target StreamingBuffer
   participant GPU as Target GPU
@@ -464,19 +464,16 @@ This flow demonstrates:
 
 ---
 
-## 5. Configuration & Environment Variables
+## 5. Configuration (typed)
 
-| Variable                                     | Default   | Description                           |
-| -------------------------------------------- | --------- | ------------------------------------- |
-| `TENSORCAST_COMM_ENABLE_RDMA`                  | `true`    | Enable RDMA transport                 |
-| `TENSORCAST_COMM_CHANNEL_EXPIRE_SEC`           | `0`       | Channel idle timeout (0=never)        |
-| `TENSORCAST_COMM_TCP_CONN_COUNT`               | `8`       | Parallel TCP sockets for MTCP         |
-| `TENSORCAST_COMM_DEFAULT_DEV`                  | ""        | Force NIC when GPU mapping fails      |
-| `TENSORCAST_COMM_LOCAL_IP`                     | `0.0.0.0` | Bind IP for server                    |
-| `TENSORCAST_COMM_LOCAL_PORT`                   | `50051`   | Bind port for server                  |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB` | `64`      | GPU staging chunk size (MB)           |
-| `TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS`   | `2`       | Number of GPU send staging buffers    |
-| `TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS`     | `4`       | Number of GPU receive staging buffers |
+Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Python). See the migration guide
+"CommunicatorConfig Migration" for YAML examples. Key fields:
+
+- enable_rdma: enable RDMA transport.
+- channel_expire_sec: channel idle timeout (0=never).
+- transport.tcp_conn_count: parallel TCP sockets for MTCP.
+- rdma.ack_ttl_ms: RDMA staged-segment ACK TTL.
+- stager.stage_chunk_mb_{gpu,cpu}, stager.buffers_per_flow: staging parameters.
 
 ---
 
@@ -489,13 +486,7 @@ For optimal performance, consider:
 - Isolate GC thread to avoid interference
 
 ### Concurrency Tuning
-```cpp
-// Adjust MTCP parallelism based on bandwidth
-export TENSORCAST_COMM_TCP_CONN_COUNT=16
-
-// Increase channel cache time to reduce reconnects
-export TENSORCAST_COMM_CHANNEL_EXPIRE_SEC=300
-```
+Set `transport.tcp_conn_count` and `channel_expire_sec` in `CommunicatorConfig`.
 
 ### Memory Registration
 - RDMA memory registration happens asynchronously
@@ -503,17 +494,7 @@ export TENSORCAST_COMM_CHANNEL_EXPIRE_SEC=300
 - Pre-register frequently used tensors
 
 ### GPU Transfer Optimization
-```bash
-# Optimize staging buffer size based on tensor sizes
-export TENSORCAST_COMM_GPU_TCP_STAGER_CHUNK_SIZE_MB=128
-
-# Increase buffers for higher concurrency
-export TENSORCAST_COMM_GPU_TCP_STAGER_NUM_BUFFERS=4
-export TENSORCAST_COMM_GPU_TCP_RECV_NUM_BUFFERS=8
-
-# Ensure sufficient TCP connections for bandwidth
-export TENSORCAST_COMM_TCP_CONN_COUNT=16
-```
+Tune `stager.stage_chunk_mb_gpu`, `stager.buffers_per_flow`, and `transport.tcp_conn_count`.
 
 **GPU-Specific Tips:**
 1. **Chunk Size**: Match staging chunk size to typical tensor dimensions
@@ -550,7 +531,7 @@ The Communicator uses a compact binary – **EngineMessage** – to exchange con
 | Op-code                           | Direction       | Purpose                                                   | When Triggered                                                          |
 | --------------------------------- | --------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `ENGINE_OP_READ_REQUEST`          | Client ➜ Server | Request a tensor slice (offset + bytes)                   | `read_tensor()` sends request from **request_thread_**.                 |
-| `ENGINE_OP_READ_RESPONSE`         | Server ➜ Client | Acknowledge READ and indicate transport route (MTCP/RDMA) | Server side of `on_receive_request()` ↠ client `on_receive_response()`. |
+| `ENGINE_OP_READ_RESPONSE_EX`      | Server ➜ Client | Multi-segment response and transport indicator (MTCP/RDMA) | Server side of `on_receive_request()` ↠ client `on_receive_response()`. |
 | `ENGINE_OP_READ_FAILED`           | Server ➜ Client | Read cannot be served (tensor missing / overflow)         | Validation failure inside `on_receive_request()`.                       |
 | `ENGINE_OP_RDMA_CONNECT_REQUEST`  | Client ➜ Server | Propose an RDMA QP handshake for a NIC pair               | Issued lazily when first RDMA READ is required.                         |
 | `ENGINE_OP_RDMA_CONNECT_RESPONSE` | Server ➜ Client | Return remote QP info so client can **RTR/RTS**           | `channel->get_rdma()` handshake path.                                   |
@@ -595,7 +576,7 @@ sequenceDiagram
     Channel->>Server: READ_REQUEST (TCP)
     Server->>Server: Validate & Locate Tensor
     alt Success
-        Server-->>Channel: ENGINE_OP_READ_RESPONSE
+        Server-->>Channel: ENGINE_OP_READ_RESPONSE_EX
         Channel-->>Client: on_receive_response()
         alt RDMA Path
             Client->>Transport: rdma.read()
@@ -618,7 +599,7 @@ stateDiagram-v2
     Created --> Queued: request_queue_.push()
     Queued --> Sent: READ_REQUEST dispatched
     Sent --> WaitingResponse
-    WaitingResponse --> Transporting: READ_RESPONSE ok
+    WaitingResponse --> Transporting: READ_RESPONSE_EX ok
     Transporting --> Completed: Data copied (MTCP) / RDMA done
     WaitingResponse --> Failed: READ_FAILED or disconnect
     Transporting --> Failed: IO Error

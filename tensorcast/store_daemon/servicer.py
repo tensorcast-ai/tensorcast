@@ -170,12 +170,23 @@ class StoreDaemonServicer(store_daemon_pb2_grpc.StoreDaemonServicer):
         comm_manager_obj = None
         if self.enable_p2p_engine:
             try:
-                comm_manager_obj = _cs.CommunicationManager(
-                    "0.0.0.0", local_p2p_port, self.enable_rdma
-                )
-                logger.info(
-                    f"CommunicationManager initialized with enable_rdma={self.enable_rdma}, p2p_port={local_p2p_port}"
-                )
+                if config.communicator is not None:
+                    cfg_dict = config.communicator.model_dump()
+                    comm_manager_obj = _cs.CommunicationManager.from_config(
+                        "0.0.0.0", local_p2p_port, cfg_dict
+                    )
+                    logger.info(
+                        "CommunicationManager initialized from typed config: "
+                        f"enable_rdma={cfg_dict.get('enable_rdma', self.enable_rdma)}, "
+                        f"p2p_port={local_p2p_port}"
+                    )
+                else:
+                    comm_manager_obj = _cs.CommunicationManager(
+                        "0.0.0.0", local_p2p_port, self.enable_rdma
+                    )
+                    logger.info(
+                        f"CommunicationManager initialized with enable_rdma={self.enable_rdma}, p2p_port={local_p2p_port}"
+                    )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Failed to initialise CommunicationManager; falling back to internal engine"

@@ -32,8 +32,20 @@ class RdmaTransport {
   RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th);
   ~RdmaTransport();
   result_t read(read_request_t request);
+  struct RdmaReadSeg {
+    uint64_t local_addr;
+    uint32_t length;
+    uint64_t remote_addr;
+    uint32_t rkey;
+  };
+  result_t read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs);
   result_t connect(RdmaTransportInfo* info);
   result_t get_local_info(RdmaTransportInfo* info);
+  // Optional: set an ACK callback invoked when a READ completes.
+  // The callback receives the completed request and can send control messages.
+  void set_ack_callback(std::function<void(const read_request_t&)> cb) {
+    ack_cb_ = std::move(cb);
+  }
 
   bool ready() {
     return ready_.load();
@@ -66,6 +78,8 @@ class RdmaTransport {
   std::atomic_int inflight_send_;
   Queue<read_request_t> read_queue_;
   Queue<read_request_t> inflight_queue_;
+
+  std::function<void(const read_request_t&)> ack_cb_;
 
   friend class RdmaThread;
 };

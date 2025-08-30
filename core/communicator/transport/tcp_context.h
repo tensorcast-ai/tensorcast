@@ -27,6 +27,11 @@ class TcpContext {
 
   std::string get_local_ip() const;
 
+  // Typed configuration injection
+  void set_connect_timeout(int seconds) {
+    connect_timeout_sec_ = seconds;
+  }
+
  protected:
   result_t register_transport(TcpTransport* t);
   result_t unregister_transport(TcpTransport* t);
@@ -47,6 +52,7 @@ class TcpContext {
   std::condition_variable cv_;
   struct sockaddr_in local_addr_{};
   on_accept_func_t on_accept_;
+  int connect_timeout_sec_ = 10;
 
   friend class TcpTransport;
 };
