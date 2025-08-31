@@ -69,6 +69,7 @@ Diagnostics:
       - cppcoreguidelines-*                # Too strict; prefer specific rules instead
       - fuchsia-statically-constructed-objects
       - misc-use-anonymous-namespace
+      - readability-braces-around-statements
 
     CheckOptions:
       readability-identifier-naming.VariableCase: lower_case

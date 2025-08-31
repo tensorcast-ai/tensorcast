@@ -162,7 +162,7 @@ The Global Store implements several recovery features:
 ### 3. Monitoring and Health Checks
 
 #### Prometheus Metrics
-Available at `http://<host>:<metrics_port>/metrics`:
+Exposed via the unified metrics system:
 - Worker registration/deregistration counts
 - Active worker count
 - Artifact registration metrics

@@ -124,6 +124,7 @@ readability-*,
 -readability-magic-numbers,
 -readability-implicit-bool-conversion,
 -readability-math-missing-parentheses,
+-readability-braces-around-statements,
 zircon-*,
 -zircon-temporary-objects,
 '

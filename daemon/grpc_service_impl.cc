@@ -69,22 +69,13 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
   // Store session mapping for Confirm/Unload
   if (!req->replica_uuid().empty()) {
     sessions_.put(req->replica_uuid(), handle.replica_key, handle.ready_future);
-    // Initialize verification registry entry and spawn a watcher to update
-    // state to PASSED/FAILED after the ready_future resolves. This makes
-    // WaitReplicaVerification reflect verification semantics rather than
-    // relying on the readiness future directly.
+    // Initialize verification registry entry and enqueue a background task to
+    // update status to PASSED/FAILED after the ready_future resolves.
     set_verif_status(req->replica_uuid(), ::store_daemon::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS);
-    std::string uuid = req->replica_uuid();
-    auto fut = handle.ready_future;
-    std::thread([this, uuid, fut]() mutable {
-      absl::Status st = fut.get();
-      if (st.ok()) {
-        set_verif_status(uuid, ::store_daemon::VerificationStatus::VERIFICATION_STATUS_PASSED);
-      } else {
-        set_verif_status(
-            uuid, ::store_daemon::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
-      }
-    }).detach();
+    {
+      absl::MutexLock l(&bg_tasks_mu_);
+      verif_tasks_.push_back(VerifTask{req->replica_uuid(), handle.ready_future});
+    }
   }
   // Track initial PID reference and keep_for_global if provided
   if (req->pid() > 0) {
@@ -101,41 +92,10 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     mem->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
   }
 
-  // Optionally auto-register disk loads with Global Store after ready
+  // Optionally enqueue auto-registration of disk loads with Global Store after ready
   if (has_disk && compat_.auto_register_disk_loads) {
-    std::string disk_path = req->disk_path();
-    auto key = handle.replica_key;
-    auto fut = handle.ready_future;
-    std::thread([this, disk_path, key, fut]() mutable {
-      // Wait for load completion
-      (void)fut.get();
-      // Try to read descriptor for mi2 ID
-      std::string mi2_id;
-      try {
-        std::filesystem::path desc_path = std::filesystem::path(disk_path) / "artifact_descriptor.json";
-        if (std::filesystem::exists(desc_path)) {
-          std::ifstream f(desc_path);
-          if (f.is_open()) {
-            nlohmann::json j;
-            f >> j;
-            if (j.contains("artifact_id") && j["artifact_id"].is_string()) {
-              mi2_id = j["artifact_id"].get<std::string>();
-            } else if (
-                j.contains("index_multihash") && j.contains("data_multihash") && j["index_multihash"].is_string() &&
-                j["data_multihash"].is_string()) {
-              mi2_id = absl::StrCat(
-                  "mi2:", j["index_multihash"].get<std::string>(), ":", j["data_multihash"].get<std::string>());
-            }
-          }
-        }
-      } catch (...) {
-        // Ignore descriptor parsing errors; fall back to key.artifact_id
-      }
-      auto st = engine_->register_replica_with_global_store(key, mi2_id);
-      if (!st.ok()) {
-        VLOG(1) << "Auto-register disk load failed: " << st;
-      }
-    }).detach();
+    absl::MutexLock l(&bg_tasks_mu_);
+    auto_reg_tasks_.push_back(AutoRegTask{handle.replica_key, req->disk_path(), handle.ready_future});
   }
   return Status::OK;
 }
@@ -539,6 +499,82 @@ void StoreDaemonServiceImpl::start_sweepers() {
       std::this_thread::sleep_for(std::chrono::seconds(10));
     }
   });
+  // Verification and auto-registration sweeper: updates verification status and
+  // registers disk-ingested replicas with Global Store once ready.
+  verif_sweeper_th_ = std::thread([this]() {
+    using namespace std::chrono_literals;
+    while (!stop_.load()) {
+      // Collect completed verification tasks
+      std::vector<std::pair<std::string, absl::Status>> verif_done;
+      {
+        absl::MutexLock l(&bg_tasks_mu_);
+        for (auto it = verif_tasks_.begin(); it != verif_tasks_.end();) {
+          if (it->ready.wait_for(0ms) == std::future_status::ready) {
+            verif_done.emplace_back(it->uuid, it->ready.get());
+            it = verif_tasks_.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      for (auto& p : verif_done) {
+        const std::string& uuid = p.first;
+        const absl::Status& st = p.second;
+        if (st.ok()) {
+          set_verif_status(uuid, ::store_daemon::VerificationStatus::VERIFICATION_STATUS_PASSED);
+        } else {
+          set_verif_status(
+              uuid, ::store_daemon::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
+        }
+      }
+
+      // Collect completed auto-registration tasks
+      std::vector<AutoRegTask> reg_ready;
+      {
+        absl::MutexLock l(&bg_tasks_mu_);
+        for (auto it = auto_reg_tasks_.begin(); it != auto_reg_tasks_.end();) {
+          if (it->ready.wait_for(0ms) == std::future_status::ready) {
+            reg_ready.push_back(*it);
+            it = auto_reg_tasks_.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      for (auto& task : reg_ready) {
+        // Wait for load completion result (ignore status; parity with previous behavior)
+        (void)task.ready.get();
+        // Try to read descriptor for mi2 ID
+        std::string mi2_id;
+        try {
+          std::filesystem::path desc_path = std::filesystem::path(task.disk_path) / "artifact_descriptor.json";
+          if (std::filesystem::exists(desc_path)) {
+            std::ifstream f(desc_path);
+            if (f.is_open()) {
+              nlohmann::json j;
+              f >> j;
+              if (j.contains("artifact_id") && j["artifact_id"].is_string()) {
+                mi2_id = j["artifact_id"].get<std::string>();
+              } else if (
+                  j.contains("index_multihash") && j.contains("data_multihash") && j["index_multihash"].is_string() &&
+                  j["data_multihash"].is_string()) {
+                mi2_id = absl::StrCat(
+                    "mi2:", j["index_multihash"].get<std::string>(), ":", j["data_multihash"].get<std::string>());
+              }
+            }
+          }
+        } catch (...) {
+          // Ignore descriptor parsing errors; fall back to key.artifact_id
+        }
+        auto st = engine_->register_replica_with_global_store(task.key, mi2_id);
+        if (!st.ok()) {
+          VLOG(1) << "Auto-register disk load failed: " << st;
+        }
+      }
+
+      std::this_thread::sleep_for(500ms);
+    }
+  });
   // PID watcher: drop dead PID refs to avoid leaked references pinning memory
   pid_watcher_th_ = std::thread([this]() {
     while (!stop_.load()) {
@@ -630,6 +666,8 @@ void StoreDaemonServiceImpl::stop_sweepers() {
     sweep_locks_th_.join();
   if (pid_watcher_th_.joinable())
     pid_watcher_th_.join();
+  if (verif_sweeper_th_.joinable())
+    verif_sweeper_th_.join();
   if (eviction_th_.joinable())
     eviction_th_.join();
 }

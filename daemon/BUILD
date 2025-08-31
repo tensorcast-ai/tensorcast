@@ -14,7 +14,6 @@ sc_cc_library(
     srcs = ["grpc_service_impl.cc"],
     hdrs = ["grpc_service_impl.h"],
     deps = [
-        ":metrics_exporter",
         ":ref_tracker_hdr",
         ":session_manager_hdr",
         ":status_utils",
@@ -60,15 +59,6 @@ sc_header_only_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
-    ],
-)
-
-sc_cc_library(
-    name = "metrics_exporter",
-    srcs = ["metrics_exporter.cc"],
-    hdrs = ["metrics_exporter.h"],
-    deps = [
-        "//core/store:store_engine",
     ],
 )
 

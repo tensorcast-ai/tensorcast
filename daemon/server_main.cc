@@ -10,7 +10,6 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/grpc_service_impl.h"
-#include "daemon/metrics_exporter.h"
 #include "daemon/worker_lifecycle_manager.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
@@ -24,7 +23,6 @@ ABSL_FLAG(uint16_t, p2p_port, 9090, "P2P communication port for engine");
 ABSL_FLAG(size_t, mem_pool_size, 8ULL << 30, "Pinned memory pool size (bytes)");
 ABSL_FLAG(size_t, chunk_size, 128ULL << 20, "Streaming chunk size (bytes)");
 ABSL_FLAG(int, io_threads, 10, "I/O worker threads for engine");
-ABSL_FLAG(uint16_t, metrics_port, 9095, "Metrics HTTP port");
 ABSL_FLAG(bool, auto_register_disk_loads, false, "Automatically register disk loads with Global Store");
 ABSL_FLAG(std::string, global_store_addr, "", "Global Store address host:port");
 ABSL_FLAG(bool, enable_p2p_engine, false, "Enable P2P communication engine");
@@ -79,8 +77,6 @@ int main(int argc, char** argv) {
   compat.eviction_check_interval_ms = absl::GetFlag(FLAGS_eviction_check_interval_ms);
   compat.gpu_memory_limit_fraction = absl::GetFlag(FLAGS_gpu_memory_limit_fraction);
   tensorcast::daemon::StoreDaemonServiceImpl service(engine, compat);
-  tensorcast::daemon::MetricsExporter metrics(engine, absl::GetFlag(FLAGS_metrics_port));
-  metrics.start();
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(absl::GetFlag(FLAGS_listen_addr), grpc::InsecureServerCredentials());
@@ -102,40 +98,7 @@ int main(int argc, char** argv) {
     if (!st.ok()) {
       LOG(WARNING) << "Worker lifecycle start failed: " << st.message();
     }
-    metrics.set_extra_metrics_provider([lc = lifecycle.get()]() {
-      std::ostringstream os;
-      os << "# HELP store_daemon_hb_success Heartbeat success count\n";
-      os << "# TYPE store_daemon_hb_success counter\n";
-      os << "store_daemon_hb_success " << lc->hb_success() << "\n";
-      os << "# HELP store_daemon_hb_failure Heartbeat failure count\n";
-      os << "# TYPE store_daemon_hb_failure counter\n";
-      os << "store_daemon_hb_failure " << lc->hb_failure() << "\n";
-      os << "# HELP store_daemon_sync_success State sync success count\n";
-      os << "# TYPE store_daemon_sync_success counter\n";
-      os << "store_daemon_sync_success " << lc->sync_success() << "\n";
-      os << "# HELP store_daemon_sync_failure State sync failure count\n";
-      os << "# TYPE store_daemon_sync_failure counter\n";
-      os << "store_daemon_sync_failure " << lc->sync_failure() << "\n";
-      os << "# HELP store_daemon_last_hb_ts_s Last heartbeat timestamp (seconds)\n";
-      os << "# TYPE store_daemon_last_hb_ts_s gauge\n";
-      os << "store_daemon_last_hb_ts_s " << lc->last_hb_ts_s() << "\n";
-      os << "# HELP store_daemon_last_sync_ts_s Last successful sync timestamp (seconds)\n";
-      os << "# TYPE store_daemon_last_sync_ts_s gauge\n";
-      os << "store_daemon_last_sync_ts_s " << lc->last_sync_ts_s() << "\n";
-      os << "# HELP store_daemon_hb_alive Heartbeat thread alive\n";
-      os << "# TYPE store_daemon_hb_alive gauge\n";
-      os << "store_daemon_hb_alive " << (lc->hb_alive() ? 1 : 0) << "\n";
-      os << "# HELP store_daemon_sync_alive Chunk sync thread alive\n";
-      os << "# TYPE store_daemon_sync_alive gauge\n";
-      os << "store_daemon_sync_alive " << (lc->sync_alive() ? 1 : 0) << "\n";
-      os << "# HELP store_daemon_hb_restarts Heartbeat thread restarts\n";
-      os << "# TYPE store_daemon_hb_restarts counter\n";
-      os << "store_daemon_hb_restarts " << lc->hb_restarts() << "\n";
-      os << "# HELP store_daemon_sync_restarts Chunk sync thread restarts\n";
-      os << "# TYPE store_daemon_sync_restarts counter\n";
-      os << "store_daemon_sync_restarts " << lc->sync_restarts() << "\n";
-      return os.str();
-    });
+    // Metrics are exported via a unified system; no HTTP server.
   }
   // Install signal handling using sigwait in a dedicated thread.
   // Block SIGINT/SIGTERM in this thread (will be inherited by worker threads)
@@ -155,10 +118,12 @@ int main(int argc, char** argv) {
   });
 
   server->Wait();
-  if (sig_thread.joinable())
+  if (sig_thread.joinable()) {
     sig_thread.join();
-  if (lifecycle)
+  }
+  if (lifecycle) {
     lifecycle->stop();
-  metrics.stop();
+  }
+
   return 0;
 }

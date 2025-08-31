@@ -34,8 +34,6 @@ data:
     # Network ports
     network:
       p2p_port: 65090
-      metrics_port: 65091
-      health_check_port: 62080
 
     # Lifecycle & eviction
     lifecycle:
@@ -62,11 +60,6 @@ spec:
   template:
     metadata:
       annotations:
-        monitoring.basemind.com/metrics_path: /
-        monitoring.basemind.com/scrape: 'true'
-        monitoring.basemind.com/scrape_interval: 30s
-        monitoring.basemind.com/scrape_port: '65091'
-        monitoring.basemind.com/scrape_timeout: 30s
       labels:
         app: store-daemon
         logs.monitoring.basemind.com/collect: 'true'
@@ -109,12 +102,7 @@ spec:
             - containerPort: 65090
               name: p2p
               protocol: TCP
-            - containerPort: 65091
-              name: metrics
-              protocol: TCP
-            - containerPort: 62080
-              name: health
-              protocol: TCP
+
           livenessProbe:
             tcpSocket:
               port: 61052
