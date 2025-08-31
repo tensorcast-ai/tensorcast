@@ -67,6 +67,20 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
   - The wheel packages the daemon at `tensorcast/bin/tensorcast_daemon` and the CLI will use it automatically.
   - To override, set `TENSORCAST_DAEMON_BIN` to an absolute path to a `tensorcast_daemon` executable.
 
+Key runtime flags (mapped from YAML config):
+
+- `--global_store_addr`: set when `global_store_address` is configured
+- `--heartbeat_interval_ms`: `high_availability.heartbeat_interval_ms`
+- `--chunk_sync_interval_ms`: `high_availability.chunk_sync_interval_ms` (0 disables)
+- `--enable_p2p_engine`: `server.enable_p2p_engine`
+- `--enable_rdma`: `server.enable_rdma`
+- `--enable_p2p_access`: `server.enable_p2p_access` (global access policy)
+- `--confirm_requires_disk_path`: `server.confirm_requires_disk_path`
+- `--verification_timeout_status`: `server.verification_timeout_status` (ok|deadline)
+- `--auto_register_disk_loads`: `server.auto_register_disk_loads`
+- `--force_full_digest_on_load`: `server.force_full_digest_on_load`
+- `--evict_on_dead_pid`: `lifecycle.evict_on_dead_pid`
+
 Example typed CommunicatorConfig (YAML)
 
 ```yaml

@@ -430,7 +430,7 @@ def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
     listen = f"{config.server.host}:{config.server.port}"
     mem_pool = int(config.server.mem_pool_size)
     chunk = int(config.server.chunk_size)
-    return [
+    args: list[str] = [
         f"--listen_addr={listen}",
         f"--storage_path={str(config.server.storage_path)}",
         f"--p2p_port={config.network.p2p_port}",
@@ -439,6 +439,49 @@ def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
         f"--io_threads={config.server.num_threads}",
         f"--metrics_port={config.network.metrics_port}",
     ]
+    # P2P engine toggles
+    if config.server.enable_p2p_engine:
+        args.append("--enable_p2p_engine=true")
+        if config.server.enable_rdma:
+            args.append("--enable_rdma=true")
+    # Global access policy for P2P
+    args.append(
+        f"--enable_p2p_access={'true' if config.server.enable_p2p_access else 'false'}"
+    )
+    # Verification & registration toggles
+    if config.server.force_full_digest_on_load:
+        args.append("--force_full_digest_on_load=true")
+    if config.server.auto_register_disk_loads:
+        args.append("--auto_register_disk_loads=true")
+    if config.server.confirm_requires_disk_path:
+        args.append("--confirm_requires_disk_path=true")
+    # Verification timeout mapping
+    if config.server.verification_timeout_status:
+        args.append(
+            f"--verification_timeout_status={config.server.verification_timeout_status}"
+        )
+    # Heartbeats and chunk sync
+    if config.global_store_address:
+        args.append(f"--global_store_addr={config.global_store_address}")
+        args.append(
+            f"--heartbeat_interval_ms={config.high_availability.heartbeat_interval_ms}"
+        )
+        args.append(
+            f"--chunk_sync_interval_ms={config.high_availability.chunk_sync_interval_ms}"
+        )
+    # PID eviction policy
+    if config.lifecycle.evict_on_dead_pid:
+        args.append("--evict_on_dead_pid=true")
+    # Optional periodic eviction policy
+    if config.lifecycle.enable_periodic_eviction:
+        args.append("--enable_periodic_eviction=true")
+        args.append(
+            f"--eviction_check_interval_ms={int(config.lifecycle.eviction_check_interval_s * 1000)}"
+        )
+        args.append(
+            f"--gpu_memory_limit_fraction={config.lifecycle.gpu_memory_limit_fraction}"
+        )
+    return args
 
 
 def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:

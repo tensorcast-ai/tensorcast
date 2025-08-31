@@ -32,6 +32,9 @@ std::string MetricsExporter::collect_metrics() {
   os << "# HELP store_daemon_memory_pool_available_bytes Available memory bytes\n";
   os << "# TYPE store_daemon_memory_pool_available_bytes gauge\n";
   os << "store_daemon_memory_pool_available_bytes " << engine_->get_available_memory() << "\n";
+  if (extra_metrics_provider_) {
+    os << extra_metrics_provider_();
+  }
   return os.str();
 }
 
@@ -63,13 +66,36 @@ void MetricsExporter::run() {
     if (client < 0)
       continue;
     // Read minimal request
-    char buf[512];
-    ::recv(client, buf, sizeof(buf), 0);
-    std::string body = collect_metrics();
+    char buf[1024];
+    ssize_t n = ::recv(client, buf, sizeof(buf) - 1, 0);
+    if (n < 0) {
+      ::close(client);
+      continue;
+    }
+    buf[n] = '\0';
+    std::string req(buf);
+    // Parse the first line: METHOD SP PATH SP HTTP/...
+    std::string path = "/";
+    size_t sp1 = req.find(' ');
+    if (sp1 != std::string::npos) {
+      size_t sp2 = req.find(' ', sp1 + 1);
+      if (sp2 != std::string::npos) {
+        path = req.substr(sp1 + 1, sp2 - (sp1 + 1));
+      }
+    }
+    std::string body;
     std::ostringstream resp;
-    resp << "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: " << body.size()
-         << "\r\nConnection: close\r\n\r\n"
-         << body;
+    if (path == "/health" || path == "/ready") {
+      body = "ok\n";
+      resp << "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " << body.size()
+           << "\r\nConnection: close\r\n\r\n"
+           << body;
+    } else {
+      body = collect_metrics();
+      resp << "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: " << body.size()
+           << "\r\nConnection: close\r\n\r\n"
+           << body;
+    }
     std::string out = resp.str();
     ::send(client, out.data(), out.size(), 0);
     ::close(client);

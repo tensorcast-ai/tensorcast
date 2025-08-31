@@ -65,11 +65,13 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
       }
 
-      // Register replica with size info from remote (best effort)
-      absl::Status reg_status = ReplicaRegistrationHelper::register_local_replica(
-          gs_client_, artifact_id, target_device, target.location.type, remote.memory_size);
+      // Register replica with Global Store using the engine's worker identity
+      // and computed key. This avoids placeholder worker IDs and keeps
+      // registrations consistent with WorkerLifecycleManager.
+      const auto& handle = *load_or;
+      absl::Status reg_status = store_->register_replica_with_global_store(handle.key());
       if (!reg_status.ok()) {
-        LOG(WARNING) << "register_local_replica returned error: " << reg_status;
+        LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
       }
 
       return load_or;
@@ -102,18 +104,13 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   auto disk_or = store_->ingest_from_disk_internal(hints.disk_path, disk_src, target, hints);
   if (disk_or.ok()) {
-    // Attempt to register replica with actual size if available
-    // Query size via a public API to avoid peeking internals; tolerate failures.
-    uint64_t artifact_size = 0;
-    if (auto size_or = store_->get_replica_size(disk_or->key()); size_or.ok()) {
-      artifact_size = *size_or;
-    }
-    // For disk fallback, register using disk_path as a legacy attribute stored on the replica.
-    // Content-addressed routing remains via artifact_id in other flows.
-    absl::Status reg_status = ReplicaRegistrationHelper::register_local_replica(
-        gs_client_, hints.disk_path, target_device, target.location.type, artifact_size);
+    // Register with Global Store using the engine helper, overriding the
+    // artifact id with the disk path for legacy visibility.
+    const auto& handle = *disk_or;
+    absl::Status reg_status =
+        store_->register_replica_with_global_store(handle.key(), /*artifact_id_override=*/hints.disk_path);
     if (!reg_status.ok()) {
-      LOG(WARNING) << "register_local_replica (disk path) returned error: " << reg_status;
+      LOG(WARNING) << "register_replica_with_global_store (disk path) returned error: " << reg_status;
     }
   }
   return disk_or;

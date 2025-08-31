@@ -8,6 +8,7 @@ namespace tensorcast::store {
 
 absl::Status ReplicaRegistrationHelper::register_local_replica(
     GlobalStoreClient* gs_client,
+    std::string_view worker_id,
     std::string_view artifact_id,
     const DeviceKey& device,
     MemoryLocation location,
@@ -16,13 +17,9 @@ absl::Status ReplicaRegistrationHelper::register_local_replica(
     return absl::FailedPreconditionError("GlobalStoreClient is null");
   }
 
-  // NOTE: For now we use the placeholder worker_id "local". In production this should
-  // be replaced by the actual worker id obtained during worker registration.
-  constexpr std::string_view kLocalWorkerId = "local";
-
   auto reg_or = gs_client->register_replica(
       artifact_id,
-      kLocalWorkerId,
+      worker_id,
       device,
       location,
       size_bytes,

@@ -22,6 +22,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//proto:store_daemon_grpc_cpp",
         "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -30,6 +31,7 @@ cc_binary(
     srcs = ["server_main.cc"],
     deps = [
         ":grpc_service_impl",
+        ":worker_lifecycle",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",
@@ -70,6 +72,17 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "worker_lifecycle",
+    srcs = ["worker_lifecycle_manager.cc"],
+    hdrs = ["worker_lifecycle_manager.h"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:global_store_grpc_cpp",
+    ],
+)
+
 sc_header_only_library(
     name = "ref_tracker_hdr",
     hdrs = ["ref_tracker.h"],
@@ -97,6 +110,88 @@ cc_test(
         ":status_utils",
         "//proto:store_daemon_grpc_cpp",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_registration_test",
+    srcs = ["grpc_service_impl_registration_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:store_daemon_grpc_cpp",
+        "@abseil-cpp//absl/log",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_parity_test",
+    srcs = ["grpc_service_impl_parity_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:store_daemon_grpc_cpp",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_status_test",
+    srcs = ["grpc_service_impl_status_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:store_daemon_grpc_cpp",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_status_multigpu_test",
+    srcs = ["grpc_service_impl_status_multigpu_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:store_daemon_grpc_cpp",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_status_mixed_residency_test",
+    srcs = ["grpc_service_impl_status_mixed_residency_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto:store_daemon_grpc_cpp",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_compat_test",
+    srcs = ["grpc_service_impl_compat_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto:store_daemon_grpc_cpp",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "worker_lifecycle_manager_sync_test",
+    srcs = ["worker_lifecycle_manager_sync_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        ":worker_lifecycle",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto:global_store_grpc_cpp",
+        "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",
     ],
 )

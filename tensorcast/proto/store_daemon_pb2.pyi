@@ -523,15 +523,18 @@ class GetLoadedReplicasResponse(_message.Message):
     ) -> None: ...
 
 class LockChunksRequest(_message.Message):
-    __slots__ = ("artifact_id", "chunk_indices")
+    __slots__ = ("artifact_id", "chunk_indices", "device_id")
     ARTIFACT_ID_FIELD_NUMBER: _ClassVar[int]
     CHUNK_INDICES_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_ID_FIELD_NUMBER: _ClassVar[int]
     artifact_id: str
     chunk_indices: _containers.RepeatedScalarFieldContainer[int]
+    device_id: int
     def __init__(
         self,
         artifact_id: _Optional[str] = ...,
         chunk_indices: _Optional[_Iterable[int]] = ...,
+        device_id: _Optional[int] = ...,
     ) -> None: ...
 
 class LockChunksResponse(_message.Message):

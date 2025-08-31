@@ -16,6 +16,7 @@ class ReplicaRegistrationHelper {
   // This is a thin wrapper around GlobalStoreClient::register_replica().
   static absl::Status register_local_replica(
       GlobalStoreClient* gs_client,
+      std::string_view worker_id,
       std::string_view artifact_id,
       const DeviceKey& device,
       MemoryLocation location,

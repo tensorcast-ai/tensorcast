@@ -37,7 +37,7 @@
 #include "core/store/loader/safetensors_util.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
-// #include "core/store/loading/replica_registration_helper.h"
+#include "core/store/loading/replica_registration_helper.h"
 
 namespace tensorcast::store {
 namespace {} // namespace
@@ -1406,6 +1406,33 @@ int StoreEngine::clear_mem() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Global Store registration helper for already-loaded replicas
+// ═══════════════════════════════════════════════════════════════════════════
+
+absl::Status StoreEngine::register_replica_with_global_store(
+    const ReplicaKey& key,
+    std::string_view artifact_id_override) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  // Determine memory location based on device type
+  MemoryLocation loc = (key.device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+
+  // Fetch total size for registration
+  uint64_t size = 0;
+  if (auto sz_or = get_replica_size(key); sz_or.ok()) {
+    size = *sz_or;
+  } else {
+    return sz_or.status();
+  }
+
+  const std::string artifact_id = artifact_id_override.empty() ? key.artifact_id : std::string(artifact_id_override);
+  const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
+  return ReplicaRegistrationHelper::register_local_replica(
+      global_store_client_.get(), wid, artifact_id, key.device, loc, size);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Distributed Memory Pool (DVMP) chunk locking API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1656,9 +1683,10 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Register with Global Store (memory replica). Provide tensor_index_key and optional UPSERT data.
   if (global_store_client_ && global_store_client_->is_connected()) {
     DeviceKey device{.type = DeviceType::GPU, .ordinal = entry.device_id, .uuid = ""};
+    const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
     auto reg_or = global_store_client_->register_memory_replica(
         entry.artifact_id,
-        /*worker_id=*/"local",
+        /*worker_id=*/wid,
         device,
         entry.size_bytes,
         entry.tensor_index_key,
@@ -1707,6 +1735,28 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
     (void)replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
   }
   return absl::OkStatus();
+}
+
+std::vector<ChunkState> StoreEngine::get_chunk_states(std::string_view artifact_id) const {
+  std::vector<ChunkState> out;
+  auto span = dvmp_->chunk_snapshot(artifact_id);
+  out.reserve(span.size());
+  for (const auto& meta : span) {
+    out.push_back(meta.state.load(std::memory_order_acquire));
+  }
+  return out;
+}
+
+// GPU device queries (exposed for status/health reporting)
+absl::StatusOr<size_t> StoreEngine::get_device_total_memory(int device_id) const {
+  auto info_or = device_manager_->get_gpu_info(device_id);
+  if (!info_or.ok())
+    return info_or.status();
+  return static_cast<size_t>((*info_or)->total_memory);
+}
+
+absl::StatusOr<size_t> StoreEngine::get_device_free_memory(int device_id) const {
+  return device_manager_->get_free_memory(device_id);
 }
 
 } // namespace tensorcast::store
