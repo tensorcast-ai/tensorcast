@@ -13,16 +13,12 @@ sc_cc_library(
     name = "grpc_service_impl",
     srcs = ["grpc_service_impl.cc"],
     hdrs = ["grpc_service_impl.h"],
-    copts = [
-        # Enable OTel C++ API instrumentation in RPC handlers
-        "-DTC_ENABLE_OTEL_CXX=1",
-    ],
+    copts = [],
     deps = [
         ":ref_tracker_hdr",
         ":session_manager_hdr",
         ":status_utils",
         ":transport_lock_manager_hdr",
-        "//core/common:otel_config_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store:store_engine",
         "//proto:store_daemon_grpc_cpp",

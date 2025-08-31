@@ -265,9 +265,9 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
-        "//core/common:otel_config_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 

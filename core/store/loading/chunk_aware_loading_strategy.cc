@@ -13,14 +13,11 @@
 #include "absl/strings/match.h"
 #include "absl/types/span.h"
 #include "core/common/cuda_api.h"
-#include "core/common/otel/config.h"
 #include "core/store/components/global_store_client.h"
-#if TC_ENABLE_OTEL_CXX
-#include "opentelemetry/trace/provider.h"
-#include "opentelemetry/trace/scope.h"
-#endif
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
 // p2p_loader.h and source.h are included indirectly via other headers. Avoid unused includes.
 #include "core/store/replica/memory_manager.h"
 #include "core/store/replica/replica_memory_coordinator.h"
@@ -303,7 +300,6 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     void* dst = static_cast<char*>(gpu_base) + offset;
 
     // Emit OTel event for H2D copy per chunk
-#if TC_ENABLE_OTEL_CXX
     namespace otel = opentelemetry;
     auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
     auto evt_span = tracer->StartSpan("H2D/Copy");
@@ -312,27 +308,22 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     evt_span->SetAttribute("tc.device.id", static_cast<int64_t>(mem_manager->get_local_device_id()));
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(size));
     evt_span->SetAttribute("tc.chunk.index", static_cast<int64_t>(chunk_idx));
-#endif
 
     auto cuda_status = cuda::memcpy_async(dst, src, size, cudaMemcpyHostToDevice, stream);
 
     if (!cuda_status.ok()) {
       copy_status = cuda_status;
       LOG(ERROR) << "Failed to copy chunk " << chunk_idx << ": " << cuda_status;
-#if TC_ENABLE_OTEL_CXX
       evt_span->SetAttribute("error", true);
       evt_span->AddEvent("h2d_error", {{"message", cuda_status.message()}});
       evt_span->End();
-#endif
       break;
     }
 
     completed++;
     progress_cb(completed, chunks.size());
 
-#if TC_ENABLE_OTEL_CXX
     evt_span->End();
-#endif
   }
 
   // Synchronize stream

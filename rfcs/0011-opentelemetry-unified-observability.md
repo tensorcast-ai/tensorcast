@@ -387,7 +387,7 @@ grpcurl -plaintext -d '{}' localhost:50051 tensorcast.proto.GlobalStore/HealthCh
   - `core/store/store_engine.cc`：为 `ingest_from_p2p_internal` 增加 OTel Span（`StoreEngine/P2PIngest`），记录 `tc.source.address`、`tc.p2p.port`、`tc.size.bytes`、`tc.location=gpu|cpu` 等属性；失败与重试路径以事件标注（`p2p_ingest_error`、`p2p_ingest_retry_after_eviction`）。
   - `core/store/loader/remote_key_source.cc`：在远端数据读取路径新增每段分块接收的子 Span（`P2P/ChunkRecv`、`P2P/DirectWrite`），为每次接收附加 `tc.conn.index`、`tc.offset`、`tc.size.bytes`、`tc.remote.key`；错误路径添加 `recv_error` 事件。
   - `core/store/replica/transfer_helpers.cc` 与 `core/communicator/transport/mtcp_transport.cc`：在 CPU→GPU 复制阶段为每块/子块拷贝创建 `H2D/Copy` 子 Span，并记录 `tc.device.id`、`tc.size.bytes`、`tc.chunk.index`；失败路径添加 `h2d_error` 事件。
-  - Bazel 依赖：为上述目标引入 OTel API 与配置头（`//core/common:otel_config_lib`、`//core/common:otel_link_deps_lib`、`@opentelemetry-cpp//api:api`）。
+  - Bazel 依赖：为上述目标引入 OTel API 和链接聚合（`//core/common:otel_link_deps_lib`、`@opentelemetry-cpp//api:api`）。
 
 - 传播与链路
   - 采用“当前上下文继承（child-of）”方式将 P2P Ingest 与分块事件串联到上游 gRPC server span（`daemon/grpc_service_impl` 中已将父上下文附着至 RuntimeContext）。
@@ -399,7 +399,8 @@ grpcurl -plaintext -d '{}' localhost:50051 tensorcast.proto.GlobalStore/HealthCh
   - 失败/重试路径具备可观测事件，便于定位资源不足、网络异常等问题。
 
 - 回退与开关
-  - 受 `TC_ENABLE_OTEL_CXX` 控制：默认关闭时为 no-op；开启后与 Python 侧链路自动拼接。未引入 C++ SDK/导出器时保持 API-only 模式。
+  - 编译时始终启用：C++ 侧 OTel API 默认随二进制编译进来，不再需要 `TC_ENABLE_OTEL_CXX` 条件编译。
+  - 运行时控制导出：是否上报由环境变量控制（如 `OTEL_EXPORTER_OTLP_*`、`OTEL_SDK_DISABLED=1`、`TC_OTEL_CONSOLE_EXPORTER=1` 等）；未配置 Provider 时为 API-only（no-op）模式。
 
   - C++ StoreDaemon 侧初始化与 gRPC 传播仍为 TODO（Phase 1）。
   - P2P 链路与 Span Link（Phase 2）待后续实现。
@@ -410,7 +411,7 @@ grpcurl -plaintext -d '{}' localhost:50051 tensorcast.proto.GlobalStore/HealthCh
 
 - 代码变更（C++ Daemon 与 Core）
   - 新增 `core/common/otel/grpc_propagation.h`：提供 `GrpcServerCarrier` 与 `GrpcClientCarrier`，并封装 `ExtractFromServerMetadata()`、`InjectIntoClientMetadata()` 以统一 W3C Trace Context 在 gRPC Metadata 中的提取/注入（使用 OpenTelemetry C++ API，仅依赖 `@opentelemetry-cpp//api:api`）。
-  - `daemon/grpc_service_impl.cc`：为主要 RPC 入口预置 server span 逻辑（受编译开关控制）并设置标准/业务属性：
+  - `daemon/grpc_service_impl.cc`：为主要 RPC 入口预置 server span 逻辑（始终编译）并设置标准/业务属性：
     - `MaterializeReplica`、`ConfirmReplica`、`UnloadReplica`、`ClearMem`、`GetServerConfig`、`WaitReplicaVerification`、
       `LockTransportChunks`、`UnlockTransportChunks`、`BeginRegisterArtifact`、`CommitRegisteredArtifact`、`AbortRegisteredArtifact`、
       `GetWorkerStatus`、`GetDetailedStatus`、`GetLoadedReplicas`。
@@ -418,19 +419,19 @@ grpcurl -plaintext -d '{}' localhost:50051 tensorcast.proto.GlobalStore/HealthCh
       `tc.size.bytes`、`tc.lock.token` 等。
   - `core/store/components/global_store_client.cc`：在所有对 Global Store 的客户端 RPC 中创建 client span（`GlobalStore/<Method>`）并注入 Trace Context，属性包含 `rpc.system=grpc`、`rpc.service=global_store.GlobalStore`、`rpc.method` 以及 gRPC 状态码。
   - Bazel：
-    - `core/common/BUILD` 新增 `otel_grpc_propagation_lib`（header-only，依赖 `@opentelemetry-cpp//api:api`）。
-    - 新增 `core/common/otel/config.h`（`otel_config_lib`）：统一编译开关 `TC_ENABLE_OTEL_CXX`（默认 0，禁用）。
-    - 新增 `core/common/otel/link_deps_dummy.cc` + `otel_link_deps_lib`（alwayslink）：强制链接 OTel 依赖，避免纯 header-only 带来的链接丢失；已添加到 `daemon:tensorcast_daemon` 与 `core/store:global_store_client`。
+    - `core/common/BUILD` 提供 `otel_grpc_propagation_lib`（header-only，依赖 `@opentelemetry-cpp//api:api`）。
+    - 已移除 `core/common/otel/config.h` 与对应 `otel_config_lib` 目标；不再提供编译期开关。
+    - `core/common/otel/link_deps_dummy.cc` + `otel_link_deps_lib`（alwayslink）：聚合/强链接 OTel 依赖，已用于 `daemon:tensorcast_daemon` 与 `core/store:global_store_client`。
     - 关联依赖：`daemon:grpc_service_impl` 与 `core/store:global_store_client` 引入所需库；后者同时声明 `@opentelemetry-cpp//api:api` 依赖。
 
 - 行为说明
-  - 由于当前仅引入 OTel C++ API 层（无 SDK/Exporter 链接），C++ 侧创建的 span 在未安装 SDK Provider 时为 no-op；但 Trace Context 在客户端（Global Store Client）会被正确透传，使下游（Python Global Store）能够与上游链路串联。
-  - Daemon 的 server 端埋点通过宏 `TC_ENABLE_OTEL_CXX` 受控，默认关闭以确保环境未装 SDK/Exporter 时仍可顺利编译/运行；启用方式：在 Bazel `copts` 或环境中定义 `-DTC_ENABLE_OTEL_CXX=1`。
-  - 链接：通过 `otel_link_deps_lib` 聚合并 `alwayslink`，确保 OTel API（以及未来可选的 SDK/Exporter）符号在最终二进制中可用。
-  - 当后续引入 C++ SDK/Exporter 后，无需修改业务代码即可开始上报。
+  - 未配置 SDK/Exporter 时：C++ 侧 span 为 no-op，但 Trace Context 仍会在客户端（Global Store Client）正确透传，下游（Python Global Store）可与上游串联。
+  - 无需编译开关：Daemon 的 server 端埋点与 Core 内部埋点默认编译，是否导出由运行时环境决定。
+  - 链接：通过 `otel_link_deps_lib` 聚合并 `alwayslink`，确保 OTel API（以及可选 SDK/Exporter）符号在最终二进制中可用。
+  - 引入 C++ SDK/Exporter 后，无需修改业务代码即可开始上报。
 
 - 未完成/后续项
-  - TraceScope 双写桥接：已新增 `core/common/otel/trace_scope_bridge.h`（RAII，默认在 `TC_ENABLE_OTEL_CXX=0` 时为 no-op）。宏级注入到 `SC_TRACE_*` 尚未启用，后续将以不影响作用域与析构时机的方式逐步合入（避免潜在宏多语句场景下的构建回归）。
+  - TraceScope 双写桥接：已新增 `core/common/otel/trace_scope_bridge.h`（RAII）。宏级注入到 `SC_TRACE_*` 尚未启用，后续将以不影响作用域与析构时机的方式逐步合入（避免潜在宏多语句场景下的构建回归）。
   - 在 `server_main.cc` 增加可选 SDK 初始化（从环境变量读取），需要引入 OTel SDK/OTLP exporter 依赖（Phase 1→Phase 5）。
   - 当引入 SDK/Exporter 后，可在 `otel_link_deps_lib` 中解注释：`@opentelemetry-cpp//sdk:trace`、`sdk:resource`、`exporters/otlp:*_exporter`，并在 `server_main` 中初始化 OTLP。
   - P2P 链路阶段化埋点与 Span Link（Phase 2）。

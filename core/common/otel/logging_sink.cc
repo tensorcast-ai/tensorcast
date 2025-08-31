@@ -17,15 +17,11 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 
-#include "core/common/otel/config.h"
-
-#if TC_ENABLE_OTEL_CXX
 #include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/context.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
-#endif
 
 namespace tensorcast::obs {
 
@@ -60,7 +56,6 @@ class OtelLogSink : public absl::LogSink {
   void Send(const absl::LogEntry& entry) override {
     std::string trace_hex("-"), span_hex("-");
 
-#if TC_ENABLE_OTEL_CXX
     try {
       namespace otel = opentelemetry;
       auto ctx = otel::context::RuntimeContext::GetCurrent();
@@ -69,18 +64,19 @@ class OtelLogSink : public absl::LogSink {
       // The API provides Span::GetContext() which exposes TraceId/SpanId.
       if (span) {
         auto sc = span->GetContext();
-        // Convert to lowercase base16 (32/16 chars)
+        // Convert to lowercase base16 (32/16 chars) using OTel nostd::span
         char tbuf[32]{};
         char sbuf[16]{};
-        sc.trace_id().ToLowerBase16(absl::MakeSpan(tbuf));
-        sc.span_id().ToLowerBase16(absl::MakeSpan(sbuf));
+        opentelemetry::nostd::span<char, 32> tspan{tbuf, sizeof(tbuf)};
+        opentelemetry::nostd::span<char, 16> sspan{sbuf, sizeof(sbuf)};
+        sc.trace_id().ToLowerBase16(tspan);
+        sc.span_id().ToLowerBase16(sspan);
         trace_hex.assign(tbuf, sizeof(tbuf));
         span_hex.assign(sbuf, sizeof(sbuf));
       }
     } catch (...) {
       // Best-effort only
     }
-#endif
 
     // Format: time severity thread file:line trace_id=... span_id=... message
     // Timestamp as unix nanos to ease parsing

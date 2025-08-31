@@ -243,11 +243,6 @@ sc_header_only_library(
 )
 
 # OpenTelemetry - build-time config header (header-only)
-sc_header_only_library(
-    name = "otel_config_lib",
-    hdrs = ["otel/config.h"],
-    visibility = ["//visibility:public"],
-)
 
 # OpenTelemetry - TraceScope bridge (header-only)
 sc_header_only_library(
@@ -255,7 +250,6 @@ sc_header_only_library(
     hdrs = ["otel/trace_scope_bridge.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":otel_config_lib",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -264,18 +258,12 @@ sc_cc_library(
     name = "otel_init_lib",
     srcs = ["otel/init.cc"],
     hdrs = ["otel/init.h"],
-    copts = [
-        # Enable SDK path in init.cc (links exporters based on env)
-        "-DTC_ENABLE_OTEL_CXX_SDK=1",
-    ],
     visibility = ["//visibility:public"],
     deps = [
-        ":otel_config_lib",
         "@opentelemetry-cpp//api:api",
-        # SDK headers + exporters required when TC_ENABLE_OTEL_CXX_SDK is enabled
+        # Keep headers-only dependency; actual SDK exporters are intentionally
+        # not linked by default to avoid unresolved symbols in Bazel package.
         "@opentelemetry-cpp//sdk:headers",
-        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
-        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
     ],
 )
 
@@ -286,7 +274,6 @@ sc_cc_library(
     hdrs = ["otel/logging_sink.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":otel_config_lib",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
@@ -309,7 +296,6 @@ sc_header_only_library(
     hdrs = ["trace/trace_macros.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":otel_config_lib",
         ":otel_trace_scope_bridge_hdr",
         ":trace_manager_lib",
         ":trace_scope_lib",
@@ -454,9 +440,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@opentelemetry-cpp//api:api",
-        # Ensure exporter symbols are retained in final binary
-        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
-        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
     ],
     alwayslink = True,
 )
