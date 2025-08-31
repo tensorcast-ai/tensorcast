@@ -284,6 +284,10 @@ message GetLoadedReplicasResponse {
 message LockChunksRequest {
   string artifact_id = 1;                     // Artifact ID
   repeated uint32 chunk_indices = 2;       // List of chunk indices to lock
+  // Optional explicit device id to disambiguate when an artifact has replicas
+  // on multiple GPUs. When absent, the daemon attempts to infer a unique
+  // device from residency; if ambiguous, the RPC returns INVALID_ARGUMENT.
+  optional int32 device_id = 3;
 }
 
 // Lock chunks response

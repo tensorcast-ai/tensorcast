@@ -6,46 +6,54 @@ sidebar_position: 3
 
 # Store Daemon Architecture
 
-This guide provides detailed information about the Store Daemon's internal architecture and implementation. For a high-level overview of the system, see the [Architecture Overview](./architecture-overview.md).
+This guide describes the Store Daemon's internal architecture. As of RFC-0011, the Store Daemon is implemented in C++ and exposed via gRPC (binary: `daemon/tensorcast_daemon`). For a high-level system overview, see the [Architecture Overview](./architecture-overview.md).
 
-## Component Architecture
+## Component Architecture (C++)
 
-The Store Daemon is composed of specialized Python modules that orchestrate a high-performance C++ backend:
+The daemon is a native C++ service with a thin gRPC layer over the StoreEngine:
 
 ```mermaid
 graph TD
-    subgraph "Python Layer"
-        Servicer[StoreDaemonServicer<br/>servicer.py]
-        Servicer --> ArtifactLoader[ArtifactLoader<br/>artifact_loader.py]
-        Servicer --> ReplicaManager[ReplicaManager<br/>replica_manager.py]
-        Servicer --> ConnectionManager[ConnectionManager<br/>connection_manager.py]
-        Servicer --> LifecycleWorker[LifecycleWorker<br/>lifecycle_worker.py]
-        Servicer --> ProcessWatcher[ProcessWatcher<br/>process_watcher.py]
+    subgraph "Daemon (C++)"
+        RPC[StoreDaemon gRPC Service<br/>daemon/grpc_service_impl.cc]
+        METRICS[Metrics Exporter<br/>/metrics, /health, /ready]
+        SESS[ReplicaSessionManager]
+        REFS[RefTracker (PID refs)]
+        LOCKS[TransportLockManager]
     end
 
-    subgraph "C++ Core"
-        CppCore[StoreEngine<br/>store_engine.h]
-        CppCore --> PinnedMemPool[Pinned Memory Pool]
-        CppCore --> CommEngine[Communicator Engine]
+    subgraph "Core (C++)"
+        Engine[StoreEngine<br/>core/store/store_engine.h]
+        DVMP[Distributed VMem Pool]
+        PMEM[Pinned Memory Pool]
+        COMM[CommunicationManager]
+        GS[GlobalStoreClient]
     end
 
-    ArtifactLoader -->|pybind11| CppCore
-    ReplicaManager -->|pybind11| CppCore
+    RPC --> Engine
+    RPC --> SESS
+    RPC --> REFS
+    RPC --> LOCKS
+    METRICS --> Engine
+    Engine --> DVMP
+    Engine --> PMEM
+    Engine --> COMM
+    Engine --> GS
 ```
 
 ## Core Components
 
-| Module | File | Responsibility |
-|--------|------|----------------|
-| **Servicer** | `servicer.py` | Main gRPC service implementation, orchestrates all components |
-| **ArtifactLoader** | `artifact_loader.py` | Handles asynchronous artifact loading from disk or remote peers |
-| **ReplicaManager** | `replica_manager.py` | Manages artifact lifecycle, reference counting, and eviction |
-| **LifecycleWorker** | `lifecycle_worker.py` | Background tasks for memory monitoring and eviction |
-| **ProcessWatcher** | `process_watcher.py` | Monitors client PIDs and cleans up on process death |
-| **ConnectionManager** | `connection_manager.py` | Manages registration, heartbeats, and state sync with Global Store (HA) |
-| **HealthCheckServer** | `health_check.py` | HTTP endpoints for health monitoring |
-| **Metrics** | `metrics.py` | Centralised Prometheus counter/gauge/histogram definitions |
-| **CkptCollector** | `ckpt_collector.py` | Bridges C++ StoreEngine metrics into the Python registry |
+| Component | File(s) | Responsibility |
+|-----------|---------|----------------|
+| gRPC Service | `daemon/grpc_service_impl.{h,cc}` | StoreDaemon RPCs: MaterializeReplica, ConfirmReplica, UnloadReplica, WaitReplicaVerification, chunk locking, status |
+| Metrics Exporter | `daemon/metrics_exporter.{h,cc}` | Serves Prometheus text and HTTP `/health`, `/ready` |
+| StoreEngine | `core/store/store_engine.{h,cc}` | High-performance loading, memory management, P2P, hashing, registration |
+| CommunicationManager | `core/store/components/communication_manager.*` | P2P/RDMA registration and transfers |
+| GlobalStoreClient | `core/store/components/global_store_client.*` | Registers replicas and coordinates P2P |
+| WorkerLifecycleManager | `daemon/worker_lifecycle_manager.{h,cc}` | Registers worker with Global Store, heartbeats, chunk-state sync, unregister on shutdown |
+| ReplicaSessionManager | `daemon/replica_session_manager.h` | Tracks per-request `replica_uuid` and futures |
+| RefTracker | `daemon/ref_tracker.h` | PID-based ref tracking; integrates with PID watcher |
+| TransportLockManager | `daemon/transport_lock_manager.h` | DVMP chunk locking tokens |
 
 ## Key Workflows
 
@@ -84,15 +92,13 @@ sequenceDiagram
 - Immediately returns a CUDA IPC handle together with a `Future` that tracks the background data transfer
 
 **Phase 2 - ConfirmReplica**:
-- Waits for transfer completion
-- Registers replica with Global Store
-- Finalizes the loading process
+- Waits for transfer completion (bounded by RPC deadline)
+- Registers replica with Global Store for P2P orchestrations
+- Optional: disk loads auto-register when `--auto_register_disk_loads=true`
 
-**Phase 3 - Integrity Verification (GPU only)**:
-- Runs in a dedicated verifier thread-pool once the async load finishes
-- Computes a SHA-256 checksum over the GPU buffer and compares it with `verification.json`
-- On success: marks the replica `VERIFICATION_STATUS_PASSED` and automatically registers it with Global Store
-- On failure: unloads the faulty replica and increments `store_daemon_artifact_verification_total{status="failed"}`
+**Phase 3 - Integrity Verification**:
+- The daemon tracks verification state per `replica_uuid`.
+- With `--force_full_digest_on_load=true`, StoreEngine computes strong data multihash and failures surface via `WaitReplicaVerification`.
 
 ### Memory Management
 
@@ -184,7 +190,7 @@ graph TD
 - CUDA IPC handle generation for zero-copy access
 - Thread-safe concurrent access
 
-## Configuration
+## Configuration (C++)
 
 Store Daemon configuration (`store_daemon/config.py`):
 
@@ -199,6 +205,8 @@ server:
   enable_p2p_engine: true
   enable_p2p_access: true
   enable_rdma: false
+  force_full_digest_on_load: false
+  auto_register_disk_loads: false
   pinned_memory_timeout_ms: 30000
 
 network:
@@ -229,58 +237,34 @@ global_store_address: "localhost:50051"
 
 ### HTTP Endpoints
 
-The `HealthCheckServer` provides monitoring endpoints:
+The C++ daemon serves basic endpoints on the metrics port:
 
-- `GET /health` - Basic liveness check
-- `GET /ready` - Readiness status
-- `GET /status` - Detailed status with metrics
+- `GET /health` - Liveness check (200 OK)
+- `GET /ready` - Readiness check (200 OK)
 
 ### Prometheus Metrics
 
 Key metrics exposed:
 
-**Python Layer**:
-
-***Loading***
-* `store_daemon_models_allocated_total` – async allocations started
-* `store_daemon_models_loaded_total` / `store_daemon_models_unloaded_total`
-* `store_daemon_models_load_failures_total{error_type}`
-* `store_daemon_model_load_duration_seconds` – histogram
-* `store_daemon_async_load_wait_duration_seconds` – histogram for `ConfirmReplica`
-* `store_daemon_pending_loads` – current async loads gauge
-
-***Memory***
-* `store_daemon_memory_pool_total_bytes` / `store_daemon_memory_pool_available_bytes`
-* `store_daemon_gpu_cache_bytes{type="local|global"}` – GPU cache usage
-* `store_daemon_model_ref_count{artifact,device_id}`
-* `store_daemon_evictions_total{reason}`
-
-***Worker Health***
-* `store_daemon_active_operations`
-* `store_daemon_worker_registered` / `store_daemon_worker_healthy`
-* `store_daemon_worker_uptime_seconds`
-
-***High Availability (HA)***
-* `store_daemon_ha_connection_state`
-* `store_daemon_ha_state_version`
-* `store_daemon_ha_registered_artifacts`
-* `store_daemon_ha_heartbeat_total{status}`
-* `store_daemon_ha_state_sync_total{type,status}`
-* `store_daemon_ha_state_changes_total{change_type}`
-* `store_daemon_ha_connection_retries_total`
-* `store_daemon_ha_thread_restarts_total{thread_name}`
-* `store_daemon_ha_pending_changes{type}`
-
-***Verification***
-* `store_daemon_artifact_verification_total{status}`
-* `store_daemon_artifact_verification_latency_seconds`
-
-**C++ Core** (exported via `GlobalMetricsCollector`):
-* `store_daemon_gpu_memory_bytes{device_id,memory_type="total|free"}`
+**Core Metrics** (C++):
+* `store_daemon_memory_pool_total_bytes`
 * `store_daemon_memory_pool_available_bytes`
-* `store_daemon_p2p_bytes_transferred_total`
-* `store_daemon_replicas_in_memory{location="cpu|gpu"}`
-* `store_daemon_cpp_operation_latency_seconds` – histogram of internal C++ calls
+* Additional StoreEngine/Communicator metrics (see core docs)
+
+## Daemon Flags
+
+- `--listen_addr=0.0.0.0:8073`
+- `--metrics_port=9091`
+- `--storage_path=/path/to/models`
+- `--mem_pool_size=8GiB`, `--chunk_size=128MiB`, `--io_threads=10`
+- `--global_store_addr=host:port`
+- `--enable_p2p_engine[=true|false]`, `--enable_rdma[=true|false]`
+- `--force_full_digest_on_load[=true|false]`
+- `--auto_register_disk_loads[=true|false]`
+
+### Chunk Locking
+
+`LockTransportChunks` accepts an optional `device_id`. When an artifact has replicas on multiple GPUs, callers should provide `device_id` to disambiguate; otherwise the daemon returns INVALID_ARGUMENT.
 
 ## Development Guidelines
 

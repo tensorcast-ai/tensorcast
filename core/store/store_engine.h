@@ -20,6 +20,7 @@
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/loading/loading_spec.h"
+#include "core/store/replica/chunk_meta.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
 #include "core/store/store_engine_options.h"
@@ -167,6 +168,11 @@ class StoreEngine {
   absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
   absl::Status disable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
 
+  // Register a loaded replica with the Global Store if connected. When
+  // artifact_id_override is provided, it is used as the identifier (e.g.,
+  // content-addressed mi2:...); otherwise key.artifact_id is used.
+  absl::Status register_replica_with_global_store(const ReplicaKey& key, std::string_view artifact_id_override = {});
+
   // --------------------------------------------------------------------
   // Memory & Registration helpers
   // --------------------------------------------------------------------
@@ -182,6 +188,15 @@ class StoreEngine {
   [[nodiscard]] size_t get_available_memory() const;
   void update_memory_pool_metrics();
   [[nodiscard]] std::vector<ReplicaInfo> get_all_replicas_info() const;
+  // GPU device queries (for status/health reporting)
+  [[nodiscard]] int get_num_gpus() const {
+    return device_manager_->get_num_gpus();
+  }
+  absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
+  absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
+
+  // DVMP chunk-state snapshot API for daemon observers (read-only).
+  [[nodiscard]] std::vector<ChunkState> get_chunk_states(std::string_view artifact_id) const;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Distributed Memory Pool (DVMP) chunk locking API
@@ -287,6 +302,17 @@ class StoreEngine {
 
   std::mutex pending_mutex_;
   std::unordered_map<std::string, PendingRegistrationEntry> pending_regs_;
+
+  // Worker identity (for Global Store registrations)
+  std::string worker_id_;
+  std::string node_id_;
+
+ public:
+  // Inject worker identity after successful registration with Global Store
+  void set_worker_identity(std::string worker_id, std::string node_id) {
+    worker_id_ = std::move(worker_id);
+    node_id_ = std::move(node_id);
+  }
 };
 
 } // namespace tensorcast::store

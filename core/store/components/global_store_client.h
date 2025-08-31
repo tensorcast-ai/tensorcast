@@ -71,6 +71,17 @@ class GlobalStoreClient {
       uint64_t mem_pool_available_size,
       bool accepting_new_requests = true);
 
+  // Enhanced heartbeat with HA state fields
+  absl::StatusOr<::global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+      std::string_view worker_id,
+      uint64_t mem_pool_available_size,
+      bool accepting_new_requests,
+      uint64_t state_version,
+      std::string_view state_checksum,
+      const std::vector<std::string>& registered_artifact_ids,
+      int64_t last_successful_sync,
+      ::global_store::ConnectionStatus connection_status = ::global_store::CONNECTED);
+
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
 
   // Replica management
@@ -127,7 +138,31 @@ class GlobalStoreClient {
       std::string_view artifact_id,
       const std::vector<uint32_t>& chunk_indices);
 
+  // HA State Synchronization
+  absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
+      const ::global_store::WorkerLocalState& local_state,
+      bool force_full_sync,
+      std::vector<::global_store::StateChange>* out_changes);
+
+  absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
+      std::string_view worker_id,
+      uint64_t current_state_version,
+      std::vector<::global_store::ReplicaInfo>* out_expected_replicas);
+
   bool is_connected() const;
+
+  // Batch chunk-state updates (DVMP -> Global Store)
+  struct ChunkStateUpdate {
+    std::string artifact_id;
+    uint32_t chunk_idx{0};
+    ChunkState state{ChunkState::COLD};
+    std::string device_uuid;
+    uint32_t replica{0};
+  };
+  absl::Status batch_update_chunk_states(
+      std::string_view worker_id,
+      std::string_view node_id,
+      const std::vector<ChunkStateUpdate>& updates);
 
  private:
   // Helper for RPC retries

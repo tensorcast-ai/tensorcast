@@ -15,9 +15,9 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
-- **LocalStoreDaemon**: Python + CXX EXT
-  - Python entrypoint: `store_daemon.py::StoreDaemonServicer`
-  - CXX: `store_engine_py.cc`
+- **LocalStoreDaemon**: C++ gRPC service (RFC-0011)
+  - Binary: `daemon/tensorcast_daemon`
+  - Service: `store_daemon.StoreDaemon` (MaterializeReplica/ConfirmReplica/UnloadReplica)
 
 - **GlobalStore**: Python
   - Entrypoint: `global_store.py::GlobalStoreServicer`
@@ -37,8 +37,8 @@ sequenceDiagram
     InferenceInstance->>LocalStoreDaemon: 0. Malloc CUDA Memory
     Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
-    InferenceInstance->>LocalStoreDaemon: 1. Request Artifact<br/>with CUDA IPC
-    Note left of LocalStoreDaemon: RPC: LoadArtifact
+    InferenceInstance->>LocalStoreDaemon: 1. MaterializeReplica (alloc + async load)
+    Note left of LocalStoreDaemon: RPC: MaterializeReplica
 
     LocalStoreDaemon->>GlobalStore: 2. Request Artifact MetaInfo
     Note left of GlobalStore: RPC: GetArtifactInfoById
