@@ -4,11 +4,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <future>
 #include <memory>
 #include <thread>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/store_engine.h"
 #include "daemon/ref_tracker.h"
@@ -190,6 +192,20 @@ class StoreDaemonServiceImpl final : public ::store_daemon::StoreDaemon::Service
   absl::Mutex verif_mu_;
   absl::flat_hash_map<std::string, VerifEntry> verif_ ABSL_GUARDED_BY(verif_mu_);
   void set_verif_status(const std::string& uuid, ::store_daemon::VerificationStatus st, std::string err = "");
+
+  // Background task queue for verification completion and auto-registration
+  struct VerifTask {
+    std::string uuid;
+    std::shared_future<absl::Status> ready;
+  };
+  struct AutoRegTask {
+    tensorcast::store::ReplicaKey key;
+    std::string disk_path;
+    std::shared_future<absl::Status> ready;
+  };
+  absl::Mutex bg_tasks_mu_;
+  std::deque<VerifTask> verif_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
+  std::deque<AutoRegTask> auto_reg_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
 };
 
 } // namespace tensorcast::daemon
