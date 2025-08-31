@@ -8,7 +8,12 @@
 
 #include "absl/log/absl_check.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/otel/config.h"
 #include "core/store/replica/chunk_meta.h"
+#if TC_ENABLE_OTEL_CXX
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
+#endif
 
 namespace tensorcast::store {
 
@@ -72,10 +77,24 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
       std::memcpy(host_ptr, src_host, step);
 
       // Async copy H2D
+#if TC_ENABLE_OTEL_CXX
+      namespace otel = opentelemetry;
+      auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
+      auto span = tracer->StartSpan("H2D/Copy");
+      otel::trace::Scope scope(span);
+      span->SetAttribute("tc.device.id", static_cast<int64_t>(device_id));
+      span->SetAttribute("tc.size.bytes", static_cast<int64_t>(step));
+      span->SetAttribute("tc.chunk.index", static_cast<int64_t>(dvmp_idx));
+#endif
       void* dst_device = static_cast<char*>(gpu_ptr) + dvmp_off + copied;
       auto memcpy_status = cuda::memcpy_async(dst_device, host_ptr, step, cudaMemcpyHostToDevice, stream);
       if (!memcpy_status.ok()) {
         ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
+#if TC_ENABLE_OTEL_CXX
+        span->SetAttribute("error", true);
+        span->AddEvent("h2d_error");
+        span->End();
+#endif
         return memcpy_status;
       }
 
@@ -89,6 +108,10 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
       // Return chunk to buffer
       ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
       copied += step;
+
+#if TC_ENABLE_OTEL_CXX
+      span->End();
+#endif
     }
 
     // UMA update: mark DVMP chunk as COPIED_GPU which triggers DVMP unlock

@@ -91,10 +91,13 @@ sc_cc_library(
     deps = [
         ":device_types",
         "//core/common:memory_location_lib",
+        "//core/common:otel_grpc_propagation_lib",
+        "//core/common:otel_link_deps_lib",
         "//core/store/replica:chunk_meta",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -165,11 +168,14 @@ sc_cc_library(
         ":global_store_client",
         ":loading_spec",
         "//core/common:cuda_api_lib",
+        "//core/common:otel_config_lib",
+        "//core/common:otel_link_deps_lib",
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
         "//core/store/replica:chunk_meta",
         "//core/store/replica:memory_manager",
         "//core/store/replica:replica_memory_coordinator",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -214,6 +220,8 @@ sc_cc_library(
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:otel_config_lib",
+        "//core/common:otel_link_deps_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
@@ -234,6 +242,7 @@ sc_cc_library(
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [

@@ -39,6 +39,14 @@
 #include "core/store/loader/source_hash.h"
 #include "core/store/loading/replica_registration_helper.h"
 
+#include "core/common/otel/config.h"
+#if TC_ENABLE_OTEL_CXX
+#include "opentelemetry/context/runtime_context.h"
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
+#include "opentelemetry/trace/span.h"
+#endif
+
 namespace tensorcast::store {
 namespace {} // namespace
 // (hashing utilities moved to core/common/artifact_hash.*)
@@ -709,7 +717,14 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
   // Update metrics
   const auto duration = std::chrono::steady_clock::now() - start_time;
-  metrics_collector_->record_operation("load_from_disk", std::chrono::duration<double>(duration).count());
+  const double duration_s = std::chrono::duration<double>(duration).count();
+  metrics_collector_->record_operation("load_from_disk", duration_s); // no-op after Phase 5
+  // Unified artifact load metric with labels
+  metrics_collector_->record_artifact_load(
+      /*source=*/"disk",
+      /*device=*/(target_location == MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
+      /*phase=*/"finalize",
+      duration_s);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
 
   return handle;
@@ -723,6 +738,38 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   const auto start_time = std::chrono::steady_clock::now();
   const std::string request_id = absl::StrCat("p2p_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_p2p_internal");
+
+#if TC_ENABLE_OTEL_CXX
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
+  otel::trace::StartSpanOptions span_opts;
+  // Treat this as an internal span within the daemon process
+  span_opts.kind = otel::trace::SpanKind::kInternal;
+  // Also attach an explicit Link to the currently active parent span (gRPC server span)
+  // so that backends that surface Links can show the association.
+  {
+    auto cur_ctx = otel::context::RuntimeContext::GetCurrent();
+    auto parent_span = otel::trace::GetSpan(cur_ctx);
+    if (parent_span) {
+      auto parent_sc = parent_span->GetContext();
+      if (parent_sc.IsValid()) {
+        span_opts.links = {otel::trace::Link{parent_sc}};
+      }
+    }
+  }
+  auto p2p_span = tracer->StartSpan("StoreEngine/P2PIngest", span_opts);
+  otel::trace::Scope p2p_scope(p2p_span);
+  // Set standard attributes and business attributes per RFC schema
+  p2p_span->SetAttribute("component", "StoreEngine");
+  p2p_span->SetAttribute("tc.source.type", "remote");
+  p2p_span->SetAttribute("tc.source.address", source.ip);
+  p2p_span->SetAttribute("tc.p2p.port", static_cast<int64_t>(source.port));
+  p2p_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(source.size_bytes));
+  p2p_span->SetAttribute(
+      "tc.location",
+      (target.location.type == MemoryLocation::GPU ? otel::nostd::string_view("gpu")
+                                                   : otel::nostd::string_view("cpu")));
+#endif
 
   if (!comm_manager_ || !comm_manager_->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
@@ -761,12 +808,19 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   auto status = load_future.get();
 
   if (!status.ok()) {
+#if TC_ENABLE_OTEL_CXX
+    p2p_span->SetAttribute("error", true);
+    p2p_span->AddEvent("p2p_ingest_error", {{"message", status.message()}});
+#endif
     if (absl::IsResourceExhausted(status)) {
       // Try to evict memory
       LOG(WARNING) << "Resource exhausted, attempting memory eviction";
       auto evict_status = try_evict_memory_for_replica(source.size_bytes);
       if (evict_status.ok()) {
         // Retry
+#if TC_ENABLE_OTEL_CXX
+        p2p_span->AddEvent("p2p_ingest_retry_after_eviction");
+#endif
         load_future =
             replica->ensure_loaded_async(target_location, num_thread_, std::optional<int>(target.location.device_id));
         status = load_future.get();
@@ -775,6 +829,9 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
 
     if (!status.ok()) {
       metrics_collector_->record_p2p_transfer(0, false);
+#if TC_ENABLE_OTEL_CXX
+      p2p_span->End();
+#endif
       return status;
     }
   }
@@ -811,9 +868,20 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   // Update metrics
   metrics_collector_->record_p2p_transfer(source.size_bytes, true);
   const auto duration = std::chrono::steady_clock::now() - start_time;
-  metrics_collector_->record_operation("load_from_p2p", std::chrono::duration<double>(duration).count());
+  const double duration_s = std::chrono::duration<double>(duration).count();
+  metrics_collector_->record_operation("load_from_p2p", duration_s);
+  // Unified artifact load metric with labels
+  metrics_collector_->record_artifact_load(
+      /*source=*/"remote",
+      /*device=*/(target_location == MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
+      /*phase=*/"finalize",
+      duration_s);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
 
+#if TC_ENABLE_OTEL_CXX
+  p2p_span->AddEvent("p2p_ingest_complete", {{"bytes", static_cast<int64_t>(source.size_bytes)}});
+  p2p_span->End();
+#endif
   return handle;
 }
 

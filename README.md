@@ -237,3 +237,27 @@ uv run -m tensorcast.global_store --port 50051 --workers 10
 # Run the Global Store Server in Docker
 sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/tensorcast/global-store:2025.04.27-55f24
 ```
+
+### Observability (OpenTelemetry)
+
+Quick ways to validate tracing after the 1.36+ upgrade:
+
+- Console exporter smoke (manual + gRPC spans):
+
+  ```bash
+  TC_OTEL_CONSOLE_EXPORTER=1 OTEL_SERVICE_NAME=tensorcast-smoke \
+    uv run tools/otel_smoke.py --use-aio
+  ```
+
+- Global Store RPC smoke (against a running server):
+
+  ```bash
+  # Terminal 1: start Global Store with tracing to console
+  TC_OTEL_CONSOLE_EXPORTER=1 uv run -m tensorcast.global_store --port 50051
+
+  # Terminal 2: one-shot client generates RPC spans
+  TC_OTEL_CONSOLE_EXPORTER=1 OTEL_SERVICE_NAME=tensorcast-gs-smoke \
+    uv run tools/gs_smoke_client.py --host 127.0.0.1 --port 50051 --list-workers
+  ```
+
+To export to an OTLP collector instead, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4317` and omit `TC_OTEL_CONSOLE_EXPORTER`.

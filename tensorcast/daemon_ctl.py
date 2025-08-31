@@ -2,12 +2,17 @@
 
 
 import os
+from contextlib import contextmanager, suppress
+from typing import Iterator, Tuple
 
 import grpc
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
 import tensorcast.proto.store_daemon_pb2_grpc as store_daemon_pb2_grpc
 from tensorcast.logger import init_logger
+from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
 logger = init_logger(__name__)
 
@@ -41,6 +46,9 @@ def get_host_pid() -> int:
 # This is a singleton class that manages the checkpoint
 class DaemonCtl:
     def __init__(self, server_address="127.0.0.1:8073"):
+        # SDK-library safe: ensure OTel is active or ask app to init. No downgrade.
+        ensure_client_otel("tensorcast-client", role="client")
+
         self.server_address = server_address
         self.channel = grpc.insecure_channel(server_address)
         self.stub = store_daemon_pb2_grpc.StoreDaemonStub(self.channel)
@@ -54,21 +62,58 @@ class DaemonCtl:
             logger.info("DaemonCtl configured to use host PID")
 
     def __del__(self):
-        # TODO: cleanup
-        pass
+        # Best-effort channel cleanup
+        with suppress(Exception):
+            self.close()
+
+    def close(self) -> None:
+        """Close underlying gRPC channel."""
+        with suppress(Exception):
+            self.channel.close()
+
+    def __enter__(self) -> "DaemonCtl":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _host_port(self) -> Tuple[str, int]:
+        """Parse and return (host, port) from server_address.
+
+        Returns (server_address, 0) if parsing fails.
+        """
+        try:
+            host, port_s = self.server_address.split(":", 1)
+            return host, int(port_s)
+        except Exception:
+            return self.server_address, 0
+
+    @contextmanager
+    def _client_span(self, name: str) -> Iterator[trace.Span]:
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(name, kind=SpanKind.CLIENT) as span:
+            host, port = self._host_port()
+            set_span_attributes({"server.address": host, "server.port": port})
+            yield span
+
+    def _get_effective_pid(self) -> int:
+        return get_host_pid() if self.use_host_pid else os.getpid()
 
     def unload_from_cpu(self, disk_path):
-        request = store_daemon_pb2.UnloadReplicaRequest(
-            disk_path=disk_path,
-            target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU,
-        )
-        try:
-            response = self.stub.UnloadReplica(request)
-        except grpc.RpcError as e:
-            logger.error(f"Error: {e}")
-            return False
-        else:
-            return response
+        with self._client_span("Client/UnloadReplica") as span:
+            request = store_daemon_pb2.UnloadReplicaRequest(
+                disk_path=disk_path,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU,
+            )
+            try:
+                response = self.stub.UnloadReplica(request)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                span.set_attribute("rpc.grpc.status_code", str(e.code().value[0]))
+                logger.error(f"Error: {e}")
+                return False
+            else:
+                return response
 
     def load_into_gpu(
         self,
@@ -82,33 +127,35 @@ class DaemonCtl:
             f"load_into_gpu: {disk_path}, {replica_uuid}, wait_for_completion={wait_for_completion}"
         )
 
-        # Choose between host PID and regular PID based on the parameter
-        pid = get_host_pid() if self.use_host_pid else os.getpid()
+        # Choose between host PID and regular PID based on configuration
+        pid = self._get_effective_pid()
         if self.use_host_pid:
             logger.debug(f"Using host PID: {pid}")
         else:
             logger.debug(f"Using container PID: {pid}")
 
-        request = store_daemon_pb2.MaterializeReplicaRequest(
-            pid=pid,
-            disk_path=disk_path,
-            replica_uuid=replica_uuid,
-            device_uuid=device_uuid,
-            target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-            pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-            keep_for_global=False,
-        )
-        try:
-            response = self.stub.MaterializeReplica(request, timeout=60)
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.CANCELLED:
-                raise RuntimeError(f"Artifact not loaded {e}") from e
-            elif e.code() == grpc.StatusCode.UNAVAILABLE:
-                raise RuntimeError(
-                    f"Local StoreDaemon ({self.server_address}) is not available."
-                ) from e
-            else:
-                raise RuntimeError(f"Error: {e}") from e
+        with self._client_span("Client/MaterializeReplica") as span:
+            request = store_daemon_pb2.MaterializeReplicaRequest(
+                pid=pid,
+                disk_path=disk_path,
+                replica_uuid=replica_uuid,
+                device_uuid=device_uuid,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
+                keep_for_global=False,
+            )
+            try:
+                response = self.stub.MaterializeReplica(request, timeout=60)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.CANCELLED:
+                    raise RuntimeError(f"Artifact not loaded {e}") from e
+                elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                else:
+                    raise RuntimeError(f"Error: {e}") from e
 
         load_status = response.status
         if (
@@ -145,36 +192,39 @@ class DaemonCtl:
         return response.mem_handle.cuda_ipc_handle
 
     def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
-        logger.info(f"confirm_replica_loaded: {disk_path}, {replica_uuid}")
-        request = store_daemon_pb2.ConfirmReplicaRequest(
-            disk_path=disk_path,
-            replica_uuid=replica_uuid,
-            target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-        )
-        try:
-            _ = self.stub.ConfirmReplica(request)
-            logger.info("Artifact loaded")
-            return True
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.CANCELLED:
-                logger.error("Artifact not loaded")
-                return False
-            else:
-                logger.error(f"Error: {e}")
-                return False
+        with self._client_span("Client/ConfirmReplica") as span:
+            request = store_daemon_pb2.ConfirmReplicaRequest(
+                disk_path=disk_path,
+                replica_uuid=replica_uuid,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+            )
+            try:
+                _ = self.stub.ConfirmReplica(request)
+                logger.info("Artifact loaded")
+                return True
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.CANCELLED:
+                    logger.error("Artifact not loaded")
+                    return False
+                else:
+                    logger.error(f"Error: {e}")
+                    return False
 
     def get_server_config(self):
-        request = store_daemon_pb2.GetServerConfigRequest()
-        try:
-            response = self.stub.GetServerConfig(request)
-        except grpc.RpcError as e:
-            logger.error(f"Error: {e}")
-            return None
-        else:
-            return {
-                "chunk_size": response.chunk_size,
-                "mem_pool_size": response.mem_pool_size,
-            }
+        with self._client_span("Client/GetServerConfig") as span:
+            request = store_daemon_pb2.GetServerConfigRequest()
+            try:
+                response = self.stub.GetServerConfig(request)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                logger.error(f"Error: {e}")
+                return None
+            else:
+                return {
+                    "chunk_size": response.chunk_size,
+                    "mem_pool_size": response.mem_pool_size,
+                }
 
     # ------------------------------------------------------------------
     # Memory Artifact registration (outer-layer client API)
@@ -230,30 +280,40 @@ class DaemonCtl:
         else:
             req.tensor_index_key = tensor_index_key or ""
 
-        try:
-            resp = self.stub.BeginRegisterArtifact(req, timeout=timeout_s)
-        except grpc.RpcError as e:
-            code = e.code()
-            if code == grpc.StatusCode.UNAVAILABLE:
-                raise RuntimeError(
-                    f"Local StoreDaemon ({self.server_address}) is not available."
-                ) from e
-            if code == grpc.StatusCode.INVALID_ARGUMENT:
-                raise ValueError(str(e)) from e
-            if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
-                raise MemoryError(str(e)) from e
-            if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                raise TimeoutError(str(e)) from e
-            # if code == grpc.StatusCode.NOT_FOUND:
-            # raise FileNotFoundError(str(e)) from e
-            raise RuntimeError(f"BeginRegisterArtifact failed: {e}") from e
+        with self._client_span("Client/BeginRegisterArtifact") as span:
+            set_span_attributes(
+                {
+                    "tc.artifact.id": artifact_id,
+                    "tc.device.id": int(device_id),
+                    "tc.size.bytes": int(total_size_bytes),
+                    "tc.enable_p2p": bool(enable_p2p),
+                }
+            )
+            try:
+                resp = self.stub.BeginRegisterArtifact(req, timeout=timeout_s)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                    raise MemoryError(str(e)) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                # if code == grpc.StatusCode.NOT_FOUND:
+                #     raise FileNotFoundError(str(e)) from e
+                raise RuntimeError(f"BeginRegisterArtifact failed: {e}") from e
 
-        return {
-            "registration_id": resp.registration_id,
-            "daemon_ipc_handle": bytes(resp.daemon_ipc_handle),
-            "device_id": int(resp.device_id),
-            "size_bytes": int(resp.size),
-        }
+            return {
+                "registration_id": resp.registration_id,
+                "daemon_ipc_handle": bytes(resp.daemon_ipc_handle),
+                "device_id": int(resp.device_id),
+                "size_bytes": int(resp.size),
+            }
 
     def commit_registered_artifact(
         self,
@@ -272,39 +332,41 @@ class DaemonCtl:
         req = store_daemon_pb2.CommitRegisteredArtifactRequest(
             registration_id=registration_id
         )
-        try:
-            resp = self.stub.CommitRegisteredArtifact(req, timeout=timeout_s)
-        except grpc.RpcError as e:
-            code = e.code()
-            if code == grpc.StatusCode.UNAVAILABLE:
-                raise RuntimeError(
-                    f"Local StoreDaemon ({self.server_address}) is not available."
-                ) from e
-            if code == grpc.StatusCode.INVALID_ARGUMENT:
-                raise ValueError(str(e)) from e
-            if code == grpc.StatusCode.NOT_FOUND:
-                raise KeyError(str(e)) from e
-            if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                raise TimeoutError(str(e)) from e
-            raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
+        with self._client_span("Client/CommitRegisteredArtifact") as span:
+            try:
+                resp = self.stub.CommitRegisteredArtifact(req, timeout=timeout_s)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise KeyError(str(e)) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
 
-        desc = resp.descriptor
-        assert desc is not None
-        descriptor_dict = {
-            "artifact_id": desc.artifact_id,
-            "index_multihash": desc.index_multihash,
-            "data_multihash": desc.data_multihash,
-            "schema_version": desc.schema_version,
-            "encoding": desc.encoding,
-            "total_size": int(desc.total_size),
-        }
-        return {
-            "registration_id": resp.registration_id,
-            "artifact_id": resp.artifact_id,
-            "device_id": int(resp.device_id),
-            "size_bytes": int(resp.size),
-            "descriptor": descriptor_dict,
-        }
+            desc = resp.descriptor
+            assert desc is not None
+            descriptor_dict = {
+                "artifact_id": desc.artifact_id,
+                "index_multihash": desc.index_multihash,
+                "data_multihash": desc.data_multihash,
+                "schema_version": desc.schema_version,
+                "encoding": desc.encoding,
+                "total_size": int(desc.total_size),
+            }
+            return {
+                "registration_id": resp.registration_id,
+                "artifact_id": resp.artifact_id,
+                "device_id": int(resp.device_id),
+                "size_bytes": int(resp.size),
+                "descriptor": descriptor_dict,
+            }
 
     def abort_registered_artifact(
         self, registration_id: str, *, timeout_s: float = 15.0
@@ -316,26 +378,28 @@ class DaemonCtl:
         req = store_daemon_pb2.AbortRegisteredArtifactRequest(
             registration_id=registration_id
         )
-        try:
-            resp = self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
-        except grpc.RpcError as e:
-            code = e.code()
-            if code == grpc.StatusCode.UNAVAILABLE:
-                raise RuntimeError(
-                    f"Local StoreDaemon ({self.server_address}) is not available."
-                ) from e
-            if code == grpc.StatusCode.INVALID_ARGUMENT:
-                raise ValueError(str(e)) from e
-            if code == grpc.StatusCode.NOT_FOUND:
-                # Treat as already-aborted/missing
-                logger.warning(
-                    "AbortRegisteredArtifact: registration not found: %s",
-                    registration_id,
-                )
-                return False
-            raise RuntimeError(f"AbortRegisteredArtifact failed: {e}") from e
+        with self._client_span("Client/AbortRegisteredArtifact") as span:
+            try:
+                resp = self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    # Treat as already-aborted/missing
+                    logger.warning(
+                        "AbortRegisteredArtifact: registration not found: %s",
+                        registration_id,
+                    )
+                    return False
+                raise RuntimeError(f"AbortRegisteredArtifact failed: {e}") from e
 
-        return bool(resp.ok)
+            return bool(resp.ok)
 
     # ------------------------------------------------------------------
     # Verification helpers
@@ -355,11 +419,19 @@ class DaemonCtl:
             timeout_ms=timeout_ms,
         )
 
-        try:
-            response = self.stub.WaitReplicaVerification(
-                request, timeout=timeout_ms / 1000 + 5
+        with self._client_span("Client/WaitReplicaVerification") as span:
+            set_span_attributes(
+                {
+                    "tc.artifact.id": artifact_identifier,
+                    "tc.timeout.ms": int(timeout_ms),
+                }
             )
-            return response
-        except grpc.RpcError as e:
-            logger.error(f"wait_artifact_verification RPC failed: {e}")
-            return None
+            try:
+                response = self.stub.WaitReplicaVerification(
+                    request, timeout=timeout_ms / 1000 + 5
+                )
+                return response
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                logger.error(f"wait_artifact_verification RPC failed: {e}")
+                return None

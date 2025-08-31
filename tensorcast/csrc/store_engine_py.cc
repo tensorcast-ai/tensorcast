@@ -702,16 +702,16 @@ transport layer.)pbdoc")
                 auto nodes = sn["nodes"].cast<py::list>();
                 ccfg.simple_numa.nodes.clear();
                 for (auto item : nodes) {
-                  auto and = item.cast<py::dict>();
+                  auto node_cfg = item.cast<py::dict>();
                   tensorcast::communicator::SimpleNumaNode node{};
-                  if (and.contains("id") && !and["id"].is_none())
-                    node.id = and["id"].cast<int>();
-                  if (and.contains("is_default") && !and["is_default"].is_none())
-                    node.is_default = and["is_default"].cast<bool>();
-                  if (and.contains("nics") && !and["nics"].is_none())
-                    node.nics = and["nics"].cast<std::vector<std::string>>();
-                  if (and.contains("gpus") && !and["gpus"].is_none())
-                    node.gpus = and["gpus"].cast<std::vector<int>>();
+                  if (node_cfg.contains("id") && !node_cfg["id"].is_none())
+                    node.id = node_cfg["id"].cast<int>();
+                  if (node_cfg.contains("is_default") && !node_cfg["is_default"].is_none())
+                    node.is_default = node_cfg["is_default"].cast<bool>();
+                  if (node_cfg.contains("nics") && !node_cfg["nics"].is_none())
+                    node.nics = node_cfg["nics"].cast<std::vector<std::string>>();
+                  if (node_cfg.contains("gpus") && !node_cfg["gpus"].is_none())
+                    node.gpus = node_cfg["gpus"].cast<std::vector<int>>();
                   ccfg.simple_numa.nodes.emplace_back(std::move(node));
                 }
               }

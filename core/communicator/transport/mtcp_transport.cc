@@ -20,9 +20,14 @@
 
 #include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
+#include "core/common/otel/config.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
+#if TC_ENABLE_OTEL_CXX
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
+#endif
 
 #include <chrono>
 
@@ -803,14 +808,31 @@ void MTcpTransport::recv_loop() {
                   return {TRANSPORT_FAILED, result.cost};
                 }
 
+            // Instrument H2D copy for GPU receive
+#if TC_ENABLE_OTEL_CXX
+                namespace otel = opentelemetry;
+                auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.communicator");
+                auto copy_span = tracer->StartSpan("H2D/Copy");
+                otel::trace::Scope copy_scope(copy_span);
+                copy_span->SetAttribute("tc.device.id", static_cast<int64_t>(device_id));
+                copy_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(sub_chunk_size));
+#endif
                 auto copy_status = cuda::memcpy(gpu_ptr, staged_ptr, sub_chunk_size, cudaMemcpyHostToDevice);
                 if (!copy_status.ok()) {
                   LOG(ERROR) << "Failed to copy to GPU: " << copy_status.message();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
+#if TC_ENABLE_OTEL_CXX
+                  copy_span->SetAttribute("error", true);
+                  copy_span->AddEvent("h2d_error");
+                  copy_span->End();
+#endif
                   return {TRANSPORT_FAILED, result.cost};
                 }
 
                 CHECK_OK(recv_buffer->return_chunk(slot_id));
+#if TC_ENABLE_OTEL_CXX
+                copy_span->End();
+#endif
                 return result;
               });
 

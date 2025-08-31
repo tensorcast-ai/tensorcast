@@ -39,6 +39,7 @@ from tensorcast.global_store.services import (
     WorkerService,
 )
 from tensorcast.logger import init_logger
+from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
 
 logger = init_logger(__name__)
@@ -168,6 +169,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
     ) -> global_store_pb2.GetArtifactInfoByIdResponse:
         """Content-addressed query by artifact_id (mi2:...)."""
         artifact_id = request.artifact_id
+        # Attach business attribute to current span (no-op if tracing disabled)
+        set_span_attributes({"tc.artifact.id": artifact_id})
         try:
             if not artifact_id:
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -213,6 +216,21 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
             # Register replica
             registered = self.artifact_service.register_replica(replica)
+
+            # Enrich span with key business attributes (best-effort only)
+            from contextlib import suppress
+
+            with suppress(Exception):
+                set_span_attributes(
+                    {
+                        "tc.artifact.id": registered.artifact_id,
+                        "tc.replica.id": str(registered.replica_id),
+                        "tc.memory.type": str(replica.memory_type.value),
+                        "tc.memory.size": int(replica.memory_size),
+                        "tc.device.id": int(replica.device_id),
+                        "tc.worker.id": replica.worker_id,
+                    }
+                )
 
             # RFC-0007: Persist content-addressed descriptor into `artifacts` table if possible.
             # Parse `mi2:` artifact_id and extract index/data multihash when present. If the
@@ -291,6 +309,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         try:
             replica_id = UUID(request.replica_id)
             artifact_id = request.artifact_id
+
+            set_span_attributes(
+                {
+                    "tc.artifact.id": artifact_id,
+                    "tc.replica.id": str(replica_id),
+                }
+            )
 
             success = self.artifact_service.update_heartbeat(replica_id, artifact_id)
 
@@ -438,6 +463,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         try:
             wait_timeout_ms = request.wait_timeout_ms
 
+            # Pre-attributes for routing decision visibility
+            set_span_attributes(
+                {
+                    "tc.artifact.id": request.artifact_id,
+                    "tc.source.address": request.source_address,
+                    "tc.source.port": int(request.source_port),
+                    "tc.request.wait_timeout_ms": int(wait_timeout_ms),
+                }
+            )
+
             # Request transport
             replica, transport_id = self.transport_service.request_transport(
                 artifact_id=request.artifact_id,
@@ -449,6 +484,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
             # Convert to proto format
             remote_info = self._replica_to_memory_info(replica)
+
+            # Transport ID is known at this point (best-effort only)
+            from contextlib import suppress
+
+            with suppress(Exception):
+                set_span_attributes({"tc.transport.id": str(transport_id)})
 
             return global_store_pb2.RequestReplicaTransportResponse(
                 status=global_store_pb2.Status.OK,
@@ -477,6 +518,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         """Complete artifact transport and release resources."""
         try:
             transport_id = UUID(request.transport_id)
+
+            # Attach known attributes; CompleteReplicaTransportRequest only carries transport_id.
+            set_span_attributes({"tc.transport.id": str(transport_id)})
 
             # Complete transport
             self.transport_service.complete_transport(transport_id)
@@ -515,6 +559,19 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 p2p_port=request.p2p_port,
                 mem_pool_total_size=request.mem_pool_total_size,
                 mem_pool_available_size=request.mem_pool_available_size,
+            )
+
+            # Span attributes with worker metadata
+            set_span_attributes(
+                {
+                    "tc.worker.node_id": worker.node_id,
+                    "tc.worker.node_address": worker.node_address,
+                    "tc.worker.grpc_port": int(worker.grpc_port),
+                    "tc.worker.p2p_port": int(worker.p2p_port),
+                    "tc.mem_pool.total_bytes": int(worker.mem_pool_total_size),
+                    "tc.mem_pool.available_bytes": int(worker.mem_pool_available_size),
+                    "tc.worker.is_recovery": bool(request.is_recovery_registration),
+                }
             )
 
             # Check if this is a recovery registration
@@ -589,6 +646,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
     ) -> global_store_pb2.WorkerHeartbeatResponse:
         """Process enhanced worker heartbeat."""
         try:
+            set_span_attributes(
+                {
+                    "tc.worker.id": request.worker_id,
+                    "tc.mem_pool.available_bytes": int(request.mem_pool_available_size),
+                    "tc.worker.accepting_new_requests": bool(
+                        request.accepting_new_requests
+                    ),
+                    "tc.worker.state_version": int(request.state_version),
+                }
+            )
             # Check if this is an enhanced heartbeat
             if request.state_version > 0:
                 # Enhanced heartbeat with state information

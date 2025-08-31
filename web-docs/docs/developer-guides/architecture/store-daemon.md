@@ -234,13 +234,13 @@ global_store_address: "localhost:50051"
 
 ## Health Monitoring
 
-### Prometheus Metrics
+### Metrics (Unified)
 
-Key metrics exposed:
+Key metrics are exposed under the unified `tc_*` schema via the sidecar HTTP server or Global Store aggregation:
 
-**Core Metrics** (C++):
-* `store_daemon_memory_pool_total_bytes`
-* `store_daemon_memory_pool_available_bytes`
+**Core Metrics** (C++ via sidecar):
+* `tc_memory_pool_bytes{location=cpu|gpu,device_id?,memory_type=total|free}`
+* `tc_p2p_bytes_total`
 * Additional StoreEngine/Communicator metrics (see core docs)
 
 ## Daemon Flags

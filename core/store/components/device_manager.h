@@ -89,10 +89,9 @@ class DeviceManager {
   int num_gpus_ = 0;
   std::unordered_map<int, GpuInfo> gpu_info_map_;
 
-  // Metrics
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_total_gauges_;
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_free_gauges_;
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_replicas_loaded_gauges_;
+  // Unified tc_* gauges
+  std::unordered_map<int, tensorcast::metrics::Gauge> tc_gpu_memory_total_gauges_;
+  std::unordered_map<int, tensorcast::metrics::Gauge> tc_gpu_memory_free_gauges_;
 };
 
 } // namespace tensorcast::store

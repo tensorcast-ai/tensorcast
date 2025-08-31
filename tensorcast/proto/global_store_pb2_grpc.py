@@ -4,8 +4,31 @@
 """Client and server classes corresponding to protobuf-defined services."""
 
 import grpc
+import warnings
 
 import tensorcast.proto.global_store_pb2 as global__store__pb2
+
+GRPC_GENERATED_VERSION = "1.73.1"
+GRPC_VERSION = grpc.__version__
+_version_not_supported = False
+
+try:
+    from grpc._utilities import first_version_is_lower
+
+    _version_not_supported = first_version_is_lower(
+        GRPC_VERSION, GRPC_GENERATED_VERSION
+    )
+except ImportError:
+    _version_not_supported = True
+
+if _version_not_supported:
+    raise RuntimeError(
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in global_store_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
+    )
 
 
 class GlobalStoreStub(object):
@@ -21,86 +44,103 @@ class GlobalStoreStub(object):
             "/global_store.GlobalStore/RegisterReplica",
             request_serializer=global__store__pb2.RegisterReplicaRequest.SerializeToString,
             response_deserializer=global__store__pb2.RegisterReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.UpdateReplica = channel.unary_unary(
             "/global_store.GlobalStore/UpdateReplica",
             request_serializer=global__store__pb2.UpdateReplicaRequest.SerializeToString,
             response_deserializer=global__store__pb2.UpdateReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.UnregisterReplica = channel.unary_unary(
             "/global_store.GlobalStore/UnregisterReplica",
             request_serializer=global__store__pb2.UnregisterReplicaRequest.SerializeToString,
             response_deserializer=global__store__pb2.UnregisterReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.RequestReplicaTransport = channel.unary_unary(
             "/global_store.GlobalStore/RequestReplicaTransport",
             request_serializer=global__store__pb2.RequestReplicaTransportRequest.SerializeToString,
             response_deserializer=global__store__pb2.RequestReplicaTransportResponse.FromString,
+            _registered_method=True,
         )
         self.CompleteReplicaTransport = channel.unary_unary(
             "/global_store.GlobalStore/CompleteReplicaTransport",
             request_serializer=global__store__pb2.CompleteReplicaTransportRequest.SerializeToString,
             response_deserializer=global__store__pb2.CompleteReplicaTransportResponse.FromString,
+            _registered_method=True,
         )
         self.ListReplicas = channel.unary_unary(
             "/global_store.GlobalStore/ListReplicas",
             request_serializer=global__store__pb2.ListReplicasRequest.SerializeToString,
             response_deserializer=global__store__pb2.ListReplicasResponse.FromString,
+            _registered_method=True,
         )
         self.GetArtifactInfoById = channel.unary_unary(
             "/global_store.GlobalStore/GetArtifactInfoById",
             request_serializer=global__store__pb2.GetArtifactInfoByIdRequest.SerializeToString,
             response_deserializer=global__store__pb2.GetArtifactInfoByIdResponse.FromString,
+            _registered_method=True,
         )
         self.GetArtifactIndex = channel.unary_unary(
             "/global_store.GlobalStore/GetArtifactIndex",
             request_serializer=global__store__pb2.GetArtifactIndexRequest.SerializeToString,
             response_deserializer=global__store__pb2.GetArtifactIndexResponse.FromString,
+            _registered_method=True,
         )
         self.RegisterWorker = channel.unary_unary(
             "/global_store.GlobalStore/RegisterWorker",
             request_serializer=global__store__pb2.RegisterWorkerRequest.SerializeToString,
             response_deserializer=global__store__pb2.RegisterWorkerResponse.FromString,
+            _registered_method=True,
         )
         self.WorkerHeartbeat = channel.unary_unary(
             "/global_store.GlobalStore/WorkerHeartbeat",
             request_serializer=global__store__pb2.WorkerHeartbeatRequest.SerializeToString,
             response_deserializer=global__store__pb2.WorkerHeartbeatResponse.FromString,
+            _registered_method=True,
         )
         self.UnregisterWorker = channel.unary_unary(
             "/global_store.GlobalStore/UnregisterWorker",
             request_serializer=global__store__pb2.UnregisterWorkerRequest.SerializeToString,
             response_deserializer=global__store__pb2.UnregisterWorkerResponse.FromString,
+            _registered_method=True,
         )
         self.ListActiveWorkers = channel.unary_unary(
             "/global_store.GlobalStore/ListActiveWorkers",
             request_serializer=global__store__pb2.ListActiveWorkersRequest.SerializeToString,
             response_deserializer=global__store__pb2.ListActiveWorkersResponse.FromString,
+            _registered_method=True,
         )
         self.SynchronizeWorkerState = channel.unary_unary(
             "/global_store.GlobalStore/SynchronizeWorkerState",
             request_serializer=global__store__pb2.SynchronizeWorkerStateRequest.SerializeToString,
             response_deserializer=global__store__pb2.SynchronizeWorkerStateResponse.FromString,
+            _registered_method=True,
         )
         self.RequestFullStateSync = channel.unary_unary(
             "/global_store.GlobalStore/RequestFullStateSync",
             request_serializer=global__store__pb2.RequestFullStateSyncRequest.SerializeToString,
             response_deserializer=global__store__pb2.RequestFullStateSyncResponse.FromString,
+            _registered_method=True,
         )
         self.HealthCheck = channel.unary_unary(
             "/global_store.GlobalStore/HealthCheck",
             request_serializer=global__store__pb2.HealthCheckRequest.SerializeToString,
             response_deserializer=global__store__pb2.HealthCheckResponse.FromString,
+            _registered_method=True,
         )
         self.QueryChunkLocations = channel.unary_unary(
             "/global_store.GlobalStore/QueryChunkLocations",
             request_serializer=global__store__pb2.QueryChunkLocationsRequest.SerializeToString,
             response_deserializer=global__store__pb2.QueryChunkLocationsResponse.FromString,
+            _registered_method=True,
         )
         self.BatchUpdateChunkStates = channel.unary_unary(
             "/global_store.GlobalStore/BatchUpdateChunkStates",
             request_serializer=global__store__pb2.BatchUpdateChunkStatesRequest.SerializeToString,
             response_deserializer=global__store__pb2.BatchUpdateChunkStatesResponse.FromString,
+            _registered_method=True,
         )
 
 
@@ -304,6 +344,9 @@ def add_GlobalStoreServicer_to_server(servicer, server):
         "global_store.GlobalStore", rpc_method_handlers
     )
     server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers(
+        "global_store.GlobalStore", rpc_method_handlers
+    )
 
 
 # This class is part of an EXPERIMENTAL API.
@@ -337,6 +380,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -366,6 +410,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -395,6 +440,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -424,6 +470,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -453,6 +500,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -482,6 +530,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -511,6 +560,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -540,6 +590,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -569,6 +620,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -598,6 +650,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -627,6 +680,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -656,6 +710,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -685,6 +740,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -714,6 +770,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -743,6 +800,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -772,6 +830,7 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -801,4 +860,5 @@ class GlobalStore(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )

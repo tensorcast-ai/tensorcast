@@ -9,11 +9,21 @@ from pathlib import Path
 from typing import Optional
 
 # Default format with detailed context
-_FORMAT = "%(levelname)s %(asctime)s [%(threadName)s %(thread)d] %(filename)s:%(lineno)d: %(message)s"
+_FORMAT = (
+    "%(levelname)s %(asctime)s [%(threadName)s %(thread)d] "
+    "trace_id=%(trace_id)s span_id=%(span_id)s "
+    "%(filename)s:%(lineno)d: %(message)s"
+)
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 # Service manager format
 SERVICE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+
+def _env_truthy(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def setup_logging(
@@ -56,14 +66,76 @@ def setup_logging(
         log_file_path.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_file_path, mode="a"))
 
-    # Configure root logger
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        datefmt=_DATE_FORMAT,
-        handlers=handlers,
-        force=True,  # Python 3.8+ - reconfigure even if already configured
-    )
+    class _SafeFormatter(logging.Formatter):
+        """Formatter that tolerates missing trace fields by injecting defaults.
+
+        Some early logs may occur before OTel context is available. This
+        formatter ensures %(trace_id)s / %(span_id)s exist to prevent KeyError.
+        """
+
+        def format(self, record: logging.LogRecord) -> str:
+            if not hasattr(record, "trace_id"):
+                record.trace_id = "-"
+            if not hasattr(record, "span_id"):
+                record.span_id = "-"
+            return super().format(record)
+
+    # Configure root logger with handlers and safe formatter
+    logging.basicConfig(level=log_level, handlers=handlers, force=True)
+    fmt = _SafeFormatter(log_format, _DATE_FORMAT)
+    for h in logging.getLogger().handlers:
+        h.setFormatter(fmt)
+
+    # Attach a filter that injects OpenTelemetry trace_id/span_id into log records
+    # Allow disabling via environment to avoid overhead in hot paths
+    if _env_truthy(os.getenv("TC_LOG_OTEL_CONTEXT_ENABLED", "1")) and not _env_truthy(
+        os.getenv("OTEL_SDK_DISABLED")
+    ):
+
+        class _OtelContextFilter(logging.Filter):
+            """Inject OpenTelemetry trace_id/span_id into log records.
+
+            Tolerant of missing OpenTelemetry dependencies and always ensures the
+            fields exist to avoid formatting KeyError.
+            """
+
+            def __init__(self) -> None:
+                super().__init__()
+                try:
+                    from opentelemetry import trace as _trace
+
+                    self._trace = _trace
+                except Exception:  # OTEL not installed
+                    self._trace = None
+
+            def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+                # Default placeholders prevent formatter failures when tracing is off
+                if not hasattr(record, "trace_id"):
+                    record.trace_id = "-"
+                if not hasattr(record, "span_id"):
+                    record.span_id = "-"
+
+                try:
+                    if self._trace is None:
+                        return True
+                    span = self._trace.get_current_span()
+                    if span is None:
+                        return True
+                    ctx = span.get_span_context()
+                    # ctx may be invalid if no active span
+                    trace_id = getattr(ctx, "trace_id", 0)
+                    span_id = getattr(ctx, "span_id", 0)
+                    if trace_id:
+                        record.trace_id = f"{trace_id:032x}"
+                    if span_id:
+                        record.span_id = f"{span_id:016x}"
+                except Exception:
+                    # Best-effort only; never block logging
+                    pass
+                return True
+
+        root_logger = logging.getLogger()
+        root_logger.addFilter(_OtelContextFilter())
 
     # Ensure tensorcast logger uses same level
     logging.getLogger("tensorcast").setLevel(log_level)

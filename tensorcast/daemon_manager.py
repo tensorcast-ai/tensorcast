@@ -6,14 +6,18 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Optional
+from contextlib import contextmanager, suppress
+from typing import Iterator, List, Optional, Tuple
 
 import grpc
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
 import tensorcast.proto.store_daemon_pb2_grpc as store_daemon_pb2_grpc
 from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger
+from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
 logger = init_logger(__name__)
 
@@ -32,6 +36,9 @@ class DaemonManager:
         config: StoreDaemonConfig,
         auto_start: bool = True,
     ):
+        # Initialize OTel in a library-friendly manner (no downgrade).
+        ensure_client_otel("tensorcast-client", role="client")
+
         self.config = config
         self.auto_start = auto_start
 
@@ -42,43 +49,34 @@ class DaemonManager:
         # Register cleanup function
         atexit.register(self.cleanup)
 
-    def is_daemon_running(self) -> bool:
-        """Check if a daemon is already running at the specified address."""
+    def close(self) -> None:
+        """Close resources held by the manager (terminate daemon we started)."""
+        self.cleanup()
+
+    def __enter__(self) -> "DaemonManager":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _host_port(self) -> Tuple[str, int]:
         try:
-            channel = grpc.insecure_channel(self.server_address)
-            stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+            host, port_s = self.server_address.split(":", 1)
+            return host, int(port_s)
+        except Exception:
+            return self.server_address, 0
 
-            # Try to get server config to verify the daemon is responsive
-            request = store_daemon_pb2.GetServerConfigRequest()
-            _ = stub.GetServerConfig(request, timeout=2.0)
+    @contextmanager
+    def _span(self, name: str, kind: SpanKind) -> Iterator[trace.Span]:
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(name, kind=kind) as span:
+            host, port = self._host_port()
+            set_span_attributes({"server.address": host, "server.port": port})
+            yield span
 
-            channel.close()
-            logger.info(f"Found existing daemon at {self.server_address}")
-            return True
-
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.UNAVAILABLE:
-                logger.debug(f"No daemon found at {self.server_address}")
-                return False
-            else:
-                logger.warning(f"Error checking daemon status: {e}")
-                return False
-        except Exception as e:
-            logger.warning(f"Unexpected error checking daemon: {e}")
-            return False
-
-    def start_daemon(self) -> bool:
-        """Start a new daemon process."""
-        if not self.auto_start:
-            logger.error("Auto-start is disabled, cannot start daemon")
-            return False
-
-        logger.info(f"Starting new daemon at {self.server_address}")
-
+    def _build_start_command(self) -> List[str]:
         python = os.environ.get("TENSORCAST_PYTHON", sys.executable)
-
-        # Build command to start daemon
-        cmd = [
+        cmd: List[str] = [
             python,
             "-m",
             "tensorcast.cli",
@@ -97,51 +95,101 @@ class DaemonManager:
             f"{self.config.server.mem_pool_size}B",
             "--non-blocking",
         ]
-
         if self.config.server.enable_p2p_access:
             cmd.extend(["--enable-p2p-access", "True"])
         if self.config.server.enable_p2p_engine:
             cmd.extend(["--enable-p2p-engine", "True"])
+        return cmd
 
-        try:
-            # Start daemon as subprocess
-            self.daemon_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid,  # Create new process group
-            )
+    def _wait_until_ready(
+        self, max_wait_time: int = 30, wait_interval: float = 1.0
+    ) -> bool:
+        elapsed = 0.0
+        while elapsed < max_wait_time:
+            if self.is_daemon_running():
+                return True
+            if self.daemon_process and self.daemon_process.poll() is not None:
+                # Process died
+                return False
+            time.sleep(wait_interval)
+            elapsed += wait_interval
+        return False
 
-            self._daemon_started_by_us = True
+    def is_daemon_running(self) -> bool:
+        """Check if a daemon is already running at the specified address."""
+        with self._span("Client/CheckDaemon", SpanKind.CLIENT) as span:
+            channel = grpc.insecure_channel(self.server_address)
+            stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+            try:
+                request = store_daemon_pb2.GetServerConfigRequest()
+                _ = stub.GetServerConfig(request, timeout=2.0)
+                logger.info(f"Found existing daemon at {self.server_address}")
+                return True
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    logger.debug(f"No daemon found at {self.server_address}")
+                    return False
+                logger.warning(f"Error checking daemon status: {e}")
+                return False
+            except Exception as e:
+                span.record_exception(e)
+                logger.warning(f"Unexpected error checking daemon: {e}")
+                return False
+            finally:
+                with suppress(Exception):
+                    channel.close()
 
-            # Wait for daemon to be ready
-            max_wait_time = 30  # seconds
-            wait_interval = 1  # seconds
-            elapsed = 0
+    def start_daemon(self) -> bool:
+        """Start a new daemon process."""
+        if not self.auto_start:
+            logger.error("Auto-start is disabled, cannot start daemon")
+            return False
 
-            while elapsed < max_wait_time:
-                if self.is_daemon_running():
+        logger.info(f"Starting new daemon at {self.server_address}")
+        cmd = self._build_start_command()
+
+        with self._span("Client/StartDaemon", SpanKind.INTERNAL) as span:
+            try:
+                # Start daemon as subprocess
+                self.daemon_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    preexec_fn=os.setsid,  # Create new process group
+                )
+
+                self._daemon_started_by_us = True
+
+                if self._wait_until_ready(max_wait_time=30, wait_interval=1):
                     logger.info(f"Daemon started successfully at {self.server_address}")
                     return True
 
-                # Check if process is still alive
-                if self.daemon_process.poll() is not None:
+                # If not ready within time, check if it died and capture output
+                if self.daemon_process and self.daemon_process.poll() is not None:
                     stdout, stderr = self.daemon_process.communicate()
                     logger.error("Daemon process exited unexpectedly")
-                    logger.error(f"stdout: {stdout.decode()}")
-                    logger.error(f"stderr: {stderr.decode()}")
-                    return False
+                    with suppress(Exception):
+                        logger.error(f"stdout: {stdout.decode()}")
+                    with suppress(Exception):
+                        logger.error(f"stderr: {stderr.decode()}")
+                else:
+                    logger.error("Daemon failed to start within 30 seconds")
+                self.cleanup()
+                return False
 
-                time.sleep(wait_interval)
-                elapsed += wait_interval
+            except Exception as e:
+                span.record_exception(e)
+                logger.error(f"Failed to start daemon: {e}")
+                return False
 
-            logger.error(f"Daemon failed to start within {max_wait_time} seconds")
-            self.cleanup()
+    def stop_daemon(self) -> bool:
+        """Stop the daemon process if it was started by this manager."""
+        if not self.daemon_process or not self._daemon_started_by_us:
+            logger.debug("stop_daemon called, but no managed daemon to stop")
             return False
-
-        except Exception as e:
-            logger.error(f"Failed to start daemon: {e}")
-            return False
+        self.cleanup()
+        return True
 
     def ensure_daemon_running(self) -> bool:
         """Ensure a daemon is running, starting one if necessary."""

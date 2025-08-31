@@ -13,15 +13,22 @@ sc_cc_library(
     name = "grpc_service_impl",
     srcs = ["grpc_service_impl.cc"],
     hdrs = ["grpc_service_impl.h"],
+    copts = [
+        # Enable OTel C++ API instrumentation in RPC handlers
+        "-DTC_ENABLE_OTEL_CXX=1",
+    ],
     deps = [
         ":ref_tracker_hdr",
         ":session_manager_hdr",
         ":status_utils",
         ":transport_lock_manager_hdr",
+        "//core/common:otel_config_lib",
+        "//core/common:otel_grpc_propagation_lib",
         "//core/store:store_engine",
         "//proto:store_daemon_grpc_cpp",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -31,6 +38,9 @@ cc_binary(
     deps = [
         ":grpc_service_impl",
         ":worker_lifecycle",
+        "//core/common:otel_init_lib",
+        "//core/common:otel_link_deps_lib",
+        "//core/common:otel_log_sink_lib",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",

@@ -95,19 +95,20 @@ absl::Status DeviceManager::initialize() {
     info.total_memory = total_mem;
     info.free_memory = free_mem;
 
-    // Initialize metrics for this device
+    // Unified tc_* gauges for GPU memory pool
     std::string device_id_str = std::to_string(i);
-    gpu_memory_total_gauges_.emplace(
-        i, metrics::Gauge("store_daemon_gpu_memory_bytes", {{"device_id", device_id_str}, {"memory_type", "total"}}));
-    gpu_memory_free_gauges_.emplace(
-        i, metrics::Gauge("store_daemon_gpu_memory_bytes", {{"device_id", device_id_str}, {"memory_type", "free"}}));
-    gpu_replicas_loaded_gauges_.emplace(
-        i, tensorcast::metrics::Gauge("store_daemon_gpu_replicas_loaded", {{"device_id", device_id_str}}));
+    tc_gpu_memory_total_gauges_.emplace(
+        i,
+        metrics::Gauge(
+            "tc_memory_pool_bytes", {{"location", "gpu"}, {"device_id", device_id_str}, {"memory_type", "total"}}));
+    tc_gpu_memory_free_gauges_.emplace(
+        i,
+        metrics::Gauge(
+            "tc_memory_pool_bytes", {{"location", "gpu"}, {"device_id", device_id_str}, {"memory_type", "free"}}));
 
     // Set initial metric values
-    gpu_memory_total_gauges_.at(i).set(static_cast<double>(total_mem));
-    gpu_memory_free_gauges_.at(i).set(static_cast<double>(free_mem));
-    gpu_replicas_loaded_gauges_.at(i).set(0.0);
+    tc_gpu_memory_total_gauges_.at(i).set(static_cast<double>(total_mem));
+    tc_gpu_memory_free_gauges_.at(i).set(static_cast<double>(free_mem));
   }
 
   return absl::OkStatus();
@@ -148,8 +149,8 @@ void DeviceManager::update_gpu_metrics() {
     size_t free_mem, total_mem;
     auto mem_status = cuda::get_memory_info(&free_mem, &total_mem, device_id);
     if (mem_status.ok()) {
-      gpu_memory_free_gauges_.at(device_id).set(static_cast<double>(free_mem));
-      gpu_memory_total_gauges_.at(device_id).set(static_cast<double>(total_mem));
+      tc_gpu_memory_free_gauges_.at(device_id).set(static_cast<double>(free_mem));
+      tc_gpu_memory_total_gauges_.at(device_id).set(static_cast<double>(total_mem));
     }
   }
 }

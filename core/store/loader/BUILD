@@ -131,7 +131,10 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":source",
+        "//core/common:otel_config_lib",
+        "//core/common:otel_link_deps_lib",
         "//core/communicator:engine_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 

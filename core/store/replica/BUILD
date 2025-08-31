@@ -76,6 +76,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:memory_location_lib",
+        "//core/common:otel_config_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/store:device_types",
         "@abseil-cpp//absl/log:absl_check",

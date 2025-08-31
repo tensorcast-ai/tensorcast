@@ -6,7 +6,12 @@
 #include <cstring>
 
 #include "absl/log/log.h"
+#include "core/common/otel/config.h"
 #include "core/communicator/engine/engine.h"
+#if TC_ENABLE_OTEL_CXX
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
+#endif
 
 namespace tensorcast::store::loader {
 
@@ -43,6 +48,18 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
     size_t remaining_in_key = key_size - current_key_offset_;
     size_t to_read = std::min(bytes_to_read - bytes_read, remaining_in_key);
 
+#if TC_ENABLE_OTEL_CXX
+    namespace otel = opentelemetry;
+    auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
+    auto evt_span = tracer->StartSpan("P2P/ChunkRecv");
+    otel::trace::Scope evt_scope(evt_span);
+    evt_span->SetAttribute("event", "p2p_chunk_recv");
+    evt_span->SetAttribute("tc.conn.index", static_cast<int64_t>(current_key_index_));
+    evt_span->SetAttribute("tc.offset", static_cast<int64_t>(current_key_offset_));
+    evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
+    evt_span->SetAttribute("tc.remote.key", key);
+#endif
+
     // Use CommunicateEngine to read from remote peer directly into dst_ptr.
     auto future = options_.comm_engine->read_tensor(
         key,
@@ -56,6 +73,11 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
 
     auto result = future.get();
     if (!result.status.ok()) {
+#if TC_ENABLE_OTEL_CXX
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
+      evt_span->End();
+#endif
       LOG(ERROR) << "Failed to read from remote key " << key << " at offset " << current_key_offset_ << " : "
                  << result.status.message();
       return result.status;
@@ -70,6 +92,10 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
       current_key_index_++;
       current_key_offset_ = 0;
     }
+
+#if TC_ENABLE_OTEL_CXX
+    evt_span->End();
+#endif
   }
 
   VLOG(3) << "Read " << bytes_read << " bytes from remote. "
@@ -134,6 +160,18 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     size_t remaining_in_key = key_size - key_offset;
     size_t to_read = std::min(bytes_to_read - bytes_read, remaining_in_key);
 
+#if TC_ENABLE_OTEL_CXX
+    namespace otel = opentelemetry;
+    auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
+    auto evt_span = tracer->StartSpan("P2P/ChunkRecv");
+    otel::trace::Scope evt_scope(evt_span);
+    evt_span->SetAttribute("event", "p2p_chunk_recv");
+    evt_span->SetAttribute("tc.conn.index", static_cast<int64_t>(key_index));
+    evt_span->SetAttribute("tc.offset", static_cast<int64_t>(key_offset));
+    evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
+    evt_span->SetAttribute("tc.remote.key", key);
+#endif
+
     auto future = options_.comm_engine->read_tensor(
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),
@@ -146,6 +184,11 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
 
     auto result = future.get();
     if (!result.status.ok()) {
+#if TC_ENABLE_OTEL_CXX
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
+      evt_span->End();
+#endif
       return result.status;
     }
 
@@ -155,6 +198,10 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
       key_index++;
       key_offset = 0;
     }
+
+#if TC_ENABLE_OTEL_CXX
+    evt_span->End();
+#endif
   }
 
   return bytes_read;
@@ -220,6 +267,18 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
     const size_t step = static_cast<size_t>(
         std::min<uint64_t>(to_read_total - bytes_done, std::min<uint64_t>(remaining_in_key, seg_bytes_left)));
 
+    // Span per direct-write segment
+#if TC_ENABLE_OTEL_CXX
+    namespace otel = opentelemetry;
+    auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
+    auto evt_span = tracer->StartSpan("P2P/DirectWrite");
+    otel::trace::Scope evt_scope(evt_span);
+    evt_span->SetAttribute("event", "p2p_chunk_recv");
+    evt_span->SetAttribute("tc.offset", static_cast<int64_t>(src_global_offset));
+    evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(step));
+    evt_span->SetAttribute("tc.remote.key", key);
+#endif
+
     auto future = options_.comm_engine->read_tensor(
         key,
         local_addr,
@@ -231,11 +290,20 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
         static_cast<uint64_t>(key_offset));
     auto result = future.get();
     if (!result.status.ok()) {
+#if TC_ENABLE_OTEL_CXX
+      evt_span->SetAttribute("error", true);
+      evt_span->AddEvent("recv_error", {{"message", result.status.message()}});
+      evt_span->End();
+#endif
       return result.status;
     }
 
     bytes_done += step;
     src_global_offset += step;
+
+#if TC_ENABLE_OTEL_CXX
+    evt_span->End();
+#endif
   }
   return bytes_done;
 }

@@ -232,6 +232,67 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
+# OpenTelemetry - gRPC propagation helpers (header-only)
+sc_header_only_library(
+    name = "otel_grpc_propagation_lib",
+    hdrs = ["otel/grpc_propagation.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+# OpenTelemetry - build-time config header (header-only)
+sc_header_only_library(
+    name = "otel_config_lib",
+    hdrs = ["otel/config.h"],
+    visibility = ["//visibility:public"],
+)
+
+# OpenTelemetry - TraceScope bridge (header-only)
+sc_header_only_library(
+    name = "otel_trace_scope_bridge_hdr",
+    hdrs = ["otel/trace_scope_bridge.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":otel_config_lib",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "otel_init_lib",
+    srcs = ["otel/init.cc"],
+    hdrs = ["otel/init.h"],
+    copts = [
+        # Enable SDK path in init.cc (links exporters based on env)
+        "-DTC_ENABLE_OTEL_CXX_SDK=1",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":otel_config_lib",
+        "@opentelemetry-cpp//api:api",
+        # SDK headers + exporters required when TC_ENABLE_OTEL_CXX_SDK is enabled
+        "@opentelemetry-cpp//sdk:headers",
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
+    ],
+)
+
+# OpenTelemetry - absl LogSink injecting trace/span context (optional)
+sc_cc_library(
+    name = "otel_log_sink_lib",
+    srcs = ["otel/logging_sink.cc"],
+    hdrs = ["otel/logging_sink.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":otel_config_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
 # Tracing - CUDA async functions
 sc_header_only_library(
     name = "trace_cuda_async_fn_lib",
@@ -248,6 +309,8 @@ sc_header_only_library(
     hdrs = ["trace/trace_macros.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":otel_config_lib",
+        ":otel_trace_scope_bridge_hdr",
         ":trace_manager_lib",
         ":trace_scope_lib",
     ],
@@ -382,4 +445,18 @@ sc_cc_library(
     deps = [
         "@abseil-cpp//absl/log:absl_log",
     ],
+)
+
+# OpenTelemetry - link deps aggregator (force-link friendly)
+sc_cc_library(
+    name = "otel_link_deps_lib",
+    srcs = ["otel/link_deps_dummy.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+        # Ensure exporter symbols are retained in final binary
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
+    ],
+    alwayslink = True,
 )

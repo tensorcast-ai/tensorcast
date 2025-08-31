@@ -75,6 +75,19 @@ class MetricsCollector {
   void record_memory_eviction();
 
   /**
+   * @brief Record artifact load latency with unified labels.
+   * @param source Source of data (e.g., "remote" or "disk")
+   * @param device Target device ("gpu" or "cpu")
+   * @param phase  Pipeline phase (e.g., "finalize")
+   * @param duration_seconds Duration in seconds
+   */
+  void record_artifact_load(
+      const std::string& source,
+      const std::string& device,
+      const std::string& phase,
+      double duration_seconds);
+
+  /**
    * @brief Update all metrics.
    * This is a convenience method that updates all metric types.
    */
@@ -84,25 +97,10 @@ class MetricsCollector {
       DeviceManager& device_manager);
 
  private:
-  // Memory Pool Metrics
-  tensorcast::metrics::Gauge memory_pool_total_gauge_;
-  tensorcast::metrics::Gauge memory_pool_available_gauge_;
-  tensorcast::metrics::Gauge memory_pool_allocated_chunks_gauge_;
-
-  // Replica Metrics
-  tensorcast::metrics::Gauge replicas_in_memory_cpu_gauge_;
-  tensorcast::metrics::Gauge replicas_in_memory_gpu_gauge_;
-  tensorcast::metrics::Gauge total_replica_size_bytes_gauge_;
-
-  // Operation Metrics
-  tensorcast::metrics::Counter operations_total_counter_;
-  tensorcast::metrics::Histogram operation_latency_histogram_;
-
-  // P2P/RDMA Metrics
-  tensorcast::metrics::Counter p2p_transfers_total_;
-  tensorcast::metrics::Counter p2p_bytes_transferred_total_;
-  tensorcast::metrics::Counter p2p_transfer_errors_total_;
-  tensorcast::metrics::Counter memory_evictions_total_;
+  // Unified tc_* metrics (Phase 3)
+  tensorcast::metrics::Gauge tc_memory_pool_bytes_cpu_available_;
+  tensorcast::metrics::Counter tc_p2p_bytes_total_;
+  tensorcast::metrics::Histogram tc_artifact_load_seconds_;
 };
 
 } // namespace tensorcast::store

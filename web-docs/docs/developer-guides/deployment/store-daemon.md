@@ -93,28 +93,25 @@ global_store_address: 127.0.0.1:6000
 ## Example Direct Launch
 
 ```
-bazel-bin/daemon/tensorcast_daemon \
-  --listen_addr=0.0.0.0:50051 \
-  --metrics_port=9095 \
-  --global_store_addr=127.0.0.1:6000 \
-  --heartbeat_interval_ms=5000 \
-  --chunk_sync_interval_ms=10000 \
-  --enable_p2p_engine=false \
+bazel-bin/daemon/tensorcast_daemon \\
+  --listen_addr=0.0.0.0:50051 \\
+  --global_store_addr=127.0.0.1:6000 \\
+  --heartbeat_interval_ms=5000 \\
+  --chunk_sync_interval_ms=10000 \\
+  --enable_p2p_engine=false \\
   --enable_p2p_access=true
-
-## Prometheus Metrics (Daemon)
-
-The C++ daemon exposes a minimal Prometheus endpoint on `metrics_port`:
-
-- Memory pool gauges:
-  - `store_daemon_memory_pool_total_bytes`
-  - `store_daemon_memory_pool_available_bytes`
-- HA lifecycle counters/gauges:
-  - `store_daemon_hb_success`, `store_daemon_hb_failure`
-  - `store_daemon_sync_success`, `store_daemon_sync_failure`
-  - `store_daemon_last_hb_ts_s`, `store_daemon_last_sync_ts_s`
-  - `store_daemon_hb_alive`, `store_daemon_sync_alive`
-  - `store_daemon_hb_restarts`, `store_daemon_sync_restarts`
-
-These reflect the Global Store heartbeat/sync loops and their liveness/restarts. Use them for alerting and dashboards.
 ```
+
+### Metrics Exposure (Unified)
+
+- The daemon no longer serves metrics directly. Use the lightweight sidecar to expose `tc_*` metrics via `/metrics`:
+
+```
+uv run -m tensorcast.daemon_metrics_http --daemon-addr 127.0.0.1:50051 --port 9091
+```
+
+Metrics include, e.g.:
+- `tc_memory_pool_bytes{location=cpu|gpu,device_id?,memory_type=total|free}`
+- `tc_p2p_bytes_total`
+
+Note: When starting via `tensorcast cli start --non-blocking`, the sidecar is spawned automatically on `network.metrics_port`.
