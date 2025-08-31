@@ -166,8 +166,5 @@ def print_config_summary(config: StoreDaemonConfig) -> None:
         f"Communication: {'Enabled' if config.server.enable_p2p_engine else 'Disabled'}"
     )
     click.echo(f"Global Store: {config.global_store_address}")
-    click.echo(f"Metrics: http://0.0.0.0:{config.network.metrics_port}/metrics")
-    click.echo(
-        f"Health Check: http://0.0.0.0:{config.network.health_check_port}/health"
-    )
+    # Metrics are exported via a unified system; no HTTP endpoint.
     click.echo("=" * 60)

@@ -437,7 +437,6 @@ def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
         f"--mem_pool_size={mem_pool}",
         f"--chunk_size={chunk}",
         f"--io_threads={config.server.num_threads}",
-        f"--metrics_port={config.network.metrics_port}",
     ]
     # P2P engine toggles
     if config.server.enable_p2p_engine:

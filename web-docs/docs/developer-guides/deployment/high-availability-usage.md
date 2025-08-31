@@ -219,12 +219,6 @@ recovery_duration_seconds{type="..."}
 ### Health Checks
 
 ```bash
-# Check Store Daemon health
-curl http://store-daemon:8080/health
-
-# Check connection status
-curl http://store-daemon:8080/status
-
 # Check Global Store via gRPC
 grpcurl -plaintext global-store:50051 \
   global_store.GlobalStore/ListActiveWorkers

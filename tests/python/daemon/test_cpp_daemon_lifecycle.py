@@ -7,7 +7,6 @@ Integration test for the C++ StoreDaemon lifecycle with Global Store.
 
 This test launches an in-process Python Global Store gRPC server and starts the
 compiled C++ daemon binary pointing at it. It verifies:
- - /health endpoint responds 200
  - Worker registers and appears in ListActiveWorkers with expected fields
 
 The test is skipped if the C++ daemon binary is not available.
@@ -84,14 +83,12 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
 
     # Allocate ports
     listen_port = _get_free_port()
-    metrics_port = _get_free_port()
 
     # Launch daemon with small pool and fake comm settings
     args = [
         str(bin_path),
         f"--listen_addr=127.0.0.1:{listen_port}",
         f"--p2p_port=0",
-        f"--metrics_port={metrics_port}",
         f"--mem_pool_size={64 * 1024 * 1024}",
         f"--chunk_size={1 * 1024 * 1024}",
         f"--io_threads=2",
@@ -104,9 +101,6 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
 
     proc = subprocess.Popen(args)
     try:
-        # Wait for /health
-        assert _wait_http_ok("127.0.0.1", metrics_port, "/health", timeout_s=20.0)
-
         # Poll ListActiveWorkers until daemon registers
         channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
         stub = global_store_pb2_grpc.GlobalStoreStub(channel)

@@ -1,15 +1,15 @@
 ---
 title: Adding New Metrics (C++ & Python)
-description: How to declare, update and expose new Prometheus metrics from the C++ core and have them automatically appear in /metrics
+description: How to declare, update and expose new Prometheus metrics via the unified metrics pipeline
 sidebar_position: 9
 ---
 
 # 📊 Adding New Metrics
 
 This guide explains **how to add a new Prometheus metric** to the TensorCast with minimal effort.
-The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMemoryPool`, future CUDA kernels) and requires **no change on the Python side** once the metric is registered in C++.
+The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMemoryPool`, future CUDA kernels) and integrates with the unified metrics exporter.
 
-> The mechanism relies on the lightweight `MetricsRegistry` singleton (`core/common/metrics/metrics_registry.{h,cpp}`) plus the Python `GlobalMetricsCollector` that automatically pulls the C++ snapshot and merges it with the existing Python metrics.
+> The mechanism relies on the lightweight `MetricsRegistry` singleton (`core/common/metrics/metrics_registry.{h,cpp}`) and a unified exporter. No per-component HTTP endpoints.
 
 ---
 
@@ -25,7 +25,7 @@ using tensorcast::metrics::Histogram;
 
 ## 2. Register / Update a Metric
 
-Because the `GlobalMetricsCollector` serializes the *global* registry, your new metric will automatically appear in the same `/metrics` scrape on the Python side.
+Because the unified exporter serializes the global registry, your new metric will automatically be exposed by the central metrics endpoint.
 
 Below are the three metric types you can work with:
 
@@ -154,10 +154,7 @@ You can safely update metrics from multiple threads without external synchroniza
 ## 4. Verify Locally
 
 1. Start the StoreDaemon using the CLI (`tensorcast start ...`).
-2. Curl the metrics endpoint:
-   ```bash
-   curl http://localhost:9091/metrics | grep my_feature
-   ```
+2. Verify via the central metrics endpoint.
    You should see something like:
    ```text
    # TYPE my_feature_processed_total counter
@@ -219,6 +216,6 @@ graph TD
 
 2. **Export**: The `get_global_metrics_text()` function (exposed to Python) exports all metrics in OpenMetrics format
 
-3. **Python Side**: `GlobalMetricsCollector` parses the C++ metrics text and converts to Prometheus Python types
+3. The exporter parses the C++ metrics snapshot and converts to Prometheus types
    - Automatically detects metric types based on naming conventions (`*_total` → counter)
-   - Merges with Python-side metrics for unified `/metrics` endpoint
+   - Merges with other component metrics for a single endpoint

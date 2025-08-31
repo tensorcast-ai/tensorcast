@@ -16,7 +16,7 @@ The daemon is a native C++ service with a thin gRPC layer over the StoreEngine:
 graph TD
     subgraph "Daemon (C++)"
         RPC[StoreDaemon gRPC Service<br/>daemon/grpc_service_impl.cc]
-        METRICS[Metrics Exporter<br/>/metrics, /health, /ready]
+        METRICS[Metrics Exporter]
         SESS[ReplicaSessionManager]
         REFS[RefTracker (PID refs)]
         LOCKS[TransportLockManager]
@@ -46,7 +46,7 @@ graph TD
 | Component | File(s) | Responsibility |
 |-----------|---------|----------------|
 | gRPC Service | `daemon/grpc_service_impl.{h,cc}` | StoreDaemon RPCs: MaterializeReplica, ConfirmReplica, UnloadReplica, WaitReplicaVerification, chunk locking, status |
-| Metrics Exporter | `daemon/metrics_exporter.{h,cc}` | Serves Prometheus text and HTTP `/health`, `/ready` |
+| Metrics Exporter | (unified system) | Exported via centralized metrics pipeline |
 | StoreEngine | `core/store/store_engine.{h,cc}` | High-performance loading, memory management, P2P, hashing, registration |
 | CommunicationManager | `core/store/components/communication_manager.*` | P2P/RDMA registration and transfers |
 | GlobalStoreClient | `core/store/components/global_store_client.*` | Registers replicas and coordinates P2P |
@@ -211,8 +211,7 @@ server:
 
 network:
   p2p_port: 9090
-  metrics_port: 9091
-  health_check_port: 8080
+  # HTTP metrics and health endpoints removed; unified metrics system in use
 
 lifecycle:
   gpu_memory_limit_fraction: 0.75
@@ -235,13 +234,6 @@ global_store_address: "localhost:50051"
 
 ## Health Monitoring
 
-### HTTP Endpoints
-
-The C++ daemon serves basic endpoints on the metrics port:
-
-- `GET /health` - Liveness check (200 OK)
-- `GET /ready` - Readiness check (200 OK)
-
 ### Prometheus Metrics
 
 Key metrics exposed:
@@ -254,7 +246,6 @@ Key metrics exposed:
 ## Daemon Flags
 
 - `--listen_addr=0.0.0.0:8073`
-- `--metrics_port=9091`
 - `--storage_path=/path/to/models`
 - `--mem_pool_size=8GiB`, `--chunk_size=128MiB`, `--io_threads=10`
 - `--global_store_addr=host:port`

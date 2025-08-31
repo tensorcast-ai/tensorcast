@@ -32,14 +32,9 @@ The CLI locates the binary in this order:
 - Installed package `tensorcast/bin/tensorcast_daemon`
 - Development path `bazel-bin/daemon/tensorcast_daemon`
 
-## Health Endpoints
+## Observability
 
-The daemon serves Prometheus metrics and two health endpoints on the metrics port:
-
-- `GET /health` – liveness
-- `GET /ready` – readiness
-
-Configure with `--metrics_port` (via YAML: `network.metrics_port`).
+Metrics are exposed via the unified system; the daemon no longer provides an HTTP metrics endpoint.
 
 ## Global Store Mode
 
@@ -84,7 +79,6 @@ server:
   auto_register_disk_loads: false
   force_full_digest_on_load: false
 network:
-  metrics_port: 9095
 high_availability:
   heartbeat_interval_ms: 5000
   chunk_sync_interval_ms: 10000
