@@ -35,6 +35,13 @@ class BufferPool {
 
   virtual void signal_production_complete() = 0;
 
+  // Gracefully cancel ongoing waits and wake up all waiters.
+  // Implementations should ensure that any threads blocked in
+  // get_free_chunk()/get_ready_chunk() are unblocked promptly.
+  // After shutdown(), further calls to blocking getters should
+  // return a non-OK status (e.g., Cancelled/OutOfRange/Unavailable).
+  virtual void shutdown() = 0;
+
   // Get pointer to chunk data for writing. Must be called only after
   // get_free_chunk() and before return_chunk() or mark_chunk_ready().
   virtual void* get_chunk_data_ptr(int slot_id) = 0;

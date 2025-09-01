@@ -76,6 +76,17 @@ void StreamingBufferAdapter::signal_production_complete() {
   buffer_->signal_production_complete();
 }
 
+void StreamingBufferAdapter::shutdown() {
+  if (!buffer_) {
+    LOG(ERROR) << "StreamingPinnedBuffer is null";
+    return;
+  }
+  // For StreamingPinnedBuffer, best-effort shutdown means signaling production
+  // complete and waking up all waiters so they can exit. The adapter forwards
+  // this behavior.
+  buffer_->signal_production_complete();
+}
+
 void* StreamingBufferAdapter::get_chunk_data_ptr(int slot_id) {
   if (!buffer_) {
     return nullptr;
