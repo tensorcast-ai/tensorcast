@@ -93,6 +93,7 @@ sc_cc_library(
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store/replica:chunk_meta",
+        "//proto:common_grpc_cpp",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",

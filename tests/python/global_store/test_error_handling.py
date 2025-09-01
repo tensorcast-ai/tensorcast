@@ -15,7 +15,7 @@ from tensorcast.global_store.exceptions import (
     ConflictError,
     DatabaseError,
 )
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
 from .conftest import create_test_replicas, create_test_workers
 
 
@@ -194,7 +194,7 @@ class TestErrorHandling:
         # Create request with invalid memory type value
         # Note: protobuf enums will accept any integer value
         request = global_store_pb2.RegisterReplicaRequest(
-            mem_info=global_store_pb2.MemoryInfo(
+            mem_info=common_pb2.MemoryInfo(
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,

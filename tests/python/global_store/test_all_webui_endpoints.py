@@ -17,7 +17,8 @@ from tensorcast.global_store.webui_backend.api import (
     list_transports,
 )
 from tensorcast.global_store.webui_backend.models import MemoryType
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
+from google.protobuf import timestamp_pb2
 from tensorcast.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
@@ -35,7 +36,7 @@ def create_mock_client():
         mem_pool_total_size=10737418240,  # 10GB
         mem_pool_available_size=5368709120,  # 5GB
         accepting_new_requests=True,
-        last_heartbeat_timestamp=1234567890,
+        last_heartbeat_ts=timestamp_pb2.Timestamp(seconds=1234567890),
     ))
     worker2 = WorkerInfoWrapper(global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
         worker_id="worker-2",
@@ -46,25 +47,25 @@ def create_mock_client():
         mem_pool_total_size=10737418240,
         mem_pool_available_size=8589934592,  # 8GB
         accepting_new_requests=True,
-        last_heartbeat_timestamp=1234567891,
+        last_heartbeat_ts=timestamp_pb2.Timestamp(seconds=1234567891),
     ))
     client.list_active_workers.return_value = [worker1, worker2]
 
     # Mock replicas
-    replica1 = global_store_pb2.MemoryInfo(
+    replica1 = common_pb2.MemoryInfo(
         node_id="node-1",
         node_address="192.168.1.1",
         node_port=50052,
         memory_size=1073741824,  # 1GB
-        memory_type=global_store_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.GPU,
         device_id=0,
     )
-    replica2 = global_store_pb2.MemoryInfo(
+    replica2 = common_pb2.MemoryInfo(
         node_id="node-2",
         node_address="192.168.1.2",
         node_port=50052,
         memory_size=2147483648,  # 2GB
-        memory_type=global_store_pb2.MemoryType.RAM,
+        memory_type=common_pb2.MemoryType.RAM,
         device_id=0,
     )
     client.list_replicas.return_value = {

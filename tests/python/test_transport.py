@@ -11,7 +11,8 @@ import uuid
 import pytest
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
+from google.protobuf import duration_pb2
 
 
 class _MockContext:
@@ -43,13 +44,13 @@ def test_context():
 @pytest.fixture
 def memory_info():
     """Create a sample memory info for testing"""
-    return global_store_pb2.MemoryInfo(
+    return common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
         remote_memory_keys=["test_key"],
         memory_size=1000000000,
-        memory_type=global_store_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.GPU,
         device_id=0,
     )
 
@@ -99,7 +100,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
     transport_request = global_store_pb2.RequestReplicaTransportRequest(
         artifact_id=artifact_id,
         local_memory_info=memory_info,
-        wait_timeout_ms=100,
+        wait_timeout_dur=duration_pb2.Duration(seconds=0, nanos=100_000_000),
         source_node_id="source_node_overflow",
         source_address="192.168.1.2",
         source_port=9000,
@@ -173,7 +174,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
     transport_request = global_store_pb2.RequestReplicaTransportRequest(
         artifact_id=artifact_id,
         local_memory_info=memory_info,
-        wait_timeout_ms=100,  # 100ms timeout
+        wait_timeout_dur=duration_pb2.Duration(nanos=100_000_000),  # 100ms timeout
         source_node_id="source_node_2",
         source_address="192.168.1.2",
         source_port=9000,
@@ -225,7 +226,7 @@ def test_concurrent_transport_requests(servicer, test_context, memory_info):
         transport_request = global_store_pb2.RequestReplicaTransportRequest(
             artifact_id=artifact_id,
             local_memory_info=memory_info,
-            wait_timeout_ms=5000,  # 5 second timeout
+            wait_timeout_dur=duration_pb2.Duration(seconds=5),  # 5 second timeout
             source_node_id=f"source_node_{i}",
             source_address="192.168.1.2",
             source_port=9000,
@@ -256,33 +257,33 @@ def test_transport_memory_type_priority(servicer, test_context):
     artifact_id = "priority_test_artifact"
 
     # Create memory infos with different types
-    gpu_info = global_store_pb2.MemoryInfo(
+    gpu_info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
         remote_memory_keys=["gpu_key"],
         memory_size=1000000000,
-        memory_type=global_store_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.GPU,
         device_id=0,
     )
 
-    ram_info = global_store_pb2.MemoryInfo(
+    ram_info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.2",
         node_port=8000,
         remote_memory_keys=["ram_key"],
         memory_size=1000000000,
-        memory_type=global_store_pb2.MemoryType.RAM,
+        memory_type=common_pb2.MemoryType.RAM,
         device_id=0,
     )
 
-    disk_info = global_store_pb2.MemoryInfo(
+    disk_info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.3",
         node_port=8000,
         remote_memory_keys=["disk_key"],
         memory_size=1000000000,
-        memory_type=global_store_pb2.MemoryType.DISK,
+        memory_type=common_pb2.MemoryType.DISK,
         device_id=0,
     )
 

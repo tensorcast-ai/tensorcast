@@ -643,6 +643,9 @@ if BUILD_EXTENSION:
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
+            # Protobuf/grpc generated headers from Bazel build
+            dir_path + "/bazel-bin/proto/global_store_grpc_cpp_pb/proto",
+            dir_path + "/bazel-bin/proto/common_grpc_cpp_pb/proto",
         ]
         if CUDA_DIR:
             _include_dirs.append(CUDA_DIR + "/include")

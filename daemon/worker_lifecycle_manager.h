@@ -10,7 +10,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
-#include "proto/global_store.pb.h"
+#include "global_store.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -54,7 +54,7 @@ class WorkerLifecycleManager {
   void chunk_sync_loop();
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
-  void apply_full_state(const std::vector<::global_store::ReplicaInfo>& expected);
+  void apply_full_state(const std::vector<::common::ReplicaInfo>& expected);
   static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
 
   std::shared_ptr<store::StoreEngine> engine_;

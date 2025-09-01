@@ -9,7 +9,8 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
+from google.protobuf import timestamp_pb2
 from tensorcast.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 
 
@@ -19,26 +20,30 @@ def mock_grpc_client():
     client = AsyncMock(spec=GlobalStoreClient)
 
     # Mock list_active_workers
-    worker1 = WorkerInfoWrapper(global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
-        worker_id="worker-1",
-        node_id="node-1",
-        node_address="192.168.1.1",
-        grpc_port=50052,
-        p2p_port=50053,
-        mem_pool_total_size=10737418240,  # 10GB
-        mem_pool_available_size=5368709120,  # 5GB
-        accepting_new_requests=True,
-        last_heartbeat_timestamp=1234567890,
-    ))
+    ts = timestamp_pb2.Timestamp()
+    ts.FromSeconds(1234567890)
+    worker1 = WorkerInfoWrapper(
+        global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
+            worker_id="worker-1",
+            node_id="node-1",
+            node_address="192.168.1.1",
+            grpc_port=50052,
+            p2p_port=50053,
+            mem_pool_total_size=10737418240,  # 10GB
+            mem_pool_available_size=5368709120,  # 5GB
+            accepting_new_requests=True,
+            last_heartbeat_ts=ts,
+        )
+    )
     client.list_active_workers.return_value = [worker1]
 
     # Mock list_replicas (artifact -> list of MemoryInfo)
-    replica1 = global_store_pb2.MemoryInfo(
+    replica1 = common_pb2.MemoryInfo(
         node_id="node-1",
         node_address="192.168.1.1",
         node_port=50052,
         memory_size=1073741824,  # 1GB
-        memory_type=global_store_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.GPU,
         device_id=0,
     )
     client.list_replicas.return_value = {

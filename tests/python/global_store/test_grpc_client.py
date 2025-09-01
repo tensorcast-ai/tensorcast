@@ -22,7 +22,8 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     close_global_store_client,
     get_global_store_client,
 )
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc, common_pb2
+from google.protobuf import timestamp_pb2
 
 
 class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
@@ -41,7 +42,7 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 mem_pool_total_size=10737418240,  # 10GB
                 mem_pool_available_size=5368709120,  # 5GB
                 accepting_new_requests=True,
-                last_heartbeat_timestamp=int(time.time()),
+                last_heartbeat_ts=timestamp_pb2.Timestamp(seconds=int(time.time())),
             ),
             global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
                 worker_id="worker-2",
@@ -52,23 +53,23 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 mem_pool_total_size=10737418240,  # 10GB
                 mem_pool_available_size=8589934592,  # 8GB
                 accepting_new_requests=False,
-                last_heartbeat_timestamp=int(time.time()) - 10,
+                last_heartbeat_ts=timestamp_pb2.Timestamp(seconds=int(time.time()) - 10),
             ),
         ]
 
         # Mock artifact replicas
         self.replicas = {
             "artifact-1": [
-                global_store_pb2.MemoryInfo(
-                    memory_type=global_store_pb2.MemoryType.GPU,
+                common_pb2.MemoryInfo(
+                    memory_type=common_pb2.MemoryType.GPU,
                     memory_size=1073741824,  # 1GB
                     device_id=0,
                     node_id="node-1",
                     node_address="192.168.1.10",
                     node_port=60052,
                 ),
-                global_store_pb2.MemoryInfo(
-                    memory_type=global_store_pb2.MemoryType.RAM,
+                common_pb2.MemoryInfo(
+                    memory_type=common_pb2.MemoryType.RAM,
                     memory_size=1073741824,  # 1GB
                     device_id=0,  # device_id must be non-negative
                     node_id="node-2",
@@ -77,8 +78,8 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 ),
             ],
             "artifact-2": [
-                global_store_pb2.MemoryInfo(
-                    memory_type=global_store_pb2.MemoryType.DISK,
+                common_pb2.MemoryInfo(
+                    memory_type=common_pb2.MemoryType.DISK,
                     memory_size=2147483648,  # 2GB
                     device_id=0,  # device_id must be non-negative
                     node_id="node-1",
@@ -122,21 +123,19 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
         return global_store_pb2.ListActiveWorkersResponse(workers=workers)
 
-    def ListReplicas(self, request, context):
-        """List artifact replicas with optional filters."""
-        self._maybe_fail(context, "ListReplicas")
+    def ListReplicasV2(self, request, context):
+        """List artifact replicas (V2) with optional filters, flat records."""
+        self._maybe_fail(context, "ListReplicasV2")
 
-        # Apply filters
-        result = {}
+        records = []
         for artifact_id, replicas in self.replicas.items():
             # Filter by content-addressed artifact_id (tests use simple names)
             if request.HasField("artifact_id") and request.artifact_id and request.artifact_id != artifact_id:
                 continue
 
-            filtered_replicas = []
             for replica in replicas:
                 # Filter by node_id
-                if request.node_id and replica.node_id != request.node_id:
+                if request.HasField("node_id") and request.node_id and replica.node_id != request.node_id:
                     continue
 
                 # Filter by memory_type
@@ -147,14 +146,13 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 if request.HasField("device_id") and replica.device_id != request.device_id:
                     continue
 
-                filtered_replicas.append(replica)
-
-            if filtered_replicas:
-                result[artifact_id] = global_store_pb2.MemoryInfoList(
-                    list=filtered_replicas
+                records.append(
+                    global_store_pb2.ArtifactReplicaRecord(
+                        artifact_id=artifact_id, memory_info=replica
+                    )
                 )
 
-        return global_store_pb2.ListReplicasResponse(artifact_replicas=result)
+        return global_store_pb2.ListReplicasV2Response(replicas=records)
 
     def GetArtifactInfoById(self, request, context):
         """Get artifact information by content-addressed artifact_id."""
@@ -365,10 +363,10 @@ class TestGlobalStoreClient:
 
         # Test with memory_type filter
         replicas = await client.list_replicas(
-            memory_type=global_store_pb2.MemoryType.GPU
+            memory_type=common_pb2.MemoryType.GPU
         )
         assert all(
-            any(r.memory_type == global_store_pb2.MemoryType.GPU for r in replica_list)
+            any(r.memory_type == common_pb2.MemoryType.GPU for r in replica_list)
             for replica_list in replicas.values()
         )
 
@@ -483,7 +481,7 @@ class TestGlobalStoreClient:
 
         # Verify concurrent execution
         assert test_server.servicer.call_count["ListActiveWorkers"] >= 1  # Called by get_summary_stats too
-        assert test_server.servicer.call_count["ListReplicas"] >= 1  # Called by get_summary_stats too
+        assert test_server.servicer.call_count["ListReplicasV2"] >= 1  # Called by get_summary_stats too
         assert test_server.servicer.call_count["GetArtifactInfoById"] >= 1
 
     @pytest.mark.asyncio
@@ -582,4 +580,3 @@ class TestEdgeCases:
 if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])
-

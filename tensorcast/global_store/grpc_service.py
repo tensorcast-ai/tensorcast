@@ -12,6 +12,7 @@ from uuid import UUID
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
 import grpc
+from google.protobuf import timestamp_pb2
 
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
@@ -40,7 +41,7 @@ from tensorcast.global_store.services import (
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import set_span_attributes
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import common_pb2, global_store_pb2, global_store_pb2_grpc
 
 logger = init_logger(__name__)
 
@@ -369,53 +370,77 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 status=global_store_pb2.Status.ERROR
             )
 
-    def ListReplicas(
+    # Legacy ListReplicas removed in favor of ListReplicasV2
+
+    def ListReplicasV2(
         self,
-        request: global_store_pb2.ListReplicasRequest,
+        request: global_store_pb2.ListReplicasV2Request,
         context: grpc.ServicerContext,
-    ) -> global_store_pb2.ListReplicasResponse:
-        """List artifact replicas with optional filters."""
+    ) -> global_store_pb2.ListReplicasV2Response:
+        """List replicas with filtering + pagination (flat records).
+
+        Token format: opaque string encoding of integer offset.
+        """
         try:
-            # Apply filters
+            # Filters
             artifact_id_filter: str | None = (
                 request.artifact_id if request.HasField("artifact_id") else None
             )
             node_id_filter: str | None = (
                 request.node_id if request.HasField("node_id") else None
             )
-            memory_type_filter: MemoryType | None = None
+            memory_type_filter = None
             if request.HasField("memory_type"):
                 memory_type_filter = MemoryType(
-                    global_store_pb2.MemoryType.Name(request.memory_type)
+                    common_pb2.MemoryType.Name(request.memory_type)
                 )
 
-            # Get replicas
+            # Fetch all matching replicas
             replicas = self.artifact_service.list_replicas(
                 artifact_id=artifact_id_filter,
                 node_id=node_id_filter,
                 memory_type=memory_type_filter,
             )
 
-            # Group by artifact_id
-            artifact_replicas = {}
-            for replica in replicas:
-                if replica.artifact_id not in artifact_replicas:
-                    artifact_replicas[replica.artifact_id] = (
-                        global_store_pb2.MemoryInfoList(list=[])
-                    )
-
-                mem_info = self._replica_to_memory_info(replica)
-                artifact_replicas[replica.artifact_id].list.append(mem_info)
-
-            return global_store_pb2.ListReplicasResponse(
-                artifact_replicas=artifact_replicas
+            # Pagination
+            page_size = (
+                int(request.pagination.page_size)
+                if request.pagination and request.pagination.page_size
+                else 100
             )
+            start = 0
+            if request.pagination and request.pagination.page_token:
+                try:
+                    start = int(request.pagination.page_token)
+                except ValueError:
+                    start = 0
 
-        except Exception as e:
-            logger.exception("Error listing artifact replicas")
+            end = min(start + page_size, len(replicas))
+            sliced = replicas[start:end]
+            next_token = str(end) if end < len(replicas) else ""
+
+            # Map to flat records
+            records: list[global_store_pb2.ArtifactReplicaRecord] = [
+                global_store_pb2.ArtifactReplicaRecord(
+                    artifact_id=r.artifact_id,
+                    memory_info=self._replica_to_memory_info(r),
+                )
+                for r in sliced
+            ]
+
+            return global_store_pb2.ListReplicasV2Response(
+                replicas=records,
+                page_info=common_pb2.PageInfo(
+                    next_page_token=next_token, total_size=len(replicas)
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in ListReplicasV2")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-            return global_store_pb2.ListReplicasResponse()
+            return global_store_pb2.ListReplicasV2Response(
+                page_info=common_pb2.PageInfo(next_page_token="", total_size=0)
+            )
 
     def GetArtifactIndex(
         self,
@@ -461,7 +486,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
     ) -> global_store_pb2.RequestReplicaTransportResponse:
         """Request artifact transport with load balancing."""
         try:
-            wait_timeout_ms = request.wait_timeout_ms
+            # Normalize wait timeout
+            if request.HasField("wait_timeout_dur"):
+                d = request.wait_timeout_dur
+                wait_timeout_ms = int(d.seconds * 1000 + d.nanos / 1_000_000)
+            else:
+                wait_timeout_ms = 0
 
             # Pre-attributes for routing decision visibility
             set_span_attributes(
@@ -735,12 +765,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             if obsolete_replicas:
                 state_sync_required = True
 
+            ts = timestamp_pb2.Timestamp()
+            ts.FromSeconds(int(time.time()))
             return global_store_pb2.WorkerHeartbeatResponse(
                 status=global_store_pb2.Status.OK,
                 state_sync_required=state_sync_required,
                 expected_state_version=current_version,
                 obsolete_replicas=obsolete_replicas,
-                server_timestamp=int(time.time()),
+                server_timestamp_ts=ts,
             )
 
         except Exception as e:
@@ -792,6 +824,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             # Convert to proto format
             worker_infos = []
             for worker in workers:
+                # Build Timestamp for last heartbeat
+                last_ts = timestamp_pb2.Timestamp()
+                if worker.last_heartbeat:
+                    last_ts.FromSeconds(int(worker.last_heartbeat.timestamp()))
+                else:
+                    last_ts.FromSeconds(0)
+
                 worker_info = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
                     worker_id=worker.worker_id,
                     node_id=worker.node_id,
@@ -801,11 +840,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                     mem_pool_total_size=worker.mem_pool_total_size,
                     mem_pool_available_size=worker.mem_pool_available_size,
                     accepting_new_requests=worker.accepting_new_requests,
-                    last_heartbeat_timestamp=int(
-                        worker.last_heartbeat.timestamp()
-                        if worker.last_heartbeat
-                        else 0
-                    ),
+                    last_heartbeat_ts=last_ts,
                     state_version=self.recovery_service.get_worker_state_version(
                         worker.worker_id
                     ),
@@ -968,14 +1003,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
     # ========== Helper Methods ==========
 
-    def _replica_to_memory_info(self, replica: Replica) -> global_store_pb2.MemoryInfo:
+    def _replica_to_memory_info(self, replica: Replica) -> common_pb2.MemoryInfo:
         """Convert Replica to MemoryInfo proto."""
-        return global_store_pb2.MemoryInfo(
+        return common_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
             node_port=replica.node_port,
             memory_size=replica.memory_size,
-            memory_type=global_store_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
+            memory_type=common_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
             device_id=replica.device_id,
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
@@ -983,7 +1018,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
     def _memory_info_to_replica_artifact_id(
         self,
-        mem_info: global_store_pb2.MemoryInfo,
+        mem_info: common_pb2.MemoryInfo,
         artifact_id: str,
         max_concurrency: int,
         worker_id: str,
@@ -1003,9 +1038,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             node_address=mem_info.node_address,
             node_port=mem_info.node_port,
             memory_size=mem_info.memory_size,
-            memory_type=MemoryType(
-                global_store_pb2.MemoryType.Name(mem_info.memory_type)
-            ),
+            memory_type=MemoryType(common_pb2.MemoryType.Name(mem_info.memory_type)),
             device_id=mem_info.device_id,
             max_concurrency=max_concurrency,
             remote_memory_keys=remote_keys,

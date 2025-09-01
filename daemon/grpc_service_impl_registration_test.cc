@@ -10,7 +10,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
-#include "proto/store_daemon.grpc.pb.h"
+#include "store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 

@@ -1,6 +1,10 @@
 syntax = "proto3";
 
-package global_store;
+package tensorcast.global;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "common.proto";
 
 service GlobalStore {
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
@@ -14,7 +18,8 @@ service GlobalStore {
 
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
 
-  rpc ListReplicas(ListReplicasRequest) returns (ListReplicasResponse) {}
+  // V2 with pagination and filtering
+  rpc ListReplicasV2(ListReplicasV2Request) returns (ListReplicasV2Response) {}
 
   // Content-addressed query by artifact_id (mi2:...)
   rpc GetArtifactInfoById(GetArtifactInfoByIdRequest) returns (GetArtifactInfoByIdResponse) {}
@@ -105,7 +110,7 @@ message WorkerHeartbeatResponse {
   bool state_sync_required = 2;          // 触发状态同步
   uint64 expected_state_version = 3;     // 期望状态版本
   repeated string obsolete_replicas = 4;   // 应该取消注册的副本
-  int64 server_timestamp = 5;            // 服务器时间戳
+  google.protobuf.Timestamp server_timestamp_ts = 5; // 服务器时间戳（标准类型）
 }
 
 // Worker注销
@@ -133,7 +138,7 @@ message ListActiveWorkersResponse {
     uint64 mem_pool_total_size = 6;
     uint64 mem_pool_available_size = 7;
     bool accepting_new_requests = 8;
-    int64 last_heartbeat_timestamp = 9;  // Unix 时间戳（秒）
+    google.protobuf.Timestamp last_heartbeat_ts = 9; // 标准时间戳
 
     // HA fields
     uint64 state_version = 10;           // 当前状态版本
@@ -148,28 +153,14 @@ message WorkerLocalState {
   string worker_id = 1;
   uint64 state_version = 2;
   string state_checksum = 3;
-  repeated ReplicaInfo local_replicas = 4;
-  int64 last_update_timestamp = 5;
+  repeated common.ReplicaInfo local_replicas = 4;
+  google.protobuf.Timestamp last_update_ts = 5;
 }
 
-message ReplicaInfo {
-  string artifact_id = 1;                     // content-addressed artifact ID (mi2:...)
-  string replica_id = 2;
-  MemoryInfo memory_info = 3;
-  uint32 max_concurrency = 4;
-  uint32 current_requests = 5;
-  bool is_available = 6;
-  int64 registered_timestamp = 7;
-}
+// ReplicaInfo moved to common
 
 // RFC-0007 descriptor for content-addressed identity
-message ArtifactDescriptor {
-  string artifact_id = 1;           // "mi2:<index_multihash>:<data_multihash>"
-  string index_multihash = 2;    // Multibase over multihash (sha2-256), base32
-  string data_multihash = 3;     // Multibase over multihash (sha2-256 root), base32
-  string schema_version = 4;     // e.g., "v2"
-  string encoding = 5;           // e.g., "json" or "cbor"
-}
+// Moved to tensorcast.artifact.v1.ArtifactDescriptor
 
 message SynchronizeWorkerStateRequest {
   string worker_id = 1;
@@ -192,7 +183,7 @@ message StateChange {
   }
 
   ChangeType type = 1;
-  ReplicaInfo replica_info = 2;
+  common.ReplicaInfo replica_info = 2;
   string reason = 3;
 }
 
@@ -204,7 +195,7 @@ message RequestFullStateSyncRequest {
 message RequestFullStateSyncResponse {
   Status status = 1;
   uint64 new_state_version = 2;
-  repeated ReplicaInfo expected_replicas = 3;
+  repeated common.ReplicaInfo expected_replicas = 3;
   string new_state_checksum = 4;
 }
 
@@ -217,7 +208,7 @@ message GetArtifactInfoByIdRequest {
 
 message GetArtifactInfoByIdResponse {
   Status status = 1;
-  repeated MemoryInfo replicas = 2;         // All replicas under the content ID
+  repeated common.MemoryInfo replicas = 2;         // All replicas under the content ID
 }
 
 // Get artifact index request
@@ -233,22 +224,11 @@ message GetArtifactIndexResponse {
   string schema_version = 4;               // Schema version (e.g., "v2")
 }
 
-message ListReplicasRequest {
-  optional string node_id = 1;
-  optional string node_address = 2;
-  optional string node_port = 3;
-  optional MemoryType memory_type = 4;
-  optional uint32 device_id = 5;
-  optional string artifact_id = 6;            // content-addressed filter
-}
-
-message ListReplicasResponse {
-  map<string, MemoryInfoList> artifact_replicas = 1;
-}
+// Legacy ListReplicas removed in favor of V2
 
 message RegisterReplicaRequest {
   string artifact_id = 1;                      // content-addressed ID (mi2:...), optional for disk/mixed flows
-  MemoryInfo mem_info = 2;
+  common.MemoryInfo mem_info = 2;
   uint32 max_concurrency = 3;
   string worker_id = 4;
 
@@ -260,7 +240,7 @@ message RegisterReplicaRequest {
   optional string disk_path = 8;
 
   // RFC-0007: Optionally include content-addressed descriptor for persistence
-  optional ArtifactDescriptor descriptor = 9;
+  optional common.ArtifactDescriptor descriptor = 9;
 }
 
 message RegisterReplicaResponse {
@@ -289,40 +269,14 @@ message UnregisterReplicaResponse {
   Status status = 1;
 }
 
-enum MemoryType {
-  GPU = 0;
-  RAM = 1;
-  DISK = 2;
-}
+// MemoryInfo moved to common
 
-message MemoryInfo {
-  string node_id = 1;
-  string node_address = 2;
-  uint32 node_port = 3;
-
-  uint64 memory_size = 5;
-
-  MemoryType memory_type = 6;
-  uint32 device_id = 7;
-
-  repeated string remote_memory_keys = 8;
-  repeated uint64 buffer_sizes = 9;
-
-  // Memory replica fields for in-memory tensor dict
-  bool is_memory_replica = 10;             // Whether this is a memory-based replica
-  string tensor_index_key = 11;            // SHA-256 hash of canonical tensor index
-  int64 creation_timestamp = 12;           // Creation timestamp (Unix seconds)
-  string source_process_id = 13;           // Source process identifier
-}
-
-message MemoryInfoList {
-  repeated MemoryInfo list = 1;
-}
+// MemoryInfoList removed with legacy ListReplicas
 
 message RequestReplicaTransportRequest {
   string artifact_id = 1;                      // content-addressed id
-  MemoryInfo local_memory_info = 2;
-  uint32 wait_timeout_ms = 3;
+  common.MemoryInfo local_memory_info = 2;
+  google.protobuf.Duration wait_timeout_dur = 3; // 标准超时时长
   string source_node_id = 4;
   string source_address = 5;
   uint32 source_port = 6;
@@ -330,7 +284,7 @@ message RequestReplicaTransportRequest {
 
 message RequestReplicaTransportResponse {
   Status status = 1;
-  MemoryInfo remote_memory_info = 2;
+  common.MemoryInfo remote_memory_info = 2;
   string transport_id = 3;
 }
 
@@ -407,4 +361,28 @@ message BatchUpdateChunkStatesRequest {
 message BatchUpdateChunkStatesResponse {
   Status status = 1;
   uint32 updates_applied = 2;
+}
+
+// ========== Pagination (local, temporary until common proto is introduced) ==========
+// Flattened record for V2 listing
+message ArtifactReplicaRecord {
+  string artifact_id = 1;
+  common.MemoryInfo memory_info = 2;
+}
+
+message ListReplicasV2Request {
+  // Optional filters
+  optional string node_id = 1;
+  optional string node_address = 2;
+  optional common.MemoryType memory_type = 3;
+  optional uint32 device_id = 4;
+  optional string artifact_id = 5;
+
+  // Pagination
+  common.Pagination pagination = 100;
+}
+
+message ListReplicasV2Response {
+  repeated ArtifactReplicaRecord replicas = 1;
+  common.PageInfo page_info = 2;
 }

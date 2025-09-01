@@ -36,7 +36,7 @@ bazel_dep(name = "opentelemetry-cpp", version = "1.22.0")
 
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
 protoc.toolchain(
-    google_protobuf = "com_google_protobuf",
+    google_protobuf = "protobuf",
     version = "v31.1",
 )
 

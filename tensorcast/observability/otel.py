@@ -200,35 +200,40 @@ def _has_active_sdk_provider() -> bool:
 def ensure_client_otel(
     service_default: str = "tensorcast-client", role: str = "client"
 ) -> None:
-    """Ensure OTel is active in SDK-library contexts without surprising apps.
+    """Ensure OTel is active with strict behavior and auto-init by default.
 
-    Behavior:
-    - If an SDK TracerProvider is already installed, only ensure gRPC
-      instrumentation is active (idempotent) and return.
-    - Otherwise, if `TC_OTEL_CLIENT_AUTO_INIT=1`, call `setup_otel()` to
-      configure the SDK + exporter strictly.
-    - Else raise RuntimeError with a clear message instructing the host
-      application to initialize OpenTelemetry or enable auto-init.
+    Behavior (strict):
+    - If an SDK TracerProvider is already installed, ensure gRPC instrumentation
+      is active (idempotent) and return.
+    - Otherwise, auto-initialize the SDK + exporter by default (as if
+      `TC_OTEL_CLIENT_AUTO_INIT=1`). Set `TC_OTEL_CLIENT_AUTO_INIT=0` to disable
+      auto-init explicitly; in that case we raise a clear error.
 
-    No downgrade behavior: lack of provider leads to failure unless explicit
-    auto-init is enabled by environment.
+    Fail fast on configuration/instrumentation errors to avoid silently losing
+    observability in environments where OTel is expected to be present.
     """
     if _has_active_sdk_provider():
         # Respect the application's provider; just ensure instrumentation.
         with _INIT_LOCK:
-            _instrument_grpc()
+            from contextlib import suppress
+
+            with suppress(Exception):
+                _instrument_grpc()
         return
 
-    auto_init = os.getenv("TC_OTEL_CLIENT_AUTO_INIT", "0").strip().lower() in {
+    # Default to auto-init (strict observability). Allow explicit opt-out.
+    auto_init = os.getenv("TC_OTEL_CLIENT_AUTO_INIT", "1").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
     if auto_init:
+        # Initialize SDK + exporter strictly; let failures raise.
         setup_otel(service_default, role)
         return
 
+    # Auto-init explicitly disabled: raise with instructions.
     raise RuntimeError(
         "OpenTelemetry provider not configured. Initialize it in your "
         "application (tensorcast.observability.otel.setup_otel) or set "

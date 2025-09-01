@@ -21,7 +21,7 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc, common_pb2
 from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 console = Console()
@@ -137,13 +137,13 @@ async def run_integration_test():
 
         # Filter by memory type
         gpu_replicas = await client.list_replicas(
-            memory_type=global_store_pb2.MemoryType.GPU
+            memory_type=common_pb2.MemoryType.GPU
         )
         gpu_count = sum(
             1
             for replicas in gpu_replicas.values()
             for r in replicas
-            if r.memory_type == global_store_pb2.MemoryType.GPU
+            if r.memory_type == common_pb2.MemoryType.GPU
         )
         print_test(
             "Filter by memory type", gpu_count > 0, f"Found {gpu_count} GPU replicas"

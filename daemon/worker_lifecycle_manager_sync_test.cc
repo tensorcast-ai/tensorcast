@@ -13,9 +13,9 @@
 #include "core/store/store_engine_options.h"
 #include "core/testing/common.h"
 #include "daemon/worker_lifecycle_manager.h"
+#include "global_store.grpc.pb.h"
+#include "global_store.pb.h"
 #include "grpcpp/grpcpp.h"
-#include "proto/global_store.grpc.pb.h"
-#include "proto/global_store.pb.h"
 
 namespace fs = std::filesystem;
 using tensorcast::DeviceType;
