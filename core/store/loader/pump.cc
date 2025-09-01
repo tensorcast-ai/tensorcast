@@ -27,9 +27,34 @@ struct PumpState {
   absl::Mutex offsets_mutex;
 };
 
+// RAII lease for a pool slot to guarantee return on all paths
+class SlotLease {
+ public:
+  SlotLease(BufferPool& pool, int slot_id) : pool_(pool), slot_id_(slot_id), active_(true) {}
+  SlotLease(const SlotLease&) = delete;
+  SlotLease& operator=(const SlotLease&) = delete;
+  ~SlotLease() {
+    if (active_) {
+      pool_.return_chunk(slot_id_);
+    }
+  }
+  int id() const {
+    return slot_id_;
+  }
+  void release() {
+    active_ = false;
+  }
+
+ private:
+  BufferPool& pool_;
+  int slot_id_;
+  bool active_;
+};
+
 void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   LOG(INFO) << "Consumer thread started";
-  while (!state.should_stop.load(std::memory_order_acquire)) {
+  bool draining = false;
+  while (!state.should_stop.load(std::memory_order_acquire) || draining) {
     auto chunk_result = pool.get_ready_chunk();
     if (!chunk_result.ok()) {
       if (absl::IsUnavailable(chunk_result.status())) {
@@ -47,7 +72,10 @@ void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
         state.consumer_status = chunk_result.status();
       }
       state.should_stop.store(true, std::memory_order_release);
-      break;
+      // Enter drain mode: keep attempting to consume any remaining ready chunks
+      // to ensure slots are returned, then exit when queues are empty.
+      draining = true;
+      continue;
     }
 
     const auto& chunk = *chunk_result;
@@ -75,7 +103,10 @@ void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
         state.consumer_status = status;
       }
       state.should_stop.store(true, std::memory_order_release);
-      break;
+      // Request pool to wake up any waiters so producers can exit
+      pool.shutdown();
+      // Switch to drain mode to return remaining ready chunks
+      draining = true;
     }
   }
 }
@@ -104,38 +135,45 @@ void RunRangeProducer(
           state.producer_status = slot_result.status();
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
       int slot_id = *slot_result;
+      // Ensure slot is returned on any early exit
+      SlotLease lease(pool, slot_id);
+
+      if (state.should_stop.load(std::memory_order_acquire)) {
+        // Respect cancellation promptly
+        break;
+      }
       size_t to_read = std::min(remaining, pool.chunk_size());
 
       // Get buffer pointer from pool using interface method
       void* buffer = pool.get_chunk_data_ptr(slot_id);
       if (!buffer) {
-        pool.return_chunk(slot_id);
         absl::MutexLock lock(&state.status_mutex);
         if (state.producer_status.ok()) {
           state.producer_status = absl::InternalError("Failed to get chunk buffer pointer");
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
       auto read_result = src.read_at(current_offset, buffer, to_read);
       if (!read_result.ok()) {
-        pool.return_chunk(slot_id);
         absl::MutexLock lock(&state.status_mutex);
         if (state.producer_status.ok()) {
           state.producer_status = read_result.status();
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
       size_t bytes_read = *read_result;
       if (bytes_read == 0) {
-        pool.return_chunk(slot_id);
         LOG(WARNING) << "Unexpected EOF at offset " << current_offset;
         // Treat as error to propagate failure instead of silently succeeding
         {
@@ -145,17 +183,18 @@ void RunRangeProducer(
           }
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
       // Validate that Source respects requested read size limits
       if (bytes_read > to_read) {
-        pool.return_chunk(slot_id);
         absl::MutexLock lock(&state.status_mutex);
         if (state.producer_status.ok()) {
           state.producer_status = absl::InvalidArgumentError("Source returned more bytes than requested");
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
@@ -163,12 +202,12 @@ void RunRangeProducer(
 
       // Check for overflow - use max value as error indicator
       if (chunk_id == std::numeric_limits<uint64_t>::max()) {
-        pool.return_chunk(slot_id);
         absl::MutexLock lock(&state.status_mutex);
         if (state.producer_status.ok()) {
           state.producer_status = absl::ResourceExhaustedError("Chunk ID overflow");
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
@@ -185,11 +224,14 @@ void RunRangeProducer(
           state.producer_status = status;
         }
         state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
         break;
       }
 
       current_offset += bytes_read;
       remaining -= bytes_read;
+      // Transfer ownership to consumer; avoid returning the slot here
+      lease.release();
     }
   }
 }

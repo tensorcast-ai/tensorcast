@@ -29,6 +29,8 @@ class StreamingBufferAdapter : public BufferPool {
 
   void signal_production_complete() override;
 
+  void shutdown() override;
+
   void* get_chunk_data_ptr(int slot_id) override;
 
   // Get the underlying buffer for direct access if needed
