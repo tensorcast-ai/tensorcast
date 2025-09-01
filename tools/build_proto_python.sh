@@ -65,7 +65,7 @@ bazel build //proto:global_store_grpc //proto:store_daemon_grpc //proto:communic
 
 # Copy generated headers into tensorcast/csrc/proto
 mkdir -p "$root_dir/tensorcast/csrc/proto"
-for tgt in global_store_grpc store_daemon_grpc common_grpc; do
+for tgt in global_store_grpc store_daemon_grpc common_grpc communicator_config_cc; do
   if ls "$root_dir/bazel-bin/proto/$tgt/proto"/*.pb.h >/dev/null 2>&1; then
     cp -f "$root_dir/bazel-bin/proto/$tgt/proto"/*.pb.h "$root_dir/tensorcast/csrc/proto"
   fi
