@@ -230,7 +230,7 @@ Where `SimpleNumaNode` is:
 Implementations:
 - C++: `core/communicator/engine/communicator_config.h`
 - Proto: `proto/communicator_config.proto` (generated to C++/Python)
-- Python: Pydantic model `CommunicatorSettings` (e.g. `scstore/store_daemon/communicator_settings.py`)
+- Python: Pydantic model `CommunicatorSettings` (e.g. `tensorcast/store_daemon/communicator_settings.py`)
 
 #### 4.3.2 Sources & precedence
 
@@ -328,7 +328,7 @@ communicator:
 | Tests | `core/communicator/engine/*_test.cc`, `core/store/replica/*_test.cc` | Update assertions and add staged RDMA cases |
 | Config (C++) | `core/communicator/engine/communicator_config.{h,cc}` | NEW: typed config + FromEnv |
 | Config (Proto) | `proto/communicator_config.proto` | NEW: shared schema for C++/Python |
-| Config (Python) | `scstore/store_daemon/communicator_settings.py` | NEW: Pydantic settings + file/env loader |
+| Config (Python) | `tensorcast/store_daemon/communicator_settings.py` | NEW: Pydantic settings + file/env loader |
 
 ## 8. Detailed Flows
 

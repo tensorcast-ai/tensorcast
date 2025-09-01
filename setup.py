@@ -428,6 +428,11 @@ class BuildExtensionCommand(BuildExtension):
         copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
+        # Ensure daemon binary is built during build_ext like libstore_engine.so
+        try:
+            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
+        except Exception as e:
+            print(f"Warning: daemon build failed: {e}")
         copy_daemon_binary()
 
 
@@ -636,6 +641,8 @@ if BUILD_EXTENSION:
             dir_path + "/external/gsl+",
             # Header-only JSON library used by pybind wrappers
             dir_path + "/external/nlohmann_json+/include",
+            dir_path + "/external/opentelemetry-cpp+/api/include",
+            dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
         ]
         if CUDA_DIR:
             _include_dirs.append(CUDA_DIR + "/include")
