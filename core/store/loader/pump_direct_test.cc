@@ -44,6 +44,7 @@ class DummyPool : public BufferPool {
     return absl::UnavailableError("no chunks");
   }
   void signal_production_complete() override {}
+  void shutdown() override {}
   void* get_chunk_data_ptr(int) override {
     return nullptr;
   }

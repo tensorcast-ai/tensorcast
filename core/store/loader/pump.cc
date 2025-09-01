@@ -72,10 +72,9 @@ void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
         state.consumer_status = chunk_result.status();
       }
       state.should_stop.store(true, std::memory_order_release);
-      // Enter drain mode: keep attempting to consume any remaining ready chunks
-      // to ensure slots are returned, then exit when queues are empty.
-      draining = true;
-      continue;
+      // Wake producers/consumers and terminate to avoid spinning on the same error
+      pool.shutdown();
+      break;
     }
 
     const auto& chunk = *chunk_result;
@@ -319,11 +318,13 @@ absl::Status pump_ranges(
   // Return first error encountered
   {
     absl::MutexLock lock(&state.status_mutex);
-    if (!state.producer_status.ok()) {
-      return state.producer_status;
-    }
     if (!state.consumer_status.ok()) {
+      LOG(ERROR) << "pump_ranges returning consumer error: " << state.consumer_status;
       return state.consumer_status;
+    }
+    if (!state.producer_status.ok()) {
+      LOG(ERROR) << "pump_ranges returning producer error: " << state.producer_status;
+      return state.producer_status;
     }
   }
 
