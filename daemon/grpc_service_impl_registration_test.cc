@@ -41,7 +41,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   StoreDaemonServiceImpl service(engine);
 
   // Begin registration with inline index data to exercise content addressing
-  ::store_daemon::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::BeginRegisterArtifactRequest breq;
   breq.set_artifact_id("cpp_mem_artifact");
   breq.set_device_id(0);
   breq.set_total_size(1 * 1024 * 1024);
@@ -52,7 +52,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
-  ::store_daemon::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
   REQUIRE(!bresp.registration_id().empty());
@@ -61,9 +61,9 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   REQUIRE(bresp.daemon_ipc_handle().size() > 0);
 
   // Commit and validate descriptor fields are populated
-  ::store_daemon::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  ::store_daemon::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.registration_id() == bresp.registration_id());

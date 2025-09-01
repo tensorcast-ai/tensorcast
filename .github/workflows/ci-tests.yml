@@ -206,11 +206,6 @@ jobs:
           uv run ruff check .
           uv run ruff format . --check
 
-      - name: Run type checking
-        run: |
-          uv run pyright ./tensorcast
-          uv run mypy ./tensorcast
-
       - name: Download libstore_engine.so artifact
         uses: actions/download-artifact@v4
         with:
@@ -281,6 +276,11 @@ jobs:
       - name: Build C++ extensions with fake CUDA
         run: |
           USE_FAKE_CUDA=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+      - name: Run type checking
+        run: |
+          uv run pyright ./tensorcast
+          uv run mypy ./tensorcast
 
       - name: Run Python tests
         run: |

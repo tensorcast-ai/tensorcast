@@ -51,8 +51,8 @@ TEST_CASE("GetDetailedStatus aggregates multi-GPU replicas", "[daemon][status][m
   create_gpu_memory_replica(engine, "logical-A", /*device_id=*/0, /*size_bytes=*/4ULL * 1024 * 1024);
   create_gpu_memory_replica(engine, "logical-B", /*device_id=*/1, /*size_bytes=*/8ULL * 1024 * 1024);
 
-  ::store_daemon::GetDetailedStatusRequest req;
-  ::store_daemon::GetDetailedStatusResponse resp;
+  tensorcast::daemon::GetDetailedStatusRequest req;
+  tensorcast::daemon::GetDetailedStatusResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
   REQUIRE(st.ok());

@@ -25,21 +25,21 @@ TEST_CASE("ConfirmReplica strict mode enforces disk_path and GPU", "[daemon][com
 
   // Missing disk_path -> INVALID_ARGUMENT
   {
-    ::store_daemon::ConfirmReplicaRequest req;
-    req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::ConfirmReplicaRequest req;
+    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_GPU);
     grpc::ServerContext ctx;
-    ::store_daemon::ConfirmReplicaResponse resp;
+    tensorcast::daemon::ConfirmReplicaResponse resp;
     auto st = svc.ConfirmReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   }
 
   // Non-GPU target -> UNIMPLEMENTED
   {
-    ::store_daemon::ConfirmReplicaRequest req;
+    tensorcast::daemon::ConfirmReplicaRequest req;
     req.set_disk_path("/tmp/xxx");
-    req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_CPU);
+    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_CPU);
     grpc::ServerContext ctx;
-    ::store_daemon::ConfirmReplicaResponse resp;
+    tensorcast::daemon::ConfirmReplicaResponse resp;
     auto st = svc.ConfirmReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::UNIMPLEMENTED);
   }
