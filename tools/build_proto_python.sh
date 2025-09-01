@@ -43,7 +43,7 @@ current_dir=$(dirname "$0")
 root_dir=$(dirname "$current_dir")
 # build proto
 # build proto
-if ! bazel build //proto:global_store_grpc; then
+if ! bazel build //proto:global_store_grpc //proto:communicator_config_cc; then
     echo "Error: Failed to build proto target" >&2
     exit 1
 fi
@@ -53,6 +53,10 @@ if ! cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/te
     echo "Error: Failed to copy proto header files" >&2
     exit 1
 fi
-cp -f $root_dir/bazel-bin/proto/global_store_grpc/proto/*.pb.h $root_dir/tensorcast/csrc/proto
+
+# Copy communicator config headers for C++ extension includes
+if [ -d "$root_dir/bazel-bin/proto/communicator_config_cc/proto" ]; then
+  cp -f $root_dir/bazel-bin/proto/communicator_config_cc/proto/*.pb.h $root_dir/tensorcast/csrc/proto
+fi
 
 uv run ruff format tensorcast/proto/*

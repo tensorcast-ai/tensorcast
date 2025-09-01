@@ -249,7 +249,7 @@ Key metrics are exposed under the unified `tc_*` schema via the sidecar HTTP ser
 - `--storage_path=/path/to/models`
 - `--mem_pool_size=8GiB`, `--chunk_size=128MiB`, `--io_threads=10`
 - `--global_store_addr=host:port`
-- `--enable_p2p_engine[=true|false]`, `--enable_rdma[=true|false]`
+- `--comm_config_path=/path/to/communicator.yaml` (enables P2P/RDMA based on file)
 - `--force_full_digest_on_load[=true|false]`
 - `--auto_register_disk_loads[=true|false]`
 

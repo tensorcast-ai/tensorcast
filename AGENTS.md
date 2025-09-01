@@ -72,6 +72,9 @@ bash tools/build_proto_python.sh
 ```
 This updates generated Python code in `./tensorcast/proto/` directory.
 
+Note: Communicator config proto package is `tensorcast.communicator` and is consumed directly by C++.
+The daemon loads communicator config from a YAML/JSON file (see `--comm_config_path`).
+
 ### Common Build Issues
 
 1. **Protocol buffer changes not reflected**: Always run `bash tools/build_proto_python.sh` after modifying `.proto` files

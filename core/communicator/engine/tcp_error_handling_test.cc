@@ -23,7 +23,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
   SECTION("Invalid tensor registration") {
     communicator::CommunicatorConfig cfg;
-    cfg.enable_rdma = false; /* disable RDMA */
+    cfg.set_enable_rdma(false); /* disable RDMA */
     auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
@@ -100,7 +100,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
   SECTION("Zero-size transfer handling") {
     communicator::CommunicatorConfig cfg;
-    cfg.enable_rdma = false; /* disable RDMA */
+    cfg.set_enable_rdma(false); /* disable RDMA */
     auto engine = std::make_shared<CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 

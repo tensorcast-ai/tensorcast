@@ -21,7 +21,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   //          Environment variables are no longer consulted at this layer.
 
   communicator::CommunicatorConfig cfg;
-  cfg.enable_rdma = enable_rdma;
+  cfg.set_enable_rdma(enable_rdma);
   comm_engine_ = std::make_shared<communicator::CommunicateEngine>(cfg);
 
   auto status = comm_engine_->init(listen_addr, listen_port);
