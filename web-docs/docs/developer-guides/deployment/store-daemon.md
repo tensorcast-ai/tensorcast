@@ -90,16 +90,45 @@ lifecycle:
 global_store_address: 127.0.0.1:6000
 ```
 
+## Communicator Configuration (YAML)
+
+P2P/RDMA communicator is configured via a single YAML/JSON file (no per‑field flags). Example:
+
+```yaml
+enable_rdma: false
+stager:
+  stage_cpu_for_rdma: true
+  stage_chunk_mb_cpu: 4
+  stage_chunk_mb_gpu: 16
+  buffers_per_flow: 4
+rdma:
+  outstanding_wr: 64
+  ack_ttl_ms: 30000
+  traffic_class: 186
+  qp_timeout: 20
+  qp_retry: 7
+pool:
+  preregister_mr: true
+  pool_size_bytes: 8589934592
+  chunk_bytes: 67108864
+transport:
+  tcp_conn_count: 8
+  connect_timeout_sec: 10
+  tcp_tos: 0
+```
+
+Save it as `communicator.yaml` and pass the path using `--comm_config_path`.
+
 ## Example Direct Launch
 
 ```
-bazel-bin/daemon/tensorcast_daemon \\
-  --listen_addr=0.0.0.0:50051 \\
-  --global_store_addr=127.0.0.1:6000 \\
-  --heartbeat_interval_ms=5000 \\
-  --chunk_sync_interval_ms=10000 \\
-  --enable_p2p_engine=false \\
-  --enable_p2p_access=true
+bazel-bin/daemon/tensorcast_daemon \
+  --listen_addr=0.0.0.0:50051 \
+  --global_store_addr=127.0.0.1:6000 \
+  --heartbeat_interval_ms=5000 \
+  --chunk_sync_interval_ms=10000 \
+  --enable_p2p_access=true \
+  --comm_config_path=$(pwd)/communicator.yaml
 ```
 
 ### Metrics Exposure (Unified)

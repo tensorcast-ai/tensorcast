@@ -13,6 +13,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/memory_location.h"
+#include "core/communicator/config_io.h"
 #include "core/communicator/engine/communicator_config.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
@@ -629,7 +630,7 @@ transport layer.)pbdoc")
                 return cfg[key].cast<bool>();
               return fb;
             };
-            ccfg.enable_rdma = get_bool("enable_rdma", ccfg.enable_rdma);
+            ccfg.set_enable_rdma(get_bool("enable_rdma", ccfg.enable_rdma()));
 
             if (cfg.contains("stager") && !cfg["stager"].is_none()) {
               auto st = cfg["stager"].cast<py::dict>();
@@ -642,10 +643,12 @@ transport layer.)pbdoc")
               auto gu32 = [&st](const char* k, uint32_t fb) {
                 return (st.contains(k) && !st[k].is_none()) ? st[k].cast<uint32_t>() : fb;
               };
-              ccfg.stager.stage_cpu_for_rdma = gb("stage_cpu_for_rdma", ccfg.stager.stage_cpu_for_rdma);
-              ccfg.stager.stage_chunk_mb_cpu = gu32("stage_chunk_mb_cpu", ccfg.stager.stage_chunk_mb_cpu);
-              ccfg.stager.stage_chunk_mb_gpu = gu32("stage_chunk_mb_gpu", ccfg.stager.stage_chunk_mb_gpu);
-              ccfg.stager.buffers_per_flow = gi("buffers_per_flow", ccfg.stager.buffers_per_flow);
+              auto* st_mut = ccfg.mutable_stager();
+              if (st.contains("stage_cpu_for_rdma") && !st["stage_cpu_for_rdma"].is_none())
+                st_mut->set_stage_cpu_for_rdma(st["stage_cpu_for_rdma"].cast<bool>());
+              st_mut->set_stage_chunk_mb_cpu(gu32("stage_chunk_mb_cpu", st_mut->stage_chunk_mb_cpu()));
+              st_mut->set_stage_chunk_mb_gpu(gu32("stage_chunk_mb_gpu", st_mut->stage_chunk_mb_gpu()));
+              st_mut->set_buffers_per_flow(gi("buffers_per_flow", st_mut->buffers_per_flow()));
             }
             if (cfg.contains("rdma") && !cfg["rdma"].is_none()) {
               auto rd = cfg["rdma"].cast<py::dict>();
@@ -655,8 +658,12 @@ transport layer.)pbdoc")
               auto gu32 = [&rd](const char* k, uint32_t fb) {
                 return (rd.contains(k) && !rd[k].is_none()) ? rd[k].cast<uint32_t>() : fb;
               };
-              ccfg.rdma.outstanding_wr = gi("outstanding_wr", ccfg.rdma.outstanding_wr);
-              ccfg.rdma.ack_ttl_ms = gu32("ack_ttl_ms", ccfg.rdma.ack_ttl_ms);
+              auto* rd_mut = ccfg.mutable_rdma();
+              rd_mut->set_outstanding_wr(gi("outstanding_wr", rd_mut->outstanding_wr()));
+              rd_mut->set_ack_ttl_ms(gu32("ack_ttl_ms", rd_mut->ack_ttl_ms()));
+              rd_mut->set_traffic_class(gi("traffic_class", rd_mut->traffic_class()));
+              rd_mut->set_qp_timeout(gi("qp_timeout", rd_mut->qp_timeout()));
+              rd_mut->set_qp_retry(gi("qp_retry", rd_mut->qp_retry()));
             }
             if (cfg.contains("pool") && !cfg["pool"].is_none()) {
               auto pl = cfg["pool"].cast<py::dict>();
@@ -666,45 +673,59 @@ transport layer.)pbdoc")
               auto gu64 = [&pl](const char* k, uint64_t fb) {
                 return (pl.contains(k) && !pl[k].is_none()) ? pl[k].cast<uint64_t>() : fb;
               };
-              ccfg.pool.preregister_mr = gb("preregister_mr", ccfg.pool.preregister_mr);
-              ccfg.pool.pool_size_bytes = gu64("pool_size_bytes", ccfg.pool.pool_size_bytes);
-              ccfg.pool.chunk_bytes = gu64("chunk_bytes", ccfg.pool.chunk_bytes);
+              auto* pl_mut = ccfg.mutable_pool();
+              if (pl.contains("preregister_mr") && !pl["preregister_mr"].is_none())
+                pl_mut->set_preregister_mr(pl["preregister_mr"].cast<bool>());
+              pl_mut->set_pool_size_bytes(gu64("pool_size_bytes", pl_mut->pool_size_bytes()));
+              pl_mut->set_chunk_bytes(gu64("chunk_bytes", pl_mut->chunk_bytes()));
             }
             if (cfg.contains("transport") && !cfg["transport"].is_none()) {
               auto tr = cfg["transport"].cast<py::dict>();
               auto gi = [&tr](const char* k, int fb) {
                 return (tr.contains(k) && !tr[k].is_none()) ? tr[k].cast<int>() : fb;
               };
-              ccfg.transport.tcp_conn_count = gi("tcp_conn_count", ccfg.transport.tcp_conn_count);
+              auto* tr_mut = ccfg.mutable_transport();
+              tr_mut->set_tcp_conn_count(gi("tcp_conn_count", tr_mut->tcp_conn_count()));
+              tr_mut->set_tcp_tos(gi("tcp_tos", tr_mut->tcp_tos()));
+              tr_mut->set_connect_timeout_sec(gi("connect_timeout_sec", tr_mut->connect_timeout_sec()));
             }
             if (cfg.contains("affinity") && !cfg["affinity"].is_none()) {
               auto af = cfg["affinity"].cast<py::dict>();
               auto gb = [&af](const char* k, bool fb) {
                 return (af.contains(k) && !af[k].is_none()) ? af[k].cast<bool>() : fb;
               };
-              ccfg.affinity.enable = gb("enable", ccfg.affinity.enable);
+              auto* af_mut = ccfg.mutable_affinity();
+              if (af.contains("enable") && !af["enable"].is_none())
+                af_mut->set_enable(af["enable"].cast<bool>());
             }
             if (cfg.contains("simple_numa") && !cfg["simple_numa"].is_none()) {
               auto sn = cfg["simple_numa"].cast<py::dict>();
               auto gb = [&sn](const char* k, bool fb) {
                 return (sn.contains(k) && !sn[k].is_none()) ? sn[k].cast<bool>() : fb;
               };
-              ccfg.simple_numa.enable = gb("enable", ccfg.simple_numa.enable);
+              auto* sn_mut = ccfg.mutable_simple_numa();
+              if (sn.contains("enable") && !sn["enable"].is_none())
+                sn_mut->set_enable(sn["enable"].cast<bool>());
               if (sn.contains("nodes") && !sn["nodes"].is_none()) {
                 auto nodes = sn["nodes"].cast<py::list>();
-                ccfg.simple_numa.nodes.clear();
+                sn_mut->clear_nodes();
                 for (auto item : nodes) {
                   auto node_cfg = item.cast<py::dict>();
-                  tensorcast::communicator::SimpleNumaNode node{};
+                  auto* n = sn_mut->add_nodes();
                   if (node_cfg.contains("id") && !node_cfg["id"].is_none())
-                    node.id = node_cfg["id"].cast<int>();
+                    n->set_id(node_cfg["id"].cast<int>());
                   if (node_cfg.contains("is_default") && !node_cfg["is_default"].is_none())
-                    node.is_default = node_cfg["is_default"].cast<bool>();
-                  if (node_cfg.contains("nics") && !node_cfg["nics"].is_none())
-                    node.nics = node_cfg["nics"].cast<std::vector<std::string>>();
-                  if (node_cfg.contains("gpus") && !node_cfg["gpus"].is_none())
-                    node.gpus = node_cfg["gpus"].cast<std::vector<int>>();
-                  ccfg.simple_numa.nodes.emplace_back(std::move(node));
+                    n->set_is_default(node_cfg["is_default"].cast<bool>());
+                  if (node_cfg.contains("nics") && !node_cfg["nics"].is_none()) {
+                    for (const auto& s : node_cfg["nics"].cast<std::vector<std::string>>()) {
+                      n->add_nics(s);
+                    }
+                  }
+                  if (node_cfg.contains("gpus") && !node_cfg["gpus"].is_none()) {
+                    for (const auto& g : node_cfg["gpus"].cast<std::vector<int>>()) {
+                      n->add_gpus(g);
+                    }
+                  }
                 }
               }
             }
@@ -727,6 +748,28 @@ transport layer.)pbdoc")
 
 Dict schema mirrors CommunicatorSettings (stager/rdma/pool/transport/affinity).
 This overload calls the typed-config initialization path in C++.)pbdoc")
+      .def_static(
+          "from_yaml",
+          [](const std::string& listen_addr, uint16_t port, const std::string& path) {
+            auto cfg_or = tensorcast::communicator::configio::LoadCommunicatorConfigFromFile(path);
+            if (!cfg_or.ok()) {
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, cfg_or.status().ToString());
+            }
+            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+            absl::Status st;
+            {
+              py::gil_scoped_release release;
+              st = mgr->initialize_with_config(listen_addr, port, cfg_or.value());
+            }
+            if (!st.ok()) {
+              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
+            }
+            return mgr;
+          },
+          py::arg("listen_addr") = std::string("0.0.0.0"),
+          py::arg("port") = 9090,
+          py::arg("path"),
+          R"pbdoc(Create a CommunicationManager by loading a communicator YAML/JSON file.)pbdoc")
       .def(
           "is_enabled",
           &tensorcast::store::CommunicationManager::is_enabled,

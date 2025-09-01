@@ -33,7 +33,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Set up source engine with GPU tensor
     communicator::CommunicatorConfig cfg1;
-    cfg1.enable_rdma = false; /* disable RDMA */
+    cfg1.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -62,7 +62,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Create target engine for loader
     communicator::CommunicatorConfig cfg2;
-    cfg2.enable_rdma = false; /* disable RDMA */
+    cfg2.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
@@ -126,7 +126,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Similar test but with CPU target
     communicator::CommunicatorConfig cfg3;
-    cfg3.enable_rdma = false; /* disable RDMA */
+    cfg3.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
@@ -159,7 +159,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(register_status.ok());
 
     communicator::CommunicatorConfig cfg4;
-    cfg4.enable_rdma = false; /* disable RDMA */
+    cfg4.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
