@@ -158,9 +158,7 @@ class ArtifactService:
             per_memtype[rep.memory_type.value] = (
                 per_memtype.get(rep.memory_type.value, 0) + 1
             )
-
         for artifact_id, count in per_model.items():
             set_replicas_per_artifact(artifact_id, count)
-
         for memtype, count in per_memtype.items():
             set_replicas_per_memtype(memtype, count)

@@ -4,11 +4,12 @@
 
 #include <string>
 #include <unordered_map>
-#include "core/common/cuda_api.h"
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/common/metrics/metric_objects.h"
+#include "core/common/cuda_api.h"
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/observer_result.h"
 
 namespace tensorcast::store {
 
@@ -89,10 +90,12 @@ class DeviceManager {
   int num_gpus_ = 0;
   std::unordered_map<int, GpuInfo> gpu_info_map_;
 
-  // Metrics
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_total_gauges_;
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_memory_free_gauges_;
-  std::unordered_map<int, tensorcast::metrics::Gauge> gpu_replicas_loaded_gauges_;
+  // OTel meter and ObservableGauge registrations for GPU memory metrics
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> gpu_memory_bytes_gauge_;
+
+  // Observable callback for GPU memory gauge
+  static void gpu_mem_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
 };
 
 } // namespace tensorcast::store

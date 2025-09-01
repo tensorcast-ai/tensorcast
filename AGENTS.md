@@ -109,7 +109,7 @@ The `.cursor/rules/` directory contains detailed guidelines for specific aspects
 - `/tests/`: Comprehensive C++ and Python test suites
 
 ### Build Systems
-- **Primary**: Bazel with MODULE.bazel (Bzlmod) for C++ core
+- **Primary**: Bazel with MODULE.bazel (Bzlmod) for C++ core & Daemon
 - **Secondary**: setuptools + uv for Python packaging
 - **Dependencies**: LibTorch 2.6.0/2.7.0, CUDA 12.6+, gRPC, Protocol Buffers
 
@@ -292,6 +292,12 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - use `uv run pytest tests/python/xxxx` to run python tests
 - use `bazel test //core/component:xxx_test` to run cxx tests (e.g., `bazel test //core/store:store_engine_test`)
 
+#### Python Naming Conventions
+- **Files/Directories**: `snake_case` (e.g., `tensorcast/global_store/manager.py`)
+- **Variables/Functions**: `snake_case`
+- **Classes**: `PascalCase`
+- **Constants**: `ALL_CAPS`
+
 #### Core Principles
 - **Functional programming**: Prefer functional, declarative style over classes where possible
 - **Type safety**: Always use type hints for function signatures
@@ -302,7 +308,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - Prefer `T | None` over `Optional[T]`, `dict[T]` over `Dict[T]`
 - Avoid dynamic attribute access (`getattr`, `hasattr`, `setattr`)
 - Avoid Optional types unless necessary
-- Avoid `isinstance` checks unless truly necessary
+- Avoid `isinstance` checks unless truly necessary; rely on precise type hints and intentional polymorphism instead of runtime type checks
 - Use Pydantic models over raw dictionaries for input validation
 
 #### Error Handling
@@ -310,6 +316,20 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - Handle errors early with guard clauses and early returns
 - Provide meaningful error messages
 - Prefer `contextlib.suppress` over `try/except` for suppressing exceptions
+
+#### Dependencies & Tools
+- **Package Management**: `uv` (preferred)
+- **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
+- **Type Checking & Linting**: `mypy` and `ruff`
+  - `uv run mypy ./tensorcast`
+  - `uv run ruff check .` and `uv run ruff format .`
+- **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
+
+#### Best Practices
+- Prefer decomposition and iteration over duplication
+- Keep functions small and focused
+- Use explicit, named imports for utilities
+- Use `dataclasses` or Pydantic models for complex data structures
 
 
 ## Development Principles

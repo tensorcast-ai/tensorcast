@@ -2,12 +2,11 @@
 
 #pragma once
 
-#include <memory>
 #include <string>
-#include <unordered_map>
 
-#include "core/common/memory/memory_location.h"
-#include "core/common/metrics/metric_objects.h"
+// OpenTelemetry Metrics API (types used in member declarations)
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/observer_result.h"
 
 namespace tensorcast::store {
 
@@ -75,6 +74,19 @@ class MetricsCollector {
   void record_memory_eviction();
 
   /**
+   * @brief Record artifact load latency with unified labels.
+   * @param source Source of data (e.g., "remote" or "disk")
+   * @param device Target device ("gpu" or "cpu")
+   * @param phase  Pipeline phase (e.g., "finalize")
+   * @param duration_seconds Duration in seconds
+   */
+  void record_artifact_load(
+      const std::string& source,
+      const std::string& device,
+      const std::string& phase,
+      double duration_seconds);
+
+  /**
    * @brief Update all metrics.
    * This is a convenience method that updates all metric types.
    */
@@ -84,25 +96,20 @@ class MetricsCollector {
       DeviceManager& device_manager);
 
  private:
-  // Memory Pool Metrics
-  tensorcast::metrics::Gauge memory_pool_total_gauge_;
-  tensorcast::metrics::Gauge memory_pool_available_gauge_;
-  tensorcast::metrics::Gauge memory_pool_allocated_chunks_gauge_;
+  // ObservableGauge callback trampoline
+  static void cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
 
-  // Replica Metrics
-  tensorcast::metrics::Gauge replicas_in_memory_cpu_gauge_;
-  tensorcast::metrics::Gauge replicas_in_memory_gpu_gauge_;
-  tensorcast::metrics::Gauge total_replica_size_bytes_gauge_;
+  // OTel Meter
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
 
-  // Operation Metrics
-  tensorcast::metrics::Counter operations_total_counter_;
-  tensorcast::metrics::Histogram operation_latency_histogram_;
+  // Synchronous instruments
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> p2p_bytes_total_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> artifact_load_seconds_;
 
-  // P2P/RDMA Metrics
-  tensorcast::metrics::Counter p2p_transfers_total_;
-  tensorcast::metrics::Counter p2p_bytes_transferred_total_;
-  tensorcast::metrics::Counter p2p_transfer_errors_total_;
-  tensorcast::metrics::Counter memory_evictions_total_;
+  // Async gauge for CPU memory available (exposes last observed value)
+  // We keep the latest snapshot here; the ObservableGauge callback reads it.
+  double cpu_available_bytes_last_ = 0.0;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> cpu_memory_available_gauge_;
 };
 
 } // namespace tensorcast::store

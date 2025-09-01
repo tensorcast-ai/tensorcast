@@ -7,7 +7,6 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
-#include "core/common/metrics/metric_objects.h"
 #include "core/store/device_registry.h"
 #include "core/store/replica/chunk_meta.h" // For chunk_state_to_string
 
@@ -222,13 +221,7 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
     auto& mapping = it->second.chunk_mappings[chunk_idx];
     mapping.last_access_ns = now;
 
-    // Record Prometheus counter for this transition (one per chunk event).
-    static const tensorcast::metrics::Counter kTransitionsCounter("store_daemon_chunk_state_transitions_total");
-    kTransitionsCounter
-        .with_labels(
-            {{"location", (location == MemoryLocation::GPU ? "GPU" : "CPU")},
-             {"state", chunk_state_to_string(new_state)}})
-        .inc();
+    // Phase 5: remove legacy per-transition counter (store_daemon_*); unified metrics capture latency/bytes elsewhere.
 
     if (location == MemoryLocation::GPU) {
       if (!device_id.has_value()) {

@@ -267,6 +267,7 @@ sc_cc_library(
         "//core/common:error_handling_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 

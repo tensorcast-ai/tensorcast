@@ -23,6 +23,7 @@ from tensorcast.global_store.metrics import (
     start_metrics_http_server,
 )
 from tensorcast.logger import init_logger
+from tensorcast.observability.otel import setup_otel
 from tensorcast.proto import global_store_pb2_grpc
 
 logger = init_logger(__name__)
@@ -94,6 +95,10 @@ def main():
 
         # Create new config instance with updates using Pydantic's model_copy
         config = config.model_copy(update=updates)
+
+    # Initialize OpenTelemetry (required; no automatic downgrade)
+    setup_otel("tensorcast-global-store", role="global-store")
+    logger.info("OpenTelemetry tracing enabled for Global Store")
 
     # Initialize the service
     servicer = GlobalStoreServicer(

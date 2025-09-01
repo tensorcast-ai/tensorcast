@@ -9,6 +9,10 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
+#include "core/common/otel/grpc_propagation.h"
+#include "opentelemetry/context/runtime_context.h"
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
 #include "proto/global_store.grpc.pb.h"
 #include "proto/global_store.pb.h"
 
@@ -37,6 +41,18 @@ absl::Status GlobalStoreClient::initialize() {
   grpc::ClientContext context;
   context.set_deadline(
       std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(config_.connection_timeout)));
+
+  // OpenTelemetry: create a client span for HealthCheck and inject context.
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kClient;
+  auto span = tracer->StartSpan("GlobalStore/HealthCheck", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "global_store.GlobalStore");
+  span->SetAttribute("rpc.method", "HealthCheck");
+  tensorcast::obs::InjectIntoClientMetadata(context);
 
   auto status = stub_->HealthCheck(&context, req, &resp);
   if (!status.ok()) {
@@ -561,7 +577,23 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     context.set_deadline(
         std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(config_.rpc_timeout)));
 
+    // OpenTelemetry: create client span and inject W3C Trace Context.
+    namespace otel = opentelemetry;
+    auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+    otel::trace::StartSpanOptions opts;
+    opts.kind = otel::trace::SpanKind::kClient;
+    auto span = tracer->StartSpan(absl::StrFormat("GlobalStore/%s", method_name), opts);
+    otel::trace::Scope scope(span);
+    span->SetAttribute("rpc.system", "grpc");
+    span->SetAttribute("rpc.service", "global_store.GlobalStore");
+    span->SetAttribute("rpc.method", method_name);
+    tensorcast::obs::InjectIntoClientMetadata(context);
+
     auto status = method(&context, request, response);
+    if (!status.ok()) {
+      span->SetAttribute("rpc.grpc.status_code", static_cast<int64_t>(status.error_code()));
+      span->SetAttribute("rpc.grpc.message", status.error_message());
+    }
 
     if (status.ok()) {
       return absl::OkStatus();

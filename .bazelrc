@@ -62,3 +62,8 @@ common:remote --experimental_remote_cache_compression_threshold=100
 common:remote --build_metadata=REPO_URL=https://github.com/tensorcast-ai/tensorcast.git
 
 try-import user.bazelrc
+
+# OpenTelemetry C++ API compile-time enable switch for daemon spans and bridges.
+# Usage:
+#   bazel build --config=otel //daemon:tensorcast_daemon
+build:otel --copt=-DTC_ENABLE_OTEL_CXX=1

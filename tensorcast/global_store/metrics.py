@@ -31,13 +31,13 @@ convenience helpers which can be called from anywhere in the code-base.
 # ---------------------------------------------------------------------------
 
 GRPC_SERVER_HANDLED_COUNTER = Counter(
-    "grpc_server_handled_total",
+    "tc_grpc_server_handled_total",
     "Total number of gRPC requests processed on the server side.",
     labelnames=("method", "code"),
 )
 
 GRPC_SERVER_HANDLING_LATENCY_SECONDS = Histogram(
-    "grpc_server_handling_seconds",
+    "tc_grpc_server_handling_seconds",
     "Latency in seconds per gRPC method handled by the server.",
     labelnames=("method",),
     buckets=(
@@ -60,12 +60,12 @@ GRPC_SERVER_HANDLING_LATENCY_SECONDS = Histogram(
 )
 
 ACTIVE_WORKERS_GAUGE = Gauge(
-    "global_store_active_workers",
+    "tc_active_workers",
     "Current number of active workers as perceived by the Global Store.",
 )
 
 ARTIFACT_REPLICAS_GAUGE = Gauge(
-    "global_store_replicas_total",
+    "tc_replicas_total",
     "Total number of registered artifact replicas across all workers.",
 )
 
@@ -76,27 +76,26 @@ ARTIFACT_REPLICAS_GAUGE = Gauge(
 # Replica lifecycle ---------------------------------------------------------
 
 REPLICA_REGISTER_COUNTER = Counter(
-    "global_store_replica_register_total",
+    "tc_replica_register_total",
     "Total number of artifact replicas registered (create or update).",
     labelnames=("artifact_id", "memory_type"),
 )
 
 REPLICA_UNREGISTER_COUNTER = Counter(
-    "global_store_replica_unregister_total",
+    "tc_replica_unregister_total",
     "Total number of artifact replicas unregistered/deleted.",
     labelnames=("artifact_id", "memory_type"),
 )
 
-# Per-artifact replica gauge – allows tracking of hot artifacts.
 REPLICA_PER_ARTIFACT_GAUGE = Gauge(
-    "global_store_replicas_per_artifact",
+    "tc_replicas_per_artifact",
     "Current number of replicas per artifact (content-addressed artifact_id).",
     labelnames=("artifact_id",),
 )
 
 # Per-memory-type gauge – GPU/RAM/DISK spread.
 REPLICA_PER_MEMTYPE_GAUGE = Gauge(
-    "global_store_replicas_per_memtype",
+    "tc_replicas_per_memtype",
     "Current number of replicas per memory type.",
     labelnames=("memory_type",),
 )
@@ -104,13 +103,13 @@ REPLICA_PER_MEMTYPE_GAUGE = Gauge(
 # Transport lifecycle -------------------------------------------------------
 
 TRANSPORT_REQUEST_COUNTER = Counter(
-    "global_store_transport_requests_total",
+    "tc_transport_requests_total",
     "Total number of transport requests processed by the Global Store.",
     labelnames=("artifact_id", "status"),  # status=success|timeout|error
 )
 
 TRANSPORT_WAIT_SECONDS = Histogram(
-    "global_store_transport_wait_seconds",
+    "tc_transport_wait_seconds",
     "Time spent waiting for an available replica during transport request.",
     labelnames=("artifact_id",),
     buckets=(
@@ -128,20 +127,20 @@ TRANSPORT_WAIT_SECONDS = Histogram(
 )
 
 ACTIVE_TRANSPORTS_GAUGE = Gauge(
-    "global_store_active_transports",
+    "tc_active_transports",
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
 # Recovery / state-sync ------------------------------------------------------
 
 STATE_SYNC_COUNTER = Counter(
-    "global_store_state_sync_operations_total",
+    "tc_state_sync_total",
     "Total number of worker state-synchronisation operations.",
     labelnames=("result",),  # result=success|error
 )
 
 STATE_SYNC_DURATION_SECONDS = Histogram(
-    "global_store_state_sync_duration_seconds",
+    "tc_state_sync_seconds",
     "Duration of worker state-synchronisation operations in seconds.",
     buckets=(
         0.01,

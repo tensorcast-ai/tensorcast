@@ -4,17 +4,32 @@
 
 #include <nlohmann/json.hpp>
 #include <unistd.h>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/common/otel/grpc_propagation.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
 #include "daemon/status_utils.h"
+#include "opentelemetry/context/runtime_context.h"
+#include "opentelemetry/trace/provider.h"
+#include "opentelemetry/trace/scope.h"
+#include "opentelemetry/trace/span.h"
 
 namespace tensorcast::daemon {
+
+static inline bool tc_otel_truthy(const char* v) {
+  if (!v)
+    return false;
+  std::string s(v);
+  for (auto& c : s)
+    c = static_cast<char>(::tolower(c));
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
 
 using ::grpc::Status;
 using ::grpc::StatusCode;
@@ -24,6 +39,31 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
     const ::store_daemon::MaterializeReplicaRequest* req,
     ::store_daemon::MaterializeReplicaResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/MaterializeReplica", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "MaterializeReplica");
+  // Always attach artifact_id for correlation as requested
+  if (req->has_artifact_id() && !req->artifact_id().empty()) {
+    span->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  // Avoid other high-cardinality attributes unless explicitly enabled
+  const bool allow_hc = tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"));
+  if (allow_hc) {
+    if (req->has_disk_path() && !req->disk_path().empty()) {
+      span->SetAttribute("tc.disk.path", req->disk_path());
+    }
+    // device_uuid is high-cardinality; attach only when allowed
+    span->SetAttribute("tc.device.uuid", req->device_uuid());
+  }
+  span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req->size_bytes()));
   using ::store_daemon::MaterializeReplicaStatus;
 
   // Reject new materialization while shutting down to align with Python daemon
@@ -104,6 +144,21 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
     const ::store_daemon::ConfirmReplicaRequest* req,
     ::store_daemon::ConfirmReplicaResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/ConfirmReplica", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "ConfirmReplica");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    span->SetAttribute("tc.disk.path", req->disk_path());
+  }
+  span->SetAttribute("tc.device.id", static_cast<int64_t>(req->target_device_type()));
   resp->set_disk_path(req->disk_path());
 
   // Compatibility checks when strict confirm mode is enabled
@@ -154,9 +209,26 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
 }
 
 Status StoreDaemonServiceImpl::UnloadReplica(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::UnloadReplicaRequest* req,
     ::store_daemon::UnloadReplicaResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/UnloadReplica", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "UnloadReplica");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    if (!req->disk_path().empty())
+      span->SetAttribute("tc.disk.path", req->disk_path());
+    if (req->has_pid())
+      span->SetAttribute("tc.pid", static_cast<int64_t>(req->pid()));
+  }
   resp->set_disk_path(req->disk_path());
   // Python parity: DISK-target unload is a no-op idempotent success
   if (req->target_device_type() == ::store_daemon::DeviceType::DEVICE_TYPE_DISK) {
@@ -208,9 +280,20 @@ Status StoreDaemonServiceImpl::UnloadReplica(
 }
 
 Status StoreDaemonServiceImpl::ClearMem(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::ClearMemRequest* /*req*/,
     ::store_daemon::ClearMemResponse* /*resp*/) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/ClearMem", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "ClearMem");
   const int rc = engine_->clear_mem();
   if (rc == 0)
     return Status::OK;
@@ -218,9 +301,20 @@ Status StoreDaemonServiceImpl::ClearMem(
 }
 
 Status StoreDaemonServiceImpl::GetServerConfig(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::GetServerConfigRequest* /*req*/,
     ::store_daemon::GetServerConfigResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/GetServerConfig", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "GetServerConfig");
   resp->set_mem_pool_size(static_cast<int64_t>(engine_->get_mem_pool_size()));
   resp->set_chunk_size(static_cast<int64_t>(engine_->get_chunk_size()));
   return Status::OK;
@@ -299,6 +393,21 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
     grpc::ServerContext* ctx,
     const ::store_daemon::ReplicaVerificationRequest* req,
     ::store_daemon::ReplicaVerificationResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/WaitReplicaVerification", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "WaitReplicaVerification");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    if (!req->replica_uuid().empty())
+      span->SetAttribute("tc.replica.id", req->replica_uuid());
+  }
   // Consult verification registry (populated by MaterializeReplica) to see
   // if we already have a terminal status. If so, return immediately; otherwise
   // proceed to wait on the readiness future with bounded timeout.
@@ -362,9 +471,23 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
 }
 
 Status StoreDaemonServiceImpl::LockTransportChunks(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::LockChunksRequest* req,
     ::store_daemon::LockChunksResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/LockTransportChunks", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "LockTransportChunks");
+  span->SetAttribute("tc.artifact.id", req->artifact_id());
+  if (req->has_device_id())
+    span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
   // Resolve ReplicaKey, prefer explicit device_id then infer residency
   auto key = make_replica_key(req->artifact_id());
   if (req->has_device_id()) {
@@ -398,9 +521,23 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
 }
 
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::UnlockChunksRequest* req,
     ::store_daemon::UnlockChunksResponse* /*resp*/) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/UnlockTransportChunks", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "UnlockTransportChunks");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    span->SetAttribute("tc.lock.token", req->lock_token());
+  }
   auto entry = locks_.get(req->lock_token());
   if (!entry.has_value()) {
     return {StatusCode::NOT_FOUND, "unknown lock token"};
@@ -413,9 +550,23 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
 }
 
 Status StoreDaemonServiceImpl::BeginRegisterArtifact(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::BeginRegisterArtifactRequest* req,
     ::store_daemon::BeginRegisterArtifactResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/BeginRegisterArtifact", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "BeginRegisterArtifact");
+  span->SetAttribute("tc.artifact.id", req->artifact_id());
+  span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
+  span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req->total_size()));
   tensorcast::store::StoreEngine::ArtifactRegistration reg;
   reg.artifact_id = req->artifact_id();
   reg.device_id = req->device_id();
@@ -444,9 +595,23 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
 }
 
 Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::CommitRegisteredArtifactRequest* req,
     ::store_daemon::CommitRegisteredArtifactResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/CommitRegisteredArtifact", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "CommitRegisteredArtifact");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    span->SetAttribute("tc.registration.id", req->registration_id());
+  }
   auto commit_or = engine_->commit_registered_artifact(req->registration_id());
   if (!commit_or.ok())
     return to_grpc_status(commit_or.status());
@@ -468,9 +633,23 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
 }
 
 Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::AbortRegisteredArtifactRequest* req,
     ::store_daemon::AbortRegisteredArtifactResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/AbortRegisteredArtifact", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "AbortRegisteredArtifact");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    span->SetAttribute("tc.registration.id", req->registration_id());
+  }
   auto st = engine_->abort_registered_artifact(req->registration_id());
   if (!st.ok())
     return to_grpc_status(st);
@@ -673,9 +852,20 @@ void StoreDaemonServiceImpl::stop_sweepers() {
 }
 
 Status StoreDaemonServiceImpl::GetWorkerStatus(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::GetWorkerStatusRequest* /*req*/,
     ::store_daemon::GetWorkerStatusResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/GetWorkerStatus", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "GetWorkerStatus");
   resp->set_is_registered(is_registered());
   resp->set_is_healthy(true);
   resp->set_is_shutting_down(is_shutting_down_.load());
@@ -688,9 +878,20 @@ Status StoreDaemonServiceImpl::GetWorkerStatus(
 }
 
 Status StoreDaemonServiceImpl::GetDetailedStatus(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::GetDetailedStatusRequest* /*req*/,
     ::store_daemon::GetDetailedStatusResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/GetDetailedStatus", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "GetDetailedStatus");
   resp->set_is_registered(is_registered());
   resp->set_is_healthy(true);
   resp->set_is_shutting_down(is_shutting_down_.load());
@@ -789,9 +990,24 @@ void StoreDaemonServiceImpl::set_verif_status(
 }
 
 Status StoreDaemonServiceImpl::GetLoadedReplicas(
-    grpc::ServerContext* /*ctx*/,
+    grpc::ServerContext* ctx,
     const ::store_daemon::GetLoadedReplicasRequest* req,
     ::store_daemon::GetLoadedReplicasResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = tensorcast::obs::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/GetLoadedReplicas", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "store_daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "GetLoadedReplicas");
+  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+    if (req->has_artifact_id_filter())
+      span->SetAttribute("tc.artifact.filter", req->artifact_id_filter());
+  }
   int32_t total = 0;
   uint64_t total_bytes = 0;
   for (const auto& info : engine_->get_all_replicas_info()) {

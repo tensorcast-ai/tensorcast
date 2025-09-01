@@ -2,8 +2,12 @@
 
 #include "core/store/loader/mux_seekable_source.h"
 
+#include <map>
 #include "absl/log/log.h"
-#include "core/common/metrics/metric_objects.h"
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store::loader {
 
@@ -44,9 +48,14 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
       VLOG(1) << "MuxSeekableSource: primary read_at failed: " << st.status();
       // Metrics: record fallback due to primary error
       try {
-        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
-        kFallbackChunks.with_labels({{"reason", "primary_error"}}).inc();
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_fallback_chunks_total");
+        std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+        attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string("primary_error")));
+        counter->Add(1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
       } catch (...) {
+        VLOG(1) << "metrics counter tc_fallback_chunks_total unavailable";
       }
     }
   }
@@ -71,9 +80,14 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     if (total_read == bytes) {
       // Metrics: record fallback due to short read (primary delivered fewer bytes than requested)
       try {
-        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
-        kFallbackChunks.with_labels({{"reason", "short_read"}}).inc();
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_fallback_chunks_total");
+        std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+        attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string("short_read")));
+        counter->Add(1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
       } catch (...) {
+        VLOG(1) << "metrics counter tc_fallback_chunks_total unavailable";
       }
     }
   }

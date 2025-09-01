@@ -13,7 +13,6 @@
 #include "absl/status/statusor.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/memory_location.h"
-#include "core/common/metrics/metrics_export.h"
 #include "core/communicator/engine/communicator_config.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
@@ -536,14 +535,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           },
           "Return a list of (total, free) GPU memory stats for each CUDA device.");
 
-  // Add global metrics function
-  m.def(
-      "get_global_metrics_text",
-      []() {
-        const std::string text = tensorcast::metrics::get_global_metrics_text();
-        return py::bytes(text);
-      },
-      "Get the global metrics snapshot in OpenMetrics text format");
+  // Deprecated: legacy OpenMetrics text exporter removed; no Python binding.
 
   // ------------------------------------------------------------------
   // Phase-2: factory function accepting a Python dict and constructing a
@@ -702,16 +694,16 @@ transport layer.)pbdoc")
                 auto nodes = sn["nodes"].cast<py::list>();
                 ccfg.simple_numa.nodes.clear();
                 for (auto item : nodes) {
-                  auto and = item.cast<py::dict>();
+                  auto node_cfg = item.cast<py::dict>();
                   tensorcast::communicator::SimpleNumaNode node{};
-                  if (and.contains("id") && !and["id"].is_none())
-                    node.id = and["id"].cast<int>();
-                  if (and.contains("is_default") && !and["is_default"].is_none())
-                    node.is_default = and["is_default"].cast<bool>();
-                  if (and.contains("nics") && !and["nics"].is_none())
-                    node.nics = and["nics"].cast<std::vector<std::string>>();
-                  if (and.contains("gpus") && !and["gpus"].is_none())
-                    node.gpus = and["gpus"].cast<std::vector<int>>();
+                  if (node_cfg.contains("id") && !node_cfg["id"].is_none())
+                    node.id = node_cfg["id"].cast<int>();
+                  if (node_cfg.contains("is_default") && !node_cfg["is_default"].is_none())
+                    node.is_default = node_cfg["is_default"].cast<bool>();
+                  if (node_cfg.contains("nics") && !node_cfg["nics"].is_none())
+                    node.nics = node_cfg["nics"].cast<std::vector<std::string>>();
+                  if (node_cfg.contains("gpus") && !node_cfg["gpus"].is_none())
+                    node.gpus = node_cfg["gpus"].cast<std::vector<int>>();
                   ccfg.simple_numa.nodes.emplace_back(std::move(node));
                 }
               }

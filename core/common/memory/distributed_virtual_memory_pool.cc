@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -19,8 +20,10 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "core/common/metrics/metric_objects.h"
 #include "core/common/system_capabilities.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::memory {
 
@@ -466,8 +469,9 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   }
   // Metrics: bytes written
   try {
-    static const metrics::Counter kWriteBytes("dvmp_write_bytes_total");
-    kWriteBytes.inc(static_cast<double>(bytes));
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_dvmp_write_bytes_total");
+    counter->Add(static_cast<double>(bytes));
   } catch (...) {
     VLOG(1) << "metrics counter kWriteBytes unavailable";
   }
@@ -528,12 +532,13 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
   }
   // Metrics: bytes mapped
   try {
-    static const metrics::Counter kMapBytes("dvmp_map_bytes_total");
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_dvmp_map_bytes_total");
     uint64_t total = 0;
     for (const auto& s : segs) {
       total += s.length;
     }
-    kMapBytes.inc(static_cast<double>(total));
+    counter->Add(static_cast<double>(total));
   } catch (...) {
     VLOG(1) << "metrics counter kMapBytes unavailable";
   }
@@ -692,8 +697,11 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
-    kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_dvmp_pin_leases_total");
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string(reason)));
+    counter->Add(1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
   } catch (...) {
     VLOG(1) << "metrics counter kPinLeasesTotal unavailable";
   }

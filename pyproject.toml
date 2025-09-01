@@ -18,7 +18,12 @@ dependencies = [
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
     "torch==2.6.0",
-    "protobuf<5.0",
+    "protobuf<7.0",
+    # OpenTelemetry is a required dependency. No automatic downgrade.
+    "opentelemetry-api>=1.36.0",
+    "opentelemetry-sdk>=1.36.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.36.0",
+    "opentelemetry-instrumentation-grpc>=0.57b0",
 ]
 
 dynamic = ["version"]

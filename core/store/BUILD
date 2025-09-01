@@ -91,10 +91,12 @@ sc_cc_library(
     deps = [
         ":device_types",
         "//core/common:memory_location_lib",
+        "//core/common:otel_grpc_propagation_lib",
         "//core/store/replica:chunk_meta",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -105,7 +107,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:cuda_api_lib",
-        "//core/common:metric_objects_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -145,10 +147,10 @@ sc_cc_library(
         ":memory_types",
         ":replica_registry",
         "//core/common:memory_location_lib",
-        "//core/common:metric_objects_lib",
         "//core/common:pinned_memory_pool_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -170,6 +172,7 @@ sc_cc_library(
         "//core/store/replica:chunk_meta",
         "//core/store/replica:memory_manager",
         "//core/store/replica:replica_memory_coordinator",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -234,6 +237,7 @@ sc_cc_library(
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [

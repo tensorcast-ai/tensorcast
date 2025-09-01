@@ -5,82 +5,74 @@
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/memory_types.h"
+
+#include <map>
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/observer_result.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store {
 
-MetricsCollector::MetricsCollector()
-    : // Memory Pool Metrics
-      memory_pool_total_gauge_("store_daemon_memory_pool_total_bytes"),
-      memory_pool_available_gauge_("store_daemon_memory_pool_available_bytes"),
-      memory_pool_allocated_chunks_gauge_("store_daemon_memory_pool_allocated_chunks"),
-      // Replica Metrics
-      replicas_in_memory_cpu_gauge_("store_daemon_replicas_in_memory", {{"location", "cpu"}}),
-      replicas_in_memory_gpu_gauge_("store_daemon_replicas_in_memory", {{"location", "gpu"}}),
-      total_replica_size_bytes_gauge_("store_daemon_total_replica_size_bytes"),
-      // Operation Metrics
-      operations_total_counter_("store_daemon_cpp_operations_total"),
-      operation_latency_histogram_("store_daemon_cpp_operation_latency_seconds"),
-      // P2P/RDMA Metrics
-      p2p_transfers_total_("store_daemon_p2p_transfers_total"),
-      p2p_bytes_transferred_total_("store_daemon_p2p_bytes_transferred_total"),
-      p2p_transfer_errors_total_("store_daemon_p2p_transfer_errors_total"),
-      memory_evictions_total_("store_daemon_memory_evictions_total") {
-  // Initialize metrics with zero values
-  memory_pool_total_gauge_.set(0.0);
-  memory_pool_available_gauge_.set(0.0);
-  memory_pool_allocated_chunks_gauge_.set(0.0);
-  replicas_in_memory_cpu_gauge_.set(0.0);
-  replicas_in_memory_gpu_gauge_.set(0.0);
-  total_replica_size_bytes_gauge_.set(0.0);
-  operations_total_counter_.inc(0.0);
-  operation_latency_histogram_.observe(0.0);
-  p2p_transfers_total_.inc(0.0);
-  p2p_bytes_transferred_total_.inc(0.0);
-  p2p_transfer_errors_total_.inc(0.0);
-  memory_evictions_total_.inc(0.0);
+void MetricsCollector::cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  obs->Observe(
+      self->cpu_available_bytes_last_,
+      {{"location", opentelemetry::common::AttributeValue("cpu")},
+       {"memory_type", opentelemetry::common::AttributeValue("available")}});
+}
+
+MetricsCollector::MetricsCollector() {
+  meter_ = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  p2p_bytes_total_ = meter_->CreateDoubleCounter("tc_p2p_bytes_total");
+  artifact_load_seconds_ = meter_->CreateDoubleHistogram("tc_artifact_load_seconds");
+
+  // Observable gauge for CPU available bytes
+  cpu_memory_available_gauge_ = meter_->CreateDoubleObservableGauge("tc_memory_pool_bytes");
+  cpu_memory_available_gauge_->AddCallback(&cpu_mem_available_callback, this);
 }
 
 void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool& memory_pool) {
-  // For now, we can only track available size
+  // Track available size via ObservableGauge snapshot
   size_t available_size = memory_pool.get_available_size();
-
-  // We'll need to track total size externally or modify PinnedMemoryPool
-  // For now, just update available size
-  memory_pool_available_gauge_.set(static_cast<double>(available_size));
+  cpu_available_bytes_last_ = static_cast<double>(available_size);
 }
 
 void MetricsCollector::update_replica_metrics(const ReplicaRegistry& replica_registry) {
-  size_t cpu_models = replica_registry.get_replica_count_by_location(MemoryLocation::PAGEABLE_CPU);
-  size_t gpu_models = replica_registry.get_replica_count_by_location(MemoryLocation::GPU);
-  uint64_t total_size = replica_registry.get_total_replica_size();
-
-  replicas_in_memory_cpu_gauge_.set(static_cast<double>(cpu_models));
-  replicas_in_memory_gpu_gauge_.set(static_cast<double>(gpu_models));
-  total_replica_size_bytes_gauge_.set(static_cast<double>(total_size));
+  // Phase 5: converge on tc_*; replica counters moved out of C++ daemon.
+  (void)replica_registry; // no-op
 }
 
 void MetricsCollector::update_gpu_metrics(DeviceManager& device_manager) {
-  // GPU metrics are updated within DeviceManager itself
-  device_manager.update_gpu_metrics();
+  // GPU metrics are exposed via DeviceManager's ObservableGauge; nothing to do here
+  (void)device_manager;
 }
 
 void MetricsCollector::record_operation(const std::string& operation_type, double duration_seconds) {
-  operations_total_counter_.with_labels({{"operation_type", operation_type}}).inc();
-  operation_latency_histogram_.with_labels({{"operation_type", operation_type}}).observe(duration_seconds);
+  // Phase 5: legacy operation metrics removed; rely on record_artifact_load
+  (void)operation_type;
+  (void)duration_seconds;
 }
 
 void MetricsCollector::record_p2p_transfer(size_t bytes_transferred, bool success) {
   if (success) {
-    p2p_transfers_total_.inc();
-    p2p_bytes_transferred_total_.add(static_cast<double>(bytes_transferred));
-  } else {
-    p2p_transfer_errors_total_.inc();
+    // Unified counter for P2P throughput only
+    p2p_bytes_total_->Add(static_cast<double>(bytes_transferred));
   }
 }
 
 void MetricsCollector::record_memory_eviction() {
-  memory_evictions_total_.inc();
+  // Phase 5: evictions no longer reported from daemon; no-op
 }
 
 void MetricsCollector::update_all_metrics(
@@ -90,6 +82,20 @@ void MetricsCollector::update_all_metrics(
   update_memory_pool_metrics(memory_pool);
   update_replica_metrics(replica_registry);
   update_gpu_metrics(device_manager);
+}
+
+void MetricsCollector::record_artifact_load(
+    const std::string& source,
+    const std::string& device,
+    const std::string& phase,
+    double duration_seconds) {
+  // Record into unified histogram with low-cardinality labels
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("source", opentelemetry::common::AttributeValue(source));
+  attrs.emplace("device", opentelemetry::common::AttributeValue(device));
+  attrs.emplace("phase", opentelemetry::common::AttributeValue(phase));
+  artifact_load_seconds_->Record(
+      duration_seconds, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
 }
 
 } // namespace tensorcast::store

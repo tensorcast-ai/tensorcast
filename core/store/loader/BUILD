@@ -132,6 +132,7 @@ sc_cc_library(
     deps = [
         ":source",
         "//core/communicator:engine_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -143,7 +144,7 @@ sc_cc_library(
     deps = [
         ":source",
         "//core/common:error_handling_lib",
-        "//core/common:metric_objects_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -234,7 +235,6 @@ sc_cc_library(
         ":remote_key_source",
         "//core/common:error_handling_lib",
         "//core/common:memory_location_lib",
-        "//core/common:metric_objects_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         "//core/store:loading_spec",

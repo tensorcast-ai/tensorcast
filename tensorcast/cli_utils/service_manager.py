@@ -106,6 +106,8 @@ def start_service(
         verbose=verbose,
     )
 
+    # No auxiliary HTTP server is spawned. Metrics export is handled elsewhere.
+
 
 def stop_service(pid_file: Path, force: bool) -> None:
     """
@@ -407,7 +409,7 @@ def _ensure_cpp_daemon_binary() -> Path:
     try:
         import importlib.resources as ir  # py3.9+
 
-        pkg = ir.files("tensorcast").joinpath("bin", "tensorcast_daemon")
+        pkg = ir.files("tensorcast").joinpath("bin").joinpath("tensorcast_daemon")
         p = Path(str(pkg))
         if p.exists() and os.access(p, os.X_OK):
             return p
@@ -552,3 +554,7 @@ def _start_cpp_daemon_service(
     click.echo(
         "StoreDaemon launched in background. Use 'tensorcast status' to check readiness, 'tensorcast stop' to stop it."
     )
+
+
+def _metrics_pid_file(pid_file: Path) -> Path:  # Deprecated; kept for import stability
+    return pid_file  # No-op; auxiliary metrics server removed

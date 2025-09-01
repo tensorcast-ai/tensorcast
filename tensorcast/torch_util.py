@@ -9,10 +9,13 @@ import uuid
 from pathlib import Path
 
 import torch
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.logger import init_logger
+from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
 logger = init_logger(__name__)
 # Global daemon address configuration
@@ -277,6 +280,9 @@ def load_dict(
         If wait_for_completion=False: Tuple of (state_dict, confirm_fn) where
             confirm_fn() -> bool indicates if loading succeeded
     """
+    # Ensure client-side OTel is initialized in a library-friendly manner.
+    ensure_client_otel("tensorcast-client", role="client")
+    tracer = trace.get_tracer(__name__)
     client = DaemonCtl(get_daemon_address())
 
     # Respect explicit empty string ("") to mean "use disk_path as-is".
@@ -334,29 +340,60 @@ def load_dict(
 
     # If CUDA is not available, or daemon is unavailable at runtime, fall back to local disk loading.
     if not torch.cuda.is_available():
-        return load_dict_from_disk(
-            artifact_dir,
-            device_id=device_id_int,
-            storage_path="",
-        )
-
-    try:
-        result = client.load_into_gpu(
-            str(disk_path),
-            replica_uuid,
-            device_uuid,
-            pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-            wait_for_completion=wait_for_completion,
-        )
-    except RuntimeError as e:
-        # Gracefully degrade to local load when daemon is not running
-        if "Local StoreDaemon" in str(e) or "not available" in str(e):
+        with tracer.start_as_current_span(
+            "Client/LoadDictLocal", kind=SpanKind.INTERNAL
+        ):
+            set_span_attributes(
+                {
+                    "tc.disk.path": str(disk_path),
+                    "tc.device.id": int(device_id_int),
+                    "tc.source": "disk",
+                }
+            )
             return load_dict_from_disk(
                 artifact_dir,
                 device_id=device_id_int,
                 storage_path="",
             )
-        raise
+
+    with tracer.start_as_current_span("Client/LoadDictDaemon", kind=SpanKind.INTERNAL):
+        set_span_attributes(
+            {
+                "tc.disk.path": str(disk_path),
+                "tc.device.id": int(device_id_int),
+                "tc.source": "daemon",
+                "tc.pinned_allocation_timeout_ms": int(pinned_allocation_timeout_ms),
+                "tc.wait_for_completion": bool(wait_for_completion),
+            }
+        )
+        try:
+            result = client.load_into_gpu(
+                str(disk_path),
+                replica_uuid,
+                device_uuid,
+                pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
+                wait_for_completion=wait_for_completion,
+            )
+        except RuntimeError as e:
+            # Gracefully degrade to local load when daemon is not running
+            if "Local StoreDaemon" in str(e) or "not available" in str(e):
+                with tracer.start_as_current_span(
+                    "Client/LoadDictLocalFallback", kind=SpanKind.INTERNAL
+                ):
+                    set_span_attributes(
+                        {
+                            "tc.disk.path": str(disk_path),
+                            "tc.device.id": int(device_id_int),
+                            "tc.source": "disk",
+                            "tc.fallback": True,
+                        }
+                    )
+                    return load_dict_from_disk(
+                        artifact_dir,
+                        device_id=device_id_int,
+                        storage_path="",
+                    )
+            raise
 
     if wait_for_completion:
         cuda_memory_handle = result
@@ -590,19 +627,32 @@ def register_artifact(
         tensor_index_v2, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
 
-    # Begin registration with inline index data
+    # Begin registration with inline index data, wrapped with an OTel span
+    ensure_client_otel("tensorcast-client", role="client")
+    tracer = trace.get_tracer(__name__)
     ctl = DaemonCtl(daemon_address or get_daemon_address())
-    begin = ctl.begin_register_artifact(
-        artifact_id=artifact_id,
-        device_id=target_device_id,
-        total_size_bytes=total_size_bytes,
-        enable_p2p=enable_p2p,
-        ttl_ms=ttl_ms if ttl_ms is not None else 0,
-        tensor_index_data=index_bytes,
-        encoding="json",
-        schema_version="v2",
-        timeout_s=60.0,
-    )
+    with tracer.start_as_current_span(
+        "Client/RegisterArtifact", kind=SpanKind.INTERNAL
+    ):
+        set_span_attributes(
+            {
+                "tc.artifact.id": artifact_id,
+                "tc.device.id": int(target_device_id),
+                "tc.size.bytes": int(total_size_bytes),
+                "tc.enable_p2p": bool(enable_p2p),
+            }
+        )
+        begin = ctl.begin_register_artifact(
+            artifact_id=artifact_id,
+            device_id=target_device_id,
+            total_size_bytes=total_size_bytes,
+            enable_p2p=enable_p2p,
+            ttl_ms=ttl_ms if ttl_ms is not None else 0,
+            tensor_index_data=index_bytes,
+            encoding="json",
+            schema_version="v2",
+            timeout_s=60.0,
+        )
 
     cuda_handle = begin["daemon_ipc_handle"]
     # Map daemon-owned memory into this process

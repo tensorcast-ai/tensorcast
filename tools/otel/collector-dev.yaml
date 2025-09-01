@@ -1,0 +1,57 @@
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+      http: {}
+  # NEW: scrape Global Store Prometheus metrics for local verification
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'tensorcast-global-store'
+          scrape_interval: 5s
+          static_configs:
+            - targets: ['127.0.0.1:8001','host.docker.internal:8001']
+        - job_name: 'tensorcast-store-daemon'
+          scrape_interval: 5s
+          static_configs:
+            - targets: ['127.0.0.1:9091','host.docker.internal:9091']
+  # NEW: collect enriched log files produced by C++ daemon sink and Python
+  # optional file logs (if configured). Adjust include globs to your paths.
+  filelog:
+    include: [ /tmp/tensorcast-*.log ]
+    start_at: beginning
+    operators:
+      # Parse a simple key=value pattern for trace/span IDs if present
+      - type: regex_parser
+        regex: '^(?P<ts>[^ ]+)\s+(?P<sev>[IWEF])\s+tid=\d+\s+[^ ]+\s+trace_id=(?P<trace_id>[0-9a-f]{32}|-)\s+span_id=(?P<span_id>[0-9a-f]{16}|-)\s+(?P<body>.*)$'
+        parse_from: body
+      - type: add
+        field: resource.service.name
+        value: tensorcast-dev
+processors:
+  batch: {}
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+exporters:
+  otlphttp/tempo:
+    endpoint: http://localhost:4318
+  prometheus:
+    endpoint: 0.0.0.0:9464
+  # NEW: console-style debug exporter for quick local inspection (replaces deprecated logging exporter)
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/tempo, debug]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp, filelog]
+      processors: [batch]
+      exporters: [otlphttp/tempo, debug]

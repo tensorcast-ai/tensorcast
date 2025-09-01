@@ -4,8 +4,31 @@
 """Client and server classes corresponding to protobuf-defined services."""
 
 import grpc
+import warnings
 
 import tensorcast.proto.store_daemon_pb2 as store__daemon__pb2
+
+GRPC_GENERATED_VERSION = "1.73.1"
+GRPC_VERSION = grpc.__version__
+_version_not_supported = False
+
+try:
+    from grpc._utilities import first_version_is_lower
+
+    _version_not_supported = first_version_is_lower(
+        GRPC_VERSION, GRPC_GENERATED_VERSION
+    )
+except ImportError:
+    _version_not_supported = True
+
+if _version_not_supported:
+    raise RuntimeError(
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in store_daemon_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
+    )
 
 
 class StoreDaemonStub(object):
@@ -21,71 +44,85 @@ class StoreDaemonStub(object):
             "/store_daemon.StoreDaemon/MaterializeReplica",
             request_serializer=store__daemon__pb2.MaterializeReplicaRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.MaterializeReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.ConfirmReplica = channel.unary_unary(
             "/store_daemon.StoreDaemon/ConfirmReplica",
             request_serializer=store__daemon__pb2.ConfirmReplicaRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.ConfirmReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.UnloadReplica = channel.unary_unary(
             "/store_daemon.StoreDaemon/UnloadReplica",
             request_serializer=store__daemon__pb2.UnloadReplicaRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.UnloadReplicaResponse.FromString,
+            _registered_method=True,
         )
         self.ClearMem = channel.unary_unary(
             "/store_daemon.StoreDaemon/ClearMem",
             request_serializer=store__daemon__pb2.ClearMemRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.ClearMemResponse.FromString,
+            _registered_method=True,
         )
         self.GetServerConfig = channel.unary_unary(
             "/store_daemon.StoreDaemon/GetServerConfig",
             request_serializer=store__daemon__pb2.GetServerConfigRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetServerConfigResponse.FromString,
+            _registered_method=True,
         )
         self.GetWorkerStatus = channel.unary_unary(
             "/store_daemon.StoreDaemon/GetWorkerStatus",
             request_serializer=store__daemon__pb2.GetWorkerStatusRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetWorkerStatusResponse.FromString,
+            _registered_method=True,
         )
         self.WaitReplicaVerification = channel.unary_unary(
             "/store_daemon.StoreDaemon/WaitReplicaVerification",
             request_serializer=store__daemon__pb2.ReplicaVerificationRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.ReplicaVerificationResponse.FromString,
+            _registered_method=True,
         )
         self.GetDetailedStatus = channel.unary_unary(
             "/store_daemon.StoreDaemon/GetDetailedStatus",
             request_serializer=store__daemon__pb2.GetDetailedStatusRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetDetailedStatusResponse.FromString,
+            _registered_method=True,
         )
         self.GetLoadedReplicas = channel.unary_unary(
             "/store_daemon.StoreDaemon/GetLoadedReplicas",
             request_serializer=store__daemon__pb2.GetLoadedReplicasRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.GetLoadedReplicasResponse.FromString,
+            _registered_method=True,
         )
         self.LockTransportChunks = channel.unary_unary(
             "/store_daemon.StoreDaemon/LockTransportChunks",
             request_serializer=store__daemon__pb2.LockChunksRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.LockChunksResponse.FromString,
+            _registered_method=True,
         )
         self.UnlockTransportChunks = channel.unary_unary(
             "/store_daemon.StoreDaemon/UnlockTransportChunks",
             request_serializer=store__daemon__pb2.UnlockChunksRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.UnlockChunksResponse.FromString,
+            _registered_method=True,
         )
         self.BeginRegisterArtifact = channel.unary_unary(
             "/store_daemon.StoreDaemon/BeginRegisterArtifact",
             request_serializer=store__daemon__pb2.BeginRegisterArtifactRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.BeginRegisterArtifactResponse.FromString,
+            _registered_method=True,
         )
         self.CommitRegisteredArtifact = channel.unary_unary(
             "/store_daemon.StoreDaemon/CommitRegisteredArtifact",
             request_serializer=store__daemon__pb2.CommitRegisteredArtifactRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.CommitRegisteredArtifactResponse.FromString,
+            _registered_method=True,
         )
         self.AbortRegisteredArtifact = channel.unary_unary(
             "/store_daemon.StoreDaemon/AbortRegisteredArtifact",
             request_serializer=store__daemon__pb2.AbortRegisteredArtifactRequest.SerializeToString,
             response_deserializer=store__daemon__pb2.AbortRegisteredArtifactResponse.FromString,
+            _registered_method=True,
         )
 
 
@@ -268,6 +305,9 @@ def add_StoreDaemonServicer_to_server(servicer, server):
         "store_daemon.StoreDaemon", rpc_method_handlers
     )
     server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers(
+        "store_daemon.StoreDaemon", rpc_method_handlers
+    )
 
 
 # This class is part of an EXPERIMENTAL API.
@@ -301,6 +341,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -330,6 +371,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -359,6 +401,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -388,6 +431,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -417,6 +461,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -446,6 +491,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -475,6 +521,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -504,6 +551,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -533,6 +581,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -562,6 +611,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -591,6 +641,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -620,6 +671,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -649,6 +701,7 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )
 
     @staticmethod
@@ -678,4 +731,5 @@ class StoreDaemon(object):
             wait_for_ready,
             timeout,
             metadata,
+            _registered_method=True,
         )

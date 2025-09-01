@@ -180,56 +180,78 @@ sc_cc_library(
     deps = [
         ":cuda_api_lib",
         ":error_handling_lib",
-        ":metric_objects_lib",
+        # removed metric_objects_lib
         ":system_capabilities_lib",
         "//core/store/replica:chunk_meta",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
-# Metrics - Registry (must come first as metric_objects.h includes it)
-sc_cc_library(
-    name = "metrics_registry_lib",
-    srcs = ["metrics/metrics_registry.cc"],
-    hdrs = ["metrics/metrics_registry.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/synchronization",
-        "@abseil-cpp//absl/time",
-    ],
-)
-
-# Metrics - Metric objects
-sc_header_only_library(
-    name = "metric_objects_lib",
-    hdrs = ["metrics/metric_objects.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":metrics_registry_lib",
-        "@abseil-cpp//absl/time",
-    ],
-)
-
-# Metrics - Export
-sc_cc_library(
-    name = "metrics_export_lib",
-    srcs = ["metrics/metrics_export.cc"],
-    hdrs = ["metrics/metrics_export.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":metrics_registry_lib",
-        "@nlohmann_json//:json",
-    ],
-)
+## Metrics - OpenTelemetry wrappers (header-only)
+## metric_objects_lib removed; use OpenTelemetry API directly
 
 # Tracing - Context
 sc_header_only_library(
     name = "trace_ctx_lib",
     hdrs = ["trace/trace_ctx.h"],
     visibility = ["//visibility:public"],
+)
+
+# OpenTelemetry - gRPC propagation helpers (header-only)
+sc_header_only_library(
+    name = "otel_grpc_propagation_lib",
+    hdrs = ["otel/grpc_propagation.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+# OpenTelemetry - build-time config header (header-only)
+
+# OpenTelemetry - TraceScope bridge (header-only)
+sc_header_only_library(
+    name = "otel_trace_scope_bridge_hdr",
+    hdrs = ["otel/trace_scope_bridge.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "otel_init_lib",
+    srcs = ["otel/init.cc"],
+    hdrs = ["otel/init.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+        # Explicitly depend on SDK trace/resource to avoid relying on exporter transitive deps
+        "@opentelemetry-cpp//sdk/src/trace:trace",
+        "@opentelemetry-cpp//sdk/src/logs:logs",
+        "@opentelemetry-cpp//sdk/src/resource:resource",
+        "@opentelemetry-cpp//sdk/src/metrics:metrics",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_metric_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_metric_exporter",
+    ],
+)
+
+# OpenTelemetry - absl LogSink injecting trace/span context (optional)
+sc_cc_library(
+    name = "otel_log_sink_lib",
+    srcs = ["otel/logging_sink.cc"],
+    hdrs = ["otel/logging_sink.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
+    ],
 )
 
 # Tracing - CUDA async functions
@@ -248,6 +270,7 @@ sc_header_only_library(
     hdrs = ["trace/trace_macros.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":otel_trace_scope_bridge_hdr",
         ":trace_manager_lib",
         ":trace_scope_lib",
     ],
@@ -331,16 +354,7 @@ cc_test(
     ],
 )
 
-# Test for metrics
-cc_test(
-    name = "metrics_test",
-    srcs = ["metrics/metrics_test.cc"],
-    deps = [
-        ":metric_objects_lib",
-        "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)
+## Legacy metrics test removed – metrics now use OTel API
 
 # Aggregate target for backward compatibility
 # This should be phased out in favor of specific dependencies
@@ -357,9 +371,6 @@ sc_cc_library(
         ":distributed_virtual_memory_pool_lib",
         ":error_handling_lib",
         ":logging_init_lib",
-        ":metric_objects_lib",
-        ":metrics_export_lib",
-        ":metrics_registry_lib",
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",

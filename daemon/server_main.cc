@@ -6,6 +6,8 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/log/log.h"
+#include "core/common/otel/init.h"
+#include "core/common/otel/logging_sink.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
@@ -41,6 +43,11 @@ ABSL_FLAG(double, gpu_memory_limit_fraction, 0.75, "GPU memory usage threshold t
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
+
+  // Initialize OpenTelemetry C++ SDK from environment (optional, idempotent)
+  (void)tensorcast::obs::InitFromEnv("tensorcast-store-daemon", "store-daemon");
+  // Optionally install log sink that enriches logs with trace_id/span_id
+  tensorcast::obs::InstallOtelLogSinkFromEnv();
 
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = absl::GetFlag(FLAGS_storage_path);

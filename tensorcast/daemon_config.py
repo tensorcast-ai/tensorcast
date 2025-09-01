@@ -129,10 +129,9 @@ class ServerConfig(BaseModel):
 
 
 class NetworkConfig(BaseModel):
-    """Ports for data, metrics and health-checks."""
+    """Ports for data transfer and health checks."""
 
     p2p_port: int = Field(default=9090, ge=1, le=65535)
-    metrics_port: int = Field(default=9091, ge=1, le=65535)
     health_check_port: int | None = Field(default=8080, ge=1, le=65535)
 
     model_config = ConfigDict(extra="forbid")

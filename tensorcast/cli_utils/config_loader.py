@@ -111,8 +111,6 @@ def _load_from_cli(cli_args: dict[str, Any]) -> StoreDaemonConfig:
     # Update network config with CLI args
     if cli_args.get("p2p_port") is not None:
         network_config.p2p_port = cli_args["p2p_port"]
-    if cli_args.get("metrics_port") is not None:
-        network_config.metrics_port = cli_args["metrics_port"]
     if cli_args.get("health_check_port") is not None:
         network_config.health_check_port = cli_args["health_check_port"]
 
@@ -166,5 +164,4 @@ def print_config_summary(config: StoreDaemonConfig) -> None:
         f"Communication: {'Enabled' if config.server.enable_p2p_engine else 'Disabled'}"
     )
     click.echo(f"Global Store: {config.global_store_address}")
-    # Metrics are exported via a unified system; no HTTP endpoint.
     click.echo("=" * 60)

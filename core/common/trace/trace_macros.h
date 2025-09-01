@@ -5,9 +5,11 @@
 
 // NOLINTBEGIN(unused-includes)
 #include <future>
+#include "core/common/otel/trace_scope_bridge.h"
 #include "core/common/trace/trace_ctx.h"
 #include "core/common/trace/trace_manager.h"
 #include "core/common/trace/trace_scope.h"
+//
 // NOLINTEND(unused-includes)
 
 // ---------------------------------------------------------------------------
@@ -17,7 +19,8 @@
 #define _SC_TRACE_SCOPE_IMPL_EX(artifact_id, request_id, stage)                                \
   ::tensorcast::store::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
   ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__ {                                    \
+  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
+  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                    \
     artifact_id, stage                                                                         \
   }
 
@@ -26,7 +29,9 @@
       ::tensorcast::store::TraceManager::current_request_id());                   \
   ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__( \
       ::tensorcast::store::TraceManager::current_artifact_id());                  \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__ {                       \
+  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{                        \
+      ::tensorcast::store::TraceManager::current_artifact_id(), stage};           \
+  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {       \
     ::tensorcast::store::TraceManager::current_artifact_id(), stage               \
   }
 
@@ -48,7 +53,8 @@
   ::tensorcast::store::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
   ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
   ::tensorcast::store::TraceSummaryGuard _trace_summary_guard_##__LINE__(artifact_id);         \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__ {                                    \
+  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
+  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                    \
     artifact_id, stage                                                                         \
   }
 
