@@ -106,17 +106,7 @@ def start_service(
         verbose=verbose,
     )
 
-    # If running in background mode, also spawn a lightweight HTTP server
-    # exposing the C++ metrics registry at /metrics so Prometheus/OTel Collector
-    # can scrape StoreDaemon metrics.
-    if not blocking:
-        try:
-            listen_addr = f"{config.server.host}:{config.server.port}"
-            _spawn_metrics_http_server(
-                config.network.metrics_port, listen_addr, pid_file
-            )
-        except Exception as e:
-            click.echo(f"Warning: failed to start metrics HTTP server: {e}", err=True)
+    # No auxiliary HTTP server is spawned. Metrics export is handled elsewhere.
 
 
 def stop_service(pid_file: Path, force: bool) -> None:
@@ -149,8 +139,6 @@ def stop_service(pid_file: Path, force: bool) -> None:
     if stop_process(pid, force=force):
         click.echo(f"StoreDaemon (PID {pid}) stopped successfully")
         cleanup_pid_file(pid_file)
-        # Attempt to stop the auxiliary metrics HTTP server if present
-        _stop_metrics_http_server(pid_file)
     else:
         raise ServiceError(f"Failed to stop process {pid}")
 
@@ -421,7 +409,7 @@ def _ensure_cpp_daemon_binary() -> Path:
     try:
         import importlib.resources as ir  # py3.9+
 
-        pkg = ir.files("tensorcast").joinpath("bin", "tensorcast_daemon")
+        pkg = ir.files("tensorcast").joinpath("bin").joinpath("tensorcast_daemon")
         p = Path(str(pkg))
         if p.exists() and os.access(p, os.X_OK):
             return p
@@ -568,62 +556,5 @@ def _start_cpp_daemon_service(
     )
 
 
-def _metrics_pid_file(pid_file: Path) -> Path:
-    return pid_file.with_name(pid_file.stem + ".metrics.pid")
-
-
-def _spawn_metrics_http_server(port: int, daemon_addr: str, pid_file: Path) -> None:
-    """Start daemon metrics HTTP server as a detached background process.
-
-    The process PID is written next to the main PID file with suffix `.metrics.pid`.
-    """
-    metrics_log = pid_file.with_name(pid_file.stem + ".metrics.log")
-    cmd = [
-        sys.executable,
-        "-m",
-        "tensorcast.daemon_metrics_http",
-        "--port",
-        str(port),
-        "--daemon-addr",
-        daemon_addr,
-    ]
-    try:
-        metrics_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(metrics_log, "a", buffering=1) as log_fd:
-            proc = subprocess.Popen(
-                cmd, stdout=log_fd, stderr=log_fd, stdin=subprocess.DEVNULL
-            )
-    except Exception as e:  # noqa: BLE001
-        raise ServiceError(f"Failed to start metrics HTTP server: {e}") from e
-
-    # Write auxiliary PID file
-    try:
-        _metrics_pid_file(pid_file).write_text(str(proc.pid))
-        logger.info(
-            "(bg) metrics HTTP PID %d written to %s",
-            proc.pid,
-            _metrics_pid_file(pid_file),
-        )
-    except Exception as e:
-        click.echo(f"Warning: failed to write metrics PID file: {e}", err=True)
-
-
-def _stop_metrics_http_server(pid_file: Path) -> None:
-    """Stop the metrics HTTP server using its PID file if present."""
-    m_pid_path = _metrics_pid_file(pid_file)
-    try:
-        if not m_pid_path.exists():
-            return
-        raw = m_pid_path.read_text().strip()
-        if not raw:
-            return
-        m_pid = int(raw)
-        stop_process(m_pid, force=True)
-        from contextlib import suppress
-
-        with suppress(Exception):
-            m_pid_path.unlink()
-        click.echo(f"Stopped metrics HTTP server (PID {m_pid})")
-    except Exception:
-        # Best-effort only
-        pass
+def _metrics_pid_file(pid_file: Path) -> Path:  # Deprecated; kept for import stability
+    return pid_file  # No-op; auxiliary metrics server removed

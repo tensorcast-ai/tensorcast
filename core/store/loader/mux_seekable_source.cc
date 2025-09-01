@@ -44,9 +44,10 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
       VLOG(1) << "MuxSeekableSource: primary read_at failed: " << st.status();
       // Metrics: record fallback due to primary error
       try {
-        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
+        static const metrics::Counter kFallbackChunks("tc_fallback_chunks_total");
         kFallbackChunks.with_labels({{"reason", "primary_error"}}).inc();
       } catch (...) {
+        VLOG(1) << "metrics counter tc_fallback_chunks_total unavailable";
       }
     }
   }
@@ -71,9 +72,10 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     if (total_read == bytes) {
       // Metrics: record fallback due to short read (primary delivered fewer bytes than requested)
       try {
-        static const metrics::Counter kFallbackChunks("fallback_chunks_total");
+        static const metrics::Counter kFallbackChunks("tc_fallback_chunks_total");
         kFallbackChunks.with_labels({{"reason", "short_read"}}).inc();
       } catch (...) {
+        VLOG(1) << "metrics counter tc_fallback_chunks_total unavailable";
       }
     }
   }

@@ -236,6 +236,3 @@ class CommunicationManager:
 
 
 def create_store_engine(config: Dict[str, Any]) -> StoreEngine: ...
-
-
-def get_global_metrics_text() -> bytes: ...

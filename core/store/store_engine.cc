@@ -39,13 +39,11 @@
 #include "core/store/loader/source_hash.h"
 #include "core/store/loading/replica_registration_helper.h"
 
-#include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
 
 namespace tensorcast::store {
-namespace {} // namespace
 // (hashing utilities moved to core/common/artifact_hash.*)
 // Forward declaration for GPU eviction helper defined later in this file.
 absl::Status try_evict_gpu_memory_impl(

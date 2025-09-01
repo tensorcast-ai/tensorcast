@@ -107,11 +107,11 @@ bazel-bin/daemon/tensorcast_daemon \\
 - The daemon no longer serves metrics directly. Use the lightweight sidecar to expose `tc_*` metrics via `/metrics`:
 
 ```
-uv run -m tensorcast.daemon_metrics_http --daemon-addr 127.0.0.1:50051 --port 9091
+# Metrics HTTP sidecar has been removed. Use central observability pipeline.
 ```
 
 Metrics include, e.g.:
 - `tc_memory_pool_bytes{location=cpu|gpu,device_id?,memory_type=total|free}`
 - `tc_p2p_bytes_total`
 
-Note: When starting via `tensorcast cli start --non-blocking`, the sidecar is spawned automatically on `network.metrics_port`.
+Note: The HTTP metrics sidecar is no longer spawned by the CLI.

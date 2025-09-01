@@ -15,8 +15,6 @@ MetricsCollector::MetricsCollector()
       tc_artifact_load_seconds_("tc_artifact_load_seconds") {
   // Initialize tc_* metrics with zero values
   tc_memory_pool_bytes_cpu_available_.set(0.0);
-  tc_p2p_bytes_total_.inc(0.0);
-  tc_artifact_load_seconds_.observe(0.0);
 }
 
 void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool& memory_pool) {

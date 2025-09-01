@@ -22,6 +22,9 @@
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src
 -Iexternal/gsl+
+-Iexternal/opentelemetry-cpp+/api/include
+-Iexternal/opentelemetry-cpp+/sdk/include
+-Iexternal/opentelemetry-cpp+/exporters/otlp/include
 
 -I.venv/lib/python3.10/site-packages/torch/include
 -I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include

@@ -192,7 +192,7 @@ graph TD
     end
 
     subgraph "Python Layer"
-        GMF[get_global_metrics_text<br/>C++ binding]
+        GMF[OTel Metrics Exporter]
         GC[GlobalMetricsCollector]
         PY[Python Metrics]
         PR[Prometheus Registry]
@@ -214,7 +214,7 @@ graph TD
    - Supports Counter, Gauge, and Histogram metric types
    - Any C++ component can update metrics without knowing about Python
 
-2. **Export**: The `get_global_metrics_text()` function (exposed to Python) exports all metrics in OpenMetrics format
+2. **Export**: Metrics are exported via OpenTelemetry (OTLP). Configure Collector `receivers: otlp` for metrics.
 
 3. The exporter parses the C++ metrics snapshot and converts to Prometheus types
    - Automatically detects metric types based on naming conventions (`*_total` → counter)

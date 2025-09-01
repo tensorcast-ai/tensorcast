@@ -2,36 +2,39 @@
 
 #pragma once
 
-// Lightweight value objects providing a **minimal** Prometheus-style API on
-// top of the global `MetricsRegistry` singleton.  The wrappers trade a few
-// extra CPU cycles (due to the registry lookup performed on every update)
-// for maximum convenience and are therefore intended for *infrequent* metric
-// updates outside tight inner loops.
-//
-// Example:
-//   #include "core/common/metrics/metric_objects.h"
-//
-//   tensorcast::metrics::Counter requests_total("my_requests_total");
-//   requests_total.Inc();
-//
-//   tensorcast::metrics::Gauge pending("my_queue_pending");
-//   pending.Set(42);
-//   pending.Dec();
-//
-// These helpers are **header-only** and introduce no additional link-time
-// dependency – they simply forward to the underlying `MetricsRegistry`.
+// Lightweight wrappers providing a minimal API over OpenTelemetry Metrics.
+// They replace the legacy MetricsRegistry-based helpers and record directly to
+// the global OpenTelemetry MeterProvider.
 
+#include <atomic>
+#include <map>
 #include <string>
 #include <unordered_set>
 #include <utility>
 
-#include "core/common/metrics/metrics_registry.h"
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::metrics {
 
+// Keep the public Labels alias used across call sites
+using Labels = std::vector<std::pair<std::string, std::string>>;
+
+namespace detail {
+inline opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> get_meter() {
+  return opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+}
+} // namespace detail
+
 class Counter {
  public:
-  explicit Counter(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {}
+  explicit Counter(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {
+    auto meter = detail::get_meter();
+    counter_ = meter->CreateDoubleCounter(name_.c_str());
+  }
 
   // ------------------------------------------------------------------
   // Helper to create a *child* metric instance that carries an additional
@@ -64,7 +67,14 @@ class Counter {
 
   // Increment the counter by `amount` (defaults to 1.0).
   void inc(double amount = 1.0) const {
-    MetricsRegistry::instance().increment_counter(name_, labels_, amount);
+    if (!counter_)
+      return;
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs_storage;
+    for (const auto& kv : labels_) {
+      attrs_storage.emplace(kv.first, opentelemetry::common::AttributeValue(kv.second));
+    }
+    counter_->Add(
+        amount, opentelemetry::common::KeyValueIterableView(attrs_storage), opentelemetry::context::Context{});
   }
 
   // Convenience alias – mirrors Prometheus client API.
@@ -75,11 +85,15 @@ class Counter {
  private:
   std::string name_;
   Labels labels_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> counter_;
 };
 
 class Gauge {
  public:
-  explicit Gauge(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {}
+  explicit Gauge(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {
+    auto meter = detail::get_meter();
+    updown_counter_ = meter->CreateDoubleUpDownCounter(name_.c_str());
+  }
 
   // Create a derived Gauge with extra labels (non-destructive).
   [[nodiscard]] Gauge with_labels(const Labels& extra_labels) const {
@@ -99,12 +113,31 @@ class Gauge {
 
   // Set the gauge to an explicit value.
   void set(double value) const {
-    MetricsRegistry::instance().set_gauge(name_, labels_, value);
+    double old = last_value_.load(std::memory_order_relaxed);
+    double delta = value - old;
+    last_value_.store(value, std::memory_order_relaxed);
+    if (updown_counter_) {
+      std::map<std::string, opentelemetry::common::AttributeValue> attrs_storage;
+      for (const auto& kv : labels_) {
+        attrs_storage.emplace(kv.first, opentelemetry::common::AttributeValue(kv.second));
+      }
+      updown_counter_->Add(
+          delta, opentelemetry::common::KeyValueIterableView(attrs_storage), opentelemetry::context::Context{});
+    }
   }
 
   // Increment (or decrement when `amount` is negative) the gauge atomically.
   void add(double amount = 1.0) const {
-    MetricsRegistry::instance().add_gauge(name_, labels_, amount);
+    const double old_val = last_value_.load(std::memory_order_relaxed);
+    last_value_.store(old_val + amount, std::memory_order_relaxed);
+    if (updown_counter_) {
+      std::map<std::string, opentelemetry::common::AttributeValue> attrs_storage;
+      for (const auto& kv : labels_) {
+        attrs_storage.emplace(kv.first, opentelemetry::common::AttributeValue(kv.second));
+      }
+      updown_counter_->Add(
+          amount, opentelemetry::common::KeyValueIterableView(attrs_storage), opentelemetry::context::Context{});
+    }
   }
 
   // Increment by +1.
@@ -120,11 +153,16 @@ class Gauge {
  private:
   std::string name_;
   Labels labels_;
+  mutable std::atomic<double> last_value_{0.0};
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::UpDownCounter<double>> updown_counter_;
 };
 
 class Histogram {
  public:
-  explicit Histogram(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {}
+  explicit Histogram(std::string name, Labels labels = {}) : name_(std::move(name)), labels_(std::move(labels)) {
+    auto meter = detail::get_meter();
+    histogram_ = meter->CreateDoubleHistogram(name_.c_str());
+  }
 
   // Return a Histogram observing the same metric *name* with an additional
   // set of labels merged onto the base labels.
@@ -145,12 +183,20 @@ class Histogram {
 
   // Record an observation.
   void observe(double value) const {
-    MetricsRegistry::instance().observe_histogram(name_, labels_, value);
+    if (!histogram_)
+      return;
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs_storage;
+    for (const auto& kv : labels_) {
+      attrs_storage.emplace(kv.first, opentelemetry::common::AttributeValue(kv.second));
+    }
+    histogram_->Record(
+        value, opentelemetry::common::KeyValueIterableView(attrs_storage), opentelemetry::context::Context{});
   }
 
  private:
   std::string name_;
   Labels labels_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> histogram_;
 };
 
 } // namespace tensorcast::metrics

@@ -152,6 +152,7 @@ sc_cc_library(
         "//core/common:pinned_memory_pool_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 

@@ -13,7 +13,6 @@
 #include "absl/status/statusor.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/memory_location.h"
-#include "core/common/metrics/metrics_export.h"
 #include "core/communicator/engine/communicator_config.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
@@ -536,14 +535,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           },
           "Return a list of (total, free) GPU memory stats for each CUDA device.");
 
-  // Add global metrics function
-  m.def(
-      "get_global_metrics_text",
-      []() {
-        const std::string text = tensorcast::metrics::get_global_metrics_text();
-        return py::bytes(text);
-      },
-      "Get the global metrics snapshot in OpenMetrics text format");
+  // Deprecated: legacy OpenMetrics text exporter removed; no Python binding.
 
   // ------------------------------------------------------------------
   // Phase-2: factory function accepting a Python dict and constructing a

@@ -8,9 +8,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from opentelemetry import trace
+
 # Default format with detailed context
 _FORMAT = (
-    "%(levelname)s %(asctime)s [%(threadName)s %(thread)d] "
+    "%(levelname)s %(asctime)s [%(threadName)s] "
     "trace_id=%(trace_id)s span_id=%(span_id)s "
     "%(filename)s:%(lineno)d: %(message)s"
 )
@@ -87,55 +89,77 @@ def setup_logging(
         h.setFormatter(fmt)
 
     # Attach a filter that injects OpenTelemetry trace_id/span_id into log records
-    # Allow disabling via environment to avoid overhead in hot paths
-    if _env_truthy(os.getenv("TC_LOG_OTEL_CONTEXT_ENABLED", "1")) and not _env_truthy(
-        os.getenv("OTEL_SDK_DISABLED")
-    ):
+    _prev_factory = logging.getLogRecordFactory()
 
-        class _OtelContextFilter(logging.Filter):
-            """Inject OpenTelemetry trace_id/span_id into log records.
+    def _record_factory(*args, **kwargs):
+        record = _prev_factory(*args, **kwargs)
+        if not hasattr(record, "trace_id"):
+            record.trace_id = "-"
+        if not hasattr(record, "span_id"):
+            record.span_id = "-"
 
-            Tolerant of missing OpenTelemetry dependencies and always ensures the
-            fields exist to avoid formatting KeyError.
-            """
+        span = trace.get_current_span()
+        if span is not None:
+            ctx = span.get_span_context()
+            tid = getattr(ctx, "trace_id", 0)
+            sid = getattr(ctx, "span_id", 0)
+            if tid:
+                record.trace_id = f"{tid:032x}"
+            if sid:
+                record.span_id = f"{sid:016x}"
+        return record
 
-            def __init__(self) -> None:
-                super().__init__()
-                try:
-                    from opentelemetry import trace as _trace
+    logging.setLogRecordFactory(_record_factory)
 
-                    self._trace = _trace
-                except Exception:  # OTEL not installed
-                    self._trace = None
+    class _OtelContextFilter(logging.Filter):
+        """Inject OpenTelemetry trace_id/span_id into log records.
 
-            def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
-                # Default placeholders prevent formatter failures when tracing is off
-                if not hasattr(record, "trace_id"):
-                    record.trace_id = "-"
-                if not hasattr(record, "span_id"):
-                    record.span_id = "-"
+        Tolerant of missing OpenTelemetry dependencies and always ensures the
+        fields exist to avoid formatting KeyError.
+        """
 
-                try:
-                    if self._trace is None:
-                        return True
-                    span = self._trace.get_current_span()
-                    if span is None:
-                        return True
-                    ctx = span.get_span_context()
-                    # ctx may be invalid if no active span
-                    trace_id = getattr(ctx, "trace_id", 0)
-                    span_id = getattr(ctx, "span_id", 0)
-                    if trace_id:
-                        record.trace_id = f"{trace_id:032x}"
-                    if span_id:
-                        record.span_id = f"{span_id:016x}"
-                except Exception:
-                    # Best-effort only; never block logging
-                    pass
-                return True
+        def __init__(self) -> None:
+            super().__init__()
+            try:
+                from opentelemetry import trace as _trace
 
-        root_logger = logging.getLogger()
-        root_logger.addFilter(_OtelContextFilter())
+                self._trace = _trace
+            except Exception:  # OTEL not installed
+                self._trace = None
+
+        def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+            # Default placeholders prevent formatter failures when tracing is off
+            if not hasattr(record, "trace_id"):
+                record.trace_id = "-"
+            if not hasattr(record, "span_id"):
+                record.span_id = "-"
+
+            try:
+                if self._trace is None:
+                    return True
+                span = self._trace.get_current_span()
+                if span is None:
+                    return True
+                ctx = span.get_span_context()
+                # ctx may be invalid if no active span
+                trace_id = getattr(ctx, "trace_id", 0)
+                span_id = getattr(ctx, "span_id", 0)
+                if trace_id:
+                    record.trace_id = f"{trace_id:032x}"
+                if span_id:
+                    record.span_id = f"{span_id:016x}"
+            except Exception:
+                # Best-effort only; never block logging
+                pass
+            return True
+
+    root_logger = logging.getLogger()
+    _filter_instance = _OtelContextFilter()
+    # Attach to all handlers so records passing through root handlers get enriched
+    for _h in root_logger.handlers:
+        _h.addFilter(_filter_instance)
+    # Also attach to root logger as a fallback
+    root_logger.addFilter(_filter_instance)
 
     # Ensure tensorcast logger uses same level
     logging.getLogger("tensorcast").setLevel(log_level)

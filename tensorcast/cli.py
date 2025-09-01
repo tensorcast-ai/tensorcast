@@ -91,12 +91,6 @@ def cli():
     help="p2p data transfer port (default: 9090)",
 )
 @click.option(
-    "--metrics-port",
-    default=9091,
-    type=int,
-    help="Prometheus metrics port (default: 9091)",
-)
-@click.option(
     "--health-check-port",
     default=8080,
     type=int,

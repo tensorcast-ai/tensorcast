@@ -27,7 +27,7 @@ namespace tensorcast::obs {
 
 namespace {
 
-inline bool Truthy(const char* v) {
+inline bool truthy(const char* v) {
   if (!v)
     return false;
   std::string s(v);
@@ -125,13 +125,15 @@ std::unique_ptr<OtelLogSink> g_sink;
 } // namespace
 
 void InstallOtelLogSinkFromEnv() {
-  if (g_installed.load(std::memory_order_acquire))
+  if (g_installed.load(std::memory_order_acquire)) {
     return;
+  }
 
-  const bool enabled = Truthy(std::getenv("TC_LOG_OTEL_CONTEXT_ENABLED")) ||
+  const bool enabled = truthy(std::getenv("TC_LOG_OTEL_CONTEXT_ENABLED")) ||
       (std::getenv("TC_LOG_OTEL_CONTEXT_ENABLED") == nullptr); // default on
-  if (!enabled)
+  if (!enabled) {
     return;
+  }
 
   const char* path = std::getenv("TC_LOG_SINK_FILE");
   if (!path || std::string(path).empty()) {
@@ -147,8 +149,9 @@ void InstallOtelLogSinkFromEnv() {
 }
 
 void RemoveOtelLogSink() {
-  if (!g_installed.load(std::memory_order_acquire))
+  if (!g_installed.load(std::memory_order_acquire)) {
     return;
+  }
   if (g_sink) {
     absl::RemoveLogSink(g_sink.get());
     g_sink.reset();

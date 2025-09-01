@@ -189,39 +189,13 @@ sc_cc_library(
     ],
 )
 
-# Metrics - Registry (must come first as metric_objects.h includes it)
-sc_cc_library(
-    name = "metrics_registry_lib",
-    srcs = ["metrics/metrics_registry.cc"],
-    hdrs = ["metrics/metrics_registry.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/synchronization",
-        "@abseil-cpp//absl/time",
-    ],
-)
-
-# Metrics - Metric objects
+## Metrics - OpenTelemetry wrappers (header-only)
 sc_header_only_library(
     name = "metric_objects_lib",
     hdrs = ["metrics/metric_objects.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":metrics_registry_lib",
-        "@abseil-cpp//absl/time",
-    ],
-)
-
-# Metrics - Export
-sc_cc_library(
-    name = "metrics_export_lib",
-    srcs = ["metrics/metrics_export.cc"],
-    hdrs = ["metrics/metrics_export.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":metrics_registry_lib",
-        "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -264,6 +238,10 @@ sc_cc_library(
         # Keep headers-only dependency; actual SDK exporters are intentionally
         # not linked by default to avoid unresolved symbols in Bazel package.
         "@opentelemetry-cpp//sdk:headers",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_grpc_metric_exporter",
+        "@opentelemetry-cpp//exporters/otlp:otlp_http_metric_exporter",
     ],
 )
 
@@ -380,16 +358,7 @@ cc_test(
     ],
 )
 
-# Test for metrics
-cc_test(
-    name = "metrics_test",
-    srcs = ["metrics/metrics_test.cc"],
-    deps = [
-        ":metric_objects_lib",
-        "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)
+## Legacy metrics test removed – metrics now use OTel API
 
 # Aggregate target for backward compatibility
 # This should be phased out in favor of specific dependencies
@@ -407,8 +376,6 @@ sc_cc_library(
         ":error_handling_lib",
         ":logging_init_lib",
         ":metric_objects_lib",
-        ":metrics_export_lib",
-        ":metrics_registry_lib",
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",

@@ -466,7 +466,7 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   }
   // Metrics: bytes written
   try {
-    static const metrics::Counter kWriteBytes("dvmp_write_bytes_total");
+    static const metrics::Counter kWriteBytes("tc_dvmp_write_bytes_total");
     kWriteBytes.inc(static_cast<double>(bytes));
   } catch (...) {
     VLOG(1) << "metrics counter kWriteBytes unavailable";
@@ -528,7 +528,7 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
   }
   // Metrics: bytes mapped
   try {
-    static const metrics::Counter kMapBytes("dvmp_map_bytes_total");
+    static const metrics::Counter kMapBytes("tc_dvmp_map_bytes_total");
     uint64_t total = 0;
     for (const auto& s : segs) {
       total += s.length;
@@ -692,7 +692,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
 
   // Metrics: record a pin-lease acquisition event for external safety/export.
   try {
-    static const metrics::Counter kPinLeasesTotal("dvmp_pin_leases_total");
+    static const metrics::Counter kPinLeasesTotal("tc_dvmp_pin_leases_total");
     kPinLeasesTotal.with_labels({{"reason", std::string(reason)}}).inc();
   } catch (...) {
     VLOG(1) << "metrics counter kPinLeasesTotal unavailable";

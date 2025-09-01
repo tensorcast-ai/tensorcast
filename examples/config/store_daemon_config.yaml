@@ -22,7 +22,6 @@ high_availability:
 # Network ports
 network:
   p2p_port: 65090
-  metrics_port: 65091
   health_check_port: 62080
 
 # Lifecycle & eviction
