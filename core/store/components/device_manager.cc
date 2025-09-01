@@ -4,11 +4,38 @@
 
 #include <cstdio>
 #include "core/common/cuda_api.h"
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/metrics/provider.h"
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
 namespace tensorcast::store {
+
+void DeviceManager::gpu_mem_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept {
+  auto* self = static_cast<DeviceManager*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  for (const auto& [device_id, info] : self->gpu_info_map_) {
+    obs->Observe(
+        static_cast<double>(info.total_memory),
+        {{"location", opentelemetry::common::AttributeValue("gpu")},
+         {"device_id", opentelemetry::common::AttributeValue(std::to_string(device_id))},
+         {"memory_type", opentelemetry::common::AttributeValue("total")}});
+    obs->Observe(
+        static_cast<double>(info.free_memory),
+        {{"location", opentelemetry::common::AttributeValue("gpu")},
+         {"device_id", opentelemetry::common::AttributeValue(std::to_string(device_id))},
+         {"memory_type", opentelemetry::common::AttributeValue("free")}});
+  }
+}
 
 DeviceManager::DeviceManager() = default;
 
@@ -39,6 +66,11 @@ absl::Status DeviceManager::initialize() {
   }
 
   LOG(INFO) << "Initializing DeviceManager with " << num_gpus_ << " GPUs";
+
+  // Prepare OTel meter and ObservableGauge for GPU memory bytes
+  meter_ = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  gpu_memory_bytes_gauge_ = meter_->CreateDoubleObservableGauge("tc_memory_pool_bytes");
+  gpu_memory_bytes_gauge_->AddCallback(&DeviceManager::gpu_mem_bytes_callback, this);
 
   for (int i = 0; i < num_gpus_; ++i) {
     auto device_status = cuda::set_device(i);
@@ -87,7 +119,8 @@ absl::Status DeviceManager::initialize() {
     }
 
     // Initialize memory info
-    size_t free_mem, total_mem;
+    size_t free_mem;
+    size_t total_mem;
     auto mem_info_status = cuda::get_memory_info(&free_mem, &total_mem, i);
     if (!mem_info_status.ok()) {
       return mem_info_status;
@@ -95,20 +128,7 @@ absl::Status DeviceManager::initialize() {
     info.total_memory = total_mem;
     info.free_memory = free_mem;
 
-    // Unified tc_* gauges for GPU memory pool
-    std::string device_id_str = std::to_string(i);
-    tc_gpu_memory_total_gauges_.emplace(
-        i,
-        metrics::Gauge(
-            "tc_memory_pool_bytes", {{"location", "gpu"}, {"device_id", device_id_str}, {"memory_type", "total"}}));
-    tc_gpu_memory_free_gauges_.emplace(
-        i,
-        metrics::Gauge(
-            "tc_memory_pool_bytes", {{"location", "gpu"}, {"device_id", device_id_str}, {"memory_type", "free"}}));
-
-    // Set initial metric values
-    tc_gpu_memory_total_gauges_.at(i).set(static_cast<double>(total_mem));
-    tc_gpu_memory_free_gauges_.at(i).set(static_cast<double>(free_mem));
+    // Initial snapshot values are stored in gpu_info_map_ and emitted by the ObservableGauge callback
   }
 
   return absl::OkStatus();
@@ -146,11 +166,12 @@ void DeviceManager::update_gpu_metrics() {
       LOG(ERROR) << "Failed to set device " << device_id << " for metrics update: " << status.message();
       continue;
     }
-    size_t free_mem, total_mem;
+    size_t free_mem;
+    size_t total_mem;
     auto mem_status = cuda::get_memory_info(&free_mem, &total_mem, device_id);
     if (mem_status.ok()) {
-      tc_gpu_memory_free_gauges_.at(device_id).set(static_cast<double>(free_mem));
-      tc_gpu_memory_total_gauges_.at(device_id).set(static_cast<double>(total_mem));
+      gpu_info_map_[device_id].free_memory = free_mem;
+      gpu_info_map_[device_id].total_memory = total_mem;
     }
   }
 }
@@ -165,7 +186,8 @@ absl::StatusOr<size_t> DeviceManager::get_free_memory(int device_id) {
   if (!status.ok()) {
     return status;
   }
-  size_t free_mem, total_mem;
+  size_t free_mem;
+  size_t total_mem;
   auto final_mem_status = cuda::get_memory_info(&free_mem, &total_mem, device_id);
   if (!final_mem_status.ok()) {
     return final_mem_status;

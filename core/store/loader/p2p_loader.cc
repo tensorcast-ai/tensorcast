@@ -12,7 +12,6 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/common/metrics/metric_objects.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/mux_seekable_source.h"
 #include "core/store/loader/remote_key_source.h"

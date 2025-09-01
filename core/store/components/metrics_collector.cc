@@ -5,22 +5,47 @@
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/memory_types.h"
+
+#include <map>
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/observer_result.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store {
 
-MetricsCollector::MetricsCollector()
-    : tc_memory_pool_bytes_cpu_available_("tc_memory_pool_bytes", {{"location", "cpu"}, {"memory_type", "available"}}),
-      tc_p2p_bytes_total_("tc_p2p_bytes_total"),
-      tc_artifact_load_seconds_("tc_artifact_load_seconds") {
-  // Initialize tc_* metrics with zero values
-  tc_memory_pool_bytes_cpu_available_.set(0.0);
+void MetricsCollector::cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  obs->Observe(
+      self->cpu_available_bytes_last_,
+      {{"location", opentelemetry::common::AttributeValue("cpu")},
+       {"memory_type", opentelemetry::common::AttributeValue("available")}});
+}
+
+MetricsCollector::MetricsCollector() {
+  meter_ = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  p2p_bytes_total_ = meter_->CreateDoubleCounter("tc_p2p_bytes_total");
+  artifact_load_seconds_ = meter_->CreateDoubleHistogram("tc_artifact_load_seconds");
+
+  // Observable gauge for CPU available bytes
+  cpu_memory_available_gauge_ = meter_->CreateDoubleObservableGauge("tc_memory_pool_bytes");
+  cpu_memory_available_gauge_->AddCallback(&cpu_mem_available_callback, this);
 }
 
 void MetricsCollector::update_memory_pool_metrics(const PinnedMemoryPool& memory_pool) {
-  // Track available size in unified gauge only
+  // Track available size via ObservableGauge snapshot
   size_t available_size = memory_pool.get_available_size();
-  tc_memory_pool_bytes_cpu_available_.set(static_cast<double>(available_size));
+  cpu_available_bytes_last_ = static_cast<double>(available_size);
 }
 
 void MetricsCollector::update_replica_metrics(const ReplicaRegistry& replica_registry) {
@@ -29,8 +54,8 @@ void MetricsCollector::update_replica_metrics(const ReplicaRegistry& replica_reg
 }
 
 void MetricsCollector::update_gpu_metrics(DeviceManager& device_manager) {
-  // GPU metrics are updated within DeviceManager itself
-  device_manager.update_gpu_metrics();
+  // GPU metrics are exposed via DeviceManager's ObservableGauge; nothing to do here
+  (void)device_manager;
 }
 
 void MetricsCollector::record_operation(const std::string& operation_type, double duration_seconds) {
@@ -42,7 +67,7 @@ void MetricsCollector::record_operation(const std::string& operation_type, doubl
 void MetricsCollector::record_p2p_transfer(size_t bytes_transferred, bool success) {
   if (success) {
     // Unified counter for P2P throughput only
-    tc_p2p_bytes_total_.add(static_cast<double>(bytes_transferred));
+    p2p_bytes_total_->Add(static_cast<double>(bytes_transferred));
   }
 }
 
@@ -65,8 +90,12 @@ void MetricsCollector::record_artifact_load(
     const std::string& phase,
     double duration_seconds) {
   // Record into unified histogram with low-cardinality labels
-  tc_artifact_load_seconds_.with_labels({{"source", source}, {"device", device}, {"phase", phase}})
-      .observe(duration_seconds);
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("source", opentelemetry::common::AttributeValue(source));
+  attrs.emplace("device", opentelemetry::common::AttributeValue(device));
+  attrs.emplace("phase", opentelemetry::common::AttributeValue(phase));
+  artifact_load_seconds_->Record(
+      duration_seconds, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
 }
 
 } // namespace tensorcast::store

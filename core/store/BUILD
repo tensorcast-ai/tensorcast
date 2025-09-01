@@ -92,7 +92,6 @@ sc_cc_library(
         ":device_types",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
-        "//core/common:otel_link_deps_lib",
         "//core/store/replica:chunk_meta",
         "//proto:global_store_grpc_cpp",
         "@abseil-cpp//absl/strings:str_format",
@@ -108,7 +107,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:cuda_api_lib",
-        "//core/common:metric_objects_lib",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -148,7 +147,6 @@ sc_cc_library(
         ":memory_types",
         ":replica_registry",
         "//core/common:memory_location_lib",
-        "//core/common:metric_objects_lib",
         "//core/common:pinned_memory_pool_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
@@ -169,7 +167,6 @@ sc_cc_library(
         ":global_store_client",
         ":loading_spec",
         "//core/common:cuda_api_lib",
-        "//core/common:otel_link_deps_lib",
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
         "//core/store/replica:chunk_meta",
@@ -220,7 +217,6 @@ sc_cc_library(
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:otel_link_deps_lib",
         "//core/common:pinned_memory_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",

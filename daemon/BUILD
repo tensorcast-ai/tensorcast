@@ -35,7 +35,6 @@ cc_binary(
         ":grpc_service_impl",
         ":worker_lifecycle",
         "//core/common:otel_init_lib",
-        "//core/common:otel_link_deps_lib",
         "//core/common:otel_log_sink_lib",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",

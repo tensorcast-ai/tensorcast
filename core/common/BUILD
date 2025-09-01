@@ -180,24 +180,18 @@ sc_cc_library(
     deps = [
         ":cuda_api_lib",
         ":error_handling_lib",
-        ":metric_objects_lib",
+        # removed metric_objects_lib
         ":system_capabilities_lib",
         "//core/store/replica:chunk_meta",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
 ## Metrics - OpenTelemetry wrappers (header-only)
-sc_header_only_library(
-    name = "metric_objects_lib",
-    hdrs = ["metrics/metric_objects.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@opentelemetry-cpp//api:api",
-    ],
-)
+## metric_objects_lib removed; use OpenTelemetry API directly
 
 # Tracing - Context
 sc_header_only_library(
@@ -235,9 +229,11 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@opentelemetry-cpp//api:api",
-        # Keep headers-only dependency; actual SDK exporters are intentionally
-        # not linked by default to avoid unresolved symbols in Bazel package.
-        "@opentelemetry-cpp//sdk:headers",
+        # Explicitly depend on SDK trace/resource to avoid relying on exporter transitive deps
+        "@opentelemetry-cpp//sdk/src/trace:trace",
+        "@opentelemetry-cpp//sdk/src/log:log",
+        "@opentelemetry-cpp//sdk/src/resource:resource",
+        "@opentelemetry-cpp//sdk/src/metrics:metrics",
         "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
         "@opentelemetry-cpp//exporters/otlp:otlp_grpc_exporter",
         "@opentelemetry-cpp//exporters/otlp:otlp_grpc_metric_exporter",
@@ -375,7 +371,6 @@ sc_cc_library(
         ":distributed_virtual_memory_pool_lib",
         ":error_handling_lib",
         ":logging_init_lib",
-        ":metric_objects_lib",
         ":pinned_memory_lib",
         ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",
@@ -398,15 +393,4 @@ sc_cc_library(
     deps = [
         "@abseil-cpp//absl/log:absl_log",
     ],
-)
-
-# OpenTelemetry - link deps aggregator (force-link friendly)
-sc_cc_library(
-    name = "otel_link_deps_lib",
-    srcs = ["otel/link_deps_dummy.cc"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@opentelemetry-cpp//api:api",
-    ],
-    alwayslink = True,
 )

@@ -2,12 +2,11 @@
 
 #pragma once
 
-#include <memory>
 #include <string>
-#include <unordered_map>
 
-#include "core/common/memory/memory_location.h"
-#include "core/common/metrics/metric_objects.h"
+// OpenTelemetry Metrics API (types used in member declarations)
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/observer_result.h"
 
 namespace tensorcast::store {
 
@@ -97,10 +96,20 @@ class MetricsCollector {
       DeviceManager& device_manager);
 
  private:
-  // Unified tc_* metrics (Phase 3)
-  tensorcast::metrics::Gauge tc_memory_pool_bytes_cpu_available_;
-  tensorcast::metrics::Counter tc_p2p_bytes_total_;
-  tensorcast::metrics::Histogram tc_artifact_load_seconds_;
+  // ObservableGauge callback trampoline
+  static void cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+
+  // OTel Meter
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
+
+  // Synchronous instruments
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> p2p_bytes_total_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> artifact_load_seconds_;
+
+  // Async gauge for CPU memory available (exposes last observed value)
+  // We keep the latest snapshot here; the ObservableGauge callback reads it.
+  double cpu_available_bytes_last_ = 0.0;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> cpu_memory_available_gauge_;
 };
 
 } // namespace tensorcast::store

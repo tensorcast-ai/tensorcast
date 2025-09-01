@@ -7,7 +7,6 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
-#include "core/common/metrics/metric_objects.h"
 #include "core/store/device_registry.h"
 #include "core/store/replica/chunk_meta.h" // For chunk_state_to_string
 
