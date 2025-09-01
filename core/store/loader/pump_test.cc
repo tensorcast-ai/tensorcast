@@ -208,7 +208,10 @@ class MockBufferPool : public BufferPool {
 
   absl::StatusOr<int> get_free_chunk() override {
     std::unique_lock<std::mutex> lock(mutex_);
-    free_cv_.wait(lock, [this] { return !free_slots_.empty(); });
+    free_cv_.wait(lock, [this] { return !free_slots_.empty() || production_done_ || cancelled_; });
+    if (free_slots_.empty()) {
+      return absl::OutOfRangeError("No free chunks (shutdown or done)");
+    }
     int slot = free_slots_.front();
     free_slots_.pop_front();
     return slot;
@@ -237,7 +240,7 @@ class MockBufferPool : public BufferPool {
 
   absl::StatusOr<ReadyChunk> get_ready_chunk() override {
     std::unique_lock<std::mutex> lock(mutex_);
-    ready_cv_.wait(lock, [this] { return !ready_chunks_.empty() || production_done_ || error_on_get_; });
+    ready_cv_.wait(lock, [this] { return !ready_chunks_.empty() || production_done_ || error_on_get_ || cancelled_; });
 
     if (error_on_get_) {
       return absl::InternalError("Mock buffer pool error");
@@ -259,6 +262,7 @@ class MockBufferPool : public BufferPool {
       production_done_ = true;
     }
     ready_cv_.notify_all();
+    free_cv_.notify_all();
   }
 
   void* get_chunk_data_ptr(int slot_id) override {
@@ -266,6 +270,16 @@ class MockBufferPool : public BufferPool {
       return nullptr;
     }
     return chunks_[static_cast<size_t>(slot_id)].get();
+  }
+
+  void shutdown() override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cancelled_ = true;
+    }
+    // Wake all waiters
+    ready_cv_.notify_all();
+    free_cv_.notify_all();
   }
 
   void set_error_on_get(bool error) {
@@ -287,6 +301,7 @@ class MockBufferPool : public BufferPool {
   std::condition_variable ready_cv_;
   bool production_done_ = false;
   bool error_on_get_ = false;
+  bool cancelled_ = false;
 };
 
 TEST_CASE("Pump basic functionality", "[pump]") {

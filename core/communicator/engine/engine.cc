@@ -35,30 +35,31 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
       inited_(false),
       server_context_(new TcpContext()),
       client_context_(new TcpContext()),
-      enable_rdma_(cfg.enable_rdma),
-      mtcp_conn_count_(cfg.transport.tcp_conn_count),
-      ack_ttl_ms_(cfg.rdma.ack_ttl_ms),
+      enable_rdma_(cfg.enable_rdma()),
+      mtcp_conn_count_(cfg.transport().tcp_conn_count()),
+      ack_ttl_ms_(cfg.rdma().ack_ttl_ms()),
       config_(cfg),
       channel_expire_(channel_expire_sec) {
   common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
   gc_thread_ = std::thread([this]() { this->do_channel_gc_loop(); });
   // Apply typed config to TCP contexts
-  server_context_->set_connect_timeout(config_.transport.connect_timeout_sec);
-  client_context_->set_connect_timeout(config_.transport.connect_timeout_sec);
+  server_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
+  client_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
 
   // Default UMA-backed residency provider
   residency_provider_ = std::make_shared<UmaResidencyProvider>();
 
   // Staging resources sized from config
   const size_t gpu_chunk_size =
-      (config_.stager.stage_chunk_mb_gpu > 0 ? config_.stager.stage_chunk_mb_gpu : 16) * 1024ull * 1024ull;
+      (config_.stager().stage_chunk_mb_gpu() > 0 ? config_.stager().stage_chunk_mb_gpu() : 16) * 1024ull * 1024ull;
   const size_t cpu_chunk_size =
-      (config_.stager.stage_chunk_mb_cpu > 0 ? config_.stager.stage_chunk_mb_cpu : 4) * 1024ull * 1024ull;
-  const size_t num_buffers = (config_.stager.buffers_per_flow > 0 ? config_.stager.buffers_per_flow : 4);
+      (config_.stager().stage_chunk_mb_cpu() > 0 ? config_.stager().stage_chunk_mb_cpu() : 4) * 1024ull * 1024ull;
+  const size_t num_buffers = (config_.stager().buffers_per_flow() > 0 ? config_.stager().buffers_per_flow() : 4);
   const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
-  const size_t total_pool_size = config_.pool.pool_size_bytes > 0 ? config_.pool.pool_size_bytes
-                                                                  : gpu_chunk_size * (num_buffers + recv_num_buffers);
+  const size_t total_pool_size = config_.pool().pool_size_bytes() > 0
+      ? config_.pool().pool_size_bytes()
+      : gpu_chunk_size * (num_buffers + recv_num_buffers);
 
   // GPU staging pool and stager
   gpu_memory_pool_ = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
@@ -80,10 +81,11 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
     rdma_context_ = std::make_shared<RdmaContext>();
     mr_cache_ = std::make_unique<MrCache>();
     // Apply typed RDMA QP tuning
-    rdma_context_->set_qp_params(config_.rdma.traffic_class, config_.rdma.qp_timeout, config_.rdma.qp_retry);
+    rdma_context_->set_qp_params(
+        config_.rdma().traffic_class(), config_.rdma().qp_timeout(), config_.rdma().qp_retry());
 
-    if (config_.simple_numa.enable) {
-      for (const auto& node : config_.simple_numa.nodes) {
+    if (config_.simple_numa().enable()) {
+      for (const auto& node : config_.simple_numa().nodes()) {
         auto pool = std::make_shared<store::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
         numa_pools_.push_back(pool);
         auto cpu_stager = std::make_shared<DRAMStager>(
@@ -93,11 +95,11 @@ CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t cha
         }
         auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, pool);
         // Map GPU ids
-        for (int gid : node.gpus) {
+        for (int gid : node.gpus()) {
           gpu_mem_stagers_[gid] = gpu_mem_stager;
         }
         // Map NIC names
-        for (const auto& nic : node.nics) {
+        for (const auto& nic : node.nics()) {
           nic_cpu_stagers_[nic] = cpu_stager;
         }
       }
@@ -713,7 +715,7 @@ result_t CommunicateEngine::on_receive_request(
             channel->set_transport(transport);
           }
           // Apply typed MTCP tuning
-          transport->set_tcp_tos(config_.transport.tcp_tos);
+          transport->set_tcp_tos(config_.transport().tcp_tos());
           if (gpu_memory_stager_)
             transport->set_gpu_memory_stager(gpu_memory_stager_);
           if (gpu_memory_pool_)
@@ -914,7 +916,7 @@ result_t CommunicateEngine::on_receive_response(
           COMM_CHECK(t->send(req));
           channel->set_transport(transport);
         }
-        transport->set_tcp_tos(config_.transport.tcp_tos);
+        transport->set_tcp_tos(config_.transport().tcp_tos());
         if (gpu_memory_pool_)
           transport->set_memory_pool(gpu_memory_pool_);
         if (memory_stager_)

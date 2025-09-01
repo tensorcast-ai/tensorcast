@@ -8,6 +8,7 @@
 #include "absl/log/log.h"
 #include "core/common/otel/init.h"
 #include "core/common/otel/logging_sink.h"
+#include "core/communicator/config_io.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
@@ -27,8 +28,7 @@ ABSL_FLAG(size_t, chunk_size, 128ULL << 20, "Streaming chunk size (bytes)");
 ABSL_FLAG(int, io_threads, 10, "I/O worker threads for engine");
 ABSL_FLAG(bool, auto_register_disk_loads, false, "Automatically register disk loads with Global Store");
 ABSL_FLAG(std::string, global_store_addr, "", "Global Store address host:port");
-ABSL_FLAG(bool, enable_p2p_engine, false, "Enable P2P communication engine");
-ABSL_FLAG(bool, enable_rdma, false, "Enable RDMA within P2P engine");
+ABSL_FLAG(std::string, comm_config_path, "", "Path to communicator config (YAML/JSON). Enables P2P when provided.");
 ABSL_FLAG(bool, force_full_digest_on_load, false, "Compute full digest during load for verification");
 // RFC-0012 compatibility and lifecycle flags
 ABSL_FLAG(int, heartbeat_interval_ms, 5000, "Worker heartbeat interval to Global Store (ms)");
@@ -59,13 +59,19 @@ int main(int argc, char** argv) {
   opts.force_full_digest_on_load = absl::GetFlag(FLAGS_force_full_digest_on_load);
 
   std::shared_ptr<tensorcast::store::CommunicationManager> comm_mgr;
-  if (absl::GetFlag(FLAGS_enable_p2p_engine)) {
-    comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
-    auto st = comm_mgr->initialize("0.0.0.0", absl::GetFlag(FLAGS_p2p_port), absl::GetFlag(FLAGS_enable_rdma));
-    if (!st.ok()) {
-      LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
+  if (!absl::GetFlag(FLAGS_comm_config_path).empty()) {
+    auto cfg_or =
+        tensorcast::communicator::configio::LoadCommunicatorConfigFromFile(absl::GetFlag(FLAGS_comm_config_path));
+    if (!cfg_or.ok()) {
+      LOG(WARNING) << "Failed to load communicator config: " << cfg_or.status();
     } else {
-      opts.comm_manager = comm_mgr;
+      comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+      auto st = comm_mgr->initialize_with_config("0.0.0.0", absl::GetFlag(FLAGS_p2p_port), cfg_or.value());
+      if (!st.ok()) {
+        LOG(WARNING) << "Failed to initialize communication engine (config): " << st.message();
+      } else {
+        opts.comm_manager = comm_mgr;
+      }
     }
   }
 

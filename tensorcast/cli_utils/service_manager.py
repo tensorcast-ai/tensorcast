@@ -440,11 +440,25 @@ def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
         f"--chunk_size={chunk}",
         f"--io_threads={config.server.num_threads}",
     ]
-    # P2P engine toggles
+    # P2P engine toggles via file-only communicator config
     if config.server.enable_p2p_engine:
-        args.append("--enable_p2p_engine=true")
-        if config.server.enable_rdma:
-            args.append("--enable_rdma=true")
+        # Prefer explicit communicator sub-config if provided, otherwise synthesize minimal YAML
+        import tempfile
+
+        import yaml as _yaml
+
+        comm_cfg = (
+            config.communicator.model_dump(mode="python", by_alias=False)
+            if config.communicator is not None
+            else {"enable_rdma": bool(config.server.enable_rdma)}
+        )
+        # Write to a temporary file that lives for the duration of the daemon process
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
+            prefix="tc_comm_", suffix=".yaml", delete=False
+        )
+        tmp.write(_yaml.safe_dump(comm_cfg, sort_keys=False).encode("utf-8"))
+        tmp.flush()
+        args.append(f"--comm_config_path={tmp.name}")
     # Global access policy for P2P
     args.append(
         f"--enable_p2p_access={'true' if config.server.enable_p2p_access else 'false'}"

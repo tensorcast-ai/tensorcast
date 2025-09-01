@@ -36,6 +36,7 @@ cc_binary(
         ":worker_lifecycle",
         "//core/common:otel_init_lib",
         "//core/common:otel_log_sink_lib",
+        "//core/communicator:config_io_lib",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",

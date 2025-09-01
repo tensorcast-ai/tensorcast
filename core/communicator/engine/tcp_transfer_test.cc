@@ -31,14 +31,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
 
     // Create source and target engines in TCP mode
     communicator::CommunicatorConfig cfg1;
-    cfg1.enable_rdma = false; /* disable RDMA */
+    cfg1.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::CommunicatorConfig cfg2;
-    cfg2.enable_rdma = false; /* disable RDMA */
+    cfg2.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
@@ -108,14 +108,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
 
     // Create source engine in TCP mode
     communicator::CommunicatorConfig cfg3;
-    cfg3.enable_rdma = false; /* disable RDMA */
+    cfg3.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::CommunicatorConfig cfg4;
-    cfg4.enable_rdma = false; /* disable RDMA */
+    cfg4.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
@@ -187,14 +187,14 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     REQUIRE(target_port > 0);
 
     communicator::CommunicatorConfig cfg5;
-    cfg5.enable_rdma = false; /* disable RDMA */
+    cfg5.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg5);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::CommunicatorConfig cfg6;
-    cfg6.enable_rdma = false; /* disable RDMA */
+    cfg6.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg6);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());

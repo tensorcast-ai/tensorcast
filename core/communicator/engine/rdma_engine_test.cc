@@ -21,11 +21,11 @@ struct RdmaTestFixture {
 
   RdmaTestFixture() {
     communicator::CommunicatorConfig srv_cfg;
-    srv_cfg.enable_rdma = true;
+    srv_cfg.set_enable_rdma(true);
     server_ = new communicator::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     communicator::CommunicatorConfig cli_cfg;
-    cli_cfg.enable_rdma = true;
+    cli_cfg.set_enable_rdma(true);
     client_ = new communicator::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 

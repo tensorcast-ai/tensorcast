@@ -57,7 +57,7 @@ root_dir=$(dirname "$current_dir")
 
 # Build C++ proto/grpc headers for both services (if present)
 echo "Building C++ proto targets..."
-bazel build //proto:global_store_grpc //proto:store_daemon_grpc \
+bazel build //proto:global_store_grpc //proto:store_daemon_grpc //proto:communicator_config_cc \
   //proto:common_grpc || {
   echo "Error: Failed to build proto targets" >&2
   exit 1

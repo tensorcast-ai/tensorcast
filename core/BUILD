@@ -7,6 +7,7 @@ cc_library(
     deps = [
         "//core/checkpoint",
         "//core/common",
+        "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
         "//core/store:store_engine",
     ],
