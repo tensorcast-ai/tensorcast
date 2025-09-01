@@ -1,5 +1,5 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_grpc_compile", "cpp_grpc_library")
+load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_grpc_compile", "cpp_grpc_library", "cpp_proto_compile", "cpp_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -38,4 +38,15 @@ cpp_grpc_library(
 proto_library(
     name = "communicator_config_proto",
     srcs = ["communicator_config.proto"],
+)
+
+# Generate C++ protobuf for communicator config (no gRPC services)
+cpp_proto_compile(
+    name = "communicator_config_cc",
+    protos = [":communicator_config_proto"],
+)
+
+cpp_proto_library(
+    name = "communicator_config_cc_lib",
+    protos = [":communicator_config_proto"],
 )

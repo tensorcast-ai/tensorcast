@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package communicator;
+package tensorcast.communicator;
 
 // Typed configuration for the communicator engine and staging behavior.
 
@@ -14,6 +14,10 @@ message StagerConfig {
 message RdmaConfig {
   int32 outstanding_wr = 1;             // default: 64
   uint32 ack_ttl_ms = 2;                // default: 30000
+  // RDMA QP tuning
+  int32 traffic_class = 3;              // default: 186 (TOS)
+  int32 qp_timeout = 4;                 // default: 20
+  int32 qp_retry = 5;                   // default: 7
 }
 
 message PoolConfig {
@@ -24,6 +28,8 @@ message PoolConfig {
 
 message TransportConfig {
   int32 tcp_conn_count = 1;             // default: 8
+  int32 tcp_tos = 2;                    // default: 0 (no change)
+  int32 connect_timeout_sec = 3;        // default: 10
 }
 
 message AffinityConfig {

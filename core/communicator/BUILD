@@ -336,7 +336,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":channel_lib",
-        ":communicator_config_lib",
         ":constants_lib",
         ":dram_stager_lib",
         ":gpu_net_stager_lib",
@@ -355,6 +354,7 @@ sc_cc_library(
         "//core/common:pinned_memory_pool_lib",
         "//core/common:system_capabilities_lib",
         "//core/store:uma_lease_provider",
+        "//proto:communicator_config_cc_lib",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
@@ -378,11 +378,20 @@ sc_cc_library(
     ],
 )
 
-# Communicator typed config (header-only for now)
-sc_header_only_library(
-    name = "communicator_config_lib",
-    hdrs = ["engine/communicator_config.h"],
+## Removed: communicator_config_lib (no adapter; use protobuf directly)
+
+# YAML/JSON loader for communicator config
+sc_cc_library(
+    name = "config_io_lib",
+    srcs = ["config_io.cc"],
+    hdrs = ["config_io.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//proto:communicator_config_cc_lib",
+        "@nlohmann_json//:json",
+        "@protobuf",
+        "@yaml-cpp//:yaml-cpp",
+    ],
 )
 
 # Aggregate target removed; depend on specific libs instead.
@@ -404,6 +413,16 @@ cc_test(
     srcs = ["engine/tcp_engine_test.cc"],
     deps = [
         ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "config_io_test",
+    srcs = ["config_io_test.cc"],
+    deps = [
+        ":config_io_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

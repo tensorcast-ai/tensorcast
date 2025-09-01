@@ -72,8 +72,7 @@ Key runtime flags (mapped from YAML config):
 - `--global_store_addr`: set when `global_store_address` is configured
 - `--heartbeat_interval_ms`: `high_availability.heartbeat_interval_ms`
 - `--chunk_sync_interval_ms`: `high_availability.chunk_sync_interval_ms` (0 disables)
-- `--enable_p2p_engine`: `server.enable_p2p_engine`
-- `--enable_rdma`: `server.enable_rdma`
+- `--comm_config_path`: path to communicator YAML/JSON (enables P2P/RDMA)
 - `--enable_p2p_access`: `server.enable_p2p_access` (global access policy)
 - `--confirm_requires_disk_path`: `server.confirm_requires_disk_path`
 - `--verification_timeout_status`: `server.verification_timeout_status` (ok|deadline)

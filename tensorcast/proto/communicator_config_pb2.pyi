@@ -30,13 +30,30 @@ class StagerConfig(_message.Message):
     ) -> None: ...
 
 class RdmaConfig(_message.Message):
-    __slots__ = ("outstanding_wr", "ack_ttl_ms")
+    __slots__ = (
+        "outstanding_wr",
+        "ack_ttl_ms",
+        "traffic_class",
+        "qp_timeout",
+        "qp_retry",
+    )
     OUTSTANDING_WR_FIELD_NUMBER: _ClassVar[int]
     ACK_TTL_MS_FIELD_NUMBER: _ClassVar[int]
+    TRAFFIC_CLASS_FIELD_NUMBER: _ClassVar[int]
+    QP_TIMEOUT_FIELD_NUMBER: _ClassVar[int]
+    QP_RETRY_FIELD_NUMBER: _ClassVar[int]
     outstanding_wr: int
     ack_ttl_ms: int
+    traffic_class: int
+    qp_timeout: int
+    qp_retry: int
     def __init__(
-        self, outstanding_wr: _Optional[int] = ..., ack_ttl_ms: _Optional[int] = ...
+        self,
+        outstanding_wr: _Optional[int] = ...,
+        ack_ttl_ms: _Optional[int] = ...,
+        traffic_class: _Optional[int] = ...,
+        qp_timeout: _Optional[int] = ...,
+        qp_retry: _Optional[int] = ...,
     ) -> None: ...
 
 class PoolConfig(_message.Message):
@@ -55,10 +72,19 @@ class PoolConfig(_message.Message):
     ) -> None: ...
 
 class TransportConfig(_message.Message):
-    __slots__ = ("tcp_conn_count",)
+    __slots__ = ("tcp_conn_count", "tcp_tos", "connect_timeout_sec")
     TCP_CONN_COUNT_FIELD_NUMBER: _ClassVar[int]
+    TCP_TOS_FIELD_NUMBER: _ClassVar[int]
+    CONNECT_TIMEOUT_SEC_FIELD_NUMBER: _ClassVar[int]
     tcp_conn_count: int
-    def __init__(self, tcp_conn_count: _Optional[int] = ...) -> None: ...
+    tcp_tos: int
+    connect_timeout_sec: int
+    def __init__(
+        self,
+        tcp_conn_count: _Optional[int] = ...,
+        tcp_tos: _Optional[int] = ...,
+        connect_timeout_sec: _Optional[int] = ...,
+    ) -> None: ...
 
 class AffinityConfig(_message.Message):
     __slots__ = ("enable",)

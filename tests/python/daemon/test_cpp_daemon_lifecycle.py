@@ -84,7 +84,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
     # Allocate ports
     listen_port = _get_free_port()
 
-    # Launch daemon with small pool and fake comm settings
+    # Launch daemon with small pool; P2P/RDMA not required for this test
     args = [
         str(bin_path),
         f"--listen_addr=127.0.0.1:{listen_port}",
@@ -93,7 +93,6 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         f"--chunk_size={1 * 1024 * 1024}",
         f"--io_threads=2",
         f"--global_store_addr=127.0.0.1:{gs_port}",
-        "--enable_p2p_engine=false",
         "--enable_p2p_access=true",
         "--heartbeat_interval_ms=500",
         "--chunk_sync_interval_ms=0",

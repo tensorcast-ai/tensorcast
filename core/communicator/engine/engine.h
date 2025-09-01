@@ -18,13 +18,13 @@
 
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/communicator_config.h"
 #include "core/communicator/engine/dram_stager.h"
 #include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
+#include "proto/communicator_config.pb.h"
 
 namespace tensorcast::communicator {
 

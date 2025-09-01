@@ -8,7 +8,7 @@
 
 int run_server() {
   tensorcast::communicator::CommunicatorConfig cfg;
-  cfg.enable_rdma = g_rdma;
+  cfg.set_enable_rdma(g_rdma);
   tensorcast::communicator::CommunicateEngine engine(cfg);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
@@ -26,7 +26,7 @@ int run_server() {
 
 int run_client() {
   tensorcast::communicator::CommunicatorConfig cfg;
-  cfg.enable_rdma = g_rdma;
+  cfg.set_enable_rdma(g_rdma);
   tensorcast::communicator::CommunicateEngine engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));
