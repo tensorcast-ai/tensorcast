@@ -231,7 +231,7 @@ sc_cc_library(
         "@opentelemetry-cpp//api:api",
         # Explicitly depend on SDK trace/resource to avoid relying on exporter transitive deps
         "@opentelemetry-cpp//sdk/src/trace:trace",
-        "@opentelemetry-cpp//sdk/src/log:log",
+        "@opentelemetry-cpp//sdk/src/logs:logs",
         "@opentelemetry-cpp//sdk/src/resource:resource",
         "@opentelemetry-cpp//sdk/src/metrics:metrics",
         "@opentelemetry-cpp//exporters/otlp:otlp_http_exporter",
