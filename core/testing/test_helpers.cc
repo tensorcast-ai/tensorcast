@@ -12,7 +12,7 @@
 
 #include "absl/log/log.h"
 
-namespace tensorcast::communicator::test {
+namespace tensorcast::testing {
 
 std::vector<uint8_t> create_test_pattern(std::size_t size, uint8_t seed) {
   std::vector<uint8_t> data(size);
@@ -68,4 +68,4 @@ int find_available_port(int base_port, int max_attempts) {
   return -1;
 }
 
-} // namespace tensorcast::communicator::test
+} // namespace tensorcast::testing

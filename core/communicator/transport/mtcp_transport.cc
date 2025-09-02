@@ -28,7 +28,7 @@
 
 #include <chrono>
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 MTcpTransportChunk::MTcpTransportChunk(uint8_t* addr, uint64_t len) : addr_(addr), len_(len), timer_(true) {}
 
@@ -59,14 +59,14 @@ void MTcpTransportTask::stop() {
   while (!send_queue_.empty()) {
     auto data = send_queue_.pop();
     if (data != nullptr) {
-      data->set_result(TRANSPORT_FAILED);
+      data->set_result(misc::TRANSPORT_FAILED);
     }
   }
 
   while (!recv_queue_.empty()) {
     auto data = recv_queue_.pop();
     if (data != nullptr) {
-      data->set_result(TRANSPORT_FAILED);
+      data->set_result(misc::TRANSPORT_FAILED);
     }
   }
 
@@ -120,7 +120,7 @@ void MTcpTransportTask::recv_loop() {
   }
 }
 
-result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
+misc::result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
   ssize_t remain_bytes = size;
   ssize_t offset = 0;
   ssize_t bytes;
@@ -128,7 +128,7 @@ result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
     bytes = ::recv(sock_fd_, buf + offset, remain_bytes, 0);
     if (bytes <= 0) {
       LOG(WARNING) << "MTcpTransportTask recv error " << strerror(errno) << " remain_bytes=" << remain_bytes;
-      return SYS_ERROR;
+      return misc::SYS_ERROR;
     } else if (bytes < remain_bytes) {
       remain_bytes -= bytes;
       offset += bytes;
@@ -136,10 +136,10 @@ result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
       remain_bytes = 0;
     }
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
+misc::result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
   ssize_t remain_bytes = size;
   ssize_t offset = 0;
   ssize_t bytes;
@@ -147,7 +147,7 @@ result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
     bytes = ::send(sock_fd_, buf + offset, remain_bytes, 0);
     if (bytes <= 0) {
       LOG(WARNING) << "MTcpTransportTask send error " << strerror(errno) << " remain_bytes=" << remain_bytes;
-      return SYS_ERROR;
+      return misc::SYS_ERROR;
     } else if (bytes < remain_bytes) {
       remain_bytes -= bytes;
       offset += bytes;
@@ -155,7 +155,7 @@ result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
       remain_bytes = 0;
     }
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 MTcpTransport::MTcpTransport(int conn_count)
@@ -167,11 +167,11 @@ MTcpTransport::MTcpTransport(int conn_count)
       stop_(false),
       closed_(false),
       ready_(false) {
-  ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
-  ASSERT(conn_count <= kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
-  bzero(sock_fds_, kMaxTcpConns * sizeof(int));
+  misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
+  misc::ASSERT(conn_count <= base::kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
+  bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));
   bzero(&server_addr_, sizeof(struct sockaddr_in));
-  bzero(client_addrs_, sizeof(struct sockaddr_in) * kMaxTcpConns);
+  bzero(client_addrs_, sizeof(struct sockaddr_in) * base::kMaxTcpConns);
 }
 
 MTcpTransport::~MTcpTransport() {
@@ -220,9 +220,9 @@ MTcpTransport::~MTcpTransport() {
 int MTcpTransport::listen(const std::string& ip, uint16_t* port) {
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
-  CLEAR(server_addr_);
+  misc::CLEAR(server_addr_);
 
   server_addr_.sin_family = AF_INET;
   server_addr_.sin_addr.s_addr = inet_addr(ip.c_str());
@@ -231,14 +231,14 @@ int MTcpTransport::listen(const std::string& ip, uint16_t* port) {
   int ret = ::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&server_addr_), sizeof(server_addr_));
   if (ret < 0) {
     LOG(WARNING) << "failed to bind address " << ip << ":" << port;
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
   // Use a reasonable backlog to reduce risk of connection drops under concurrency
   ret = ::listen(listen_fd_, conn_count_);
   if (ret < 0) {
     LOG(WARNING) << "failed to listen address" << ip << ":" << port;
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
   socklen_t len = sizeof(server_addr_);
@@ -247,47 +247,47 @@ int MTcpTransport::listen(const std::string& ip, uint16_t* port) {
   send_thread_ = std::thread([this] { this->send_loop(); });
 
   *port = ntohs(server_addr_.sin_port);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 int MTcpTransport::connect(const std::string& ip, uint16_t port, int retry) {
   max_retry_ = retry;
-  CLEAR(server_addr_);
+  misc::CLEAR(server_addr_);
   server_addr_.sin_family = AF_INET;
   server_addr_.sin_addr.s_addr = inet_addr(ip.c_str());
   server_addr_.sin_port = htons(port);
 
   recv_thread_ = std::thread([this] { this->client_loop(); });
   send_thread_ = std::thread([this] { this->send_loop(); });
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t MTcpTransport::send(const write_request_t& msg) {
+misc::result_t MTcpTransport::send(const write_request_t& msg) {
   if (closed_.load()) {
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
   send_queue_.push(msg, true, -1);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t MTcpTransport::recv(const read_request_t& msg) {
+misc::result_t MTcpTransport::recv(const read_request_t& msg) {
   if (closed_.load()) {
     LOG(ERROR) << "[MTcpTransport::recv] Transport is closed, cannot process request";
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
   VLOG(1) << "[MTcpTransport::recv] Queueing read request: key=" << msg->get_key()
           << " bytes=" << msg->get_local_tensor()->get_bytes();
   recv_queue_.push(msg, true, -1);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 void MTcpTransport::set_conn_count(int conn_count) {
-  ASSERT(!ready_.load(), "failed to set connection count");
+  misc::ASSERT(!ready_.load(), "failed to set connection count");
   conn_count_ = conn_count;
 }
 
-void MTcpTransport::set_memory_pool(std::shared_ptr<store::PinnedMemoryPool> pool) {
+void MTcpTransport::set_memory_pool(std::shared_ptr<common::memory::PinnedMemoryPool> pool) {
   memory_pool_ = pool;
 }
 
@@ -485,7 +485,7 @@ void MTcpTransport::send_loop() {
                   // Fail all remaining work for this and subsequent chunks
                   for (; idx < conn_count_; idx++) {
                     auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
-                    fail_chunk->set_result(TRANSPORT_FAILED);
+                    fail_chunk->set_result(misc::TRANSPORT_FAILED);
                     results.push_back(fail_chunk->get_future());
                   }
                   staging_failed = true;
@@ -577,7 +577,7 @@ void MTcpTransport::send_loop() {
                     // Fail remaining connections
                     for (; idx < conn_count_; idx++) {
                       auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
-                      fail_chunk->set_result(TRANSPORT_FAILED);
+                      fail_chunk->set_result(misc::TRANSPORT_FAILED);
                       results.push_back(fail_chunk->get_future());
                     }
                     staging_failed = true;
@@ -631,7 +631,7 @@ void MTcpTransport::send_loop() {
             // Fail this request
             for (; idx < conn_count_; idx++) {
               auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
-              fail_chunk->set_result(TRANSPORT_FAILED);
+              fail_chunk->set_result(misc::TRANSPORT_FAILED);
               results.push_back(fail_chunk->get_future());
             }
           }
@@ -642,7 +642,7 @@ void MTcpTransport::send_loop() {
           // Wait for all chunks of this request
           for (size_t i = 0; i < results.size(); ++i) {
             auto result = results[i].get();
-            if (result.status != SUCCESS) {
+            if (result.status != misc::SUCCESS) {
               LOG(ERROR) << "[MTcpTransport::send_loop] Chunk " << i << " failed for " << msg->tensor_key_;
             }
           }
@@ -685,7 +685,7 @@ void MTcpTransport::recv_loop() {
     std::vector<future_chunk_result_t> results;
 
     // Check if tensor is on GPU and needs staging
-    if (tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU) {
+    if (tensor->get_mem_type() == base::COMMUNICATE_ENGINE_DEV_GPU) {
       // Handle GPU tensor with staging - recv to CPU first, then copy to GPU
       VLOG(1) << "Receiving to GPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks with staging";
       LOG(INFO) << "[MTcpTransport::recv_loop] GPU recv starting for " << msg->get_key() << " bytes=" << bytes
@@ -720,7 +720,8 @@ void MTcpTransport::recv_loop() {
         // overlap network I/O and GPU copies, so four buffers is usually enough.
         size_t num_buffers = std::min(static_cast<size_t>(conn_count_), size_t(4));
 
-        gpu_recv_buffer_ = std::make_unique<store::StreamingPinnedBuffer>(num_buffers, pool_chunk_size, memory_pool_);
+        gpu_recv_buffer_ =
+            std::make_unique<common::memory::StreamingPinnedBuffer>(num_buffers, pool_chunk_size, memory_pool_);
 
         auto init_status = gpu_recv_buffer_->initialize();
         CHECK(init_status.ok()) << "Failed to initialize GPU receive buffer: " << init_status;
@@ -785,7 +786,7 @@ void MTcpTransport::recv_loop() {
                           << " waiting for sub-chunk recv to complete";
 
                 auto result = chunk_future.get();
-                if (result.status != SUCCESS) {
+                if (result.status != misc::SUCCESS) {
                   LOG(ERROR) << "[MTcpTransport::recv_loop] Async task #" << idx
                              << " sub-chunk recv failed, returning buffer";
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
@@ -802,7 +803,7 @@ void MTcpTransport::recv_loop() {
                 if (!guard.status().ok()) {
                   LOG(ERROR) << "Failed to set CUDA device: " << guard.status();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
-                  return {TRANSPORT_FAILED, result.cost};
+                  return {misc::TRANSPORT_FAILED, result.cost};
                 }
 
                 // Instrument H2D copy for GPU receive
@@ -819,7 +820,7 @@ void MTcpTransport::recv_loop() {
                   copy_span->SetAttribute("error", true);
                   copy_span->AddEvent("h2d_error");
                   copy_span->End();
-                  return {TRANSPORT_FAILED, result.cost};
+                  return {misc::TRANSPORT_FAILED, result.cost};
                 }
 
                 CHECK_OK(recv_buffer->return_chunk(slot_id));
@@ -837,7 +838,7 @@ void MTcpTransport::recv_loop() {
           // Fail all remaining high-level chunks (connections) if an error occurred
           for (; idx < conn_count_; idx++) {
             auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
-            fail_chunk->set_result(TRANSPORT_FAILED);
+            fail_chunk->set_result(misc::TRANSPORT_FAILED);
             results.push_back(fail_chunk->get_future());
           }
           break;
@@ -860,18 +861,18 @@ void MTcpTransport::recv_loop() {
       }
     }
 
-    result_t result = SUCCESS;
+    misc::result_t result = misc::SUCCESS;
     LOG(INFO) << "[MTcpTransport::recv_loop] Waiting for " << results.size() << " async operations for "
               << msg->get_key();
     for (size_t i = 0; i < results.size(); ++i) {
       auto chunk_result = results[i].get();
-      if (chunk_result.status != SUCCESS) {
+      if (chunk_result.status != misc::SUCCESS) {
         LOG(ERROR) << "[MTcpTransport::recv_loop] Chunk " << i << " failed for " << msg->get_key();
-        result = FAILED;
+        result = misc::FAILED;
       }
     }
 
-    if (result == SUCCESS) {
+    if (result == misc::SUCCESS) {
       msg->set_result(absl::OkStatus());
     } else {
       msg->set_result(absl::InternalError("failed to read chunk"));
@@ -879,13 +880,13 @@ void MTcpTransport::recv_loop() {
 
     // Debug trace for recv_loop – finished a ReadRequest with result
     VLOG(2) << "[MTcpTransport::recv_loop] Finished ReadRequest key=" << msg->get_key()
-            << " status=" << (result == SUCCESS ? "SUCCESS" : "FAILED");
+            << " status=" << (result == misc::SUCCESS ? "SUCCESS" : "FAILED");
   }
   closed_.store(true);
   ready_.store(false);
 }
 
-result_t MTcpTransport::init_socket_fd(int sock_fd) {
+misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {
   int opt = 1;
   int ret;
   ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&opt), sizeof(int));
@@ -925,7 +926,7 @@ result_t MTcpTransport::init_socket_fd(int sock_fd) {
     LOG(WARNING) << "failed to set zero copy" << errno << " " << strerror(errno);
   }
 
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

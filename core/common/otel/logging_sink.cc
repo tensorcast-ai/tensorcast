@@ -4,26 +4,20 @@
 
 #include <atomic>
 #include <cctype>
-#include <chrono>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 
 #include "absl/log/log.h"
 #include "absl/log/log_sink.h"
 #include "absl/log/log_sink_registry.h"
 #include "absl/strings/str_format.h"
-#include "absl/types/span.h"
 
 #include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/context.h"
-#include "opentelemetry/trace/provider.h"
-#include "opentelemetry/trace/scope.h"
-#include "opentelemetry/trace/span.h"
 
-namespace tensorcast::obs {
+namespace tensorcast::common::otel {
 
 namespace {
 
@@ -48,13 +42,15 @@ class OtelLogSink : public absl::LogSink {
 
   ~OtelLogSink() override {
     std::lock_guard<std::mutex> _lk(mu_);
-    if (file_.is_open())
+    if (file_.is_open()) {
       file_.flush();
+    }
     file_.close();
   }
 
   void Send(const absl::LogEntry& entry) override {
-    std::string trace_hex("-"), span_hex("-");
+    std::string trace_hex("-");
+    std::string span_hex("-");
 
     try {
       namespace otel = opentelemetry;
@@ -124,7 +120,7 @@ std::unique_ptr<OtelLogSink> g_sink;
 
 } // namespace
 
-void InstallOtelLogSinkFromEnv() {
+void install_otel_log_sink_from_env() {
   if (g_installed.load(std::memory_order_acquire)) {
     return;
   }
@@ -148,7 +144,7 @@ void InstallOtelLogSinkFromEnv() {
   LOG(INFO) << "Installed OTel log sink (file): " << path;
 }
 
-void RemoveOtelLogSink() {
+void remove_otel_log_sink() {
   if (!g_installed.load(std::memory_order_acquire)) {
     return;
   }
@@ -159,4 +155,4 @@ void RemoveOtelLogSink() {
   g_installed.store(false, std::memory_order_release);
 }
 
-} // namespace tensorcast::obs
+} // namespace tensorcast::common::otel

@@ -17,8 +17,11 @@
 #include "core/testing/test_helpers.h"
 
 using namespace tensorcast;
-using namespace tensorcast::communicator;
-using namespace tensorcast::communicator::test;
+using tensorcast::communicator::CommunicatorConfig;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+using tensorcast::communicator::engine::CommunicateEngine;
+using namespace tensorcast::testing;
 
 TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent]") {
   SKIP_IF_NO_CUDA();
@@ -45,7 +48,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register the tensor
-    communicator::CommunicateEngine::RegisterTensorOptions ro1;
+    CommunicateEngine::RegisterTensorOptions ro1;
     ro1.register_mr = false;
     ro1.needs_staging = true;
     ro1.async = false;
@@ -78,7 +81,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Start concurrent reads
-    std::vector<std::future<tensorcast::communicator::read_result_t>> futures;
+    std::vector<std::future<tensorcast::communicator::transport::read_result_t>> futures;
     futures.reserve(num_readers);
     for (int i = 0; i < num_readers; ++i) {
       futures.push_back(
@@ -216,7 +219,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       }
       source_ptrs.push_back(ptr);
 
-      communicator::CommunicateEngine::RegisterTensorOptions r;
+      CommunicateEngine::RegisterTensorOptions r;
       r.register_mr = false;
       r.needs_staging = (spec.source_type == COMMUNICATE_ENGINE_DEV_GPU);
       r.async = false;
@@ -227,7 +230,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     // Prepare target buffers and start transfers
     std::vector<void*> target_ptrs;
-    std::vector<std::future<tensorcast::communicator::read_result_t>> futures;
+    std::vector<std::future<tensorcast::communicator::transport::read_result_t>> futures;
 
     for (const auto& spec : transfers) {
       void* ptr = nullptr;
@@ -296,7 +299,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto test_data = create_test_pattern(tensor_size, 99);
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions ro2;
+    CommunicateEngine::RegisterTensorOptions ro2;
     ro2.register_mr = false;
     ro2.needs_staging = true;
     ro2.async = false;
@@ -431,7 +434,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions ro3;
+    CommunicateEngine::RegisterTensorOptions ro3;
     ro3.register_mr = false;
     ro3.needs_staging = true;
     ro3.async = false;
@@ -827,7 +830,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       gpu_ptrs.push_back(gpu_ptr);
 
       std::string tensor_name = "pressure_tensor_" + std::to_string(i);
-      communicator::CommunicateEngine::RegisterTensorOptions ro4;
+      CommunicateEngine::RegisterTensorOptions ro4;
       ro4.register_mr = false;
       ro4.needs_staging = true;
       ro4.async = false;
@@ -961,7 +964,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     const int num_holders = 2; // Equal to default staging buffers
     std::vector<std::shared_ptr<CommunicateEngine>> holder_engines;
     std::vector<void*> holder_buffers;
-    std::vector<std::future<tensorcast::communicator::read_result_t>> holder_futures;
+    std::vector<std::future<tensorcast::communicator::transport::read_result_t>> holder_futures;
 
     // Start reads that will occupy all staging buffers
     for (int i = 0; i < num_holders; ++i) {
@@ -996,7 +999,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     const int num_waiters = 3;
     std::vector<std::shared_ptr<CommunicateEngine>> waiter_engines;
     std::vector<void*> waiter_buffers;
-    std::vector<std::future<tensorcast::communicator::read_result_t>> waiter_futures;
+    std::vector<std::future<tensorcast::communicator::transport::read_result_t>> waiter_futures;
     std::atomic<int> waiters_started(0);
 
     // Pre-allocate futures vector to avoid race conditions

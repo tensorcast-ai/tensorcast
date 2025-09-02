@@ -13,17 +13,17 @@
 #include "core/communicator/misc/common.h"
 #include "core/communicator/transport/tcp_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
-typedef std::function<result_t(tcp_transport_t)> on_accept_func_t;
+typedef std::function<misc::result_t(transport::tcp_transport_t)> on_accept_func_t;
 
 class TcpContext {
  public:
   TcpContext();
   ~TcpContext();
 
-  result_t open(const std::string& ip, uint16_t port, on_accept_func_t func);
-  absl::StatusOr<tcp_transport_t> connect(const std::string& ip, uint16_t port);
+  misc::result_t open(const std::string& ip, uint16_t port, on_accept_func_t func);
+  absl::StatusOr<transport::tcp_transport_t> connect(const std::string& ip, uint16_t port);
 
   std::string get_local_ip() const;
 
@@ -33,8 +33,8 @@ class TcpContext {
   }
 
  protected:
-  result_t register_transport(TcpTransport* t);
-  result_t unregister_transport(TcpTransport* t);
+  misc::result_t register_transport(TcpTransport* t);
+  misc::result_t unregister_transport(TcpTransport* t);
 
  private:
   void listen_event_loop();
@@ -58,6 +58,6 @@ class TcpContext {
 };
 typedef std::shared_ptr<TcpContext> tcp_context_t;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_TCP_CONTEXT_H_

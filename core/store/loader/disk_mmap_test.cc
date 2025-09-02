@@ -14,9 +14,16 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
-using namespace tensorcast::memory;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::read_file_content;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu][mmap]") {
   // System page size

@@ -20,7 +20,7 @@
 #include "global_store.pb.h"
 #include "grpcpp/grpcpp.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 // Configuration for Global Store Client
 struct GlobalStoreClientConfig {
@@ -37,7 +37,7 @@ struct RemoteReplicaInfo {
   std::string node_address;
   uint32_t node_port;
   uint64_t memory_size;
-  MemoryLocation memory_type;
+  common::memory::MemoryLocation memory_type;
   uint32_t device_id;
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
@@ -73,7 +73,7 @@ class GlobalStoreClient {
       bool accepting_new_requests = true);
 
   // Enhanced heartbeat with HA state fields
-  absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+  absl::StatusOr<global::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
       bool accepting_new_requests,
@@ -81,7 +81,7 @@ class GlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      ::tensorcast::global::ConnectionStatus connection_status = ::tensorcast::global::CONNECTED);
+      global::ConnectionStatus connection_status = global::CONNECTED);
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
 
@@ -90,7 +90,7 @@ class GlobalStoreClient {
       std::string_view artifact_id,
       std::string_view worker_id,
       const DeviceKey& device,
-      MemoryLocation location,
+      common::memory::MemoryLocation location,
       uint64_t memory_size,
       uint32_t max_concurrency = 1);
 
@@ -129,7 +129,7 @@ class GlobalStoreClient {
     std::string node_id;
     std::string node_address;
     uint32_t p2p_port;
-    ChunkState state;
+    replica::ChunkState state;
     float node_load_ratio;
     std::string device_uuid;
     uint32_t replica;
@@ -141,14 +141,14 @@ class GlobalStoreClient {
 
   // HA State Synchronization
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
-      const ::tensorcast::global::WorkerLocalState& local_state,
+      const global::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<::tensorcast::global::StateChange>* out_changes);
+      std::vector<global::StateChange>* out_changes);
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<::common::ReplicaInfo>* out_expected_replicas);
+      std::vector<common::ReplicaInfo>* out_expected_replicas);
 
   bool is_connected() const;
 
@@ -156,7 +156,7 @@ class GlobalStoreClient {
   struct ChunkStateUpdate {
     std::string artifact_id;
     uint32_t chunk_idx{0};
-    ChunkState state{ChunkState::COLD};
+    replica::ChunkState state{replica::ChunkState::COLD};
     std::string device_uuid;
     uint32_t replica{0};
   };
@@ -175,20 +175,20 @@ class GlobalStoreClient {
       const std::string& method_name);
 
   // Convert between internal types and proto types
-  static ::common::MemoryType convert_to_proto_memory_type(MemoryLocation location);
-  static MemoryLocation convert_from_proto_memory_type(::common::MemoryType type);
+  static common::MemoryType convert_to_proto_memory_type(common::memory::MemoryLocation location);
+  static common::memory::MemoryLocation convert_from_proto_memory_type(common::MemoryType type);
   static void fill_memory_info(
-      ::common::MemoryInfo* info,
+      common::MemoryInfo* info,
       const DeviceKey& device,
-      MemoryLocation location,
+      common::memory::MemoryLocation location,
       uint64_t memory_size);
-  static RemoteReplicaInfo convert_from_proto_memory_info(const ::common::MemoryInfo& info);
+  static RemoteReplicaInfo convert_from_proto_memory_info(const common::MemoryInfo& info);
 
   GlobalStoreClientConfig config_;
   std::shared_ptr<grpc::Channel> channel_;
-  std::unique_ptr<::tensorcast::global::GlobalStore::Stub> stub_;
+  std::unique_ptr<global::GlobalStore::Stub> stub_;
   std::string worker_id_;
   mutable std::mutex mutex_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

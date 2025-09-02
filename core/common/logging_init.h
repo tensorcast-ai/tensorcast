@@ -3,7 +3,7 @@
 #ifndef CORE_COMMON_LOGGING_INIT_H_
 #define CORE_COMMON_LOGGING_INIT_H_
 
-namespace tensorcast::store {
+namespace tensorcast::common {
 
 /**
  * @brief Ensure absl logging is initialized exactly once across all modules
@@ -19,6 +19,6 @@ namespace tensorcast::store {
  */
 void ensure_logging_initialized();
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common
 
 #endif // CORE_COMMON_LOGGING_INIT_H_

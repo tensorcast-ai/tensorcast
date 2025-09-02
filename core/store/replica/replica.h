@@ -23,7 +23,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 /**
  * @brief Facade class for managing a machine learning replica's lifecycle,
@@ -59,7 +59,7 @@ class Replica {
   /**
    * @brief Returns the ReplicaKey uniquely identifying this replica instance.
    */
-  const ReplicaKey& replica_key() const {
+  const loading::ReplicaKey& replica_key() const {
     return key_;
   }
 
@@ -73,7 +73,7 @@ class Replica {
   /**
    * @brief Copies replica data from another Replica instance (GPU↔GPU or CPU↔GPU).
    */
-  absl::Status copy_from(const Replica& src);
+  absl::Status copy_from(const replica::Replica& src);
 
   /**
    * @brief Gets the total size of the replica data in bytes.
@@ -95,7 +95,7 @@ class Replica {
    * @return std::shared_future<absl::Status> A future indicating the completion status of the load/copy operation.
    */
   std::shared_future<absl::Status> ensure_loaded_async(
-      MemoryLocation target_location,
+      common::memory::MemoryLocation target_location,
       int concurrency = 4,
       std::optional<int> device_id = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -105,14 +105,15 @@ class Replica {
    * @param safe_release If true, fails if the memory is currently being loaded into.
    * @return absl::Status OkStatus on success, error otherwise.
    */
-  absl::Status release_memory(MemoryLocation location, bool safe_release = false) ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status release_memory(common::memory::MemoryLocation location, bool safe_release = false)
+      ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets the current state of the memory for the specified location.
    * @param location MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU.
    * @return MemoryState The current state of the memory at the specified location.
    */
-  MemoryState get_memory_state(MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
+  replica::MemoryState get_memory_state(common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets a pointer to the replica data at the specified location.
@@ -121,7 +122,7 @@ class Replica {
    * @param location MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU.
    * @return std::vector<void*> Vector of pointers to the data, or empty vector if not loaded.
    */
-  std::vector<void*> get_data_pointer(MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
+  std::vector<void*> get_data_pointer(common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits until the replica data is fully loaded at the specified location or an error occurs.
@@ -129,8 +130,9 @@ class Replica {
    * @param timeout Optional maximum duration to wait.
    * @return absl::Status OkStatus if loaded, DeadlineExceeded if timeout, FailedPrecondition if loading failed.
    */
-  absl::Status wait_until_loaded(MemoryLocation location, absl::Duration timeout = absl::InfiniteDuration())
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status wait_until_loaded(
+      common::memory::MemoryLocation location,
+      absl::Duration timeout = absl::InfiniteDuration()) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Provides access to the underlying MemoryManager. Use with caution.
@@ -146,8 +148,8 @@ class Replica {
    * @return absl::StatusOr<CommRegistrationInfo> Information needed by remote peers to access the memory, or an error.
    */
   absl::StatusOr<CommRegistrationInfo> enable_remote_memory_access(
-      MemoryLocation location,
-      tensorcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      common::memory::MemoryLocation location,
+      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Disables the communication access for the specified location.
@@ -157,8 +159,8 @@ class Replica {
    * @return absl::Status OkStatus on success, error if location not loaded or communication disconnection fails.
    */
   absl::Status disable_remote_memory_access(
-      MemoryLocation location,
-      tensorcast::communicator::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      common::memory::MemoryLocation location,
+      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Generates verification information for the replica data at the specified location.
@@ -167,8 +169,8 @@ class Replica {
    * MemoryLocation::GPU).
    * @return absl::StatusOr<ArtifactVerificationInfo> Generated verification information or an error.
    */
-  absl::StatusOr<ArtifactVerificationInfo> generate_verification_info(MemoryLocation location) const
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::StatusOr<common::ArtifactVerificationInfo> generate_verification_info(
+      common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Verifies the replica data at the specified location against expected verification information.
@@ -178,9 +180,9 @@ class Replica {
    * @return absl::Status OkStatus if verification passes, error if verification fails or location not loaded.
    */
   absl::Status verify_artifact_data(
-      MemoryLocation location,
-      const ArtifactVerificationInfo& expected_info,
-      VerificationLevel level = VerificationLevel::SEGMENT_HASHES) const ABSL_LOCKS_EXCLUDED(mutex_);
+      common::memory::MemoryLocation location,
+      const common::ArtifactVerificationInfo& expected_info,
+      common::VerificationLevel level = common::VerificationLevel::SEGMENT_HASHES) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Fast key-point verification of replica data (first, middle, last positions).
@@ -189,23 +191,24 @@ class Replica {
    * @param expected_info The expected verification information containing key values.
    * @return absl::Status OkStatus if key points match, error if verification fails.
    */
-  absl::Status verify_key_points(MemoryLocation location, const ArtifactVerificationInfo& expected_info) const
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status verify_key_points(
+      common::memory::MemoryLocation location,
+      const common::ArtifactVerificationInfo& expected_info) const ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   // Immutable identifier for multi-device binding.
-  const ReplicaKey key_{};
+  const loading::ReplicaKey key_{};
 
   // Private constructor, use Replica::create()
   Replica(
-      ReplicaKey key,
+      loading::ReplicaKey key,
       std::unique_ptr<IArtifactLoader> loader,
       std::shared_ptr<MemoryManager> memory_manager,
-      MemoryLocation source_type);
+      common::memory::MemoryLocation source_type);
 
   // Helper to determine the optimal source location for loading `target_location`
-  absl::StatusOr<MemoryLocation> find_best_source_for_target(MemoryLocation target_location) const
-      ABSL_SHARED_LOCKS_REQUIRED(mutex_);
+  absl::StatusOr<common::memory::MemoryLocation> find_best_source_for_target(
+      common::memory::MemoryLocation target_location) const ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
   mutable absl::Mutex mutex_; // Protects internal state consistency, loader/manager access
 
@@ -213,11 +216,11 @@ class Replica {
   const gsl::not_null<std::shared_ptr<MemoryManager>> memory_manager_;
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
-  const MemoryLocation original_source_type_;
+  const common::memory::MemoryLocation original_source_type_;
 
   // Futures tracking ongoing load/copy operations to prevent duplicate requests
   std::shared_future<absl::Status> cpu_load_future_ ABSL_GUARDED_BY(mutex_);
   std::shared_future<absl::Status> gpu_load_future_ ABSL_GUARDED_BY(mutex_);
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

@@ -20,7 +20,7 @@
 
 #include <string>
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 [[maybe_unused]] constexpr size_t kAlignment = 4096; // 4k
 [[maybe_unused]] constexpr size_t kBufferSize = 1L << 30; // 1GB
@@ -55,4 +55,4 @@ class AlignedBuffer {
   void flush_buffer(bool pad_to_alignment);
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

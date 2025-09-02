@@ -16,8 +16,18 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::ArtifactVerificationInfo;
+using tensorcast::common::VerificationLevel;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::read_file_content;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 TEST_CASE("Replica Verification System", "[replica][verification]") {
   const std::string artifact_id = "verification_artifact";
@@ -53,7 +63,7 @@ TEST_CASE("Replica Verification System", "[replica][verification]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir;

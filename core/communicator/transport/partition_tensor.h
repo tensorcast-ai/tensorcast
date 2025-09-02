@@ -8,7 +8,7 @@
 
 #include "core/communicator/transport/net_dev.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 class NetDev;
 typedef std::shared_ptr<NetDev> net_dev_t;
@@ -88,6 +88,6 @@ class RemotePartitionTensor {
 };
 typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_

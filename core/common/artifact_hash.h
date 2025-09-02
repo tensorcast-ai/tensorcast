@@ -10,7 +10,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 
-namespace tensorcast::store::artifact_hash {
+namespace tensorcast::common {
 
 // Compute index multihash (multibase base32 over multihash sha2-256) from either
 // canonical index bytes (preferred) or a precomputed sha256 hex key.
@@ -30,4 +30,4 @@ std::vector<uint8_t> sha256_digest_bytes(absl::Span<const uint8_t> bytes);
 std::vector<uint8_t> compute_tree_hash_root_sha256(const std::vector<std::vector<uint8_t>>& leaf_digests);
 std::string multibase_multihash_sha256(const std::vector<uint8_t>& digest);
 
-} // namespace tensorcast::store::artifact_hash
+} // namespace tensorcast::common

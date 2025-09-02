@@ -10,9 +10,9 @@
 #include "core/store/loading/replica_registration_helper.h"
 #include "core/store/store_engine.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::loading {
 
-MaterializeOrchestrator::MaterializeOrchestrator(StoreEngine* store, GlobalStoreClient* gs_client)
+MaterializeOrchestrator::MaterializeOrchestrator(StoreEngine* store, components::GlobalStoreClient* gs_client)
     : store_(store), gs_client_(gs_client) {}
 
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
@@ -54,7 +54,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
     // Build target description
     ReplicaTarget target;
-    target.location.type = (target_device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+    target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                   : common::memory::MemoryLocation::PAGEABLE_CPU;
     target.location.device_id = target_device.ordinal;
 
     auto load_or = store_->ingest_from_p2p_internal(std::string(artifact_id), p2p_src, target, hints);
@@ -99,7 +100,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   disk_src.path = std::filesystem::path(hints.disk_path);
 
   ReplicaTarget target;
-  target.location.type = (target_device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+  target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                 : common::memory::MemoryLocation::PAGEABLE_CPU;
   target.location.device_id = target_device.ordinal;
 
   auto disk_or = store_->ingest_from_disk_internal(hints.disk_path, disk_src, target, hints);
@@ -116,4 +118,4 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   return disk_or;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::loading

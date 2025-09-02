@@ -78,7 +78,7 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
     pair.emplace_back(paths[i], sizes[i]);
   std::sort(
       pair.begin(), pair.end(), [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
-  store::loader::FilePartitionSource::Options opts;
+  loader::FilePartitionSource::Options opts;
   for (auto& p : pair) {
     opts.partition_paths.push_back(p.first);
     opts.partition_sizes.push_back(p.second);
@@ -99,7 +99,7 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
   }
 
   // Construct primary remote source
-  store::loader::RemoteKeySource::Options src_opts{
+  loader::RemoteKeySource::Options src_opts{
       .comm_engine = source_.comm_engine,
       .memory_keys = source_.memory_keys,
       .buffer_sizes = source_.buf_sizes,

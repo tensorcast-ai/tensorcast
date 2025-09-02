@@ -8,8 +8,10 @@
 #include "absl/status/status.h"
 #include "core/common/artifact_verification.h"
 
-using namespace tensorcast::store;
 using Catch::Matchers::ContainsSubstring;
+using tensorcast::common::ArtifactVerificationInfo;
+using tensorcast::common::ArtifactVerifier;
+using tensorcast::common::VerificationLevel;
 
 TEST_CASE("ArtifactVerifier Direct Testing", "[verification][direct]") {
   const size_t test_size = 1024 * 4;

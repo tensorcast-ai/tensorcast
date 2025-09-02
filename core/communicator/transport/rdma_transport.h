@@ -3,13 +3,15 @@
 #ifndef CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <vector>
 
 #include "core/communicator/transport/net_dev.h"
-#include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/request.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 struct RdmaTransportInfo {
   uint32_t mtu = IBV_MTU_4096;
@@ -21,26 +23,26 @@ struct RdmaTransportInfo {
   uint8_t gid[16] = {};
 };
 
-class RdmaContext;
-typedef std::shared_ptr<RdmaContext> rdma_context_t;
+class RdmaContext; // fwd decl to avoid circular include
+using rdma_context_t = std::shared_ptr<RdmaContext>;
 
-class RdmaThread;
-typedef std::shared_ptr<RdmaThread> rdma_thread_t;
+class RdmaThread; // fwd decl to avoid circular include
+using rdma_thread_t = std::shared_ptr<RdmaThread>;
 
 class RdmaTransport {
  public:
   RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th);
   ~RdmaTransport();
-  result_t read(read_request_t request);
+  misc::result_t read(read_request_t request);
   struct RdmaReadSeg {
     uint64_t local_addr;
     uint32_t length;
     uint64_t remote_addr;
     uint32_t rkey;
   };
-  result_t read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs);
-  result_t connect(RdmaTransportInfo* info);
-  result_t get_local_info(RdmaTransportInfo* info);
+  misc::result_t read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs);
+  misc::result_t connect(RdmaTransportInfo* info);
+  misc::result_t get_local_info(RdmaTransportInfo* info);
   // Optional: set an ACK callback invoked when a READ completes.
   // The callback receives the completed request and can send control messages.
   void set_ack_callback(std::function<void(const read_request_t&)> cb) {
@@ -52,19 +54,24 @@ class RdmaTransport {
   }
 
  protected:
-  result_t do_init_qp();
-  result_t do_modify_qp_rtr();
-  result_t do_modify_qp_rts();
+  misc::result_t do_init_qp();
+  misc::result_t do_modify_qp_rtr();
+  misc::result_t do_modify_qp_rts();
 
   bool ready_to_send();
   bool ready_to_recv();
 
-  result_t do_post_send();
-  result_t do_process_wc(struct ibv_wc* wc);
-  result_t do_post_recv();
+  misc::result_t do_post_send();
+  misc::result_t do_process_wc(struct ibv_wc* wc);
+  misc::result_t do_post_recv();
 
  public:
-  int transport_idx_;
+  int transport_index() const {
+    return transport_index_;
+  }
+  void set_transport_index(int index) {
+    transport_index_ = index;
+  }
 
  private:
   RdmaContext* context_;
@@ -76,15 +83,16 @@ class RdmaTransport {
   RdmaTransportInfo peer_info_;
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
-  Queue<read_request_t> read_queue_;
-  Queue<read_request_t> inflight_queue_;
+  misc::Queue<read_request_t> read_queue_;
+  misc::Queue<read_request_t> inflight_queue_;
 
   std::function<void(const read_request_t&)> ack_cb_;
 
   friend class RdmaThread;
+  int transport_index_{};
 };
-typedef std::shared_ptr<RdmaTransport> rdma_transport_t;
+using rdma_transport_t = std::shared_ptr<RdmaTransport>;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_

@@ -16,8 +16,8 @@
 #include "core/common/system_capabilities.h"
 #include "core/store/replica/chunk_meta.h"
 
-using namespace tensorcast::memory;
-using namespace tensorcast::store;
+using namespace tensorcast::common::memory;
+using tensorcast::store::replica::ChunkState;
 using namespace tensorcast::common;
 
 namespace {

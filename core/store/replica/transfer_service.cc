@@ -16,7 +16,9 @@
 #include "core/store/loader/streaming_buffer_adapter.h"
 #include "core/store/replica/transfer_helpers.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
+
+using common::memory::MemoryLocation;
 
 namespace {
 // Per-GPU (device_id) concurrency limiter: at most 1 active session per GPU.
@@ -29,17 +31,21 @@ std::unordered_map<int, GpuGate> g_gpu_gates ABSL_GUARDED_BY(g_gpu_limit_mu);
 } // namespace
 
 TransferService::TransferService(
-    const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
-    const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
+    const gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>& pinned_pool,
+    const gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>& dvmp,
     const gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>& uma,
-    ReplicaKey replica_key,
+    loading::ReplicaKey replica_key,
     Config cfg)
     : pinned_pool_(pinned_pool),
       dvmp_(dvmp),
       uma_(uma),
       replica_key_(std::move(replica_key)),
       cfg_(cfg),
-      spb_(std::make_shared<StreamingPinnedBuffer>(/*num_chunks=*/16, pinned_pool_->chunk_size(), pinned_pool_)) {}
+      spb_(
+          std::make_shared<common::memory::StreamingPinnedBuffer>(
+              /*num_chunks=*/16,
+              pinned_pool_->chunk_size(),
+              pinned_pool_)) {}
 
 size_t TransferService::get_pool_chunk_size() const {
   return pinned_pool_->chunk_size();
@@ -84,7 +90,7 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   // Acquire per-GPU permit (1 active session per GPU)
   ScopedGpuPermit permit(static_cast<int>(device_id));
   // Create a per-session streaming buffer backed by the shared pinned pool
-  auto session_spb = std::make_shared<StreamingPinnedBuffer>(
+  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/16, get_pool_chunk_size(), pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
   if (!init_status.ok()) {
@@ -235,7 +241,7 @@ absl::Status TransferService::load_from_source(
   ScopedGpuPermit permit(device_id);
 
   // Create a per-session streaming buffer backed by the shared pinned pool
-  auto session_spb = std::make_shared<StreamingPinnedBuffer>(
+  auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/16, get_pool_chunk_size(), pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
   if (!init_status.ok()) {
@@ -257,4 +263,4 @@ absl::Status TransferService::load_from_source(
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

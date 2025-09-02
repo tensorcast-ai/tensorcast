@@ -23,7 +23,7 @@ namespace tensorcast::store {
  */
 class InlineBufferLoader : public IArtifactLoader {
  public:
-  explicit InlineBufferLoader(InlineBufferSource source) : source_(std::move(source)) {}
+  explicit InlineBufferLoader(loading::InlineBufferSource source) : source_(std::move(source)) {}
 
   ~InlineBufferLoader() override = default;
 
@@ -55,7 +55,7 @@ class InlineBufferLoader : public IArtifactLoader {
   }
 
  private:
-  InlineBufferSource source_;
+  loading::InlineBufferSource source_;
   bool initialized_ = false;
   absl::Mutex mutex_;
 };

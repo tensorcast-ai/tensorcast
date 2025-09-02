@@ -17,7 +17,7 @@
 
 namespace tc = tensorcast::communicator;
 
-namespace tensorcast::communicator::configio {
+namespace tensorcast::communicator {
 
 namespace {
 // Convert a YAML::Node tree into nlohmann::json for uniform JsonStringToMessage parsing.
@@ -177,4 +177,4 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   return cfg;
 }
 
-} // namespace tensorcast::communicator::configio
+} // namespace tensorcast::communicator

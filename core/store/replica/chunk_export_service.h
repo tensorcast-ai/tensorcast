@@ -20,36 +20,32 @@
 #include "core/store/direct_write.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace tensorcast::communicator {
-class CommunicateEngine;
-}
-
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 class ChunkExportService {
  public:
   ChunkExportService(
       std::shared_ptr<ReplicaMemoryCoordinator> uma,
-      gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp)
+      gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp)
       : uma_(std::move(uma)), dvmp_(std::move(dvmp)) {}
 
   absl::StatusOr<CommRegistrationInfo> export_chunks(
-      const ReplicaKey& key,
-      MemoryLocation location,
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
-      communicator::CommunicateEngine& comm_engine);
+      communicator::engine::CommunicateEngine& comm_engine);
 
   absl::Status unexport_chunks(
-      const ReplicaKey& key,
+      const loading::ReplicaKey& key,
       const CommRegistrationInfo& info,
-      communicator::CommunicateEngine& comm_engine);
+      communicator::engine::CommunicateEngine& comm_engine);
 
  private:
   static std::vector<std::pair<uint32_t, uint32_t>> coalesce_ranges(std::vector<uint32_t> chunks);
 
   struct ExportKey {
-    ReplicaKey key;
-    MemoryLocation location;
+    loading::ReplicaKey key;
+    common::memory::MemoryLocation location;
     bool operator==(const ExportKey& other) const {
       return key == other.key && location == other.location;
     }
@@ -73,11 +69,11 @@ class ChunkExportService {
   };
 
   std::shared_ptr<ReplicaMemoryCoordinator> uma_;
-  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_;
+  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_;
 
   // Cache per (ReplicaKey, Location) to support precise unexport and lease lifetime
   std::unordered_map<ExportKey, ExportRecord, ExportKeyHash> records_;
   std::mutex records_mu_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

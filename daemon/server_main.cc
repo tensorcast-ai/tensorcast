@@ -44,10 +44,11 @@ ABSL_FLAG(double, gpu_memory_limit_fraction, 0.75, "GPU memory usage threshold t
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
 
+  using namespace tensorcast;
   // Initialize OpenTelemetry C++ SDK from environment (optional, idempotent)
-  (void)tensorcast::obs::InitFromEnv("tensorcast-store-daemon", "store-daemon");
+  (void)common::otel::init_from_env("tensorcast-store-daemon", "store-daemon");
   // Optionally install log sink that enriches logs with trace_id/span_id
-  tensorcast::obs::InstallOtelLogSinkFromEnv();
+  common::otel::install_otel_log_sink_from_env();
 
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = absl::GetFlag(FLAGS_storage_path);
@@ -58,14 +59,13 @@ int main(int argc, char** argv) {
   opts.global_store_address = absl::GetFlag(FLAGS_global_store_addr);
   opts.force_full_digest_on_load = absl::GetFlag(FLAGS_force_full_digest_on_load);
 
-  std::shared_ptr<tensorcast::store::CommunicationManager> comm_mgr;
+  std::shared_ptr<store::components::CommunicationManager> comm_mgr;
   if (!absl::GetFlag(FLAGS_comm_config_path).empty()) {
-    auto cfg_or =
-        tensorcast::communicator::configio::LoadCommunicatorConfigFromFile(absl::GetFlag(FLAGS_comm_config_path));
+    auto cfg_or = tensorcast::communicator::LoadCommunicatorConfigFromFile(absl::GetFlag(FLAGS_comm_config_path));
     if (!cfg_or.ok()) {
       LOG(WARNING) << "Failed to load communicator config: " << cfg_or.status();
     } else {
-      comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+      comm_mgr = std::make_shared<store::components::CommunicationManager>();
       auto st = comm_mgr->initialize_with_config("0.0.0.0", absl::GetFlag(FLAGS_p2p_port), cfg_or.value());
       if (!st.ok()) {
         LOG(WARNING) << "Failed to initialize communication engine (config): " << st.message();

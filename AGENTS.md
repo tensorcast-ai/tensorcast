@@ -4,7 +4,7 @@ This file provides guidance to AI when working with code in this repository.
 
 ## Project Overview
 
-TensorCast is a high-performance, distributed artifact storage and loading system for machine learning inference and training. It follows a **distributed master-worker architecture** with:
+TensorCast is a high-performance distributed artifact storage and loading system for machine learning inference and training. It uses a distributed master-worker architecture; see Architecture Overview below for details.
 
 ## Development Environment Setup
 
@@ -80,20 +80,6 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 1. **Protocol buffer changes not reflected**: Always run `bash tools/build_proto_python.sh` after modifying `.proto` files
 2. **C++ changes not visible in Python**: Ensure both `BUILD_CORE=1` and `BUILD_EXTENSION=1` are set
 3. **Clean build needed**: Run `bazel clean --expunge` and `rm -rf build/` for a complete clean build
-
-
-## Additional Development Resources
-
-### Cursor Rules Directory
-The `.cursor/rules/` directory contains detailed guidelines for specific aspects of development:
-- `architecture.mdc`: Detailed system architecture and design patterns
-- `build.mdc`: Build system reference and troubleshooting
-- `code_review.mdc`: Comprehensive code review checklist
-- `common.mdc`: Software design principles and best practices
-- `cpp.mdc`: C++ specific coding standards
-- `proto.mdc`: Protocol buffer guidelines
-- `python.mdc`: Python specific coding standards
-- `technical_design.mdc`: Technical design document templates
 
 ## Architecture Overview
 
@@ -253,6 +239,20 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ## Coding Standards
 
+### Package & Directory Structure
+
+- Directory layout must mirror package/namespace hierarchy.
+- C++: Derive namespace from path (`a/b/c` -> `a::b::c`); open matching nested namespaces. In the innermost namespace, prefer unqualified local names; fully qualify only when crossing namespaces or to disambiguate. Do not use `using namespace` at file scope.
+  - `/core/`: drop leading `core` when deriving (`core/a/b/c` -> `tensorcast::a::b::c`).
+  - Tests (`*_test.cc`): allow narrowly scoped `using`; prefer `using a::b::Symbol;` over broad imports.
+  - Qualification elision:
+    - Most sources sit under outer `tensorcast`; inside it, omit the `tensorcast::` prefix (e.g., `communicator::misc::GB`).
+    - `core/store/**` is `tensorcast::store`; inside these files, also omit `store::` and refer directly to sub-namespaces (consistent with `core/store/store_engine.cc`): `loading::ReplicaHandle`, `replica::Replica`, `components::DeviceManager`.
+    - Fully qualify with `tensorcast::...` only when leaving the implicit root or to resolve ambiguity. Never add `using namespace` at file scope.
+  - Examples:
+    - Good: `loading::ReplicaHandle`, `replica::Replica::create(...)`, `communicator::misc::GB`
+    - Bad: `tensorcast::store::loading::ReplicaHandle`, `tensorcast::store::replica::Replica::create(...)`, `tensorcast::communicator::misc::GB`
+
 ### C++ Guidelines (Simplified)
 
 #### C++ Naming Conventions
@@ -360,52 +360,3 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 
 ### Code Fixing and Testing
 - When fixing tests, always first understand the actual functionality of the test and the code behind that functionality. Make the test match the functionality, rather than making the functionality match the original test (while also ensuring the functionality is reasonable)
-# Repository Guidelines
-
-## Project Structure & Module Organization
-- core/: C++20 core (checkpoint, store engine, communicator). Bazel-first builds.
-- tensorcast/: Python services and client libs (gRPC, PyTorch integration).
-- daemon/: C++ StoreDaemon service (launched by Python CLI).
-- proto/: Protocol Buffers used across components.
-- tests/: C++ and Python tests; C++ tests live next to code, Python under tests/python/.
-- rfcs/: Technical designs (e.g., unified stager, staged P2P).
-
-## Build, Test, and Development Commands
-- Build C++ core + Python extension:
-  ```bash
-  BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
-  ```
-- Develop without GPUs (fake CUDA):
-  ```bash
-  USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
-  bazel test //core/communicator:tcp_engine_test --define use_fake_cuda=true
-  ```
-- Run C++ tests (examples):
-  ```bash
-  bazel test //core/store:store_engine_test
-  bazel test //core/store/loader:disk_loader_streaming_buffer_test
-  ```
-- Run Python tests and quality:
-  ```bash
-  uv run pytest tests/python
-  uv run ruff check . && uv run ruff format .
-  uv run mypy ./tensorcast
-  ```
-- Regenerate protobufs after .proto changes:
-  ```bash
-  bash tools/build_proto_python.sh
-  ```
-
-## Coding Style & Naming Conventions
-- C++: C++20, Bazel with sc_cc_library targets; naming — snake_case (vars/funcs), PascalCase (types), ALL_CAPS (consts/macros). Prefer early returns, RAII, absl::Status/StatusOr; logging via LOG/CHECK/VLOG.
-- Python: 3.10+, type hints required; prefer functional style; use Pydantic models for validation; avoid dynamic getattr/hasattr.
-- Formatting: use clang-tidy for C++ and ruff for Python. Keep changes minimal and consistent with neighbors.
-
-## Testing Guidelines
-- Frameworks: Catch2 (C++) and pytest (Python).
-- Placement: C++ tests beside sources; Python under tests/python/ with test_*.py names.
-- Running: prefer Bazel for C++ (see above) and uv run pytest for Python. Use fake CUDA for GPU paths when no hardware is available.
-
-## Commit & Pull Request Guidelines
-- Commits: concise subject, imperative mood; explain why and what. Scope changes to a single concern.
-- PRs: include description, linked issues, test plan (commands + results), and impact notes (e.g., proto changes require running tools/build_proto_python.sh). Update docs (web-docs/sidebars.ts) if moving/adding docs.

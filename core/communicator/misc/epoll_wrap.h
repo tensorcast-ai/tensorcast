@@ -5,8 +5,6 @@
 
 #include <cstdint>
 
-namespace tensorcast::communicator {
-
 #ifdef __APPLE__
 enum EPOLL_EVENTS {
   EPOLLIN = 0x001,
@@ -71,6 +69,8 @@ extern "C" {
 
 #endif
 
-} // namespace tensorcast::communicator
+namespace tensorcast::communicator::misc {
+// No additional declarations needed for non-APPLE; macros map to global epoll APIs.
+}
 
 #endif // CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_

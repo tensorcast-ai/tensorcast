@@ -43,8 +43,8 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   fs::create_directories(artifact_dir);
 
   // Create data and descriptor (standard partitions format)
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir / "tensor.data", artifact_size));
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data", artifact_size));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
   // Ensure verification.json does not exist initially
   fs::path verification_path = artifact_dir / "verification.json";
@@ -54,7 +54,7 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
 
   // Load to CPU and wait ready
   StoreEngine store = make_store(temp_root);
-  tensorcast::store::MaterializeHints hints;
+  tensorcast::store::loading::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto handle_or =
       store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -72,8 +72,8 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   const std::string artifact_id2 = "verify_artifact_bad";
   fs::path artifact_dir2 = temp_root / artifact_id2;
   fs::create_directories(artifact_dir2);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size));
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
 
   // Write a bad verification.json (wrong key_values ensures failure)
   nlohmann::json bad;
@@ -88,7 +88,7 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   out << bad.dump(2);
   out.close();
 
-  tensorcast::store::MaterializeHints hints2;
+  tensorcast::store::loading::MaterializeHints hints2;
   hints2.disk_path = artifact_id2;
   auto handle_or2 =
       store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);

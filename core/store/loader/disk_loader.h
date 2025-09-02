@@ -33,7 +33,7 @@ class DiskLoader : public IArtifactLoader {
    * @brief Constructs a DiskLoader.
    * @param source Configuration detailing the disk storage path.
    */
-  explicit DiskLoader(DiskSource source);
+  explicit DiskLoader(loading::DiskSource source);
 
   ~DiskLoader() override = default;
 
@@ -61,7 +61,7 @@ class DiskLoader : public IArtifactLoader {
   /**
    * @brief Returns the replica verification information loaded from disk (if any).
    */
-  absl::StatusOr<ArtifactVerificationInfo> get_verification_info() const;
+  absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> get_verification_info() const;
 
   // NEW: Provide disk-backed source for pumping
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override ABSL_LOCKS_EXCLUDED(mutex_);
@@ -69,7 +69,7 @@ class DiskLoader : public IArtifactLoader {
  private:
   mutable absl::Mutex mutex_; // Protects initialization state and partition info access
 
-  DiskSource source_ ABSL_GUARDED_BY(mutex_);
+  loading::DiskSource source_ ABSL_GUARDED_BY(mutex_);
   uint64_t artifact_size_ = 0;
   std::vector<std::filesystem::path> partition_paths_;
   std::vector<size_t> partition_sizes_;

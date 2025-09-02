@@ -9,7 +9,7 @@
 
 #include "core/common/trace/trace_manager.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 
 // ---------------------------------------------------------------------------
 // Helper for propagating request-id & replica-id across std::async / thread pools
@@ -35,4 +35,4 @@ auto with_trace_ctx(Fn&& fn) {
   };
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

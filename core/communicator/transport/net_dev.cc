@@ -5,7 +5,7 @@
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 NetDev::NetDev(struct ibv_context* context, int dev_id, struct ibv_device* dev, int port_id, struct ibv_port_attr port)
     : dev_name_(dev->name),
@@ -19,8 +19,8 @@ NetDev::NetDev(struct ibv_context* context, int dev_id, struct ibv_device* dev, 
       pd_(nullptr),
       cq_(nullptr),
       stop_(false) {
-  CHECK_WARN(wrap_ibv_alloc_pd(&pd_, context_), "failed to allocate PD");
-  CHECK_WARN(wrap_ibv_create_cq(&cq_, context_, 128, nullptr, nullptr, 0), "failed to allocate CQ");
+  CHECK_WARN(misc::wrap_ibv_alloc_pd(&pd_, context_), "failed to allocate PD");
+  CHECK_WARN(misc::wrap_ibv_create_cq(&cq_, context_, 128, nullptr, nullptr, 0), "failed to allocate CQ");
   CHECK_WARN(read_pci_path(), "failed to get pci path");
   get_best_gid_index();
 
@@ -35,11 +35,11 @@ NetDev::~NetDev() {
   }
 
   if (cq_) {
-    wrap_ibv_destroy_cq(cq_);
+    misc::wrap_ibv_destroy_cq(cq_);
     cq_ = nullptr;
   }
   if (pd_) {
-    wrap_ibv_dealloc_pd(pd_);
+    misc::wrap_ibv_dealloc_pd(pd_);
     pd_ = nullptr;
   }
   if (pci_path_ != nullptr) {
@@ -48,7 +48,7 @@ NetDev::~NetDev() {
   }
 
   if (context_ != nullptr) {
-    wrap_ibv_close_device(context_);
+    misc::wrap_ibv_close_device(context_);
     context_ = nullptr;
   }
 }
@@ -77,16 +77,16 @@ char* NetDev::get_pci_path() {
   return pci_path_;
 }
 
-result_t NetDev::read_pci_path() {
+misc::result_t NetDev::read_pci_path() {
   char device_path[1024];
   snprintf(device_path, sizeof(device_path), "/sys/class/infiniband/%s/device", dev_name_.c_str());
   char* p = realpath(device_path, nullptr);
   pci_path_ = p;
   if (p == nullptr) {
     LOG(WARNING) << "could not find real path of " << dev_name_ << " (" << device_path << ")";
-    return FAILED;
+    return misc::FAILED;
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 int NetDev::get_best_gid_index() {
@@ -97,7 +97,7 @@ int NetDev::get_best_gid_index() {
   ibv_gid gid = {};
   for (int i = 1; i < gid_tbl_len_; i++) {
     bzero(&gid, sizeof(gid));
-    wrap_ibv_query_gid(context_, port_, i, &gid);
+    misc::wrap_ibv_query_gid(context_, port_, i, &gid);
     if ((gid.raw[10] == 0xFF) && (gid.raw[11] == 0xFF)) {
       gid_idx = i;
       gid_idx_ = i;
@@ -107,20 +107,20 @@ int NetDev::get_best_gid_index() {
   return gid_idx;
 }
 
-result_t NetDev::get_best_gid(ibv_gid* gid, int* gid_idx) {
-  ASSERT(gid != nullptr, "gid cannot be nullptr");
-  ASSERT(gid_idx != nullptr, "gid index cannot be nullptr");
+misc::result_t NetDev::get_best_gid(ibv_gid* gid, int* gid_idx) {
+  misc::ASSERT(gid != nullptr, "gid cannot be nullptr");
+  misc::ASSERT(gid_idx != nullptr, "gid index cannot be nullptr");
   if (gid_idx_ > 0) {
     *gid_idx = gid_idx_;
     memcpy(gid, &gid_, sizeof(gid_));
-    return SUCCESS;
+    return misc::SUCCESS;
   }
 
   ibv_gid tmp_gid = {};
 
   for (int i = 1; i < gid_tbl_len_; i++) {
     bzero(&tmp_gid, sizeof(tmp_gid));
-    wrap_ibv_query_gid(context_, port_, i, &tmp_gid);
+    misc::wrap_ibv_query_gid(context_, port_, i, &tmp_gid);
     if ((tmp_gid.raw[10] == 0xFF) && (tmp_gid.raw[11] == 0xFF)) {
       *gid_idx = i;
       gid_idx_ = i;
@@ -129,22 +129,22 @@ result_t NetDev::get_best_gid(ibv_gid* gid, int* gid_idx) {
     }
   }
   if (*gid_idx == -1) {
-    return FAILED;
+    return misc::FAILED;
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t NetDev::reg_async(const tensor_t& tensor) {
+misc::result_t NetDev::reg_async(const tensor_t& tensor) {
   register_queue_.push(tensor);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t NetDev::reg_mr(struct ibv_mr** ret, void* addr, size_t length, int access) const {
-  return wrap_ibv_reg_mr(ret, pd_, addr, length, access);
+misc::result_t NetDev::reg_mr(struct ibv_mr** ret, void* addr, size_t length, int access) const {
+  return misc::wrap_ibv_reg_mr(ret, pd_, addr, length, access);
 }
 
-result_t NetDev::create_qp(struct ibv_qp** ret, struct ibv_qp_init_attr* qp_init_attr) const {
-  return wrap_ibv_create_qp(ret, pd_, qp_init_attr);
+misc::result_t NetDev::create_qp(struct ibv_qp** ret, struct ibv_qp_init_attr* qp_init_attr) const {
+  return misc::wrap_ibv_create_qp(ret, pd_, qp_init_attr);
 }
 
 void NetDev::register_loop() {
@@ -157,10 +157,10 @@ void NetDev::register_loop() {
       continue;
     }
 
-    auto start = get_us();
+    auto start = misc::get_us();
     t->register_mr();
-    LOG(INFO) << "register done: dev=" << dev_name_ << ", cost=" << get_us() - start;
+    LOG(INFO) << "register done: dev=" << dev_name_ << ", cost=" << misc::get_us() - start;
   }
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

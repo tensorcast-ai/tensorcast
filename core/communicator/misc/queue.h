@@ -9,7 +9,7 @@
 
 #include "core/communicator/misc/common.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 template <class T>
 class Queue {
@@ -129,6 +129,6 @@ class Queue {
   std::atomic_bool stop_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // CORE_COMMUNICATOR_MISC_QUEUE_H_

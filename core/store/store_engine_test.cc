@@ -17,9 +17,9 @@
 namespace fs = std::filesystem;
 using tensorcast::DeviceType;
 using tensorcast::store::DeviceKey;
-using tensorcast::store::ReplicaKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::ReplicaKey;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper utilities
@@ -40,7 +40,9 @@ static StoreEngine make_store(
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   return StoreEngine(opts);
 }
-static absl::Status wait_ready(tensorcast::store::ReplicaHandle& handle, absl::Duration timeout = absl::Seconds(60)) {
+static absl::Status wait_ready(
+    tensorcast::store::loading::ReplicaHandle& handle,
+    absl::Duration timeout = absl::Seconds(60)) {
   return handle.wait_ready(std::chrono::milliseconds(absl::ToInt64Milliseconds(timeout)));
 }
 
@@ -56,16 +58,16 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
   fs::create_directories(temp_root);
   fs::path artifact_dir = temp_root / artifact_id;
   fs::create_directories(artifact_dir);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir / "tensor.data_0", artifact_size));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data_0", artifact_size));
 
   // RFC-0007: standard partitions require descriptor and canonical index
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
   StoreEngine store = make_store(temp_root);
 
   // Load to GPU (Now only GPU is supported)
-  REQUIRE(tensorcast::tests::is_cuda_available());
-  tensorcast::store::MaterializeHints hints;
+  REQUIRE(tensorcast::testing::is_cuda_available());
+  tensorcast::store::loading::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto gpu_handle_or =
       store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -89,7 +91,7 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
 // Test case 2: Query helpers after materialize_replica()
 // ─────────────────────────────────────────────────────────────────────────────
 TEST_CASE("StoreEngine helper queries after materialize_replica()", "[store_engine][materialize_replica][status]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping status tests with materialize_replica().");
     return;
   }
@@ -101,16 +103,16 @@ TEST_CASE("StoreEngine helper queries after materialize_replica()", "[store_engi
   fs::create_directories(temp_root);
   fs::path artifact_dir2 = temp_root / artifact_id;
   fs::create_directories(artifact_dir2);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir2 / "tensor.data_0", artifact_size));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir2 / "tensor.data_0", artifact_size));
 
   // RFC-0007: standard partitions require descriptor and canonical index
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
 
   StoreEngine store = make_store(temp_root);
 
   // Load to GPU.
   {
-    tensorcast::store::MaterializeHints hints2;
+    tensorcast::store::loading::MaterializeHints hints2;
     hints2.disk_path = artifact_id;
     auto gpu_handle_or =
         store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);

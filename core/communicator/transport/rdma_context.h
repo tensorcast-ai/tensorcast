@@ -3,21 +3,24 @@
 #ifndef COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
 #define COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
 
-#include <map>
+#include <array>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/communicator/transport/net_dev.h"
-#include "core/communicator/transport/rdma_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 class RdmaThread;
-typedef std::shared_ptr<RdmaThread> rdma_thread_t;
+using rdma_thread_t = std::shared_ptr<RdmaThread>;
 
 class RdmaTransport;
-typedef std::shared_ptr<RdmaTransport> rdma_transport_t;
+using rdma_transport_t = std::shared_ptr<RdmaTransport>;
 
 class RdmaContext {
  public:
@@ -64,9 +67,8 @@ class RdmaContext {
   }
 
  private:
-  result_t ibv_init();
+  misc::result_t ibv_init();
 
- private:
   std::vector<net_dev_t> devs_;
   std::vector<rdma_thread_t> io_threads_;
   std::array<net_dev_t, 16> dev_vector_;
@@ -74,7 +76,7 @@ class RdmaContext {
   int qp_timeout_ = 20;
   int qp_retry_ = 7;
 };
-typedef std::shared_ptr<RdmaContext> rdma_context_t;
+using rdma_context_t = std::shared_ptr<RdmaContext>;
 
 class RdmaTransport;
 class RdmaThread {
@@ -86,8 +88,8 @@ class RdmaThread {
   void notify_send();
   void notify_poll();
   void notify_recv();
-  result_t register_transport(RdmaTransport*);
-  result_t unregister_transport(RdmaTransport*);
+  misc::result_t register_transport(RdmaTransport*);
+  misc::result_t unregister_transport(RdmaTransport*);
 
  private:
   void send_loop();
@@ -101,7 +103,6 @@ class RdmaThread {
   void add_recv_transport(RdmaTransport* t);
   void del_recv_transport(RdmaTransport* t);
 
- private:
   std::array<RdmaTransport*, 1024> send_transports_{};
   std::array<RdmaTransport*, 1024> poll_transports_{};
   std::array<RdmaTransport*, 1024> recv_transports_{};
@@ -118,10 +119,10 @@ class RdmaThread {
   std::condition_variable poll_cv_;
   std::condition_variable recv_cv_;
 
-  std::atomic_bool stop_{};
+  std::atomic_bool stop_;
   net_dev_t net_dev_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_

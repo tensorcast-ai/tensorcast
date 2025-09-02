@@ -4,17 +4,10 @@
 
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <string>
+#include "core/store/components/communication_manager.h"
 
-namespace tensorcast {
-namespace communicator {
-class CommunicateEngine;
-} // namespace communicator
-
-namespace store {
-
-class CommunicationManager; // forward declaration
+namespace tensorcast::store {
 
 /**
  * @brief Options structure used to configure a StoreEngine instance.
@@ -53,7 +46,7 @@ struct StoreEngineOptions {
   // StoreEngine instances can share the same underlying CommunicateEngine
   // and listen socket.  When provided, the StoreEngine will reuse this
   // manager instead of creating its own internal instance.
-  std::shared_ptr<tensorcast::store::CommunicationManager> comm_manager{nullptr};
+  std::shared_ptr<components::CommunicationManager> comm_manager{nullptr};
 
   // Maximum number of concurrent replica transfers that can use the shared
   // streaming pinned buffer pool. Each transfer receives an isolated buffer
@@ -72,5 +65,4 @@ struct StoreEngineOptions {
   bool force_full_digest_on_load{false};
 };
 
-} // namespace store
-} // namespace tensorcast
+} // namespace tensorcast::store

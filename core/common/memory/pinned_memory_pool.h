@@ -26,7 +26,7 @@
 
 #include "gsl/pointers"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 class PinnedMemoryPool {
  public:
@@ -63,4 +63,4 @@ class PinnedMemoryPool {
   std::unordered_set<char*> pool_;
   size_t chunk_size_; // May be adjusted in constructor for alignment
 };
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

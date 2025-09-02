@@ -5,15 +5,15 @@
 
 #include "core/communicator/engine/store.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 PartitionTensorStore::PartitionTensorStore() = default;
 
-tensor_t PartitionTensorStore::get_tensor(std::string tensor_key) {
+transport::tensor_t PartitionTensorStore::get_tensor(std::string tensor_key) {
   return tensors_.get(std::move(tensor_key));
 }
 
-void PartitionTensorStore::register_tensor(const tensor_t& t) {
+void PartitionTensorStore::register_tensor(const transport::tensor_t& t) {
   tensors_.put(t->get_key(), t);
 }
 
@@ -25,4 +25,4 @@ void PartitionTensorStore::clear() {
   tensors_.clear();
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine

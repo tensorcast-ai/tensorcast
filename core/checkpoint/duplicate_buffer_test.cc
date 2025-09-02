@@ -8,7 +8,7 @@
 #include "core/checkpoint/checkpoint.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
+using namespace tensorcast::checkpoint;
 
 TEST_CASE("save / load tensors that share same buffer", "[checkpoint][dedup]") {
   // ------------------------------------------------------------------

@@ -20,7 +20,7 @@ extern "C" {
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/tcp_context.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 constexpr static int kTcpContextBatchSize = 16;
 
@@ -52,12 +52,12 @@ TcpContext::~TcpContext() {
   }
 }
 
-result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t func) {
-  ASSERT(listen_fd_ == 0, "failed to open due to valid listen fd");
+misc::result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t func) {
+  misc::ASSERT(listen_fd_ == 0, "failed to open due to valid listen fd");
   on_accept_ = std::move(func);
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
   // Enable address/port reuse to avoid EADDRINUSE due to TIME_WAIT and reduce bind conflicts
@@ -70,22 +70,22 @@ result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t
     PLOG(WARNING) << "failed to set SO_REUSEPORT";
   }
 
-  CLEAR(local_addr_);
+  misc::CLEAR(local_addr_);
   local_addr_.sin_family = AF_INET;
   local_addr_.sin_addr.s_addr = inet_addr(ip.c_str());
   local_addr_.sin_port = htons(port);
 
   int ret = ::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), sizeof(local_addr_));
   if (ret < 0) {
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
   ret = ::listen(listen_fd_, 1024);
   if (ret < 0) {
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
-  CLEAR(local_addr_);
+  misc::CLEAR(local_addr_);
   socklen_t len = sizeof(local_addr_);
   getsockname(listen_fd_, (struct sockaddr*)&local_addr_, &len);
 
@@ -102,7 +102,7 @@ result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t
     return ret;
   }
 
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint16_t port) {
@@ -135,12 +135,12 @@ absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint1
 
 std::string TcpContext::get_local_ip() const {
   if (local_addr_.sin_addr.s_addr == INADDR_ANY) {
-    return get_default_ip();
+    return misc::get_default_ip();
   }
   return {inet_ntoa(local_addr_.sin_addr)};
 }
 
-result_t TcpContext::register_transport(TcpTransport* t) {
+misc::result_t TcpContext::register_transport(TcpTransport* t) {
   epoll_event ev{};
   bzero(&ev, sizeof(epoll_event));
   ev.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
@@ -152,23 +152,23 @@ result_t TcpContext::register_transport(TcpTransport* t) {
     return ret;
   }
 
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t TcpContext::unregister_transport(TcpTransport* t) {
+misc::result_t TcpContext::unregister_transport(TcpTransport* t) {
   int ret = wrap_epoll_ctl(recv_epoll_fd_, EPOLL_CTL_DEL, t->get_fd(), nullptr);
   if (ret != 0) {
     LOG(WARNING) << "failed to delete listen epoll: ret=" << ret << " " << strerror(errno);
     return ret;
   }
 
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 void TcpContext::listen_event_loop() {
   int num_fd = 0;
   epoll_event events[kTcpContextBatchSize];
-  CLEAR_PTR(events, kTcpContextBatchSize * sizeof(epoll_event));
+  misc::CLEAR_PTR(events, kTcpContextBatchSize * sizeof(epoll_event));
   while (!stop_.load()) {
     num_fd = wrap_epoll_wait(listen_epoll_fd_, events, kTcpContextBatchSize, 1000);
     for (int i = 0; i < num_fd; i++) {
@@ -195,7 +195,7 @@ void TcpContext::do_accept() {
   int sock_fd = 0;
   struct sockaddr_in remote_addr = {};
   int addr_len = sizeof(remote_addr);
-  CLEAR(remote_addr);
+  misc::CLEAR(remote_addr);
 
   if (listen_fd_ == 0) {
     LOG(ERROR) << "[do_accept] " << "failed to do accept due to invalid listen_fd_";
@@ -217,7 +217,7 @@ void TcpContext::do_accept() {
 void TcpContext::recv_event_loop() {
   int num_fd = 0;
   epoll_event events[kTcpContextBatchSize];
-  CLEAR_PTR(events, kTcpContextBatchSize * sizeof(epoll_event));
+  misc::CLEAR_PTR(events, kTcpContextBatchSize * sizeof(epoll_event));
   while (!stop_.load()) {
     num_fd = wrap_epoll_wait(recv_epoll_fd_, events, kTcpContextBatchSize, 10);
     for (int i = 0; i < num_fd; i++) {
@@ -232,4 +232,4 @@ void TcpContext::recv_event_loop() {
   }
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

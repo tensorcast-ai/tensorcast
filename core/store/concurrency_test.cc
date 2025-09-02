@@ -11,15 +11,18 @@
 #include <unordered_set>
 
 #include "core/common/logging_init.h"
-#include "core/store/concurrency_utils.h"
+#include "core/testing/concurrency_utils.h"
 
-using namespace tensorcast::tests::store_engine;
-using namespace tensorcast::store;
+using namespace tensorcast::testing;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::MaterializeHints;
 
 namespace {
 struct LoggingInitializer {
   LoggingInitializer() {
-    tensorcast::store::ensure_logging_initialized();
+    tensorcast::common::ensure_logging_initialized();
   }
 };
 
@@ -35,7 +38,7 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
   const size_t artifact_size = 10 * 1024 * 1024; // 10MB
 
   TempArtifactFixture fixture("concurrency_a1");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool for 32 threads x 10MB
   ThreadBarrier barrier(num_threads);
@@ -53,7 +56,7 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
 
       auto load_start = std::chrono::high_resolution_clock::now();
       LOG(INFO) << "Thread " << thread_id << " preparing replica " << artifact_id;
-      tensorcast::store::MaterializeHints hints;
+      MaterializeHints hints;
       hints.disk_path = artifact_id;
       auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
@@ -118,7 +121,7 @@ TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_en
   for (int i = 0; i < num_models; ++i) {
     auto artifact_id = generate_artifact_id("artifact", i);
     artifact_ids.push_back(artifact_id);
-    fixture.create_artifact(artifact_id, random_artifact_size(5, 20));
+    fixture.create_model(artifact_id, random_model_size(5, 20));
   }
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool
@@ -137,7 +140,7 @@ TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_en
       const auto& artifact_id = artifact_ids[thread_id % num_models];
 
       auto load_start = std::chrono::high_resolution_clock::now();
-      tensorcast::store::MaterializeHints hints;
+      MaterializeHints hints;
       hints.disk_path = artifact_id;
       auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
@@ -197,13 +200,13 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
   const size_t artifact_size = 20 * 1024 * 1024; // 20MB
 
   TempArtifactFixture fixture("concurrency_a3");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // First, load the replica
   {
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto initial_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(initial_handle.ok());
@@ -224,7 +227,7 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
       barrier.arrive_and_wait();
 
       while (!stop_flag.load()) {
-        tensorcast::store::MaterializeHints hints;
+        MaterializeHints hints;
         hints.disk_path = artifact_id;
         auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
         if (handle_or.ok()) {
@@ -277,12 +280,12 @@ TEST_CASE("A4: Concurrent unload_replica() same replica", "[store_engine][concur
   const size_t artifact_size = 15 * 1024 * 1024; // 15MB
 
   TempArtifactFixture fixture("concurrency_a4");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // Load the replica
-  tensorcast::store::MaterializeHints hints;
+  MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   REQUIRE(handle.ok());
@@ -339,9 +342,9 @@ TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
 
   for (int i = 0; i < num_models; ++i) {
     auto artifact_id = generate_artifact_id("artifact", i);
-    fixture.create_artifact(artifact_id, 10 * 1024 * 1024); // 10MB each
+    fixture.create_model(artifact_id, 10 * 1024 * 1024); // 10MB each
 
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle.ok());

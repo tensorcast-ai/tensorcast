@@ -9,8 +9,8 @@
 #include "core/communicator/config_io.h"
 
 using tensorcast::communicator::CommunicatorConfig;
-using tensorcast::communicator::configio::LoadCommunicatorConfigFromFile;
-using tensorcast::communicator::configio::NormalizeDefaults;
+using tensorcast::communicator::LoadCommunicatorConfigFromFile;
+using tensorcast::communicator::NormalizeDefaults;
 
 static std::string write_temp_file(const std::string& content, const std::string& suffix) {
   // Write into the test's working directory

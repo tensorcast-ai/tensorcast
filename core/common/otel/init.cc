@@ -23,11 +23,10 @@
 // Optional console exporter
 // Console exporter (ostream) may not be available in the Bazel package; omit.
 
-namespace otel = opentelemetry;
-namespace sdktrace = otel::sdk::trace;
-namespace resource = otel::sdk::resource;
+namespace sdktrace = opentelemetry::sdk::trace;
+namespace resource = opentelemetry::sdk::resource;
 
-namespace tensorcast::obs {
+namespace tensorcast::common::otel {
 
 static bool truthy(const char* v) {
   if (!v) {
@@ -53,7 +52,7 @@ static void strip_scheme(std::string& s) {
   }
 }
 
-bool InitFromEnv(const std::string& service_default, const std::string& role) {
+bool init_from_env(const std::string& service_default, const std::string& role) {
   if (truthy(std::getenv("OTEL_SDK_DISABLED"))) {
     LOG(INFO) << "OTel C++ SDK disabled via OTEL_SDK_DISABLED";
     return false;
@@ -78,14 +77,14 @@ bool InitFromEnv(const std::string& service_default, const std::string& role) {
     }
 
     if (protocol == "http/protobuf" || protocol == "http") {
-      otel::exporter::otlp::OtlpHttpExporterOptions opts;
+      opentelemetry::exporter::otlp::OtlpHttpExporterOptions opts;
       std::string url = get_env(
           "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
           get_env("OTEL_EXPORTER_OTLP_ENDPOINT", std::string("http://127.0.0.1:4318/v1/traces")));
       opts.url = url;
-      exporter = otel::exporter::otlp::OtlpHttpExporterFactory::Create(opts);
+      exporter = opentelemetry::exporter::otlp::OtlpHttpExporterFactory::Create(opts);
     } else { // grpc
-      otel::exporter::otlp::OtlpGrpcExporterOptions opts;
+      opentelemetry::exporter::otlp::OtlpGrpcExporterOptions opts;
       std::string ep = get_env(
           "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", get_env("OTEL_EXPORTER_OTLP_ENDPOINT", std::string("127.0.0.1:4317")));
       // Allow ep like http://host:4317
@@ -113,7 +112,7 @@ bool InitFromEnv(const std::string& service_default, const std::string& role) {
           start = comma + 1;
         }
       }
-      exporter = otel::exporter::otlp::OtlpGrpcExporterFactory::Create(opts);
+      exporter = opentelemetry::exporter::otlp::OtlpGrpcExporterFactory::Create(opts);
     }
 
     // Batch span processor with default options
@@ -124,10 +123,10 @@ bool InitFromEnv(const std::string& service_default, const std::string& role) {
     // Optional console exporter omitted (not available via Bazel package)
 
     // Convert unique_ptr -> shared_ptr for Provider API
-    std::shared_ptr<otel::trace::TracerProvider> provider_sp(std::move(provider_up));
-    otel::trace::Provider::SetTracerProvider(provider_sp);
+    std::shared_ptr<opentelemetry::trace::TracerProvider> provider_sp(std::move(provider_up));
+    opentelemetry::trace::Provider::SetTracerProvider(provider_sp);
     // Set W3C propagator
-    otel::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
+    opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
         opentelemetry::nostd::shared_ptr<opentelemetry::context::propagation::TextMapPropagator>(
             new opentelemetry::trace::propagation::HttpTraceContext()));
 
@@ -141,4 +140,4 @@ bool InitFromEnv(const std::string& service_default, const std::string& role) {
   return false;
 }
 
-} // namespace tensorcast::obs
+} // namespace tensorcast::common::otel

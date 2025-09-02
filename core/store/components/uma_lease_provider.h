@@ -14,16 +14,16 @@
 #include "core/store/replica/replica_memory_coordinator.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 // UMA-backed lease provider for DRAM staging.
 // Maps registered tensor keys (exported DVMP ranges) to UMA + base VA offset.
-class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
+class UmaLeaseProvider : public communicator::engine::DRAMStager::LeaseProvider {
  public:
   struct Entry {
-    ReplicaKey key;
+    loading::ReplicaKey key;
     uint64_t base_va_off = 0;
-    std::weak_ptr<ReplicaMemoryCoordinator> uma;
+    std::weak_ptr<replica::ReplicaMemoryCoordinator> uma;
   };
 
   static std::shared_ptr<UmaLeaseProvider> instance();
@@ -31,11 +31,11 @@ class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
   // Register a mapping for a DVMP-exported tensor key.
   void register_mapping(
       const std::string& tensor_key,
-      const ReplicaKey& key,
+      const loading::ReplicaKey& key,
       uint64_t base_va_off,
-      gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma);
+      gsl::not_null<std::shared_ptr<replica::ReplicaMemoryCoordinator>> uma);
 
-  std::unique_ptr<communicator::DRAMStager::LeaseHandle> acquire(
+  std::unique_ptr<communicator::engine::DRAMStager::LeaseHandle> acquire(
       const std::string& tensor_key,
       uint64_t offset,
       uint64_t bytes) override;
@@ -47,7 +47,7 @@ class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
  private:
   UmaLeaseProvider() = default;
 
-  struct TokenLeaseHandle : public communicator::DRAMStager::LeaseHandle {
+  struct TokenLeaseHandle : public communicator::engine::DRAMStager::LeaseHandle {
     explicit TokenLeaseHandle(std::shared_ptr<void> keep) : keepalive(std::move(keep)) {}
     std::shared_ptr<void> keepalive;
   };
@@ -56,4 +56,4 @@ class UmaLeaseProvider : public communicator::DRAMStager::LeaseProvider {
   std::unordered_map<std::string, Entry> map_ ABSL_GUARDED_BY(mu_);
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

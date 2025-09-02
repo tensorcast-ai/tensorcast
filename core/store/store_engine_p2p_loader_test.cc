@@ -25,9 +25,17 @@
 #include "core/testing/test_helpers.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::communicator;
-using namespace tensorcast::communicator::test;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::communicator::CommunicatorConfig;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::store::P2PSource;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::ReplicaHandle;
+using tensorcast::store::loading::ReplicaLoadSpec;
+using tensorcast::store::loading::ReplicaTarget;
+using namespace tensorcast::testing;
 
 TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu]") {
   // ---------------------------------------------------------------------------
@@ -90,7 +98,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   // ---------------------------------------------------------------------------
   int comm_port = find_available_port(9090);
   REQUIRE(comm_port > 0);
-  auto comm_manager = std::make_shared<tensorcast::store::CommunicationManager>();
+  auto comm_manager = std::make_shared<CommunicationManager>();
   REQUIRE(comm_manager->initialize("127.0.0.1", /*listen_port=*/comm_port, /*enable_rdma=*/false).ok());
 
   // ---------------------------------------------------------------------------

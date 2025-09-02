@@ -15,7 +15,7 @@
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
 
-namespace tensorcast::obs {
+namespace tensorcast::common::otel {
 
 // TextMapCarrier for extracting trace context from gRPC ServerContext metadata.
 class GrpcServerCarrier : public opentelemetry::context::propagation::TextMapCarrier {
@@ -71,4 +71,4 @@ inline void InjectIntoClientMetadata(grpc::ClientContext& ctx) {
   propagator->Inject(carrier, current);
 }
 
-} // namespace tensorcast::obs
+} // namespace tensorcast::common::otel

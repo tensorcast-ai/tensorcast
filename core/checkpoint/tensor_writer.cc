@@ -18,7 +18,7 @@
 //  ----------------------------------------------------------------------------
 #include "tensor_writer.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 TensorWriter::TensorWriter(std::string filename) : filename_(std::move(filename)) {}
 
@@ -51,4 +51,4 @@ uint64_t TensorWriter::write_record(const char* data, size_t size) {
   return start_offset;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

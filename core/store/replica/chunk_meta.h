@@ -6,7 +6,7 @@
 #include <cstdint>
 #include "absl/status/status.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 // clang-format off
 /**
@@ -128,4 +128,4 @@ inline absl::Status try_transition_chunk_state(ChunkMeta& meta, ChunkState to) n
   }
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

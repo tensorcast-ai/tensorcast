@@ -10,11 +10,15 @@
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/store/loading/loading_spec.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
+using ::tensorcast::DeviceType;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::loading::ReplicaKey;
 namespace {
 
 // Mock implementation of DistributedVirtualMemoryPool for testing
-class MockDistributedVirtualMemoryPool : public memory::DistributedVirtualMemoryPool {
+class MockDistributedVirtualMemoryPool : public common::memory::DistributedVirtualMemoryPool {
  public:
   // === Configurable state ===
   VirtualRegion test_region_{};
@@ -327,4 +331,4 @@ TEST_CASE("ReplicaMemoryCoordinator multi-GPU state tracking", "[unified_memory]
 }
 
 } // namespace
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

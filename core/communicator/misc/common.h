@@ -13,7 +13,7 @@ extern "C" {
 
 #include <future>
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 enum {
   SUCCESS = 0,
@@ -41,8 +41,8 @@ constexpr size_t GB = (1ull << 30);
 
 #define COMM_CHECK(call)                                                         \
   do {                                                                           \
-    result_t res = call;                                                         \
-    if (res != SUCCESS) {                                                        \
+    misc::result_t res = (call);                                                 \
+    if (res != misc::SUCCESS) {                                                  \
       LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " " << errno; \
       return res;                                                                \
     }                                                                            \
@@ -50,12 +50,12 @@ constexpr size_t GB = (1ull << 30);
 
 #define CHECK_WARN(call, msg)                                                  \
   do {                                                                         \
-    result_t res = call;                                                       \
-    if (res != SUCCESS) {                                                      \
+    misc::result_t res = (call);                                               \
+    if (res != misc::SUCCESS) {                                                \
       LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " " << msg; \
     }                                                                          \
   } while (0)
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // CORE_COMMUNICATOR_MISC_COMMON_H_

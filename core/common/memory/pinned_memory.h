@@ -24,7 +24,7 @@
 
 #include "pinned_memory_pool.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 class PinnedMemory {
  public:
@@ -54,4 +54,4 @@ class PinnedMemory {
   std::shared_ptr<PinnedMemoryPool> mempool_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

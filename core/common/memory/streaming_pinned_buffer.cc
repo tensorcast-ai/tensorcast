@@ -7,7 +7,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 StreamingPinnedBuffer::StreamingPinnedBuffer(
     size_t num_chunks,
@@ -294,4 +294,4 @@ bool StreamingPinnedBuffer::production_done() const {
   return production_complete_;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

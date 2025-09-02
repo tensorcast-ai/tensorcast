@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 class Timer {
  public:
@@ -18,6 +18,6 @@ class Timer {
   uint64_t end_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // COMMUNICATOR_MISC_METRIC_H_

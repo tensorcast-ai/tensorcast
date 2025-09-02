@@ -14,9 +14,13 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
 using Catch::Matchers::ContainsSubstring;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
   const std::string artifact_id = "error_artifact";
@@ -31,7 +35,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
 
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource

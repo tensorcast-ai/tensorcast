@@ -12,11 +12,9 @@
 #include "core/store/loading/loading_spec.h"
 #include "gsl/pointers"
 
-namespace tensorcast::communicator {
-class CommunicateEngine;
-} // namespace tensorcast::communicator
+// No forward declarations from unrelated namespaces here
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 /**
  * @brief Runtime configuration for a Replica instance.
@@ -26,7 +24,7 @@ namespace tensorcast::store {
  */
 struct ReplicaConfig {
   // Source of the replica data (using new unified types)
-  ArtifactSource source;
+  loading::ArtifactSource source;
 
   // Unique identifier for the replica (used for logging, caching keys, RDMA registration).
   std::string artifact_identifier;
@@ -34,15 +32,15 @@ struct ReplicaConfig {
   // Explicit target device type (CPU, GPU, REMOTE). Defaults to CPU. If GPU is chosen, also
   // specify `local_device_id` below. This makes the target placement unambiguous and avoids
   // the legacy convention of inferring GPU vs. CPU from the sign of `local_device_id`.
-  ::tensorcast::DeviceType device_type = ::tensorcast::DeviceType::CPU;
+  DeviceType device_type = DeviceType::CPU;
 
   // Target local GPU device for operations (if applicable).
   int local_device_id = -1; // -1 means unspecified; runtime will decide
 
   // Memory pools for allocation (can be shared across replicas).
-  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> pinned_memory_pool;
+  gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pinned_memory_pool;
   // Shared Distributed Virtual Memory Pool for managing virtual address spaces
-  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp;
+  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp;
 
   // Optional: Explicitly provide artifact size if known.
   std::optional<uint64_t> expected_artifact_size;
@@ -66,4 +64,4 @@ struct ReplicaConfig {
   // - Performance tuning parameters
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

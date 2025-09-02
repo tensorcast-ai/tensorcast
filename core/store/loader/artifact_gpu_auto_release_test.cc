@@ -17,8 +17,14 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using namespace tensorcast::testing;
 
 TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][release]") {
   if (!is_cuda_available()) {
@@ -53,7 +59,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
     // Create DVMP
-    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -164,7 +170,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     // First GPU load
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+      auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -205,7 +211,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
     // Second GPU load (different device)
     {
       // Create DVMP
-      auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+      auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -277,7 +283,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -326,7 +332,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -375,7 +381,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
     // Create DVMP
-    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;

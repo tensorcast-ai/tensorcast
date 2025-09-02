@@ -10,13 +10,13 @@
 #include "core/store/device_registry.h"
 #include "core/store/replica/chunk_meta.h" // For chunk_state_to_string
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 ReplicaMemoryCoordinator::ReplicaMemoryCoordinator(
-    gsl::not_null<std::shared_ptr<tensorcast::memory::DistributedVirtualMemoryPool>> dvmp)
+    gsl::not_null<std::shared_ptr<tensorcast::common::memory::DistributedVirtualMemoryPool>> dvmp)
     : dvmp_(std::move(dvmp)) {}
 
-absl::Status ReplicaMemoryCoordinator::allocate(const ReplicaKey& key, size_t bytes) {
+absl::Status ReplicaMemoryCoordinator::allocate(const loading::ReplicaKey& key, size_t bytes) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Check if already allocated
@@ -40,8 +40,8 @@ absl::Status ReplicaMemoryCoordinator::allocate(const ReplicaKey& key, size_t by
     return region_or.status();
   }
   alloc.total_bytes = bytes;
-  alloc.num_chunks = (bytes + tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
-      tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+  alloc.num_chunks = (bytes + tensorcast::common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize - 1) /
+      tensorcast::common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
 
@@ -65,8 +65,8 @@ absl::Status ReplicaMemoryCoordinator::allocate(const ReplicaKey& key, size_t by
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::shared_ptr<CudaMemory>> ReplicaMemoryCoordinator::get_or_create_gpu_allocation(
-    const ReplicaKey& key,
+absl::StatusOr<std::shared_ptr<common::memory::CudaMemory>> ReplicaMemoryCoordinator::get_or_create_gpu_allocation(
+    const loading::ReplicaKey& key,
     int device_id) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -86,7 +86,7 @@ absl::StatusOr<std::shared_ptr<CudaMemory>> ReplicaMemoryCoordinator::get_or_cre
   }
 
   // Lazy allocation of GPU memory
-  auto cuda_mem = std::make_shared<CudaMemory>();
+  auto cuda_mem = std::make_shared<common::memory::CudaMemory>();
   auto status = cuda_mem->allocate(it->second.total_bytes, device_id);
   if (!status.ok()) {
     return status;
@@ -102,7 +102,7 @@ absl::StatusOr<std::shared_ptr<CudaMemory>> ReplicaMemoryCoordinator::get_or_cre
 }
 
 absl::Span<const ReplicaMemoryCoordinator::ChunkMapping> ReplicaMemoryCoordinator::get_chunk_mappings(
-    const ReplicaKey& key) const {
+    const loading::ReplicaKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -117,8 +117,8 @@ absl::Span<const ReplicaMemoryCoordinator::ChunkMapping> ReplicaMemoryCoordinato
 }
 
 std::vector<uint32_t> ReplicaMemoryCoordinator::get_missing_chunks(
-    const ReplicaKey& key,
-    MemoryLocation target,
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation target,
     std::optional<int> device_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -137,7 +137,7 @@ std::vector<uint32_t> ReplicaMemoryCoordinator::get_missing_chunks(
     const auto& mapping = mappings[i];
     bool is_missing = false;
 
-    if (target == MemoryLocation::GPU) {
+    if (target == common::memory::MemoryLocation::GPU) {
       if (!device_id.has_value()) {
         LOG(ERROR) << "Device ID required for GPU target";
         continue;
@@ -149,7 +149,7 @@ std::vector<uint32_t> ReplicaMemoryCoordinator::get_missing_chunks(
           (gpu_it->second != ChunkState::HOT && gpu_it->second != ChunkState::COPIED_GPU)) {
         is_missing = true;
       }
-    } else if (target == MemoryLocation::PAGEABLE_CPU) {
+    } else if (target == common::memory::MemoryLocation::PAGEABLE_CPU) {
       if (mapping.cpu_state != ChunkState::HOT && mapping.cpu_state != ChunkState::COLD &&
           mapping.cpu_state != ChunkState::PREEMPTIBLE) {
         is_missing = true;
@@ -165,9 +165,9 @@ std::vector<uint32_t> ReplicaMemoryCoordinator::get_missing_chunks(
 }
 
 absl::Status ReplicaMemoryCoordinator::lock_chunks_for_transfer(
-    const ReplicaKey& key,
-    MemoryLocation source,
-    MemoryLocation target,
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation source,
+    common::memory::MemoryLocation target,
     const std::vector<uint32_t>& chunks) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -177,7 +177,7 @@ absl::Status ReplicaMemoryCoordinator::lock_chunks_for_transfer(
   }
 
   // If source is CPU, delegate to DVMP for locking
-  if (source == MemoryLocation::PAGEABLE_CPU) {
+  if (source == common::memory::MemoryLocation::PAGEABLE_CPU) {
     auto status = dvmp_->lock_chunks(key.artifact_id, chunks);
     if (!status.ok()) {
       return status;
@@ -199,8 +199,8 @@ absl::Status ReplicaMemoryCoordinator::lock_chunks_for_transfer(
 }
 
 absl::Status ReplicaMemoryCoordinator::update_chunk_states(
-    const ReplicaKey& key,
-    MemoryLocation location,
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation location,
     const std::vector<uint32_t>& chunks,
     ChunkState new_state,
     std::optional<int> device_id) {
@@ -223,7 +223,7 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
 
     // Phase 5: remove legacy per-transition counter (store_daemon_*); unified metrics capture latency/bytes elsewhere.
 
-    if (location == MemoryLocation::GPU) {
+    if (location == common::memory::MemoryLocation::GPU) {
       if (!device_id.has_value()) {
         return absl::InvalidArgumentError("Device ID required for GPU location");
       }
@@ -253,7 +253,7 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
           LOG(WARNING) << "Failed to unlock chunk " << chunk_idx << ": " << status;
         }
       }
-    } else if (location == MemoryLocation::PAGEABLE_CPU) {
+    } else if (location == common::memory::MemoryLocation::PAGEABLE_CPU) {
       // CPU state is managed by DVMP, but we track it here for queries
       mapping.cpu_state = new_state;
       // Inform DVMP about recent activity so that LRU-based policies (e.g. mark_cpu_preemptible)
@@ -266,9 +266,9 @@ absl::Status ReplicaMemoryCoordinator::update_chunk_states(
 }
 
 ReplicaMemoryCoordinator::ChunkSource ReplicaMemoryCoordinator::get_best_source_for_chunk(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     uint32_t chunk_idx,
-    MemoryLocation target) const {
+    common::memory::MemoryLocation target) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -279,12 +279,12 @@ ReplicaMemoryCoordinator::ChunkSource ReplicaMemoryCoordinator::get_best_source_
   const auto& mapping = it->second.chunk_mappings[chunk_idx];
 
   // Priority 1: Local copy (CPU→GPU or GPU→CPU)
-  if (target == MemoryLocation::GPU) {
+  if (target == common::memory::MemoryLocation::GPU) {
     if (mapping.cpu_state == ChunkState::HOT || mapping.cpu_state == ChunkState::COLD ||
         mapping.cpu_state == ChunkState::PREEMPTIBLE) {
       return {ChunkSource::LOCAL_CPU, -1, ""};
     }
-  } else if (target == MemoryLocation::PAGEABLE_CPU) {
+  } else if (target == common::memory::MemoryLocation::PAGEABLE_CPU) {
     // Check if available on any GPU
     for (const auto& [dev_key, state] : mapping.gpu_state) {
       if (state == ChunkState::HOT || state == ChunkState::COPIED_GPU) {
@@ -300,10 +300,11 @@ ReplicaMemoryCoordinator::ChunkSource ReplicaMemoryCoordinator::get_best_source_
   return {ChunkSource::DISK, -1, ""};
 }
 
-std::unordered_map<MemoryLocation, size_t> ReplicaMemoryCoordinator::get_memory_stats(const ReplicaKey& key) const {
+std::unordered_map<common::memory::MemoryLocation, size_t> ReplicaMemoryCoordinator::get_memory_stats(
+    const loading::ReplicaKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  std::unordered_map<MemoryLocation, size_t> stats;
+  std::unordered_map<common::memory::MemoryLocation, size_t> stats;
 
   auto it = allocations_.find(key);
   if (it == allocations_.end()) {
@@ -312,23 +313,23 @@ std::unordered_map<MemoryLocation, size_t> ReplicaMemoryCoordinator::get_memory_
 
   // Check DRAM allocation
   if (it->second.dram_region.cpu_base != nullptr) {
-    stats[MemoryLocation::PAGEABLE_CPU] = it->second.total_bytes;
+    stats[common::memory::MemoryLocation::PAGEABLE_CPU] = it->second.total_bytes;
   }
 
   // Check GPU allocations
   if (!it->second.gpu_allocations.empty()) {
-    stats[MemoryLocation::GPU] = it->second.total_bytes * it->second.gpu_allocations.size();
+    stats[common::memory::MemoryLocation::GPU] = it->second.total_bytes * it->second.gpu_allocations.size();
   }
 
   return stats;
 }
 
-bool ReplicaMemoryCoordinator::has_allocation(const ReplicaKey& key) const {
+bool ReplicaMemoryCoordinator::has_allocation(const loading::ReplicaKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return allocations_.find(key) != allocations_.end();
 }
 
-absl::StatusOr<size_t> ReplicaMemoryCoordinator::get_artifact_size(const ReplicaKey& key) const {
+absl::StatusOr<size_t> ReplicaMemoryCoordinator::get_artifact_size(const loading::ReplicaKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -339,7 +340,7 @@ absl::StatusOr<size_t> ReplicaMemoryCoordinator::get_artifact_size(const Replica
   return it->second.total_bytes;
 }
 
-void* ReplicaMemoryCoordinator::get_cpu_base_ptr(const ReplicaKey& key) const {
+void* ReplicaMemoryCoordinator::get_cpu_base_ptr(const loading::ReplicaKey& key) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -350,7 +351,7 @@ void* ReplicaMemoryCoordinator::get_cpu_base_ptr(const ReplicaKey& key) const {
   return it->second.dram_region.cpu_base;
 }
 
-void* ReplicaMemoryCoordinator::get_gpu_base_ptr(const ReplicaKey& key, int device_id) const {
+void* ReplicaMemoryCoordinator::get_gpu_base_ptr(const loading::ReplicaKey& key, int device_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -367,7 +368,7 @@ void* ReplicaMemoryCoordinator::get_gpu_base_ptr(const ReplicaKey& key, int devi
   return gpu_it->second->get();
 }
 
-absl::Status ReplicaMemoryCoordinator::release(const ReplicaKey& key) {
+absl::Status ReplicaMemoryCoordinator::release(const loading::ReplicaKey& key) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -382,10 +383,10 @@ absl::Status ReplicaMemoryCoordinator::release(const ReplicaKey& key) {
 }
 
 size_t ReplicaMemoryCoordinator::get_chunk_size() const {
-  return tensorcast::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+  return tensorcast::common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
 }
 
-absl::Status ReplicaMemoryCoordinator::mark_cpu_chunks_preemptible(const ReplicaKey& key, float ratio) {
+absl::Status ReplicaMemoryCoordinator::mark_cpu_chunks_preemptible(const loading::ReplicaKey& key, float ratio) {
   if (ratio < 0.0F || ratio > 1.0F) {
     return absl::InvalidArgumentError("ratio must be between 0.0 and 1.0");
   }
@@ -426,7 +427,7 @@ absl::Status ReplicaMemoryCoordinator::mark_cpu_chunks_preemptible(const Replica
   return absl::OkStatus();
 }
 
-void ReplicaMemoryCoordinator::sync_cpu_chunk_states(const ReplicaKey& key) {
+void ReplicaMemoryCoordinator::sync_cpu_chunk_states(const loading::ReplicaKey& key) {
   auto it = allocations_.find(key);
   if (it == allocations_.end()) {
     return;
@@ -442,7 +443,7 @@ void ReplicaMemoryCoordinator::sync_cpu_chunk_states(const ReplicaKey& key) {
 }
 
 void ReplicaMemoryCoordinator::sync_cpu_chunk_states(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     absl::Span<const std::pair<uint32_t, uint32_t>> ranges) {
   auto it = allocations_.find(key);
   if (it == allocations_.end()) {
@@ -461,7 +462,7 @@ void ReplicaMemoryCoordinator::sync_cpu_chunk_states(
   }
 }
 
-bool ReplicaMemoryCoordinator::is_gpu_loading_complete(const ReplicaKey& key, int device_id) const {
+bool ReplicaMemoryCoordinator::is_gpu_loading_complete(const loading::ReplicaKey& key, int device_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = allocations_.find(key);
@@ -498,7 +499,7 @@ bool ReplicaMemoryCoordinator::is_gpu_loading_complete(const ReplicaKey& key, in
 }
 
 void ReplicaMemoryCoordinator::record_gpu_touch(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     int device_id,
     absl::Span<const uint32_t> chunks) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -517,7 +518,7 @@ void ReplicaMemoryCoordinator::record_gpu_touch(
 }
 
 absl::StatusOr<DirectWriteToken> ReplicaMemoryCoordinator::create_direct_write_token(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     absl::Span<const VaRange> ranges) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = allocations_.find(key);
@@ -530,7 +531,7 @@ absl::StatusOr<DirectWriteToken> ReplicaMemoryCoordinator::create_direct_write_t
   }
 
   struct DwKeep {
-    std::vector<memory::DistributedVirtualMemoryPool::ChunkResidencyLease> leases;
+    std::vector<common::memory::DistributedVirtualMemoryPool::ChunkResidencyLease> leases;
   };
   auto keep = std::make_shared<DwKeep>();
 
@@ -557,7 +558,7 @@ absl::StatusOr<DirectWriteToken> ReplicaMemoryCoordinator::create_direct_write_t
 }
 
 absl::Status ReplicaMemoryCoordinator::post_gpu_load_policy(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     size_t bytes,
     PostGpuLoadPolicy policy) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -584,4 +585,4 @@ absl::Status ReplicaMemoryCoordinator::post_gpu_load_policy(
   }
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

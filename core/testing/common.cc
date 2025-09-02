@@ -11,6 +11,8 @@
 #include "core/common/cuda_api.h"
 #include "core/store/loader/disk_dir_hash.h"
 
+namespace tensorcast::testing {
+
 struct option longOpts[] = {
     {"actor", required_argument, nullptr, 'a'},
     {"ip", required_argument, nullptr, 'i'},
@@ -81,7 +83,9 @@ int parse_options(int argc, char* argv[]) {
   return 0;
 }
 
-namespace tensorcast::tests {
+} // namespace tensorcast::testing
+
+namespace tensorcast::testing {
 
 bool create_dummy_file(const std::filesystem::path& path, size_t size, char start_char) {
   LOG(INFO) << "Creating dummy file at " << path << " with size " << size;
@@ -176,8 +180,7 @@ absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::files
   }
 
   // 2) Compute multihashes via core/common/artifact_hash
-  auto index_mh_or =
-      tensorcast::store::artifact_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
+  auto index_mh_or = tensorcast::common::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
@@ -211,4 +214,4 @@ absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::files
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::tests
+} // namespace tensorcast::testing

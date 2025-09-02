@@ -28,7 +28,6 @@
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/loading/materialize_orchestrator.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
 // RFC-0007 helpers for safetensors canonical index
@@ -37,19 +36,36 @@
 #include "core/store/loader/safetensors_util.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
+#include "core/store/loading/materialize_orchestrator.h"
 #include "core/store/loading/replica_registration_helper.h"
-
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
 
 namespace tensorcast::store {
+
+using common::memory::MemoryLocation;
+using components::DeviceManager;
+using components::MetricsCollector;
+using components::ReplicaRegistry;
+using loading::DiskSource;
+using loading::InlineBufferSource;
+using loading::MaterializeHints;
+using loading::ReplicaHandle;
+using loading::ReplicaKey;
+using loading::ReplicaRegistrationHelper;
+using loading::ReplicaTarget;
+using replica::ChunkMeta;
+using replica::ChunkState;
+using replica::MemoryState;
+using replica::Replica;
+
 // (hashing utilities moved to core/common/artifact_hash.*)
 // Forward declaration for GPU eviction helper defined later in this file.
 absl::Status try_evict_gpu_memory_impl(
-    ReplicaRegistry& registry,
-    DeviceManager& device_manager,
-    MetricsCollector& metrics,
+    components::ReplicaRegistry& registry,
+    components::DeviceManager& device_manager,
+    components::MetricsCollector& metrics,
     int device_id,
     size_t required_bytes);
 
@@ -65,20 +81,24 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       num_thread_(opts.num_thread),
       chunk_size_(opts.chunk_size),
       pinned_memory_timeout_(opts.pinned_memory_timeout),
-      device_manager_(gsl::not_null<std::unique_ptr<DeviceManager>>(std::make_unique<DeviceManager>())),
-      replica_registry_(gsl::not_null<std::unique_ptr<ReplicaRegistry>>(std::make_unique<ReplicaRegistry>())),
-      metrics_collector_(gsl::not_null<std::unique_ptr<MetricsCollector>>(std::make_unique<MetricsCollector>())),
+      device_manager_(
+          gsl::not_null<std::unique_ptr<components::DeviceManager>>(std::make_unique<components::DeviceManager>())),
+      replica_registry_(
+          gsl::not_null<std::unique_ptr<components::ReplicaRegistry>>(std::make_unique<components::ReplicaRegistry>())),
+      metrics_collector_(
+          gsl::not_null<std::unique_ptr<components::MetricsCollector>>(
+              std::make_unique<components::MetricsCollector>())),
       memory_pool_(
-          gsl::not_null<std::shared_ptr<PinnedMemoryPool>>(
-              std::make_shared<PinnedMemoryPool>(memory_pool_size_, chunk_size_))),
+          gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>(
+              std::make_shared<common::memory::PinnedMemoryPool>(memory_pool_size_, chunk_size_))),
       dvmp_(
-          gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>(
-              std::make_shared<memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
+          gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>(
+              std::make_shared<common::memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
   VLOG(1) << "Initializing StoreEngine with unified Options constructor";
   VLOG(1) << "Storage path: "
           << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
-  VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::GB << "GB";
-  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::MB << "MB";
+  VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
+  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::misc::MB << "MB";
 
   initialize_components();
   initialize_global_store(opts);
@@ -99,10 +119,10 @@ void StoreEngine::initialize_global_store(const StoreEngineOptions& opts) {
   // connect immediately so that MaterializeOrchestrator can leverage it for remote
   // replica discovery.
   if (!opts.global_store_address.empty()) {
-    GlobalStoreClientConfig gs_cfg;
+    components::GlobalStoreClientConfig gs_cfg;
     gs_cfg.global_store_address = opts.global_store_address;
 
-    global_store_client_ = std::make_unique<GlobalStoreClient>(gs_cfg);
+    global_store_client_ = std::make_unique<components::GlobalStoreClient>(gs_cfg);
     absl::Status st = global_store_client_->initialize();
     if (!st.ok()) {
       LOG(WARNING) << "StoreEngine: GlobalStoreClient init failed: " << st;
@@ -160,15 +180,17 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
     auto size_result = replica->get_artifact_size();
     info.size_bytes = size_result.ok() ? size_result.value() : 0;
 
-    auto cpu_state = replica->get_memory_state(MemoryLocation::PAGEABLE_CPU);
-    auto gpu_state = replica->get_memory_state(MemoryLocation::GPU);
+    auto cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+    auto gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
-    auto is_present = [](MemoryState st) {
-      return st == MemoryState::ALLOCATED || st == MemoryState::LOADING || st == MemoryState::LOADED;
+    auto is_present = [](replica::MemoryState st) {
+      return st == replica::MemoryState::ALLOCATED || st == replica::MemoryState::LOADING ||
+          st == replica::MemoryState::LOADED;
     };
 
-    info.cpu_state = is_present(cpu_state) ? MemoryLocation::PAGEABLE_CPU : MemoryLocation::NONE;
-    info.gpu_state = is_present(gpu_state) ? MemoryLocation::GPU : MemoryLocation::NONE;
+    info.cpu_state =
+        is_present(cpu_state) ? common::memory::MemoryLocation::PAGEABLE_CPU : common::memory::MemoryLocation::NONE;
+    info.gpu_state = is_present(gpu_state) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::NONE;
 
     info.gpu_device_id = -1;
     info.gpu_device_uuid.clear();
@@ -179,7 +201,7 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
         info.gpu_device_uuid = key.device.uuid;
       } else {
         // Fallback: query via CUDA API if uuid not stored.
-        const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+        const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
         if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
           cudaPointerAttributes attrs;
           auto attr_status = cuda::pointer_get_attributes_full(gpu_ptrs[0], &attrs);
@@ -212,24 +234,24 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
 // Internal Implementation - using new unified types
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     const std::string& artifact_identifier,
-    const DiskSource& source,
-    const ReplicaTarget& target,
-    const MaterializeHints& hints) {
+    const loading::DiskSource& source,
+    const loading::ReplicaTarget& target,
+    const loading::MaterializeHints& hints) {
   const auto start_time = std::chrono::steady_clock::now();
   const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_disk_internal");
 
   // Convert Location to legacy MemoryLocation
-  MemoryLocation target_location = MemoryLocation::PAGEABLE_CPU;
-  if (target.location.type == MemoryLocation::GPU) {
-    target_location = MemoryLocation::GPU;
+  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::PAGEABLE_CPU;
+  if (target.location.type == common::memory::MemoryLocation::GPU) {
+    target_location = common::memory::MemoryLocation::GPU;
   }
 
   // Resolve device ID if GPU target
   int target_device_id = target.location.device_id;
-  if (target_location == MemoryLocation::GPU && !target.location.device_uuid.empty()) {
+  if (target_location == common::memory::MemoryLocation::GPU && !target.location.device_uuid.empty()) {
     auto device_result = device_manager_->find_device_by_uuid(target.location.device_uuid);
     if (!device_result.ok()) {
       return device_result.status();
@@ -238,7 +260,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   }
 
   // Defensive check: ensure GPU ordinal is valid before proceeding.
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     const int num_gpus = device_manager_->get_num_gpus();
     if (target_device_id < 0 || target_device_id >= num_gpus) {
       return absl::InvalidArgumentError(std::string("Invalid GPU device ordinal: ") + std::to_string(target_device_id));
@@ -251,13 +273,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   // unit-tests).  This mirrors the semantics of the legacy Python
   // implementation and avoids surprises when the current working directory is
   // different from storage_path_.
-  DiskSource resolved_source = source;
+  loading::DiskSource resolved_source = source;
   if (!storage_path_.empty() && !source.path.is_absolute()) {
     resolved_source.path = storage_path_ / source.path;
   }
 
   // Get or create replica
-  ReplicaConfig config{
+  replica::ReplicaConfig config{
       .source = resolved_source,
       .artifact_identifier = artifact_identifier,
       .device_type = DeviceType::CPU,
@@ -267,10 +289,10 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       .expected_artifact_size = std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     config.local_device_id = target_device_id;
   }
-  config.device_type = (target_location == MemoryLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
+  config.device_type = (target_location == common::memory::MemoryLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
 
   auto replica = get_or_create_replica(artifact_identifier, config);
   if (!replica) {
@@ -279,7 +301,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
   // Start async loading
   std::optional<int> opt_dev;
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     opt_dev = target_device_id;
   }
 
@@ -293,12 +315,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   absl::Duration wait_duration =
       (allocation_timeout.count() > 0) ? absl::Milliseconds(allocation_timeout.count()) : absl::InfiniteDuration();
 
-  auto wait_status = replica->get_memory_manager().wait_for_state(target_location, MemoryState::LOADED, wait_duration);
+  auto wait_status =
+      replica->get_memory_manager().wait_for_state(target_location, replica::MemoryState::LOADED, wait_duration);
 
   // ------------------------------------------------------------------
   // NEW (Phase 3.2-3): On GPU allocation failure attempt eviction + retry
   // ------------------------------------------------------------------
-  if (!wait_status.ok() && target_location == MemoryLocation::GPU) {
+  if (!wait_status.ok() && target_location == common::memory::MemoryLocation::GPU) {
     // Approximate bytes we need = artifact size (may be 0 if unknown)
     size_t required_bytes = 0;
     if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
@@ -314,12 +337,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
     if (evict_st.ok()) {
       // Reset replica GPU memory state then retry loading.
-      (void)replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+      (void)replica->release_memory(common::memory::MemoryLocation::GPU, /*safe_release=*/true);
 
       // Trigger load again.
       load_future = replica->ensure_loaded_async(target_location, num_thread_, opt_dev);
 
-      wait_status = replica->get_memory_manager().wait_for_state(target_location, MemoryState::LOADED, wait_duration);
+      wait_status =
+          replica->get_memory_manager().wait_for_state(target_location, replica::MemoryState::LOADED, wait_duration);
 
       if (!wait_status.ok()) {
         LOG(WARNING) << "ingest_from_disk_internal(): Retry after eviction still failed: " << wait_status;
@@ -423,8 +447,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
       if (index_bytes_or.ok()) {
         // compute_index_multihash prefers inline data
-        auto index_mh_or =
-            artifact_hash::compute_index_multihash(std::optional<std::string>(index_bytes_or.value()), "");
+        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(index_bytes_or.value()), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
           // Determine logical total size from canonical index bytes
@@ -465,7 +488,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         // Apply stable canonicalization using C++ authority
         auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
         const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
-        auto index_mh_or = artifact_hash::compute_index_multihash(std::optional<std::string>(canonical_json), "");
+        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
           // Determine logical total size from canonical index JSON
@@ -510,7 +533,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           std::stringstream vbuf;
           vbuf << vf.rdbuf();
           vf.close();
-          auto ver_or = ArtifactVerificationInfo::from_json(vbuf.str());
+          auto ver_or = common::ArtifactVerificationInfo::from_json(vbuf.str());
           if (ver_or.ok()) {
             std::vector<void*> ptrs;
             std::vector<size_t> sizes;
@@ -537,8 +560,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
               }
             }
             if (!ptrs.empty()) {
-              absl::Status vstatus = ArtifactVerifier::verify_artifact_data(
-                  ptrs, sizes, *ver_or, VerificationLevel::SEGMENT_HASHES, dev_id);
+              absl::Status vstatus = common::ArtifactVerifier::verify_artifact_data(
+                  ptrs, sizes, *ver_or, common::VerificationLevel::SEGMENT_HASHES, dev_id);
               if (!vstatus.ok()) {
                 return absl::DataLossError(
                     absl::StrCat("ARTIFACT_ID_MISMATCH: verification failed: ", vstatus.message()));
@@ -573,8 +596,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           }
         }
         if (!ptrs.empty()) {
-          auto gen_or =
-              ArtifactVerifier::generate_verification_info(ptrs, sizes, dev_id, VerificationLevel::SEGMENT_HASHES);
+          auto gen_or = common::ArtifactVerifier::generate_verification_info(
+              ptrs, sizes, dev_id, common::VerificationLevel::SEGMENT_HASHES);
           if (gen_or.ok()) {
             try {
               std::ofstream vf(verification_path);
@@ -683,24 +706,24 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   }
 
   // Build result using new ReplicaHandle structure
-  ReplicaHandle handle;
+  loading::ReplicaHandle handle;
 
   // Compose ReplicaKey
   DeviceKey dev_key;
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     dev_key = DeviceKey{.type = DeviceType::GPU, .ordinal = target_device_id, .uuid = ""};
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.replica_key = ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, /*replica=*/.replica = 0};
+  handle.replica_key = loading::ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
 
   // Loading future and states
   handle.ready_future = load_future;
-  handle.cpu_state = replica->get_memory_state(MemoryLocation::PAGEABLE_CPU);
-  handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
-  if (target_location == MemoryLocation::GPU) {
-    const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
     handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
     // Attempt to obtain CUDA IPC handle bytes for the allocated GPU buffer.
@@ -717,7 +740,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   // Unified artifact load metric with labels
   metrics_collector_->record_artifact_load(
       /*source=*/"disk",
-      /*device=*/(target_location == MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
+      /*device=*/(target_location == common::memory::MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
       /*phase=*/"finalize",
       duration_s);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
@@ -725,11 +748,11 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   return handle;
 }
 
-absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
     const std::string& artifact_identifier,
     const P2PSource& source,
-    const ReplicaTarget& target,
-    const MaterializeHints& hints) {
+    const loading::ReplicaTarget& target,
+    const loading::MaterializeHints& hints) {
   const auto start_time = std::chrono::steady_clock::now();
   const std::string request_id = absl::StrCat("p2p_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_p2p_internal");
@@ -748,24 +771,24 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   p2p_span->SetAttribute("tc.source.address", source.ip);
   p2p_span->SetAttribute("tc.p2p.port", static_cast<int64_t>(source.port));
   p2p_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(source.size_bytes));
-  p2p_span->SetAttribute("tc.location", target.location.type == MemoryLocation::GPU ? "gpu" : "cpu");
+  p2p_span->SetAttribute("tc.location", target.location.type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu");
 
   if (!comm_manager_ || !comm_manager_->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
 
-  MemoryLocation target_location = MemoryLocation::PAGEABLE_CPU;
-  if (target.location.type == MemoryLocation::GPU) {
-    target_location = MemoryLocation::GPU;
+  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::PAGEABLE_CPU;
+  if (target.location.type == common::memory::MemoryLocation::GPU) {
+    target_location = common::memory::MemoryLocation::GPU;
   }
 
   // Create replica with P2P source
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
-  ReplicaConfig config{
+  replica::ReplicaConfig config{
       .source = p2p_source,
       .artifact_identifier = artifact_identifier,
-      .device_type = (target_location == MemoryLocation::GPU ? DeviceType::GPU : DeviceType::CPU),
+      .device_type = (target_location == common::memory::MemoryLocation::GPU ? DeviceType::GPU : DeviceType::CPU),
       .local_device_id = target.location.device_id,
       .pinned_memory_pool = memory_pool_,
       .dvmp = dvmp_,
@@ -774,7 +797,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   config.p2p_comm_enabled = true;
-  config.device_type = (target_location == MemoryLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
+  config.device_type = (target_location == common::memory::MemoryLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
 
   auto replica = get_or_create_replica(artifact_identifier, config);
   if (!replica) {
@@ -810,26 +833,26 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   }
 
   // Build result using new ReplicaHandle structure
-  ReplicaHandle handle;
+  loading::ReplicaHandle handle;
 
   DeviceKey dev_key;
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     dev_key = DeviceKey{.type = DeviceType::GPU, .ordinal = target.location.device_id, .uuid = ""};
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.replica_key = ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, /*replica=*/.replica = 0};
+  handle.replica_key = loading::ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
 
   // Ready future is already resolved (synchronous path)
   std::promise<absl::Status> promise;
   promise.set_value(absl::OkStatus());
   handle.ready_future = promise.get_future().share();
 
-  handle.cpu_state = replica->get_memory_state(MemoryLocation::PAGEABLE_CPU);
-  handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
-  if (target_location == MemoryLocation::GPU) {
-    const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
     handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
     auto ipc_or = replica->get_memory_manager().get_cuda_ipc_handle();
@@ -846,7 +869,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   // Unified artifact load metric with labels
   metrics_collector_->record_artifact_load(
       /*source=*/"remote",
-      /*device=*/(target_location == MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
+      /*device=*/(target_location == common::memory::MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
       /*phase=*/"finalize",
       duration_s);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
@@ -856,19 +879,19 @@ absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   return handle;
 }
 
-absl::StatusOr<ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
     const std::string& /*artifact_identifier*/,
-    const InlineBufferSource& /*source*/,
-    const ReplicaTarget& /*target*/,
-    const MaterializeHints& /*hints*/) {
+    const loading::InlineBufferSource& /*source*/,
+    const loading::ReplicaTarget& /*target*/,
+    const loading::MaterializeHints& /*hints*/) {
   // InlineBufferSource is a newly added type, temporarily returning unimplemented error
   // Future: implement direct replica loading from memory buffer
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
-std::shared_ptr<Replica> StoreEngine::get_or_create_replica(
+std::shared_ptr<replica::Replica> StoreEngine::get_or_create_replica(
     const std::string& artifact_identifier,
-    const ReplicaConfig& config) {
+    const replica::ReplicaConfig& config) {
   // Build ReplicaKey for the requested device (CPU when local_device_id < 0)
   DeviceKey dev_key;
   if (config.device_type == DeviceType::GPU) {
@@ -877,7 +900,7 @@ std::shared_ptr<Replica> StoreEngine::get_or_create_replica(
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  ReplicaKey inst_key{.artifact_id = artifact_identifier, .device = dev_key, /*replica=*/.replica = 0};
+  loading::ReplicaKey inst_key{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
 
   // Fast-path: already present in registry
   if (auto existing_or = replica_registry_->find(inst_key); existing_or.ok()) {
@@ -885,12 +908,12 @@ std::shared_ptr<Replica> StoreEngine::get_or_create_replica(
   }
 
   // Create new Replica
-  auto replica_create_or = Replica::create(config);
+  auto replica_create_or = replica::Replica::create(config);
   if (!replica_create_or.ok()) {
     LOG(ERROR) << "Failed to create replica: " << replica_create_or.status().message();
     return nullptr;
   }
-  auto replica = std::shared_ptr<Replica>(std::move(replica_create_or.value()));
+  auto replica = std::shared_ptr<replica::Replica>(std::move(replica_create_or.value()));
 
   // Register in multi-device registry (best effort)
   absl::Status emplace_status = replica_registry_->emplace(inst_key, replica);
@@ -925,7 +948,7 @@ absl::Status StoreEngine::try_evict_memory_for_replica(size_t required_size) {
 
     // Only attempt to free CPU memory for now – GPU eviction will be handled
     // in a future iteration.
-    auto free_status = replica->release_memory(MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+    auto free_status = replica->release_memory(common::memory::MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
     if (free_status.ok()) {
       metrics_collector_->record_memory_eviction();
       LOG(INFO) << "Evicted replica " << inst_key.artifact_id
@@ -1038,21 +1061,22 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
   }
 
   // Helper lambda: minimal disk-loading path.
-  auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<ReplicaHandle> {
+  auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<loading::ReplicaHandle> {
     // Guard: content-addressed IDs (mi2:...) are not paths.
     if (absl::StartsWith(hints.artifact_id, "mi2:")) {
       return absl::FailedPreconditionError(
           "LOAD_ONLY/disk fallback disabled for content-addressed artifact_id; Global Store routing required");
     }
-    DiskSource disk_src;
+    loading::DiskSource disk_src;
     if (!hints.disk_path.empty()) {
       disk_src.path = std::filesystem::path(hints.disk_path);
     } else {
       disk_src.path = std::filesystem::path(hints.artifact_id);
     }
 
-    ReplicaTarget target;
-    target.location.type = (dev_key.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+    loading::ReplicaTarget target;
+    target.location.type = (dev_key.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                             : common::memory::MemoryLocation::PAGEABLE_CPU;
     target.location.device_id = dev_key.ordinal;
 
     return ingest_from_disk_internal(
@@ -1086,7 +1110,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
           continue;
         }
         const auto& src_replica = src_or.value();
-        if (src_replica->get_memory_state(MemoryLocation::GPU) != MemoryState::LOADED) {
+        if (src_replica->get_memory_state(common::memory::MemoryLocation::GPU) != replica::MemoryState::LOADED) {
           continue;
         }
 
@@ -1099,8 +1123,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         } else {
           return sz_or.status();
         }
-        InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
-        ReplicaConfig cfg{
+        loading::InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
+        replica::ReplicaConfig cfg{
             .source = ib_source,
             .artifact_identifier = hints.artifact_id,
             .device_type = DeviceType::GPU,
@@ -1110,11 +1134,11 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
             .expected_artifact_size = expected_size};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
-        auto dst_or = Replica::create(cfg);
+        auto dst_or = replica::Replica::create(cfg);
         if (!dst_or.ok()) {
           return dst_or.status();
         }
-        auto dst_replica = std::shared_ptr<Replica>(std::move(dst_or.value()));
+        auto dst_replica = std::shared_ptr<replica::Replica>(std::move(dst_or.value()));
         (void)replica_registry_->emplace(dst_key, dst_replica);
 
         absl::Status copy_st = dst_replica->copy_from(*src_replica);
@@ -1148,7 +1172,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
 
     case MaterializeMode::AUTO: {
       if (global_store_client_ && global_store_client_->is_connected() && !hints.artifact_id.empty()) {
-        MaterializeOrchestrator orchestrator(this, global_store_client_.get());
+        loading::MaterializeOrchestrator orchestrator(this, global_store_client_.get());
         auto orchestrated_or = orchestrator.run(hints.artifact_id, target_device, hints);
         if (orchestrated_or.ok()) {
           return *orchestrated_or;
@@ -1537,7 +1561,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   // Use InlineBufferSource with the known total size so Replica::create() can
   // construct MemoryManager without requiring any on-disk layout.
   InlineBufferSource ib_source{.data = nullptr, .size_bytes = reg.total_size_bytes};
-  ReplicaConfig cfg{
+  replica::ReplicaConfig cfg{
       .source = ib_source,
       .artifact_identifier = reg.artifact_id,
       .device_type = DeviceType::GPU,
@@ -1673,7 +1697,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Compute content-addressed artifact_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
   // 1) index_multihash from canonical index bytes when provided, otherwise from key (sha256 hex)
   absl::StatusOr<std::string> index_mh_or =
-      artifact_hash::compute_index_multihash(entry.tensor_index_data, entry.tensor_index_key);
+      common::compute_index_multihash(entry.tensor_index_data, entry.tensor_index_key);
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
@@ -1685,7 +1709,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
   }
   absl::StatusOr<std::string> data_mh_or =
-      artifact_hash::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
+      common::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
@@ -1759,7 +1783,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {
-  std::shared_ptr<Replica> replica;
+  std::shared_ptr<replica::Replica> replica;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     auto it = pending_regs_.find(std::string(registration_id));
@@ -1776,8 +1800,8 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
   return absl::OkStatus();
 }
 
-std::vector<ChunkState> StoreEngine::get_chunk_states(std::string_view artifact_id) const {
-  std::vector<ChunkState> out;
+std::vector<replica::ChunkState> StoreEngine::get_chunk_states(std::string_view artifact_id) const {
+  std::vector<replica::ChunkState> out;
   auto span = dvmp_->chunk_snapshot(artifact_id);
   out.reserve(span.size());
   for (const auto& meta : span) {

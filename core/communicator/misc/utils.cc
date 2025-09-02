@@ -26,7 +26,7 @@ extern "C" {
 
 #include "core/communicator/misc/utils.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 #define MAX_IFS 32
 
@@ -86,4 +86,4 @@ std::string get_default_ip() {
   return ip;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc

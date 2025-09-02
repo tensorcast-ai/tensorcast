@@ -12,25 +12,25 @@
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
-    const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
+    const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
-    const ReplicaKey& ikey) {
+    const loading::ReplicaKey& ikey) {
   // Required components must be present – enforce via CHECKKs
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU destination pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
-  const size_t dvmp_chunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+  const size_t dvmp_chunk = common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
   const size_t copy_chunk = streaming_buf->chunk_size();
 
   auto device_status = cuda::set_device(device_id);
@@ -48,7 +48,8 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     // UMA lock this DVMP chunk for transfer (CPU -> GPU)
     if (uma) {
       std::vector<uint32_t> one{static_cast<uint32_t>(dvmp_idx)};
-      auto st = uma->lock_chunks_for_transfer(ikey, MemoryLocation::PAGEABLE_CPU, MemoryLocation::GPU, one);
+      auto st = uma->lock_chunks_for_transfer(
+          ikey, common::memory::MemoryLocation::PAGEABLE_CPU, common::memory::MemoryLocation::GPU, one);
       if (!st.ok()) {
         return st;
       }
@@ -108,7 +109,8 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     // UMA update: mark DVMP chunk as COPIED_GPU which triggers DVMP unlock
     if (uma) {
       std::vector<uint32_t> one{static_cast<uint32_t>(dvmp_idx)};
-      auto st = uma->update_chunk_states(ikey, MemoryLocation::GPU, one, ChunkState::COPIED_GPU, device_id);
+      auto st =
+          uma->update_chunk_states(ikey, common::memory::MemoryLocation::GPU, one, ChunkState::COPIED_GPU, device_id);
       if (!st.ok()) {
         // Best-effort unlock on failure to avoid holding LOCKED_TX
         (void)dvmp->unlock_chunks(artifact_id, one, /*copied_gpu=*/true);
@@ -123,12 +125,12 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
 absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
-    const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
+    const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<memory::DistributedVirtualMemoryPool>& dvmp) {
+    const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK(gpu_ptr) << "GPU source pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
@@ -189,4 +191,4 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

@@ -4,7 +4,7 @@
 
 #include "absl/log/log.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 std::shared_ptr<UmaLeaseProvider> UmaLeaseProvider::instance() {
   static auto inst = std::shared_ptr<UmaLeaseProvider>(new UmaLeaseProvider());
@@ -13,15 +13,15 @@ std::shared_ptr<UmaLeaseProvider> UmaLeaseProvider::instance() {
 
 void UmaLeaseProvider::register_mapping(
     const std::string& tensor_key,
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     uint64_t base_va_off,
-    gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma) {
+    gsl::not_null<std::shared_ptr<replica::ReplicaMemoryCoordinator>> uma) {
   absl::MutexLock lk(&mu_);
   map_[tensor_key] =
-      Entry{.key = key, .base_va_off = base_va_off, .uma = std::weak_ptr<ReplicaMemoryCoordinator>(uma.get())};
+      Entry{.key = key, .base_va_off = base_va_off, .uma = std::weak_ptr<replica::ReplicaMemoryCoordinator>(uma.get())};
 }
 
-std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire(
+std::unique_ptr<communicator::engine::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire(
     const std::string& tensor_key,
     uint64_t offset,
     uint64_t bytes) {
@@ -31,14 +31,14 @@ std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire
     auto it = map_.find(tensor_key);
     if (it == map_.end()) {
       // Unknown key – return no-op handle (no UMA pin)
-      return std::make_unique<communicator::DRAMStager::LeaseHandle>();
+      return std::make_unique<communicator::engine::DRAMStager::LeaseHandle>();
     }
     entry = it->second;
   }
 
   auto uma = entry.uma.lock();
   if (!uma) {
-    return std::make_unique<communicator::DRAMStager::LeaseHandle>();
+    return std::make_unique<communicator::engine::DRAMStager::LeaseHandle>();
   }
 
   const uint64_t va_off = entry.base_va_off + offset;
@@ -46,7 +46,7 @@ std::unique_ptr<communicator::DRAMStager::LeaseHandle> UmaLeaseProvider::acquire
   auto token_or = uma->create_direct_write_token(entry.key, absl::Span<const VaRange>(&range, 1));
   if (!token_or.ok()) {
     LOG(WARNING) << "UMA lease acquire failed for key=" << tensor_key << ": " << token_or.status();
-    return std::make_unique<communicator::DRAMStager::LeaseHandle>();
+    return std::make_unique<communicator::engine::DRAMStager::LeaseHandle>();
   }
   auto token = std::move(*token_or);
   // Keepalive via LeaseHandle lifetime
@@ -89,7 +89,7 @@ bool UmaLeaseProvider::is_range_hot(const std::string& tensor_key, uint64_t offs
     for (const auto& m : mappings) {
       if (m.chunk_idx == i) {
         found = true;
-        if (m.cpu_state != ChunkState::HOT) {
+        if (m.cpu_state != replica::ChunkState::HOT) {
           return false;
         }
         break;
@@ -101,4 +101,4 @@ bool UmaLeaseProvider::is_range_hot(const std::string& tensor_key, uint64_t offs
   return true;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

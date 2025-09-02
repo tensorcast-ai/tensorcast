@@ -6,7 +6,8 @@
 
 namespace tensorcast::store::loader {
 
-StreamingBufferAdapter::StreamingBufferAdapter(std::shared_ptr<StreamingPinnedBuffer> buffer)
+StreamingBufferAdapter::StreamingBufferAdapter(
+    std::shared_ptr<tensorcast::common::memory::StreamingPinnedBuffer> buffer)
     : buffer_(std::move(buffer)) {
   if (!buffer_) {
     LOG(ERROR) << "StreamingPinnedBuffer is null";

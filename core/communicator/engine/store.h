@@ -9,24 +9,24 @@
 #include "core/communicator/misc/map.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 class PartitionTensorStore {
  public:
   PartitionTensorStore();
 
-  tensor_t get_tensor(std::string tensor_key);
+  transport::tensor_t get_tensor(std::string tensor_key);
 
-  void register_tensor(const tensor_t& t);
+  void register_tensor(const transport::tensor_t& t);
 
   void unregister_tensor(std::string tensor_key);
 
   void clear();
 
  private:
-  Map<std::string, tensor_t> tensors_;
+  misc::Map<std::string, transport::tensor_t> tensors_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine
 
 #endif // CORE_COMMUNICATOR_ENGINE_STORE_H_

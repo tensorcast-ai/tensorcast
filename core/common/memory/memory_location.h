@@ -6,7 +6,7 @@
 #include <ostream>
 #include <string>
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 /**
  * @brief Specifies the target or current location of replica data.
@@ -69,4 +69,4 @@ inline std::string location_to_string(MemoryLocation loc) {
 //    // ... implementation if needed ...
 // }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

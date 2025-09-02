@@ -16,7 +16,7 @@
 namespace tensorcast::daemon {
 
 struct LockEntry {
-  tensorcast::store::ReplicaKey key;
+  store::loading::ReplicaKey key;
   std::vector<uint32_t> chunk_indices;
   std::chrono::steady_clock::time_point expiry;
 };
@@ -33,7 +33,7 @@ class TransportLockManager {
     return absl::StrFormat("%016x%016x", a, b);
   }
 
-  void put(const std::string& token, const tensorcast::store::ReplicaKey& key, std::vector<uint32_t> indices) {
+  void put(const std::string& token, const store::loading::ReplicaKey& key, std::vector<uint32_t> indices) {
     absl::MutexLock l(&mu_);
     locks_[token] = LockEntry{key, std::move(indices), now() + ttl_};
   }

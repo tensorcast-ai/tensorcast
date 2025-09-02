@@ -12,9 +12,9 @@ namespace tensorcast::unittests {
 #define GPU_KEY "RDMA_TENSOR_KEY_GPU"
 
 struct RdmaTestFixture {
-  communicator::CommunicateEngine* server_;
+  communicator::engine::CommunicateEngine* server_;
   absl::Status server_init_status_;
-  communicator::CommunicateEngine* client_;
+  communicator::engine::CommunicateEngine* client_;
   absl::Status client_init_status_;
   uint32_t server_buf_[BUF_SIZE];
   uint32_t client_buf_[BUF_SIZE];
@@ -22,11 +22,11 @@ struct RdmaTestFixture {
   RdmaTestFixture() {
     communicator::CommunicatorConfig srv_cfg;
     srv_cfg.set_enable_rdma(true);
-    server_ = new communicator::CommunicateEngine(srv_cfg, 30);
+    server_ = new communicator::engine::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     communicator::CommunicatorConfig cli_cfg;
     cli_cfg.set_enable_rdma(true);
-    client_ = new communicator::CommunicateEngine(cli_cfg, 30);
+    client_ = new communicator::engine::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
     for (uint32_t i = 0; i < BUF_SIZE; i++) {
@@ -54,7 +54,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.client_init_status_.ok());
 
     // register GPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o1;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o1;
     o1.register_mr = true;
     o1.needs_staging = true;
     o1.async = false;
@@ -62,13 +62,13 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_GPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         o1);
     REQUIRE(status.ok());
 
     // register CPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o2;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o2;
     o2.register_mr = true;
     o2.needs_staging = false;
     o2.async = false;
@@ -76,7 +76,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         o2);
     REQUIRE(status.ok());
@@ -87,7 +87,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.client_init_status_.ok());
 
     // register/unregister CPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o3;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o3;
     o3.register_mr = true;
     o3.needs_staging = false;
     o3.async = false;
@@ -95,7 +95,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         o3);
     REQUIRE(status.ok());
@@ -104,7 +104,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(status.ok());
 
     // register/unregister GPU tensor
-    communicator::CommunicateEngine::RegisterTensorOptions o4;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o4;
     o4.register_mr = true;
     o4.needs_staging = true;
     o4.async = false;
@@ -112,7 +112,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_GPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         o4);
     REQUIRE(status.ok());
@@ -136,7 +136,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions o5;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o5;
     o5.register_mr = true;
     o5.needs_staging = true;
     o5.async = false;
@@ -144,12 +144,12 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_GPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         o5);
     REQUIRE(status.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions o6;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions o6;
     o6.register_mr = true;
     o6.needs_staging = false;
     o6.async = false;
@@ -157,7 +157,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         CPU_KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         o6);
     REQUIRE(status.ok());
@@ -168,7 +168,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
           GPU_KEY,
           reinterpret_cast<uint64_t>(fixture.client_buf_),
           (BUF_SIZE - offset) * sizeof(uint32_t),
-          communicator::COMMUNICATE_ENGINE_DEV_GPU,
+          communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
           0,
           "127.0.0.1",
           60000,
@@ -191,7 +191,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
         GPU_KEY,
         reinterpret_cast<uint64_t>(fixture.client_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_GPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         "127.0.0.1",
         60000);

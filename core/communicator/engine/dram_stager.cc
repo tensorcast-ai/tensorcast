@@ -7,7 +7,7 @@
 #include "absl/log/log.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 namespace {
 class NoOpLeaseHandle : public DRAMStager::LeaseHandle {};
@@ -27,11 +27,11 @@ std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider(
   return provider;
 }
 
-DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool, size_t num_buffers_hint)
+DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pool, size_t num_buffers_hint)
     : pool_(std::move(pool)), chunk_size_(pool_->chunk_size()), num_buffers_hint_(num_buffers_hint) {}
 
 absl::StatusOr<void*> DRAMStager::stage(
-    const std::shared_ptr<PartitionTensor>& tensor,
+    const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
     uint64_t offset,
     uint64_t bytes) {
   // pool_ is guaranteed non-null
@@ -87,4 +87,4 @@ absl::Status DRAMStager::release_staged_buffer(gsl::not_null<void*> host_ptr) {
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine

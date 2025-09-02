@@ -7,7 +7,7 @@
 #include "absl/status/statusor.h"
 #include "communicator_config.pb.h"
 
-namespace tensorcast::communicator::configio {
+namespace tensorcast::communicator {
 
 // Load communicator config from a YAML or JSON file and normalize defaults.
 absl::StatusOr<tensorcast::communicator::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std::string& path);
@@ -17,4 +17,4 @@ absl::StatusOr<tensorcast::communicator::CommunicatorConfig> LoadCommunicatorCon
 // overriding explicit false booleans (proto3 lacks presence for scalars).
 void NormalizeDefaults(tensorcast::communicator::CommunicatorConfig* cfg);
 
-} // namespace tensorcast::communicator::configio
+} // namespace tensorcast::communicator

@@ -8,7 +8,7 @@
 
 #include "core/communicator/misc/utils.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 class TransportMessage {
  public:
@@ -25,7 +25,7 @@ class TransportMessage {
 
   template <class T>
   T* get_payload() {
-    ASSERT(sizeof(T) <= payload_size_, "failed to get payload due to illegal size");
+    misc::ASSERT(sizeof(T) <= payload_size_, "failed to get payload due to illegal size");
     return reinterpret_cast<T*>(payload_buf_);
   }
 
@@ -37,6 +37,6 @@ class TransportMessage {
 };
 typedef std::shared_ptr<TransportMessage> transport_message_t;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // COMMUNICATOR_TRANSPORT_TRANSPORT_MESSAGE_H_

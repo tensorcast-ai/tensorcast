@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include "absl/status/status.h"
 
+namespace tensorcast::testing {
+
 // Command line arguments
 extern std::string g_actor;
 extern std::string g_ip;
@@ -22,9 +24,10 @@ extern uint32_t g_chunk;
 extern uint32_t g_rdma;
 
 int parse_options(int argc, char* argv[]);
+} // namespace tensorcast::testing
 
 // File operations
-namespace tensorcast::tests {
+namespace tensorcast::testing {
 
 // Helper function to create a dummy file with patterned content.
 // Returns true on success, false otherwise.
@@ -43,6 +46,6 @@ bool is_cuda_available();
 // Returns OK on success.
 absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::filesystem::path& artifact_dir);
 
-} // namespace tensorcast::tests
+} // namespace tensorcast::testing
 
 #endif // TESTS_COMMON_H_

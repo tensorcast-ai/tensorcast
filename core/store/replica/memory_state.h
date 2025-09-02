@@ -6,7 +6,7 @@
 #include <ostream>
 #include <string>
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 /**
  * @brief Represents the detailed state of memory allocation and loading for a specific location (CPU or GPU).
@@ -69,4 +69,4 @@ inline std::string state_to_string(const MemoryState& state) {
   }
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

@@ -8,7 +8,7 @@
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/transport/rdma_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 constexpr static uint32_t kMaxDevName = 32;
 constexpr static uint32_t kMaxTensorNameLen = 512;
@@ -49,13 +49,13 @@ struct ProtoHeader {
 #define PROTO_HEADER_SIZE sizeof(ProtoHeader)
 
 struct ProtoRdmaConnectRequest {
-  RdmaTransportInfo qp_info = {};
+  transport::RdmaTransportInfo qp_info = {};
   char dst_dev_name[kMaxDevName] = {};
   char src_dev_name[kMaxDevName] = {};
 };
 
 struct ProtoRdmaConnectResponse {
-  RdmaTransportInfo qp_info = {};
+  transport::RdmaTransportInfo qp_info = {};
   char dst_dev_name[kMaxDevName] = {};
   char src_dev_name[kMaxDevName] = {};
 };
@@ -119,6 +119,6 @@ struct ProtoRdmaReadDoneExSeg {
   uint64_t offset;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine
 
 #endif // CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_

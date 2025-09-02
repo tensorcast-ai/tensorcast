@@ -9,7 +9,7 @@
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common {
 
 std::once_flag logging_init_flag;
 
@@ -46,4 +46,4 @@ void ensure_logging_initialized() {
   });
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common

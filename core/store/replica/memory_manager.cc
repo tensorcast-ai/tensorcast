@@ -22,13 +22,18 @@
 #include "core/store/replica/chunk_export_service.h"
 #include "core/store/replica/transfer_service.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
+
+using common::memory::DistributedVirtualMemoryPool;
+using common::memory::MemoryLocation;
+using common::memory::PinnedMemoryPool;
+using loading::ReplicaKey;
 
 MemoryManager::MemoryManager(
     std::string artifact_identifier,
     int local_device_id,
     const gsl::not_null<std::shared_ptr<PinnedMemoryPool>>& pinned_pool,
-    const gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>>& dvmp,
+    const gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>& dvmp,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
     uint64_t artifact_size)
@@ -45,7 +50,7 @@ MemoryManager::MemoryManager(
               memory_coordinator_,
               ReplicaKey{
                   .artifact_id = artifact_identifier,
-                  .device = {.type = ::tensorcast::DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
+                  .device = {.type = DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
@@ -53,7 +58,7 @@ MemoryManager::MemoryManager(
       export_service_(std::make_shared<ChunkExportService>(memory_coordinator_, dvmp_)) {
   // Populate replica_key_ using constructor inputs
   replica_key_.artifact_id = std::move(artifact_identifier);
-  replica_key_.device.type = ::tensorcast::DeviceType::GPU;
+  replica_key_.device.type = DeviceType::GPU;
   replica_key_.device.ordinal = local_device_id;
   // Initialize services already done in initializer list
 
@@ -796,7 +801,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
 absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
     MemoryLocation location,
     absl::Span<const uint32_t> chunks,
-    communicator::CommunicateEngine& comm_engine) {
+    communicator::engine::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
   auto info_or = export_service_->export_chunks(replica_key_, location, chunks, comm_engine);
   if (!info_or.ok()) {
@@ -816,7 +821,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
 absl::Status MemoryManager::unexport_chunks_for_p2p(
     MemoryLocation location,
     absl::Span<const uint32_t> /*chunks*/,
-    communicator::CommunicateEngine& comm_engine) {
+    communicator::engine::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
   if (location == MemoryLocation::GPU && gpu_.comm_registered) {
     auto st = export_service_->unexport_chunks(replica_key_, gpu_.comm_registration_info, comm_engine);
@@ -838,12 +843,12 @@ absl::Status MemoryManager::unexport_chunks_for_p2p(
 }
 
 // --- DVMP accessor implementation ---
-gsl::not_null<memory::DistributedVirtualMemoryPool*> tensorcast::store::MemoryManager::get_dvmp() {
-  return gsl::not_null<memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
+gsl::not_null<common::memory::DistributedVirtualMemoryPool*> MemoryManager::get_dvmp() {
+  return gsl::not_null<common::memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
-gsl::not_null<const memory::DistributedVirtualMemoryPool*> tensorcast::store::MemoryManager::get_dvmp() const {
-  return gsl::not_null<const memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
+gsl::not_null<const common::memory::DistributedVirtualMemoryPool*> MemoryManager::get_dvmp() const {
+  return gsl::not_null<const common::memory::DistributedVirtualMemoryPool*>{dvmp_.get().get()};
 }
 
 // Opaque keepalive container for DVMP pin leases held by a DirectWriteToken
@@ -913,7 +918,7 @@ absl::Status MemoryManager::finalize_load(
   }
 
   // Determine new state for GPU loads
-  store::ChunkState new_state = store::ChunkState::COPIED_GPU;
+  replica::ChunkState new_state = replica::ChunkState::COPIED_GPU;
 
   // Gather chunk list
   std::vector<uint32_t> chunks;
@@ -937,7 +942,7 @@ absl::Status MemoryManager::finalize_load(
 // DVMP instance itself lives.  Callers must treat the returned ChunkMeta
 // objects as immutable and use the atomic accessors defined inside ChunkMeta
 // for state inspection.
-absl::Span<const store::ChunkMeta> tensorcast::store::MemoryManager::chunk_snapshot() const noexcept {
+absl::Span<const ChunkMeta> MemoryManager::chunk_snapshot() const noexcept {
   // No expensive operations here – simply delegate to DVMP.
   return dvmp_->chunk_snapshot(replica_key_.artifact_id);
 }
@@ -1097,4 +1102,4 @@ absl::Status MemoryManager::ensure_gpu_stream_initialized_locked_() {
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

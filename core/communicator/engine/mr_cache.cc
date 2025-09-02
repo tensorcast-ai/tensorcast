@@ -5,14 +5,14 @@
 #include "absl/log/log.h"
 #include "core/communicator/misc/ibv_wrap.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 MrCache::~MrCache() {
   absl::MutexLock lk(&mu_);
   for (auto& kv : cache_) {
     if (kv.second) {
-      auto rc = wrap_ibv_dereg_mr(kv.second);
-      if (rc != SUCCESS) {
+      auto rc = misc::wrap_ibv_dereg_mr(kv.second);
+      if (rc != misc::SUCCESS) {
         LOG(WARNING) << "Failed to dereg MR in MrCache dtor";
       }
     }
@@ -31,8 +31,8 @@ struct ibv_mr* MrCache::get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, si
   }
   // Not found; register
   struct ibv_mr* mr = nullptr;
-  int rc = wrap_ibv_reg_mr(&mr, pd, ptr.get(), bytes, access);
-  if (rc != SUCCESS) {
+  int rc = misc::wrap_ibv_reg_mr(&mr, pd, ptr.get(), bytes, access);
+  if (rc != misc::SUCCESS) {
     return nullptr;
   }
   absl::MutexLock lk(&mu_);
@@ -40,4 +40,4 @@ struct ibv_mr* MrCache::get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, si
   return mr;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine

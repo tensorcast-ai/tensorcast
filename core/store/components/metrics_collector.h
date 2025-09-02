@@ -5,15 +5,16 @@
 #include <string>
 
 // OpenTelemetry Metrics API (types used in member declarations)
+#include "core/common/memory/pinned_memory_pool.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 // Forward declarations
 class ReplicaRegistry;
 class DeviceManager;
-class PinnedMemoryPool;
+// Note: PinnedMemoryPool lives under tensorcast::common::memory
 
 /**
  * @brief Centralized metrics collection for the store engine.
@@ -40,7 +41,7 @@ class MetricsCollector {
    * @brief Update memory pool metrics.
    * @param memory_pool Reference to the memory pool
    */
-  void update_memory_pool_metrics(const PinnedMemoryPool& memory_pool);
+  void update_memory_pool_metrics(const common::memory::PinnedMemoryPool& memory_pool);
 
   /**
    * @brief Update replica-related metrics.
@@ -91,7 +92,7 @@ class MetricsCollector {
    * This is a convenience method that updates all metric types.
    */
   void update_all_metrics(
-      const PinnedMemoryPool& memory_pool,
+      const tensorcast::common::memory::PinnedMemoryPool& memory_pool,
       const ReplicaRegistry& replica_registry,
       DeviceManager& device_manager);
 
@@ -112,4 +113,4 @@ class MetricsCollector {
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> cpu_memory_available_gauge_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

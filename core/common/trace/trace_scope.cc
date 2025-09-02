@@ -6,7 +6,7 @@
 
 #include "core/common/trace/trace_manager.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 
 TraceScope::TraceScope(const std::string& replica, const std::string& stage)
     : artifact_id_(replica), request_id_(TraceManager::current_request_id()) {
@@ -40,4 +40,4 @@ void TraceScope::Finish() {
   }
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

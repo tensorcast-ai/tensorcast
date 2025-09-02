@@ -16,7 +16,7 @@
 using namespace tensorcast;
 ;
 using namespace tensorcast::communicator;
-using namespace tensorcast::communicator::test;
+using namespace tensorcast::testing;
 
 TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
@@ -24,11 +24,11 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SECTION("Invalid tensor registration") {
     communicator::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
-    auto engine = std::make_shared<CommunicateEngine>(cfg);
+    auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Try to register with invalid device ID
-    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;
@@ -36,7 +36,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
         "invalid_tensor",
         0x12345678,
         1024,
-        COMMUNICATE_ENGINE_DEV_GPU,
+        tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         999, // Invalid device ID
         opts);
     REQUIRE(!status.ok());
@@ -49,15 +49,19 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
   SECTION("Staging buffer exhaustion recovery") {
     // Create a GPU stager with very limited buffers
-    auto pool = std::make_shared<tensorcast::store::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
-    GpuNetStager stager(1024 * 1024, 1, pool); // 1MB, only 1 buffer
+    auto pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 1, pool);
 
     // Allocate GPU memory
     void* gpu_ptr;
     REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024 * 1024).ok());
 
-    auto tensor = std::make_shared<PartitionTensor>(
-        "test", reinterpret_cast<uint64_t>(gpu_ptr), 1024 * 1024, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
+    auto tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+        "test",
+        reinterpret_cast<uint64_t>(gpu_ptr),
+        1024 * 1024,
+        tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        nullptr);
     tensor->set_device_id(0);
 
     // Try to stage again without releasing - should timeout quickly
@@ -101,14 +105,14 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SECTION("Zero-size transfer handling") {
     communicator::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
-    auto engine = std::make_shared<CommunicateEngine>(cfg);
+    auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;
     REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024).ok());
 
     // Register with zero size should fail
-    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;
@@ -116,7 +120,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
         "zero_size",
         reinterpret_cast<uint64_t>(gpu_ptr),
         0, // Zero size
-        COMMUNICATE_ENGINE_DEV_GPU,
+        tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         opts);
     INFO("Expected tensor registration to fail with zero size, but it succeeded");
@@ -130,15 +134,19 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Out of bounds staging") {
-    auto pool = std::make_shared<tensorcast::store::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
-    GpuNetStager stager(1024 * 1024, 2, pool);
+    auto pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 2, pool);
 
     void* gpu_ptr;
     const std::size_t tensor_size = 1024 * 1024;
     REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
 
-    auto tensor = std::make_shared<PartitionTensor>(
-        "test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, nullptr);
+    auto tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+        "test",
+        reinterpret_cast<uint64_t>(gpu_ptr),
+        tensor_size,
+        tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
+        nullptr);
     tensor->set_device_id(0);
 
     // Try to stage beyond tensor bounds

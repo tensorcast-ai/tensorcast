@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <ranges>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -31,8 +32,15 @@
 
 namespace py = pybind11;
 
-using namespace tensorcast::store;
-using tensorcast::store::artifact_hash::compute_index_multihash;
+using tensorcast::checkpoint::close_cuda_memory_handle;
+using tensorcast::checkpoint::generate_verification_info_from_disk;
+using tensorcast::checkpoint::get_cuda_memory_ptr;
+using tensorcast::checkpoint::save_tensors_streaming;
+using tensorcast::checkpoint::StreamingTensorWriter;
+using tensorcast::common::ArtifactVerificationInfo;
+using tensorcast::common::ArtifactVerifier;
+using tensorcast::common::compute_index_multihash;
+using tensorcast::common::VerificationLevel;
 
 // Helper function to convert ArtifactVerificationInfo to Python dictionary
 py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
@@ -232,7 +240,7 @@ static py::dict save_model_to_disk_wrapper(
 
   // Build Canonical Index JSON via C++ authority (stable grouping + 8B alignment invariant already respected by writer)
   std::vector<std::string> ordered_names = tensor_names;
-  std::ranges::sort(ordered_names);
+  std::sort(ordered_names.begin(), ordered_names.end());
   std::unordered_map<std::string, tensorcast::store::loader::CanonicalTensorMeta> metas;
   metas.reserve(ordered_names.size());
   for (const auto& name : ordered_names) {
@@ -314,8 +322,8 @@ static py::dict save_model_to_disk_wrapper(
     // Empty artifact: no bytes to hash → define data_multihash deterministically
     if (total_size == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = tensorcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return tensorcast::store::artifact_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = tensorcast::common::compute_tree_hash_root_sha256(empty_leaves);
+      return tensorcast::common::multibase_multihash_sha256(root);
     }
 
     // Collect partition files deterministically
@@ -329,7 +337,7 @@ static py::dict save_model_to_disk_wrapper(
         parts.push_back(entry.path());
       }
     }
-    std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
     if (parts.empty()) {
       fs::path single = dir / "tensor.data";
       if (fs::exists(single)) {
@@ -445,7 +453,7 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
         parts.push_back(entry.path());
       }
     }
-    std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
     if (parts.empty()) {
       fs::path single = dir2 / "tensor.data";
       if (fs::exists(single)) {
@@ -467,8 +475,8 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
     // Empty artifact: produce deterministic data multihash without requiring partitions
     if (total_size2 == 0) {
       const std::vector<std::vector<uint8_t>> empty_leaves;
-      std::vector<uint8_t> root = tensorcast::store::artifact_hash::compute_tree_hash_root_sha256(empty_leaves);
-      return tensorcast::store::artifact_hash::multibase_multihash_sha256(root);
+      std::vector<uint8_t> root = tensorcast::common::compute_tree_hash_root_sha256(empty_leaves);
+      return tensorcast::common::multibase_multihash_sha256(root);
     }
     if (parts.empty()) {
       return absl::NotFoundError("No tensor.data partitions found");
@@ -551,13 +559,13 @@ static py::bytes build_canonical_index_from_safetensors_wrapper(const std::strin
       st_files.push_back(entry.path());
     }
   }
-  std::ranges::sort(st_files);
+  std::sort(st_files.begin(), st_files.end());
   if (st_files.empty()) {
     const auto msg = std::string("No .safetensors files found under: ") + dir_path;
     PY_THROW_WITH_LOG(PyExc_RuntimeError, msg);
   }
 
-  absl::StatusOr<std::string> idx_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+  absl::StatusOr<std::string> idx_bytes_or = tensorcast::store::loader::BuildCanonicalIndexFromSafetensors(st_files);
   if (!idx_bytes_or.ok()) {
     PY_THROW_WITH_LOG(
         PyExc_RuntimeError,
@@ -569,13 +577,13 @@ static py::bytes build_canonical_index_from_safetensors_wrapper(const std::strin
 // define pybind11 module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Initialize logging only once across all modules
-  ensure_logging_initialized();
+  tensorcast::common::ensure_logging_initialized();
 
 #ifdef USE_FAKE_CUDA
   py::module_::import("warnings")
       .attr("warn")("CUDA not detected, running with FakeCuda backend. Only logical correctness is guaranteed.");
 #endif
-  m.def("save_tensors", &save_tensors, "Save a state dict")
+  m.def("save_tensors", &tensorcast::checkpoint::save_tensors, "Save a state dict")
       .def(
           "save_tensors_streaming",
           &save_tensors_streaming_wrapper,
@@ -593,10 +601,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("path"),
           py::arg("config") = py::dict(),
           "Unified save: writes data, tensor_index.json, artifact_descriptor.json and returns descriptor")
-      .def("restore_tensors", &restore_tensors, "Restore a state dict")
+      .def("restore_tensors", &tensorcast::checkpoint::restore_tensors, "Restore a state dict")
       .def(
           "restore_tensors_from_disk",
-          &restore_tensors_from_disk,
+          &tensorcast::checkpoint::restore_tensors_from_disk,
           py::arg("meta_state_dict"),
           py::arg("disk_path"),
           py::arg("tensor_device_offsets"),
@@ -604,20 +612,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Restore a state dict from artifact path, device_id=-1 means load to CPU, otherwise CUDA device id")
       .def(
           "allocate_cuda_memory",
-          &allocate_cuda_memory,
+          &tensorcast::checkpoint::allocate_cuda_memory,
           py::arg("device_id"),
           py::arg("size"),
           "Allocate CUDA memory on a single device")
       .def(
           "get_cuda_memory_handle",
           [](int device_id, std::uint64_t memory_ptr_int) {
-            const std::string handle = get_cuda_memory_handle(device_id, memory_ptr_int);
+            const std::string handle = tensorcast::checkpoint::get_cuda_memory_handle(device_id, memory_ptr_int);
             return py::bytes(handle);
           },
           py::arg("device_id"),
           py::arg("memory_ptr"),
           "Get a CUDA IPC memory handle for a single allocation")
-      .def("get_device_uuid_map", &get_device_uuid_map, "Get device uuid map")
+      .def("get_device_uuid_map", &tensorcast::checkpoint::get_device_uuid_map, "Get device uuid map")
       .def(
           "get_cuda_memory_ptr",
           &get_cuda_memory_ptr_wrapper,

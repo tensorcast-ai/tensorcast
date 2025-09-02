@@ -10,7 +10,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 void DeviceManager::gpu_mem_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept {
   auto* self = static_cast<DeviceManager*>(state);
@@ -198,4 +198,4 @@ absl::StatusOr<size_t> DeviceManager::get_free_memory(int device_id) {
   return free_mem;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

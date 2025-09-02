@@ -5,7 +5,7 @@
 
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 
-using tensorcast::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
 
 TEST_CASE("DvmpRegion handle open and basic delegation") {
   DistributedVirtualMemoryPool dvmp(DistributedVirtualMemoryPool::kDefaultChunkSize);

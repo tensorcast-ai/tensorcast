@@ -8,7 +8,7 @@
 
 #include "core/communicator/transport/request.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 ReadRequest::ReadRequest(
     std::string tensor_key,
@@ -98,4 +98,4 @@ std::string WriteRequest::get_key() {
   return get_request_key(tensor_key_, offset_);
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

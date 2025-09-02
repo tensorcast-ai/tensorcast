@@ -20,44 +20,44 @@ extern "C" {
 #include "core/communicator/transport/rdma_transport.h"
 #include "core/communicator/transport/transport_message.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 class TcpContext;
 class TcpTransport;
 
 typedef std::shared_ptr<TcpTransport> tcp_transport_t;
 
-typedef std::function<result_t(tcp_transport_t)> on_recv_func_t;
-typedef std::function<result_t(tcp_transport_t)> on_close_func_t;
+typedef std::function<misc::result_t(tcp_transport_t)> on_recv_func_t;
+typedef std::function<misc::result_t(tcp_transport_t)> on_close_func_t;
 
 class TcpTransport : public std::enable_shared_from_this<TcpTransport> {
  public:
   TcpTransport(TcpContext* context, int fd, struct sockaddr_in remote_addr);
   ~TcpTransport();
 
-  result_t send(const transport_message_t& msg);
-  result_t recv(uint8_t* buf, uint32_t buf_size);
+  misc::result_t send(const transport_message_t& msg);
+  misc::result_t recv(uint8_t* buf, uint32_t buf_size);
 
   template <class T>
-  result_t recv(T* data) {
+  misc::result_t recv(T* data) {
     return recv(reinterpret_cast<uint8_t*>(data), sizeof(T));
   }
 
   void set_recv_func(on_recv_func_t recv_func);
   void set_close_func(on_close_func_t recv_func);
 
-  result_t process_event(uint32_t events);
+  misc::result_t process_event(uint32_t events);
 
   int get_fd() const;
 
   std::string get_remote_url() const;
   std::string get_local_url() const;
 
-  result_t close();
+  misc::result_t close();
 
  private:
-  result_t do_recv();
-  result_t do_close();
+  misc::result_t do_recv();
+  misc::result_t do_close();
 
  private:
   TcpContext* context_;
@@ -69,6 +69,6 @@ class TcpTransport : public std::enable_shared_from_this<TcpTransport> {
   mutable std::mutex mu_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // CORE_COMMUNICATOR_TRANSPORT_TCP_TRANSPORT_H_

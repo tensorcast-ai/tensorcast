@@ -10,7 +10,7 @@
 #include "core/communicator/misc/ibv_wrap.h"
 #include "gsl/pointers"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 // Simple per-PD MR cache keyed by (pd, buffer_ptr).
 // Registers an MR once for a given (pd, ptr, length) and reuses it.
@@ -49,4 +49,4 @@ class MrCache {
   std::unordered_map<Key, gsl::owner<ibv_mr*>, KeyHash> cache_ ABSL_GUARDED_BY(mu_);
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine

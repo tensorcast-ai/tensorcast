@@ -6,13 +6,13 @@
 
 #include "core/store/replica/memory_state.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New ReplicaKey-based API implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
-absl::Status ReplicaRegistry::emplace(const ReplicaKey& key, std::shared_ptr<Replica> replica) {
+absl::Status ReplicaRegistry::emplace(const loading::ReplicaKey& key, std::shared_ptr<replica::Replica> replica) {
   if (!replica) {
     return absl::InvalidArgumentError("Cannot register null replica");
   }
@@ -31,7 +31,7 @@ absl::Status ReplicaRegistry::emplace(const ReplicaKey& key, std::shared_ptr<Rep
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::shared_ptr<Replica>> ReplicaRegistry::find(const ReplicaKey& key) const {
+absl::StatusOr<std::shared_ptr<replica::Replica>> ReplicaRegistry::find(const loading::ReplicaKey& key) const {
   absl::MutexLock lock(&mutex_);
   auto it = by_instance_.find(key);
   if (it == by_instance_.end()) {
@@ -42,9 +42,9 @@ absl::StatusOr<std::shared_ptr<Replica>> ReplicaRegistry::find(const ReplicaKey&
   return entries_[idx].replica;
 }
 
-std::vector<ReplicaKey> ReplicaRegistry::find_by_artifact(std::string_view artifact_id) const {
+std::vector<loading::ReplicaKey> ReplicaRegistry::find_by_artifact(std::string_view artifact_id) const {
   absl::MutexLock lock(&mutex_);
-  std::vector<ReplicaKey> result;
+  std::vector<loading::ReplicaKey> result;
   auto it = by_artifact_.find(std::string(artifact_id));
   if (it == by_artifact_.end()) {
     return result;
@@ -58,9 +58,9 @@ std::vector<ReplicaKey> ReplicaRegistry::find_by_artifact(std::string_view artif
   return result;
 }
 
-std::vector<ReplicaKey> ReplicaRegistry::find_by_device(const DeviceKey& device) const {
+std::vector<loading::ReplicaKey> ReplicaRegistry::find_by_device(const DeviceKey& device) const {
   absl::MutexLock lock(&mutex_);
-  std::vector<ReplicaKey> result;
+  std::vector<loading::ReplicaKey> result;
   auto it = by_device_.find(device);
   if (it == by_device_.end()) {
     return result;
@@ -76,11 +76,11 @@ std::vector<ReplicaKey> ReplicaRegistry::find_by_device(const DeviceKey& device)
 
 // -----------------------------------------------------------------------------
 
-std::vector<ReplicaKey> ReplicaRegistry::get_lru_instances() const {
+std::vector<loading::ReplicaKey> ReplicaRegistry::get_lru_instances() const {
   absl::MutexLock lock(&mutex_);
 
   struct TimedKey {
-    ReplicaKey key;
+    loading::ReplicaKey key;
     std::chrono::time_point<std::chrono::system_clock> ts;
   };
 
@@ -92,7 +92,7 @@ std::vector<ReplicaKey> ReplicaRegistry::get_lru_instances() const {
 
   std::sort(tmp.begin(), tmp.end(), [](const TimedKey& a, const TimedKey& b) { return a.ts < b.ts; });
 
-  std::vector<ReplicaKey> ordered;
+  std::vector<loading::ReplicaKey> ordered;
   ordered.reserve(tmp.size());
   for (const auto& tk : tmp) {
     ordered.push_back(tk.key);
@@ -102,10 +102,10 @@ std::vector<ReplicaKey> ReplicaRegistry::get_lru_instances() const {
 
 // -----------------------------------------------------------------------------
 
-std::vector<std::pair<ReplicaKey, std::shared_ptr<Replica>>> ReplicaRegistry::clear_all() {
+std::vector<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> ReplicaRegistry::clear_all() {
   absl::MutexLock lock(&mutex_);
 
-  std::vector<std::pair<ReplicaKey, std::shared_ptr<Replica>>> removed;
+  std::vector<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> removed;
   removed.reserve(entries_.size());
 
   for (auto& entry : entries_) {
@@ -126,11 +126,11 @@ size_t ReplicaRegistry::size() const {
   return entries_.size();
 }
 
-size_t ReplicaRegistry::get_replica_count_by_location(MemoryLocation location) const {
+size_t ReplicaRegistry::get_replica_count_by_location(common::memory::MemoryLocation location) const {
   absl::MutexLock lock(&mutex_);
   size_t count = 0;
   for (const auto& entry : entries_) {
-    if (entry.replica && entry.replica->get_memory_state(location) == MemoryState::LOADED) {
+    if (entry.replica && entry.replica->get_memory_state(location) == replica::MemoryState::LOADED) {
       ++count;
     }
   }
@@ -152,4 +152,4 @@ uint64_t ReplicaRegistry::get_total_replica_size() const {
   return total;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

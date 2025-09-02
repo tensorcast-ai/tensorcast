@@ -25,7 +25,7 @@
 #include "opentelemetry/context/context.h"
 #include "opentelemetry/metrics/provider.h"
 
-namespace tensorcast::memory {
+namespace tensorcast::common::memory {
 
 DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : chunk_size_(chunk_size) {
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
@@ -78,12 +78,12 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
   auto info = std::make_shared<DvmpRegionState>();
   info->cpu_base = addr;
   info->bytes = bytes;
-  info->metadata = std::make_unique<store::ChunkMeta[]>(num_chunks);
+  info->metadata = std::make_unique<store::replica::ChunkMeta[]>(num_chunks);
   info->chunk_count = num_chunks;
   info->pin_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
   info->mlock_refcnt = std::make_unique<std::atomic<uint32_t>[]>(num_chunks);
   for (size_t i = 0; i < num_chunks; ++i) {
-    info->metadata[i].state.store(store::ChunkState::COLD, std::memory_order_relaxed);
+    info->metadata[i].state.store(store::replica::ChunkState::COLD, std::memory_order_relaxed);
     info->metadata[i].last_touch_s.store(0, std::memory_order_relaxed);
     info->pin_refcnt[i].store(0, std::memory_order_relaxed);
     info->mlock_refcnt[i].store(0, std::memory_order_relaxed);
@@ -102,7 +102,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::VirtualRegion> DistributedVirtualMe
   return allocate(artifact_id, bytes, -1);
 }
 
-absl::Span<const store::ChunkMeta> DistributedVirtualMemoryPool::chunk_snapshot(
+absl::Span<const store::replica::ChunkMeta> DistributedVirtualMemoryPool::chunk_snapshot(
     std::string_view artifact_id) const noexcept {
   auto info_sp_or = get_artifact_info(artifact_id);
   if (!info_sp_or.ok()) {
@@ -135,7 +135,7 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
   // Track successfully locked indices, their previous states, and whether mlock succeeded
   struct LockedChunk {
     uint32_t idx;
-    store::ChunkState prev_state;
+    store::replica::ChunkState prev_state;
     bool mlocked;
   };
   std::vector<LockedChunk> locked;
@@ -179,13 +179,14 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
       return rollback_and_log(absl::OutOfRangeError("Chunk index out of range"), i);
     }
     auto& meta = info.metadata[i];
-    store::ChunkState expected = meta.state.load(std::memory_order_acquire);
+    store::replica::ChunkState expected = meta.state.load(std::memory_order_acquire);
     bool ok = false;
     // We allow locking from HOT, COLD, PREEMPTIBLE, or COPIED_GPU (target may recopy).
     for (;;) {
-      if (expected == store::ChunkState::HOT || expected == store::ChunkState::COLD ||
-          expected == store::ChunkState::PREEMPTIBLE || expected == store::ChunkState::COPIED_GPU) {
-        ok = meta.state.compare_exchange_strong(expected, store::ChunkState::LOCKED_TX, std::memory_order_acq_rel);
+      if (expected == store::replica::ChunkState::HOT || expected == store::replica::ChunkState::COLD ||
+          expected == store::replica::ChunkState::PREEMPTIBLE || expected == store::replica::ChunkState::COPIED_GPU) {
+        ok = meta.state.compare_exchange_strong(
+            expected, store::replica::ChunkState::LOCKED_TX, std::memory_order_acq_rel);
         if (ok) {
           break;
         }
@@ -260,12 +261,13 @@ absl::Status DistributedVirtualMemoryPool::unlock_chunks(
       return absl::OutOfRangeError("Chunk index out of range");
     }
     const auto state = info.metadata[i].state.load(std::memory_order_acquire);
-    if (state != store::ChunkState::LOCKED_TX) {
+    if (state != store::replica::ChunkState::LOCKED_TX) {
       return absl::FailedPreconditionError("Chunk not locked for transfer");
     }
   }
 
-  store::ChunkState new_state = copied_gpu ? store::ChunkState::COPIED_GPU : store::ChunkState::HOT;
+  store::replica::ChunkState new_state =
+      copied_gpu ? store::replica::ChunkState::COPIED_GPU : store::replica::ChunkState::HOT;
 
   // Second pass: perform the unlock transition and housekeeping.
   for (uint32_t i : idx) {
@@ -300,19 +302,20 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view artifact_
   // Iterate from tail backwards.
   for (ssize_t idx = static_cast<ssize_t>(info.chunk_count) - 1; idx >= 0 && freed < bytes; --idx) {
     auto& meta = info.metadata[idx];
-    store::ChunkState st = meta.state.load(std::memory_order_acquire);
+    store::replica::ChunkState st = meta.state.load(std::memory_order_acquire);
     // Skip pinned chunks
     if (info.pin_refcnt[idx].load(std::memory_order_acquire) > 0) {
       continue;
     }
-    if (st == store::ChunkState::LOCKED_TX || st == store::ChunkState::EVICTED) {
+    if (st == store::replica::ChunkState::LOCKED_TX || st == store::replica::ChunkState::EVICTED) {
       continue; // Cannot evict locked or already evicted
     }
-    if (st == store::ChunkState::HOT || st == store::ChunkState::COLD || st == store::ChunkState::COPIED_GPU ||
-        st == store::ChunkState::PREEMPTIBLE) {
+    if (st == store::replica::ChunkState::HOT || st == store::replica::ChunkState::COLD ||
+        st == store::replica::ChunkState::COPIED_GPU || st == store::replica::ChunkState::PREEMPTIBLE) {
       // Attempt CAS to EVICTED.
-      store::ChunkState expected = st;
-      if (!meta.state.compare_exchange_strong(expected, store::ChunkState::EVICTED, std::memory_order_acq_rel)) {
+      store::replica::ChunkState expected = st;
+      if (!meta.state.compare_exchange_strong(
+              expected, store::replica::ChunkState::EVICTED, std::memory_order_acq_rel)) {
         continue; // state changed concurrently, skip
       }
       void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(idx) * chunk_size_;
@@ -360,7 +363,7 @@ absl::Status DistributedVirtualMemoryPool::ensure_chunk_resident(std::string_vie
     return absl::OutOfRangeError("Chunk index out of range");
   }
   auto st = info.metadata[chunk_idx].state.load(std::memory_order_acquire);
-  if (st == store::ChunkState::EVICTED) {
+  if (st == store::replica::ChunkState::EVICTED) {
     return {kErrChunkRemote, "Chunk data not resident locally"};
   }
   return absl::OkStatus();
@@ -384,11 +387,12 @@ absl::Status DistributedVirtualMemoryPool::mark_preemptible(
     if (info.pin_refcnt[i].load(std::memory_order_acquire) > 0) {
       continue;
     }
-    store::ChunkState expected = meta.state.load(std::memory_order_acquire);
+    store::replica::ChunkState expected = meta.state.load(std::memory_order_acquire);
     // Eligible states: HOT, COLD, COPIED_GPU (may still hold identical data but no longer needed)
-    if (expected == store::ChunkState::HOT || expected == store::ChunkState::COLD ||
-        expected == store::ChunkState::COPIED_GPU) {
-      if (meta.state.compare_exchange_strong(expected, store::ChunkState::PREEMPTIBLE, std::memory_order_acq_rel)) {
+    if (expected == store::replica::ChunkState::HOT || expected == store::replica::ChunkState::COLD ||
+        expected == store::replica::ChunkState::COPIED_GPU) {
+      if (meta.state.compare_exchange_strong(
+              expected, store::replica::ChunkState::PREEMPTIBLE, std::memory_order_acq_rel)) {
         void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
         // Prefer MADV_FREE if capability detected, else MADV_DONTNEED directly
         int rc = 0;
@@ -464,7 +468,7 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   const uint64_t last = (va_offset + bytes - 1) / chunk_size_;
   uint64_t ts = now_s();
   for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
-    info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
+    info.metadata[i].state.store(store::replica::ChunkState::HOT, std::memory_order_release);
     info.metadata[i].last_touch_s.store(static_cast<uint32_t>(ts), std::memory_order_relaxed);
   }
   // Metrics: bytes written
@@ -526,7 +530,7 @@ absl::Status DistributedVirtualMemoryPool::map_file_segments(
     const uint64_t last = (s.va_offset + s.length - 1) / chunk_size_;
     uint64_t ts = now_s();
     for (uint64_t i = first; i <= last && i < info.chunk_count; ++i) {
-      info.metadata[i].state.store(store::ChunkState::HOT, std::memory_order_release);
+      info.metadata[i].state.store(store::replica::ChunkState::HOT, std::memory_order_release);
       info.metadata[i].last_touch_s.store(static_cast<uint32_t>(ts), std::memory_order_relaxed);
     }
   }
@@ -720,4 +724,4 @@ absl::StatusOr<DistributedVirtualMemoryPool::DvmpRegion> DistributedVirtualMemor
   return DvmpRegion(this, std::string(artifact_id));
 }
 
-} // namespace tensorcast::memory
+} // namespace tensorcast::common::memory

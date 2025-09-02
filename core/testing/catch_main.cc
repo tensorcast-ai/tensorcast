@@ -16,7 +16,7 @@ struct LoggingInitializer : Catch::EventListenerBase {
     static bool initialized = false;
     if (!initialized) {
       // Use ensure_logging_initialized which respects TENSORCAST_VLOG_LEVEL env var
-      tensorcast::store::ensure_logging_initialized();
+      tensorcast::common::ensure_logging_initialized();
       absl::FailureSignalHandlerOptions options;
       absl::InstallFailureSignalHandler(options);
       initialized = true;

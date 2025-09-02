@@ -14,7 +14,6 @@
 #include "core/common/logging_init.h"
 #include "core/common/memory/memory_location.h"
 #include "core/communicator/config_io.h"
-#include "core/communicator/engine/communicator_config.h"
 #include "core/store/communication_types.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/device_types.h"
@@ -26,8 +25,17 @@
 namespace py = pybind11;
 
 // NOLINTBEGIN(google-build-using-namespace,fuchsia-statically-constructed-objects,misc-const-correctness,misc-use-anonymous-namespace,)
-using namespace tensorcast::store;
-using tensorcast::DeviceType; // Bring the top-level DeviceType enum into scope
+using tensorcast::DeviceType;
+using tensorcast::common::ensure_logging_initialized;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::store::CommRegistrationInfo;
+using tensorcast::store::DeviceKey;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::MaterializeHints;
+using tensorcast::store::loading::ReplicaHandle;
+using tensorcast::store::loading::ReplicaKey;
+using tensorcast::store::replica::MemoryState;
 
 // Helper function to convert time_point to Python timestamp
 static double time_point_to_timestamp(const std::chrono::time_point<std::chrono::system_clock>& tp) {
@@ -567,7 +575,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         // Optional: external CommunicationManager for dependency injection
         if (cfg.contains("comm_manager") && !cfg["comm_manager"].is_none()) {
           try {
-            auto mgr = cfg["comm_manager"].cast<std::shared_ptr<tensorcast::store::CommunicationManager>>();
+            auto mgr = cfg["comm_manager"].cast<std::shared_ptr<CommunicationManager>>();
             if (mgr && mgr->is_enabled()) {
               opts.comm_manager = mgr;
             }
@@ -598,11 +606,10 @@ Missing keys fall back to sensible defaults.)pbdoc");
   // single communication instance to multiple StoreEngine objects.
   // ------------------------------------------------------------------
 
-  py::class_<tensorcast::store::CommunicationManager, std::shared_ptr<tensorcast::store::CommunicationManager>>(
-      m, "CommunicationManager")
+  py::class_<CommunicationManager, std::shared_ptr<CommunicationManager>>(m, "CommunicationManager")
       .def(
           py::init([](const std::string& listen_addr, uint16_t port, bool enable_rdma) {
-            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+            auto mgr = std::make_shared<CommunicationManager>();
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -730,7 +737,7 @@ transport layer.)pbdoc")
               }
             }
 
-            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+            auto mgr = std::make_shared<CommunicationManager>();
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -751,11 +758,11 @@ This overload calls the typed-config initialization path in C++.)pbdoc")
       .def_static(
           "from_yaml",
           [](const std::string& listen_addr, uint16_t port, const std::string& path) {
-            auto cfg_or = tensorcast::communicator::configio::LoadCommunicatorConfigFromFile(path);
+            auto cfg_or = tensorcast::communicator::LoadCommunicatorConfigFromFile(path);
             if (!cfg_or.ok()) {
               PY_THROW_WITH_LOG(PyExc_RuntimeError, cfg_or.status().ToString());
             }
-            auto mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+            auto mgr = std::make_shared<CommunicationManager>();
             absl::Status st;
             {
               py::gil_scoped_release release;
@@ -772,7 +779,7 @@ This overload calls the typed-config initialization path in C++.)pbdoc")
           R"pbdoc(Create a CommunicationManager by loading a communicator YAML/JSON file.)pbdoc")
       .def(
           "is_enabled",
-          &tensorcast::store::CommunicationManager::is_enabled,
+          &CommunicationManager::is_enabled,
           "Return True if the communication engine is initialized and enabled.");
 }
 

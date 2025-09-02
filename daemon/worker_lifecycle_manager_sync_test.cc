@@ -276,14 +276,14 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
     for (const auto& in : infos) {
       if (in.artifact_id == keep_id) {
         // kept means still has any residency on CPU/GPU
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
           kept = true;
         }
       }
       if (in.artifact_id == remove_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
           remove_present = true;
         }
       }
@@ -359,14 +359,14 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
     bool remove_present = false;
     for (const auto& in : infos) {
       if (in.artifact_id == keep_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
           kept = true;
         }
       }
       if (in.artifact_id == remove_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
           remove_present = true;
         }
       }
@@ -442,13 +442,13 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
     bool remove_present = false;
     for (const auto& in : infos) {
       if (in.artifact_id == keep_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           kept = true;
       }
       if (in.artifact_id == remove_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           remove_present = true;
       }
     }
@@ -522,13 +522,13 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
     bool remove_present = false;
     for (const auto& in : infos) {
       if (in.artifact_id == keep_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           kept = true;
       }
       if (in.artifact_id == remove_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           remove_present = true;
       }
     }
@@ -654,13 +654,13 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
     bool remove_present = false;
     for (const auto& in : infos) {
       if (in.artifact_id == keep_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           kept = true;
       }
       if (in.artifact_id == remove_id) {
-        if (in.cpu_state != tensorcast::store::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::store::MemoryLocation::NONE)
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
           remove_present = true;
       }
     }

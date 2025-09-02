@@ -26,7 +26,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 AlignedBuffer::AlignedBuffer(const std::string& filename)
     : fd_(-1), buf_size_(kBufferSize), buf_pos_(0), file_offset_(0), direct_io_(true) {
@@ -181,4 +181,4 @@ void AlignedBuffer::flush_buffer(bool pad_to_alignment) {
   buf_pos_ = 0;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

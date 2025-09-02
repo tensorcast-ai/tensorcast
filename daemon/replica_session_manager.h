@@ -13,7 +13,7 @@
 namespace tensorcast::daemon {
 
 struct SessionEntry {
-  tensorcast::store::ReplicaKey key;
+  store::loading::ReplicaKey key;
   std::shared_future<absl::Status> ready;
   std::chrono::steady_clock::time_point expiry;
 };
@@ -24,7 +24,7 @@ class ReplicaSessionManager {
 
   void put(
       const std::string& replica_uuid,
-      const tensorcast::store::ReplicaKey& key,
+      const store::loading::ReplicaKey& key,
       std::shared_future<absl::Status> ready) {
     absl::MutexLock l(&mu_);
     sessions_[replica_uuid] = SessionEntry{key, std::move(ready), now() + ttl_};

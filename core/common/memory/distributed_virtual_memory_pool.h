@@ -22,7 +22,7 @@
 
 #include "core/store/replica/chunk_meta.h"
 
-namespace tensorcast::memory {
+namespace tensorcast::common::memory {
 
 class DistributedVirtualMemoryPool {
  public:
@@ -60,7 +60,8 @@ class DistributedVirtualMemoryPool {
   virtual absl::StatusOr<VirtualRegion> region_info(std::string_view artifact_id) const;
 
   // ===== Snapshot & State =====
-  virtual absl::Span<const tensorcast::store::ChunkMeta> chunk_snapshot(std::string_view artifact_id) const noexcept;
+  virtual absl::Span<const tensorcast::store::replica::ChunkMeta> chunk_snapshot(
+      std::string_view artifact_id) const noexcept;
 
   // Lock/unlock a set of chunks for H2D or P2P transfer.
   virtual absl::Status lock_chunks(std::string_view artifact_id, absl::Span<const uint32_t> idx);
@@ -154,7 +155,7 @@ class DistributedVirtualMemoryPool {
     // Base CPU virtual address reserved for the replica's region
     void* cpu_base{nullptr};
     size_t bytes{0};
-    std::unique_ptr<tensorcast::store::ChunkMeta[]> metadata;
+    std::unique_ptr<tensorcast::store::replica::ChunkMeta[]> metadata;
     size_t chunk_count{0};
     // Per-chunk pin refcounts used by ChunkResidencyLease API
     std::unique_ptr<std::atomic<uint32_t>[]> pin_refcnt;
@@ -246,4 +247,4 @@ class DistributedVirtualMemoryPool::DvmpRegion {
   std::string artifact_id_;
 };
 
-} // namespace tensorcast::memory
+} // namespace tensorcast::common::memory

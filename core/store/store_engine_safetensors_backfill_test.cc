@@ -82,7 +82,7 @@ TEST_CASE("Safetensors backfill writes descriptor and CBOR index", "[store_engin
   REQUIRE_FALSE(std::filesystem::exists(dir / "tensor_index.cbor"));
 
   StoreEngine store = make_store(root);
-  tensorcast::store::MaterializeHints hints;
+  tensorcast::store::loading::MaterializeHints hints;
   hints.disk_path = artifact;
   auto handle_or =
       store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);

@@ -8,9 +8,9 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 class CommunicateEngine;
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine
 
 namespace tensorcast::store {
 
@@ -19,7 +19,7 @@ namespace tensorcast::store {
  */
 struct CommRegistrationInfo {
   uint64_t artifact_size = 0;
-  MemoryLocation location = MemoryLocation::NONE;
+  common::memory::MemoryLocation location = common::memory::MemoryLocation::NONE;
   int device_id = -1; // -1 for CPU, device id for GPU
   int comm_dev_type = 0; // Device type used for communicator registration
   std::vector<uint64_t> buffer_addresses; // Addresses (cast to uint64_t) of registered regions/chunks
@@ -39,7 +39,7 @@ struct P2PSource {
   bool enable_checksum = true;
   Location location;
 
-  std::shared_ptr<tensorcast::communicator::CommunicateEngine> comm_engine;
+  std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine;
 };
 
 } // namespace tensorcast::store

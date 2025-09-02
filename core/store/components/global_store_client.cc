@@ -13,11 +13,13 @@
 #include "core/common/otel/grpc_propagation.h"
 #include "global_store.grpc.pb.h"
 #include "global_store.pb.h"
-#include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
+
+using common::memory::MemoryLocation;
+using replica::ChunkState;
 
 GlobalStoreClient::GlobalStoreClient(const GlobalStoreClientConfig& config) : config_(config) {}
 
@@ -33,11 +35,11 @@ absl::Status GlobalStoreClient::initialize() {
 
   channel_ = grpc::CreateCustomChannel(config_.global_store_address, grpc::InsecureChannelCredentials(), args);
 
-  stub_ = ::tensorcast::global::GlobalStore::NewStub(channel_);
+  stub_ = global::GlobalStore::NewStub(channel_);
 
   // Test connection with a health check
-  ::tensorcast::global::HealthCheckRequest req;
-  ::tensorcast::global::HealthCheckResponse resp;
+  global::HealthCheckRequest req;
+  global::HealthCheckResponse resp;
 
   grpc::ClientContext context;
   context.set_deadline(
@@ -53,7 +55,7 @@ absl::Status GlobalStoreClient::initialize() {
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.global.GlobalStore");
   span->SetAttribute("rpc.method", "HealthCheck");
-  tensorcast::obs::InjectIntoClientMetadata(context);
+  tensorcast::common::otel::InjectIntoClientMetadata(context);
 
   auto status = stub_->HealthCheck(&context, req, &resp);
   if (!status.ok()) {
@@ -73,7 +75,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
     uint32_t p2p_port,
     uint64_t mem_pool_total_size,
     uint64_t mem_pool_available_size) {
-  ::tensorcast::global::RegisterWorkerRequest request;
+  global::RegisterWorkerRequest request;
   request.set_node_id(std::string(node_id));
   request.set_node_address(std::string(node_address));
   request.set_grpc_port(grpc_port);
@@ -81,7 +83,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
   request.set_mem_pool_total_size(mem_pool_total_size);
   request.set_mem_pool_available_size(mem_pool_available_size);
 
-  ::tensorcast::global::RegisterWorkerResponse response;
+  global::RegisterWorkerResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -93,7 +95,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("RegisterWorker failed with status: %d", response.status()));
   }
 
@@ -110,12 +112,12 @@ absl::Status GlobalStoreClient::send_heartbeat(
     std::string_view worker_id,
     uint64_t mem_pool_available_size,
     bool accepting_new_requests) {
-  ::tensorcast::global::WorkerHeartbeatRequest request;
+  global::WorkerHeartbeatRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_mem_pool_available_size(mem_pool_available_size);
   request.set_accepting_new_requests(accepting_new_requests);
 
-  ::tensorcast::global::WorkerHeartbeatResponse response;
+  global::WorkerHeartbeatResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -127,14 +129,14 @@ absl::Status GlobalStoreClient::send_heartbeat(
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("WorkerHeartbeat failed with status: %d", response.status()));
   }
 
   return absl::OkStatus();
 }
 
-absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> GlobalStoreClient::send_heartbeat_enhanced(
+absl::StatusOr<global::WorkerHeartbeatResponse> GlobalStoreClient::send_heartbeat_enhanced(
     std::string_view worker_id,
     uint64_t mem_pool_available_size,
     bool accepting_new_requests,
@@ -142,8 +144,8 @@ absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> GlobalStoreClient:
     std::string_view state_checksum,
     const std::vector<std::string>& registered_artifact_ids,
     int64_t last_successful_sync,
-    ::tensorcast::global::ConnectionStatus connection_status) {
-  ::tensorcast::global::WorkerHeartbeatRequest request;
+    global::ConnectionStatus connection_status) {
+  global::WorkerHeartbeatRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_mem_pool_available_size(mem_pool_available_size);
   request.set_accepting_new_requests(accepting_new_requests);
@@ -155,7 +157,7 @@ absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> GlobalStoreClient:
   request.set_last_successful_sync(last_successful_sync);
   request.set_global_store_status(connection_status);
 
-  ::tensorcast::global::WorkerHeartbeatResponse response;
+  global::WorkerHeartbeatResponse response;
   auto status = execute_rpc_with_retry(
       request,
       &response,
@@ -163,18 +165,18 @@ absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> GlobalStoreClient:
       "WorkerHeartbeat(enhanced)");
   if (!status.ok())
     return status;
-  if (response.status() != ::tensorcast::global::OK && response.status() != ::tensorcast::global::STATE_SYNC_REQUIRED) {
+  if (response.status() != global::OK && response.status() != global::STATE_SYNC_REQUIRED) {
     return absl::InternalError(absl::StrFormat("WorkerHeartbeat(enhanced) failed with status: %d", response.status()));
   }
   return response;
 }
 
 absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bool is_graceful_shutdown) {
-  ::tensorcast::global::UnregisterWorkerRequest request;
+  global::UnregisterWorkerRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_is_graceful_shutdown(is_graceful_shutdown);
 
-  ::tensorcast::global::UnregisterWorkerResponse response;
+  global::UnregisterWorkerResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -186,7 +188,7 @@ absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bo
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("UnregisterWorker failed with status: %d", response.status()));
   }
 
@@ -200,7 +202,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
     MemoryLocation location,
     uint64_t memory_size,
     uint32_t max_concurrency) {
-  ::tensorcast::global::RegisterReplicaRequest request;
+  global::RegisterReplicaRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
@@ -208,7 +210,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   auto* mem_info = request.mutable_mem_info();
   fill_memory_info(mem_info, device, location, memory_size);
 
-  ::tensorcast::global::RegisterReplicaResponse response;
+  global::RegisterReplicaResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -220,7 +222,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("RegisterReplica failed with status: %d", response.status()));
   }
 
@@ -244,7 +246,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   // memory replicas with tensor index key. If the server does not support the
   // new fields it will still accept the request but ignore extra data.
 
-  ::tensorcast::global::RegisterReplicaRequest request;
+  global::RegisterReplicaRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
@@ -299,7 +301,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   // Optionally include descriptor when available to allow GS to upsert the artifact registry directly.
   // Server will parse mi2 artifact_id and upsert the artifacts table as needed.
 
-  ::tensorcast::global::RegisterReplicaResponse response;
+  global::RegisterReplicaResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -311,7 +313,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
   }
 
@@ -320,11 +322,11 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
 }
 
 absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id, std::string_view replica_id) {
-  ::tensorcast::global::UnregisterReplicaRequest request;
+  global::UnregisterReplicaRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_replica_id(std::string(replica_id));
 
-  ::tensorcast::global::UnregisterReplicaResponse response;
+  global::UnregisterReplicaResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -336,7 +338,7 @@ absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id,
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("UnregisterReplica failed with status: %d", response.status()));
   }
 
@@ -350,7 +352,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     uint32_t source_port,
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms) {
-  ::tensorcast::global::RequestReplicaTransportRequest request;
+  global::RequestReplicaTransportRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_source_node_id(std::string(source_node_id));
   request.set_source_address(std::string(source_address));
@@ -363,7 +365,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   auto* local_mem_info = request.mutable_local_memory_info();
   fill_memory_info(local_mem_info, target_device, MemoryLocation::GPU, 0);
 
-  ::tensorcast::global::RequestReplicaTransportResponse response;
+  global::RequestReplicaTransportResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -375,8 +377,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
-    if (response.status() == ::tensorcast::global::NOT_FOUND) {
+  if (response.status() != global::OK) {
+    if (response.status() == global::NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("No available replicas for replica: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("RequestReplicaTransport failed with status: %d", response.status()));
@@ -393,10 +395,10 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
 }
 
 absl::Status GlobalStoreClient::complete_replica_transport(std::string_view transport_id) {
-  ::tensorcast::global::CompleteReplicaTransportRequest request;
+  global::CompleteReplicaTransportRequest request;
   request.set_transport_id(std::string(transport_id));
 
-  ::tensorcast::global::CompleteReplicaTransportResponse response;
+  global::CompleteReplicaTransportResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -408,7 +410,7 @@ absl::Status GlobalStoreClient::complete_replica_transport(std::string_view tran
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("CompleteReplicaTransport failed with status: %d", response.status()));
   }
 
@@ -416,10 +418,10 @@ absl::Status GlobalStoreClient::complete_replica_transport(std::string_view tran
 }
 
 absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_replicas(std::string_view artifact_id) {
-  ::tensorcast::global::GetArtifactInfoByIdRequest request;
+  global::GetArtifactInfoByIdRequest request;
   request.set_artifact_id(std::string(artifact_id));
 
-  ::tensorcast::global::GetArtifactInfoByIdResponse response;
+  global::GetArtifactInfoByIdResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -431,8 +433,8 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
-    if (response.status() == ::tensorcast::global::NOT_FOUND) {
+  if (response.status() != global::OK) {
+    if (response.status() == global::NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("Artifact not found: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("GetArtifactInfoById failed with status: %d", response.status()));
@@ -457,7 +459,7 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
     const std::vector<ChunkStateUpdate>& updates) {
   if (updates.empty())
     return absl::OkStatus();
-  ::tensorcast::global::BatchUpdateChunkStatesRequest req;
+  global::BatchUpdateChunkStatesRequest req;
   req.set_worker_id(std::string(worker_id));
   req.set_node_id(std::string(node_id));
   for (const auto& u : updates) {
@@ -466,27 +468,27 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
     up->set_chunk_idx(u.chunk_idx);
     switch (u.state) {
       case ChunkState::HOT:
-        up->set_state(::tensorcast::global::CHUNK_HOT);
+        up->set_state(global::CHUNK_HOT);
         break;
       case ChunkState::LOCKED_TX:
-        up->set_state(::tensorcast::global::CHUNK_LOCKED_TX);
+        up->set_state(global::CHUNK_LOCKED_TX);
         break;
       case ChunkState::COPIED_GPU:
-        up->set_state(::tensorcast::global::CHUNK_COPIED_GPU);
+        up->set_state(global::CHUNK_COPIED_GPU);
         break;
       case ChunkState::EVICTED:
-        up->set_state(::tensorcast::global::CHUNK_EVICTED);
+        up->set_state(global::CHUNK_EVICTED);
         break;
       case ChunkState::COLD:
       case ChunkState::PREEMPTIBLE:
       default:
-        up->set_state(::tensorcast::global::CHUNK_COLD);
+        up->set_state(global::CHUNK_COLD);
         break;
     }
     up->set_device_uuid(u.device_uuid);
     up->set_replica(u.replica);
   }
-  ::tensorcast::global::BatchUpdateChunkStatesResponse resp;
+  global::BatchUpdateChunkStatesResponse resp;
   auto st = execute_rpc_with_retry(
       req,
       &resp,
@@ -494,35 +496,35 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
       "BatchUpdateChunkStates");
   if (!st.ok())
     return st;
-  if (resp.status() != ::tensorcast::global::OK) {
+  if (resp.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("BatchUpdateChunkStates failed with status: %d", resp.status()));
   }
   return absl::OkStatus();
 }
 
 // Static conversion methods
-::common::MemoryType GlobalStoreClient::convert_to_proto_memory_type(MemoryLocation location) {
+common::MemoryType GlobalStoreClient::convert_to_proto_memory_type(MemoryLocation location) {
   switch (location) {
     case MemoryLocation::GPU:
-      return ::common::GPU;
+      return common::GPU;
     case MemoryLocation::PAGEABLE_CPU:
-      return ::common::RAM;
+      return common::RAM;
     case MemoryLocation::DISK:
-      return ::common::DISK;
+      return common::DISK;
     case MemoryLocation::REMOTE:
-      return ::common::DISK; // Fallback mapping for REMOTE
+      return common::DISK; // Fallback mapping for REMOTE
     default:
-      return ::common::DISK;
+      return common::DISK;
   }
 }
 
-MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(::common::MemoryType type) {
+MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(common::MemoryType type) {
   switch (type) {
-    case ::common::GPU:
+    case common::GPU:
       return MemoryLocation::GPU;
-    case ::common::RAM:
+    case common::RAM:
       return MemoryLocation::PAGEABLE_CPU;
-    case ::common::DISK:
+    case common::DISK:
       return MemoryLocation::DISK;
     default:
       return MemoryLocation::DISK;
@@ -530,7 +532,7 @@ MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(::common::Memor
 }
 
 void GlobalStoreClient::fill_memory_info(
-    ::common::MemoryInfo* info,
+    common::MemoryInfo* info,
     const DeviceKey& device,
     MemoryLocation location,
     uint64_t memory_size) {
@@ -551,7 +553,7 @@ void GlobalStoreClient::fill_memory_info(
   }
 }
 
-RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const ::common::MemoryInfo& info) {
+RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const common::MemoryInfo& info) {
   RemoteReplicaInfo replica;
   replica.node_id = info.node_id();
   replica.node_address = info.node_address();
@@ -593,7 +595,7 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     span->SetAttribute("rpc.system", "grpc");
     span->SetAttribute("rpc.service", "tensorcast.global.GlobalStore");
     span->SetAttribute("rpc.method", method_name);
-    tensorcast::obs::InjectIntoClientMetadata(context);
+    tensorcast::common::otel::InjectIntoClientMetadata(context);
 
     auto status = method(&context, request, response);
     if (!status.ok()) {
@@ -624,13 +626,13 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
 absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreClient::query_chunk_locations(
     std::string_view artifact_id,
     const std::vector<uint32_t>& chunk_indices) {
-  ::tensorcast::global::QueryChunkLocationsRequest request;
+  global::QueryChunkLocationsRequest request;
   request.set_artifact_id(std::string(artifact_id));
   for (uint32_t idx : chunk_indices) {
     request.add_chunk_indices(idx);
   }
 
-  ::tensorcast::global::QueryChunkLocationsResponse response;
+  global::QueryChunkLocationsResponse response;
 
   auto status = execute_rpc_with_retry(
       request,
@@ -642,8 +644,8 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
     return status;
   }
 
-  if (response.status() != ::tensorcast::global::OK) {
-    if (response.status() == ::tensorcast::global::NOT_FOUND) {
+  if (response.status() != global::OK) {
+    if (response.status() == global::NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("Artifact not found: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("QueryChunkLocations failed with status: %d", response.status()));
@@ -661,19 +663,19 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
 
     // Convert proto ChunkState to our ChunkState
     switch (loc.state()) {
-      case ::tensorcast::global::CHUNK_HOT:
+      case global::CHUNK_HOT:
         info.state = ChunkState::HOT;
         break;
-      case ::tensorcast::global::CHUNK_LOCKED_TX:
+      case global::CHUNK_LOCKED_TX:
         info.state = ChunkState::LOCKED_TX;
         break;
-      case ::tensorcast::global::CHUNK_COPIED_GPU:
+      case global::CHUNK_COPIED_GPU:
         info.state = ChunkState::COPIED_GPU;
         break;
-      case ::tensorcast::global::CHUNK_COLD:
+      case global::CHUNK_COLD:
         info.state = ChunkState::COLD;
         break;
-      case ::tensorcast::global::CHUNK_EVICTED:
+      case global::CHUNK_EVICTED:
         info.state = ChunkState::EVICTED;
         break;
       default:
@@ -692,17 +694,17 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
 }
 
 absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_worker_state(
-    const ::tensorcast::global::WorkerLocalState& local_state,
+    const global::WorkerLocalState& local_state,
     bool force_full_sync,
-    std::vector<::tensorcast::global::StateChange>* out_changes) {
+    std::vector<global::StateChange>* out_changes) {
   if (!out_changes)
     return absl::InvalidArgumentError("out_changes must not be null");
-  ::tensorcast::global::SynchronizeWorkerStateRequest request;
+  global::SynchronizeWorkerStateRequest request;
   request.set_worker_id(local_state.worker_id());
   *request.mutable_local_state() = local_state;
   request.set_force_full_sync(force_full_sync);
 
-  ::tensorcast::global::SynchronizeWorkerStateResponse response;
+  global::SynchronizeWorkerStateResponse response;
   auto status = execute_rpc_with_retry(
       request,
       &response,
@@ -710,7 +712,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
       "SynchronizeWorkerState");
   if (!status.ok())
     return status;
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("SynchronizeWorkerState failed with status: %d", response.status()));
   }
   out_changes->clear();
@@ -724,14 +726,14 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
 absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full_state_sync(
     std::string_view worker_id,
     uint64_t current_state_version,
-    std::vector<::common::ReplicaInfo>* out_expected_replicas) {
+    std::vector<common::ReplicaInfo>* out_expected_replicas) {
   if (!out_expected_replicas)
     return absl::InvalidArgumentError("out_expected_replicas must not be null");
-  ::tensorcast::global::RequestFullStateSyncRequest request;
+  global::RequestFullStateSyncRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_current_state_version(current_state_version);
 
-  ::tensorcast::global::RequestFullStateSyncResponse response;
+  global::RequestFullStateSyncResponse response;
   auto status = execute_rpc_with_retry(
       request,
       &response,
@@ -739,7 +741,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
       "RequestFullStateSync");
   if (!status.ok())
     return status;
-  if (response.status() != ::tensorcast::global::OK) {
+  if (response.status() != global::OK) {
     return absl::InternalError(absl::StrFormat("RequestFullStateSync failed with status: %d", response.status()));
   }
   out_expected_replicas->clear();
@@ -750,4 +752,4 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
   return std::make_pair(response.new_state_version(), response.new_state_checksum());
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components
