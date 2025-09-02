@@ -113,6 +113,17 @@ jobs:
           path: bazel-external-includes.tar.gz
           if-no-files-found: error
 
+      - name: Archive Bazel generated C++ protos
+        run: |
+          tar -czf bazel-bin-proto.tgz -C bazel-bin proto
+
+      - name: Upload Bazel generated C++ protos artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-bin-proto
+          path: bazel-bin-proto.tgz
+          if-no-files-found: error
+
       - name: Run non-stress C++ tests
         timeout-minutes: 30
         shell: bash
@@ -195,11 +206,6 @@ jobs:
           uv run ruff check .
           uv run ruff format . --check
 
-      - name: Run type checking
-        run: |
-          uv run pyright ./tensorcast
-          uv run mypy ./tensorcast
-
       - name: Download libstore_engine.so artifact
         uses: actions/download-artifact@v4
         with:
@@ -239,6 +245,17 @@ jobs:
         run: |
           tar -xzf bazel-external-includes.tar.gz
 
+      - name: Download Bazel generated C++ protos artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bazel-bin-proto
+          path: .
+
+      - name: Extract Bazel generated C++ protos
+        run: |
+          mkdir -p bazel-bin
+          tar -xzf bazel-bin-proto.tgz -C bazel-bin
+
       - name: Generate Python Protocol Buffers (no Bazel)
         run: |
           uv run python -m grpc_tools.protoc \
@@ -253,12 +270,29 @@ jobs:
               --grpc_python_out=tensorcast/proto \
               --proto_path=proto \
               proto/global_store.proto
+          uv run python -m grpc_tools.protoc \
+              --python_out=tensorcast/proto \
+              --pyi_out=tensorcast/proto \
+              --grpc_python_out=tensorcast/proto \
+              --proto_path=proto \
+              proto/communicator_config.proto
+          # Normalize imports for package layout
+          sed -i 's/^from tensorcast/proto/\from .tensorcast\/proto/' tensorcast/proto/*_pb2.py || true
+          sed -i 's/^import communicator_config_pb2/import tensorcast.proto.communicator_config_pb2/' tensorcast/proto/communicator_config_pb2_grpc.py || true
+          # Ensure package markers so relative imports work
+          mkdir -p tensorcast/proto
+          touch tensorcast/proto/__init__.py
           sed -i 's/^import store_daemon_pb2/import tensorcast.proto.store_daemon_pb2/' tensorcast/proto/store_daemon_pb2_grpc.py
           sed -i 's/^import global_store_pb2/import tensorcast.proto.global_store_pb2/' tensorcast/proto/global_store_pb2_grpc.py
 
       - name: Build C++ extensions with fake CUDA
         run: |
           USE_FAKE_CUDA=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+      - name: Run type checking
+        run: |
+          uv run pyright ./tensorcast
+          uv run mypy ./tensorcast
 
       - name: Run Python tests
         run: |

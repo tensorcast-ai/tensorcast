@@ -52,7 +52,7 @@ absl::Status WorkerLifecycleManager::start() {
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
   if (gs_) {
-    std::vector<::global_store::ReplicaInfo> expected;
+    std::vector<::common::ReplicaInfo> expected;
     auto full_or = gs_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
     if (full_or.ok()) {
       state_version_ = full_or->first;
@@ -121,7 +121,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           state_checksum_,
           registered_ids,
           last_sync_success_ts_,
-          ::global_store::CONNECTED);
+          ::tensorcast::global::CONNECTED);
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
@@ -144,31 +144,35 @@ void WorkerLifecycleManager::heartbeat_loop() {
             (hb.expected_state_version() > 0 && hb.expected_state_version() != state_version_);
         if (needs_sync) {
           // Build local state for synchronize call
-          ::global_store::WorkerLocalState local_state;
+          ::tensorcast::global::WorkerLocalState local_state;
           local_state.set_worker_id(worker_id_);
           local_state.set_state_version(state_version_);
           local_state.set_state_checksum(state_checksum_);
-          local_state.set_last_update_timestamp(
-              static_cast<int64_t>(
-                  std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-                      .count()));
+          {
+            auto* ts = local_state.mutable_last_update_ts();
+            ts->set_seconds(
+                static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count()));
+            ts->set_nanos(0);
+          }
           for (const auto& i : infos) {
             auto* rep = local_state.add_local_replicas();
-            rep->set_artifact_id(i.artifact_id);
-            rep->set_replica_id("");
+            rep->mutable_ref()->set_artifact_id(i.artifact_id);
+            rep->mutable_ref()->set_replica_id("");
             auto* mi = rep->mutable_memory_info();
             mi->set_memory_size(i.size_bytes);
             if (i.gpu_state != store::MemoryLocation::NONE) {
-              mi->set_memory_type(::global_store::GPU);
+              mi->set_memory_type(::common::GPU);
               mi->set_device_id(i.gpu_device_id);
             } else if (i.cpu_state != store::MemoryLocation::NONE) {
-              mi->set_memory_type(::global_store::RAM);
+              mi->set_memory_type(::common::RAM);
               mi->set_device_id(0);
             } else {
-              mi->set_memory_type(::global_store::DISK);
+              mi->set_memory_type(::common::DISK);
               mi->set_device_id(0);
             }
-            rep->set_max_concurrency(1);
+            rep->mutable_stats()->set_max_concurrency(1);
             // Reconcile current_requests with active PID refs tracked by the service
             tensorcast::store::ReplicaKey rkey{
                 .artifact_id = i.artifact_id,
@@ -176,12 +180,12 @@ void WorkerLifecycleManager::heartbeat_loop() {
                     ? tensorcast::store::DeviceRegistry::instance().gpu_key(i.gpu_device_id)
                     : tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""},
                 .replica = 0};
-            rep->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
-            rep->set_is_available(true);
-            rep->set_registered_timestamp(local_state.last_update_timestamp());
+            rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
+            rep->mutable_stats()->set_is_available(true);
+            rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
           }
 
-          std::vector<::global_store::StateChange> changes;
+          std::vector<::tensorcast::global::StateChange> changes;
           auto sync_or = gs_->synchronize_worker_state(local_state, /*force_full_sync=*/false, &changes);
           if (sync_or.ok()) {
             state_version_ = sync_or->first;
@@ -192,24 +196,24 @@ void WorkerLifecycleManager::heartbeat_loop() {
             obsolete.reserve(changes.size());
             for (const auto& ch : changes) {
               switch (ch.type()) {
-                case ::global_store::StateChange::REMOVE_REPLICA: {
-                  obsolete.push_back(ch.replica_info().artifact_id());
+                case ::tensorcast::global::StateChange::REMOVE_REPLICA: {
+                  obsolete.push_back(ch.replica_info().ref().artifact_id());
                   break;
                 }
-                case ::global_store::StateChange::ADD_REPLICA: {
+                case ::tensorcast::global::StateChange::ADD_REPLICA: {
                   // Proactively materialize the replica locally on the indicated memory
                   const auto& ri = ch.replica_info();
                   tensorcast::store::DeviceKey dev{tensorcast::DeviceType::CPU, -1, ""};
-                  if (ri.memory_info().memory_type() == ::global_store::GPU) {
+                  if (ri.memory_info().memory_type() == ::common::GPU) {
                     dev = tensorcast::store::DeviceRegistry::instance().gpu_key(
                         static_cast<int>(ri.memory_info().device_id()));
-                  } else if (ri.memory_info().memory_type() == ::global_store::RAM) {
+                  } else if (ri.memory_info().memory_type() == ::common::RAM) {
                     dev = tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""};
                   } else {
                     // Ignore DISK-only add in daemon prefetch
                     break;
                   }
-                  std::string artifact_id = ri.artifact_id();
+                  std::string artifact_id = ri.ref().artifact_id();
                   auto engine = engine_;
                   std::thread([engine, dev, artifact_id]() {
                     tensorcast::store::MaterializeHints hints;
@@ -219,10 +223,10 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   }).detach();
                   break;
                 }
-                case ::global_store::StateChange::UPDATE_REPLICA: {
+                case ::tensorcast::global::StateChange::UPDATE_REPLICA: {
                   // Reconcile availability (enable/disable remote access) if applicable
                   const auto& ri = ch.replica_info();
-                  const auto artifact_id = ri.artifact_id();
+                  const auto artifact_id = ri.ref().artifact_id();
                   // Find local replica info to get device id and comm registration
                   for (const auto& li : engine_->get_all_replicas_info()) {
                     if (li.artifact_id != artifact_id)
@@ -231,9 +235,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
                       continue;
                     auto dev = tensorcast::store::DeviceRegistry::instance().gpu_key(li.gpu_device_id);
                     tensorcast::store::ReplicaKey key{.artifact_id = li.artifact_id, .device = dev, .replica = 0};
-                    if (!ri.is_available() && li.is_registered_for_comm) {
+                    if (!ri.stats().is_available() && li.is_registered_for_comm) {
                       (void)engine_->disable_remote_replica_access(key, store::MemoryLocation::GPU);
-                    } else if (ri.is_available() && !li.is_registered_for_comm) {
+                    } else if (ri.stats().is_available() && !li.is_registered_for_comm) {
                       (void)engine_->enable_remote_replica_access(key, store::MemoryLocation::GPU);
                     }
                   }
@@ -245,13 +249,13 @@ void WorkerLifecycleManager::heartbeat_loop() {
             }
             if (!obsolete.empty())
               apply_obsolete_replicas(obsolete);
-            last_sync_success_ts_ = local_state.last_update_timestamp();
+            last_sync_success_ts_ = local_state.last_update_ts().seconds();
             last_sync_ts_s_.store(last_sync_success_ts_);
           } else {
             VLOG(1) << "SynchronizeWorkerState returned: " << sync_or.status();
             sync_failure_.fetch_add(1);
             // Fallback to full-state sync if server indicates desync or errors persist
-            std::vector<::global_store::ReplicaInfo> expected;
+            std::vector<::common::ReplicaInfo> expected;
             auto full_or = gs_->request_full_state_sync(worker_id_, state_version_, &expected);
             if (full_or.ok()) {
               state_version_ = full_or->first;
@@ -380,12 +384,12 @@ void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::stri
   }
 }
 
-void WorkerLifecycleManager::apply_full_state(const std::vector<::global_store::ReplicaInfo>& expected) {
+void WorkerLifecycleManager::apply_full_state(const std::vector<::common::ReplicaInfo>& expected) {
   // Build a set of expected artifact_ids for quick lookup
   absl::flat_hash_set<std::string> expected_ids;
   expected_ids.reserve(expected.size());
   for (const auto& r : expected)
-    expected_ids.insert(r.artifact_id());
+    expected_ids.insert(r.ref().artifact_id());
 
   std::vector<std::string> obsolete;
   for (const auto& info : engine_->get_all_replicas_info()) {

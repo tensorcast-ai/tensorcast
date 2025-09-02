@@ -183,3 +183,7 @@ test-models
 
 _vendor/google/protobuf
 external
+
+# Generated protobufs (Python + C++)
+tensorcast/proto
+tensorcast/csrc/proto

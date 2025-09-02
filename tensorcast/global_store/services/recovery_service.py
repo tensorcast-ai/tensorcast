@@ -18,7 +18,7 @@ from tensorcast.global_store.repositories import (
     WorkerRepository,
 )
 from tensorcast.logger import init_logger
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import common_pb2, global_store_pb2
 
 logger = init_logger(__name__)
 
@@ -234,7 +234,7 @@ class RecoveryService:
 
         # Convert to sets for comparison
         local_replica_keys = {
-            (r.artifact_id, str(r.memory_info.memory_type), r.memory_info.device_id)
+            (r.ref.artifact_id, str(r.memory_info.memory_type), r.memory_info.device_id)
             for r in local_state.local_replicas
         }
 
@@ -251,7 +251,7 @@ class RecoveryService:
                 r
                 for r in local_state.local_replicas
                 if (
-                    r.artifact_id == artifact_id
+                    r.ref.artifact_id == artifact_id
                     and str(r.memory_info.memory_type) == memory_type
                     and r.memory_info.device_id == device_id
                 )
@@ -336,55 +336,61 @@ class RecoveryService:
             except Exception as e:
                 logger.error(f"Failed to apply state change {change.type}: {e}")
 
-    def _convert_replica_to_proto(
-        self, replica: Replica
-    ) -> global_store_pb2.ReplicaInfo:
+    def _convert_replica_to_proto(self, replica: Replica) -> common_pb2.ReplicaInfo:
         """Convert Replica to proto format."""
-        memory_info = global_store_pb2.MemoryInfo(
+        memory_info = common_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
             node_port=replica.node_port,
             memory_size=replica.memory_size,
-            memory_type=global_store_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
+            memory_type=common_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
             device_id=replica.device_id,
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
         )
-
-        return global_store_pb2.ReplicaInfo(
-            artifact_id=replica.artifact_id,
-            replica_id=str(replica.replica_id),
-            memory_info=memory_info,
+        stats = common_pb2.ReplicaStats(
             max_concurrency=replica.max_concurrency,
             current_requests=replica.current_requests,
             is_available=replica.is_available,
-            registered_timestamp=int(replica.created_at.timestamp())
-            if replica.created_at
-            else 0,
+        )
+        if replica.created_at:
+            from google.protobuf import timestamp_pb2
+
+            ts = timestamp_pb2.Timestamp()
+            ts.FromSeconds(int(replica.created_at.timestamp()))
+            stats.registered_ts.CopyFrom(ts)
+
+        return common_pb2.ReplicaInfo(
+            ref=common_pb2.ReplicaRef(
+                artifact_id=replica.artifact_id,
+                replica_id=str(replica.replica_id),
+            ),
+            memory_info=memory_info,
+            stats=stats,
         )
 
     def _convert_proto_to_replica(
-        self, proto_replica: global_store_pb2.ReplicaInfo, worker_id: str
+        self, proto_replica: common_pb2.ReplicaInfo, worker_id: str
     ) -> Replica:
         """Convert proto format to Replica."""
         from tensorcast.global_store.models import MemoryType
 
         return Replica(
-            replica_id=UUID(proto_replica.replica_id)
-            if proto_replica.replica_id
+            replica_id=UUID(proto_replica.ref.replica_id)
+            if proto_replica.ref.replica_id
             else uuid4(),
-            artifact_id=proto_replica.artifact_id,
+            artifact_id=proto_replica.ref.artifact_id,
             node_id=proto_replica.memory_info.node_id,
             node_address=proto_replica.memory_info.node_address,
             node_port=proto_replica.memory_info.node_port,
             memory_size=proto_replica.memory_info.memory_size,
             memory_type=MemoryType(
-                global_store_pb2.MemoryType.Name(proto_replica.memory_info.memory_type)
+                common_pb2.MemoryType.Name(proto_replica.memory_info.memory_type)
             ),
             device_id=proto_replica.memory_info.device_id,
-            max_concurrency=proto_replica.max_concurrency,
-            current_requests=proto_replica.current_requests,
-            is_available=proto_replica.is_available,
+            max_concurrency=proto_replica.stats.max_concurrency,
+            current_requests=proto_replica.stats.current_requests,
+            is_available=proto_replica.stats.is_available,
             remote_memory_keys=list(proto_replica.memory_info.remote_memory_keys),
             buffer_sizes=list(proto_replica.memory_info.buffer_sizes),
             worker_id=worker_id,
@@ -411,7 +417,7 @@ class RecoveryService:
 
     def request_full_state_sync(
         self, worker_id: str
-    ) -> tuple[bool, list[global_store_pb2.ReplicaInfo], int, str]:
+    ) -> tuple[bool, list[common_pb2.ReplicaInfo], int, str]:
         """
         Request full state synchronization for a worker.
 

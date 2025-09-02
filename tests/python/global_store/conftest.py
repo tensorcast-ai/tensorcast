@@ -11,7 +11,7 @@ import pytest
 import duckdb
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
@@ -129,13 +129,13 @@ def test_context():
 @pytest.fixture
 def memory_info():
     """Create a sample memory info for testing"""
-    return global_store_pb2.MemoryInfo(
+    return common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
         remote_memory_keys=["test_key"],
         memory_size=1000000000,
-        memory_type=global_store_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.GPU,
         device_id=0,
     )
 

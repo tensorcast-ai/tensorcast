@@ -5,7 +5,8 @@
 import uuid
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto import global_store_pb2, common_pb2
+from google.protobuf import duration_pb2
 
 
 class TestGRPCService:
@@ -99,12 +100,17 @@ class TestGRPCService:
             servicer.RegisterReplica(request, test_context)
 
         # List all replicas
-        list_request = global_store_pb2.ListReplicasRequest()
-        list_response = servicer.ListReplicas(list_request, test_context)
+        list_request = global_store_pb2.ListReplicasV2Request()
+        list_response = servicer.ListReplicasV2(list_request, test_context)
 
-        assert len(list_response.artifact_replicas) >= 3
+        # Convert flat records to dict for assertions
+        result = {}
+        for rec in list_response.replicas:
+            result.setdefault(rec.artifact_id, []).append(rec.memory_info)
+
+        assert len(result) >= 3
         for artifact_id in artifact_ids:
-            assert artifact_id in list_response.artifact_replicas
+            assert artifact_id in result
 
     def test_list_replicas_with_filter(
         self, servicer, test_context, memory_info, registered_worker
@@ -121,11 +127,11 @@ class TestGRPCService:
         servicer.RegisterReplica(request, test_context)
 
         # List replicas with filter
-        list_request = global_store_pb2.ListReplicasRequest(artifact_id=artifact_id)
-        list_response = servicer.ListReplicas(list_request, test_context)
+        list_request = global_store_pb2.ListReplicasV2Request(artifact_id=artifact_id)
+        list_response = servicer.ListReplicasV2(list_request, test_context)
 
-        assert len(list_response.artifact_replicas) == 1
-        assert artifact_id in list_response.artifact_replicas
+        assert sum(1 for _ in list_response.replicas) == 1
+        assert list_response.replicas[0].artifact_id == artifact_id
 
     def test_request_artifact_replica_transport(
         self, servicer, test_context, memory_info, registered_worker
@@ -152,7 +158,7 @@ class TestGRPCService:
         transport_request = global_store_pb2.RequestReplicaTransportRequest(
             artifact_id="test_artifact",
             local_memory_info=memory_info,
-            wait_timeout_ms=1000,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
@@ -191,7 +197,7 @@ class TestGRPCService:
         transport_request = global_store_pb2.RequestReplicaTransportRequest(
             artifact_id="test_artifact",
             local_memory_info=memory_info,
-            wait_timeout_ms=1000,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
             source_node_id="source_node",
             source_address="192.168.1.2",
             source_port=9000,
@@ -252,13 +258,13 @@ class TestGRPCService:
             servicer2 = GlobalStoreServicer(db_file=temp_db_file)
 
             # List replicas and verify the registered artifact is there
-            list_request = global_store_pb2.ListReplicasRequest(
+            list_request = global_store_pb2.ListReplicasV2Request(
                 artifact_id="persistent_artifact"
             )
-            list_response = servicer2.ListReplicas(list_request, test_context)
+            list_response = servicer2.ListReplicasV2(list_request, test_context)
 
-            assert len(list_response.artifact_replicas) == 1
-            assert "persistent_artifact" in list_response.artifact_replicas
+            assert sum(1 for _ in list_response.replicas) == 1
+            assert list_response.replicas[0].artifact_id == "persistent_artifact"
         except Exception as e:
             # Clean up is handled by temp_db_file fixture
             raise e
@@ -290,18 +296,15 @@ class TestGRPCService:
         replica_id = register_response.replica_id
 
         # 2. List replicas to get replica information
-        list_request = global_store_pb2.ListReplicasRequest(artifact_id=artifact_id)
-        list_response = servicer.ListReplicas(list_request, test_context)
+        list_request = global_store_pb2.ListReplicasV2Request(artifact_id=artifact_id)
+        list_response = servicer.ListReplicasV2(list_request, test_context)
 
         # 3. Verify the replica exists
-        assert artifact_id in list_response.artifact_replicas
-        assert len(list_response.artifact_replicas[artifact_id].list) == 1
+        assert sum(1 for _ in list_response.replicas) == 1
+        assert list_response.replicas[0].artifact_id == artifact_id
+        assert list_response.replicas[0].memory_info.node_id == memory_info.node_id
         assert (
-            list_response.artifact_replicas[artifact_id].list[0].node_id
-            == memory_info.node_id
-        )
-        assert (
-            list_response.artifact_replicas[artifact_id].list[0].remote_memory_keys[0]
+            list_response.replicas[0].memory_info.remote_memory_keys[0]
             == memory_info.remote_memory_keys[0]
         )
 
@@ -316,12 +319,9 @@ class TestGRPCService:
         assert unregister_response.status == global_store_pb2.Status.OK
 
         # 5. List replicas again and verify the replica no longer exists
-        list_response = servicer.ListReplicas(list_request, test_context)
+        list_response = servicer.ListReplicasV2(list_request, test_context)
 
-        assert (
-            artifact_id not in list_response.artifact_replicas
-            or len(list_response.artifact_replicas[artifact_id].list) == 0
-        )
+        assert sum(1 for _ in list_response.replicas) == 0
 
     def test_worker_registration(self, servicer, test_context):
         """Test worker registration functionality"""

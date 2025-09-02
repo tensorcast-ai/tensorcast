@@ -5,7 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "proto/store_daemon.grpc.pb.h"
+#include "store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -22,10 +22,10 @@ TEST_CASE("DISK unload is idempotent success", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   StoreDaemonServiceImpl svc(engine);
 
-  ::store_daemon::UnloadReplicaRequest req;
+  tensorcast::daemon::UnloadReplicaRequest req;
   req.set_disk_path("/tmp/does-not-matter");
-  req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_DISK);
-  ::store_daemon::UnloadReplicaResponse resp;
+  req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_DISK);
+  tensorcast::daemon::UnloadReplicaResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.UnloadReplica(&ctx, &req, &resp);
   REQUIRE(st.ok());
@@ -37,14 +37,14 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
   StoreDaemonServiceImpl svc(engine);
   svc.begin_shutdown();
 
-  ::store_daemon::MaterializeReplicaRequest req;
+  tensorcast::daemon::MaterializeReplicaRequest req;
   req.set_disk_path("/tmp/anything");
-  req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_GPU);
-  ::store_daemon::MaterializeReplicaResponse resp;
+  req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_GPU);
+  tensorcast::daemon::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.MaterializeReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::UNAVAILABLE);
-  REQUIRE(resp.status() == ::store_daemon::MATERIALIZE_REPLICA_STATUS_FAILED);
+  REQUIRE(resp.status() == tensorcast::daemon::MATERIALIZE_REPLICA_STATUS_FAILED);
 }
 
 TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
@@ -53,9 +53,9 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
 
   // Both missing -> INVALID_ARGUMENT
   {
-    ::store_daemon::MaterializeReplicaRequest req;
-    req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_GPU);
-    ::store_daemon::MaterializeReplicaResponse resp;
+    tensorcast::daemon::MaterializeReplicaRequest req;
+    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
@@ -63,11 +63,11 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
 
   // Both present -> INVALID_ARGUMENT
   {
-    ::store_daemon::MaterializeReplicaRequest req;
+    tensorcast::daemon::MaterializeReplicaRequest req;
     req.set_disk_path("/tmp/x");
     req.set_artifact_id("mi2:abc:def");
-    req.set_target_device_type(::store_daemon::DeviceType::DEVICE_TYPE_GPU);
-    ::store_daemon::MaterializeReplicaResponse resp;
+    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
@@ -78,13 +78,13 @@ TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]")
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   StoreDaemonServiceImpl svc(engine);
 
-  ::store_daemon::ReplicaVerificationRequest req;
+  tensorcast::daemon::ReplicaVerificationRequest req;
   req.set_artifact_id("nonexistent");
   req.set_replica_uuid("deadbeef-dead-beef-dead-beefdeadbeef");
   req.set_timeout_ms(10);
-  ::store_daemon::ReplicaVerificationResponse resp;
+  tensorcast::daemon::ReplicaVerificationResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.WaitReplicaVerification(&ctx, &req, &resp);
   REQUIRE(st.ok());
-  REQUIRE(resp.status() == ::store_daemon::VerificationStatus::VERIFICATION_STATUS_UNKNOWN);
+  REQUIRE(resp.status() == tensorcast::daemon::VerificationStatus::VERIFICATION_STATUS_UNKNOWN);
 }

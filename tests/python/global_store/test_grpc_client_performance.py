@@ -27,7 +27,8 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto import global_store_pb2, global_store_pb2_grpc, common_pb2
+from google.protobuf import timestamp_pb2
 from tests.python.global_store.test_grpc_client import MockGlobalStoreServicer
 
 console = Console()
@@ -43,6 +44,8 @@ class PerformanceTestServicer(MockGlobalStoreServicer):
         # Generate larger datasets
         self.workers = []
         for i in range(num_workers):
+            ts = timestamp_pb2.Timestamp()
+            ts.FromSeconds(int(time.time()) - i)
             self.workers.append(
                 global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
                     worker_id=f"worker-{i}",
@@ -53,7 +56,7 @@ class PerformanceTestServicer(MockGlobalStoreServicer):
                     mem_pool_total_size=10737418240,  # 10GB
                     mem_pool_available_size=5368709120 + i * 1048576,  # 5GB + i MB
                     accepting_new_requests=i % 3 != 0,  # 2/3 active
-                    last_heartbeat_timestamp=int(time.time()) - i,
+                    last_heartbeat_ts=ts,
                 )
             )
 
@@ -68,16 +71,16 @@ class PerformanceTestServicer(MockGlobalStoreServicer):
             for j in range(num_replicas):
                 # Map to enum values explicitly for type safety
                 memory_type = [
-                    global_store_pb2.MemoryType.GPU,
-                    global_store_pb2.MemoryType.RAM,
-                    global_store_pb2.MemoryType.DISK,
+                    common_pb2.MemoryType.GPU,
+                    common_pb2.MemoryType.RAM,
+                    common_pb2.MemoryType.DISK,
                 ][j % 3]
                 replicas.append(
-                    global_store_pb2.MemoryInfo(
+                    common_pb2.MemoryInfo(
                         memory_type=memory_type,
                         memory_size=1073741824 * (1 + j),  # 1-5 GB
                         device_id=j
-                        if memory_type == global_store_pb2.MemoryType.GPU
+                        if memory_type == common_pb2.MemoryType.GPU
                         else 0,  # device_id must be non-negative
                         node_id=f"node-{j % 10}",
                         node_address=f"192.168.1.{10 + j}",

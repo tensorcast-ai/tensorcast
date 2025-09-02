@@ -19,7 +19,11 @@ from typing import Callable, Optional, TypeVar
 import grpc
 
 from tensorcast.logger import init_logger
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc  # noqa: E402
+from tensorcast.proto import (
+    common_pb2,
+    global_store_pb2,
+    global_store_pb2_grpc,  # noqa: E402
+)
 
 # Generic type for synchronous RPC return types
 T = TypeVar("T")
@@ -48,22 +52,22 @@ class WorkerInfoWrapper:
     ):
         self._worker_info = worker_info
 
-        raw_ts = int(worker_info.last_heartbeat_timestamp)
+        # Normalize google.protobuf.Timestamp to seconds
+        ts = worker_info.last_heartbeat_ts
+        raw_ts = int(getattr(ts, "seconds", 0))
 
-        # Validate strictly against seconds-based range; reject millisecond-style values
-        # 0 is allowed (unknown / not set)
+        # 0 is allowed (unknown / not set); enforce sensible upper bound
         upper_bound_seconds = 4102444800  # 2100-01-01 UTC
         if raw_ts < 0 or raw_ts > upper_bound_seconds:
             raise ValueError(
-                f"Invalid last_heartbeat_timestamp: {raw_ts}. Expected Unix seconds in [0, {upper_bound_seconds}]"
+                f"Invalid last_heartbeat_ts: {raw_ts}. Expected Unix seconds in [0, {upper_bound_seconds}]"
             )
 
         self._last_heartbeat_seconds: int = raw_ts
         self._last_heartbeat_dt: Optional[datetime]
-        if raw_ts == 0:
-            self._last_heartbeat_dt = None
-        else:
-            self._last_heartbeat_dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        self._last_heartbeat_dt = (
+            None if raw_ts == 0 else datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        )
 
     def __getattr__(self, name: str):
         """Forward all other attributes to the underlying WorkerInfo."""
@@ -245,7 +249,7 @@ class GlobalStoreClient:
         node_id: Optional[str] = None,
         memory_type: Optional[int] = None,  # Use int instead of proto enum
         device_id: Optional[int] = None,
-    ) -> dict[str, list[global_store_pb2.MemoryInfo]]:
+    ) -> dict[str, list[common_pb2.MemoryInfo]]:
         """List artifact replicas with optional filters.
 
         Parameters
@@ -266,25 +270,25 @@ class GlobalStoreClient:
         """
 
         def _call():
-            request = global_store_pb2.ListReplicasRequest()
+            request = global_store_pb2.ListReplicasV2Request()
 
             if artifact_id is not None:
                 request.artifact_id = artifact_id
             if node_id is not None:
                 request.node_id = node_id
             if memory_type is not None:
-                request.memory_type = memory_type  # type: ignore[assignment]
+                request.memory_type = memory_type
             if device_id is not None:
                 request.device_id = device_id
 
-            response = self._stub.ListReplicas(  # type: ignore[union-attr]
+            response = self._stub.ListReplicasV2(  # type: ignore[union-attr]
                 request, timeout=self.config.timeout
             )
 
-            # Convert to Python dict
-            result = {}
-            for mid, mem_list in response.artifact_replicas.items():
-                result[mid] = list(mem_list.list)
+            # Convert flat records into {artifact_id: [MemoryInfo, ...]}
+            result: dict[str, list[common_pb2.MemoryInfo]] = {}
+            for rec in response.replicas:
+                result.setdefault(rec.artifact_id, []).append(rec.memory_info)
             return result
 
         return await self._execute_with_retry(_call) or {}
@@ -293,7 +297,7 @@ class GlobalStoreClient:
     class ArtifactInfo:
         """Container for artifact replica information."""
 
-        available_replicas: list[global_store_pb2.MemoryInfo]
+        available_replicas: list[common_pb2.MemoryInfo]
 
     async def get_artifact_info(
         self, artifact_id: str
@@ -375,11 +379,11 @@ class GlobalStoreClient:
 
         for replicas in all_replicas.values():
             for replica in replicas:
-                if replica.memory_type == global_store_pb2.MemoryType.GPU:
+                if replica.memory_type == common_pb2.MemoryType.GPU:
                     gpu_replicas += 1
-                elif replica.memory_type == global_store_pb2.MemoryType.RAM:
+                elif replica.memory_type == common_pb2.MemoryType.RAM:
                     ram_replicas += 1
-                elif replica.memory_type == global_store_pb2.MemoryType.DISK:
+                elif replica.memory_type == common_pb2.MemoryType.DISK:
                     disk_replicas += 1
 
         return {

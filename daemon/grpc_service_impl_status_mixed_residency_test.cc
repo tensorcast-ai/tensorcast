@@ -9,7 +9,7 @@
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"
 #include "grpcpp/server_context.h"
-#include "proto/store_daemon.grpc.pb.h"
+#include "store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 namespace fs = std::filesystem;
@@ -61,8 +61,8 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Query detailed status
   {
-    ::store_daemon::GetDetailedStatusRequest req;
-    ::store_daemon::GetDetailedStatusResponse resp;
+    tensorcast::daemon::GetDetailedStatusRequest req;
+    tensorcast::daemon::GetDetailedStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());
@@ -90,8 +90,8 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Query loaded replicas list and ensure both CPU(-1) and GPU(0) are present
   {
-    ::store_daemon::GetLoadedReplicasRequest req;
-    ::store_daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::GetLoadedReplicasRequest req;
+    tensorcast::daemon::GetLoadedReplicasResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
     REQUIRE(st.ok());
@@ -133,8 +133,8 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
   // Filter by artifact_id substring (directory basename)
   const std::string filter = dir.filename().string();
   {
-    ::store_daemon::GetLoadedReplicasRequest req;
-    ::store_daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::GetLoadedReplicasRequest req;
+    tensorcast::daemon::GetLoadedReplicasResponse resp;
     req.set_artifact_id_filter(filter);
     grpc::ServerContext ctx;
     auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
@@ -154,8 +154,8 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Filter by device_id only (GPU 0)
   {
-    ::store_daemon::GetLoadedReplicasRequest req;
-    ::store_daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::GetLoadedReplicasRequest req;
+    tensorcast::daemon::GetLoadedReplicasResponse resp;
     req.set_device_id_filter(0);
     grpc::ServerContext ctx;
     auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
@@ -169,8 +169,8 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Combined filter (artifact_id + device_id = CPU should return only CPU replica)
   {
-    ::store_daemon::GetLoadedReplicasRequest req;
-    ::store_daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::GetLoadedReplicasRequest req;
+    tensorcast::daemon::GetLoadedReplicasResponse resp;
     req.set_artifact_id_filter(filter);
     req.set_device_id_filter(-1);
     grpc::ServerContext ctx;

@@ -77,19 +77,7 @@ int main(int argc, char** argv) {
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(opts);
 
-  tensorcast::daemon::StoreDaemonServiceImpl::CompatConfig compat;
-  compat.auto_register_disk_loads = absl::GetFlag(FLAGS_auto_register_disk_loads);
-  compat.confirm_requires_disk_path = absl::GetFlag(FLAGS_confirm_requires_disk_path);
-  compat.enable_p2p_access = absl::GetFlag(FLAGS_enable_p2p_access);
-  compat.evict_on_dead_pid = absl::GetFlag(FLAGS_evict_on_dead_pid);
-  {
-    auto vt = absl::GetFlag(FLAGS_verification_timeout_status);
-    compat.verification_timeout_deadline = (vt == "deadline");
-  }
-  compat.enable_periodic_eviction = absl::GetFlag(FLAGS_enable_periodic_eviction);
-  compat.eviction_check_interval_ms = absl::GetFlag(FLAGS_eviction_check_interval_ms);
-  compat.gpu_memory_limit_fraction = absl::GetFlag(FLAGS_gpu_memory_limit_fraction);
-  tensorcast::daemon::StoreDaemonServiceImpl service(engine, compat);
+  tensorcast::daemon::StoreDaemonServiceImpl service(engine);
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(absl::GetFlag(FLAGS_listen_addr), grpc::InsecureServerCredentials());

@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package tensorcast.common.v1;
+
+// Generic pagination request parameters
+message Pagination {
+  optional uint32 page_size = 1;
+  optional string page_token = 2; // opaque token
+}
+
+// Generic page information for responses
+message PageInfo {
+  optional string next_page_token = 1; // opaque token
+  optional uint32 total_size = 2;      // total items matching the query
+}
+

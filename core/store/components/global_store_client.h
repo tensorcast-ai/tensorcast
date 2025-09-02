@@ -12,12 +12,13 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
+#include "common.pb.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/chunk_meta.h"
+#include "global_store.grpc.pb.h"
+#include "global_store.pb.h"
 #include "grpcpp/grpcpp.h"
-#include "proto/global_store.grpc.pb.h"
-#include "proto/global_store.pb.h"
 
 namespace tensorcast::store {
 
@@ -72,7 +73,7 @@ class GlobalStoreClient {
       bool accepting_new_requests = true);
 
   // Enhanced heartbeat with HA state fields
-  absl::StatusOr<::global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+  absl::StatusOr<::tensorcast::global::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
       bool accepting_new_requests,
@@ -80,7 +81,7 @@ class GlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      ::global_store::ConnectionStatus connection_status = ::global_store::CONNECTED);
+      ::tensorcast::global::ConnectionStatus connection_status = ::tensorcast::global::CONNECTED);
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
 
@@ -140,14 +141,14 @@ class GlobalStoreClient {
 
   // HA State Synchronization
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
-      const ::global_store::WorkerLocalState& local_state,
+      const ::tensorcast::global::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<::global_store::StateChange>* out_changes);
+      std::vector<::tensorcast::global::StateChange>* out_changes);
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<::global_store::ReplicaInfo>* out_expected_replicas);
+      std::vector<::common::ReplicaInfo>* out_expected_replicas);
 
   bool is_connected() const;
 
@@ -174,18 +175,18 @@ class GlobalStoreClient {
       const std::string& method_name);
 
   // Convert between internal types and proto types
-  static ::global_store::MemoryType convert_to_proto_memory_type(MemoryLocation location);
-  static MemoryLocation convert_from_proto_memory_type(::global_store::MemoryType type);
+  static ::common::MemoryType convert_to_proto_memory_type(MemoryLocation location);
+  static MemoryLocation convert_from_proto_memory_type(::common::MemoryType type);
   static void fill_memory_info(
-      ::global_store::MemoryInfo* info,
+      ::common::MemoryInfo* info,
       const DeviceKey& device,
       MemoryLocation location,
       uint64_t memory_size);
-  static RemoteReplicaInfo convert_from_proto_memory_info(const ::global_store::MemoryInfo& info);
+  static RemoteReplicaInfo convert_from_proto_memory_info(const ::common::MemoryInfo& info);
 
   GlobalStoreClientConfig config_;
   std::shared_ptr<grpc::Channel> channel_;
-  std::unique_ptr<::global_store::GlobalStore::Stub> stub_;
+  std::unique_ptr<::tensorcast::global::GlobalStore::Stub> stub_;
   std::string worker_id_;
   mutable std::mutex mutex_;
 };

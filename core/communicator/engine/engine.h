@@ -16,6 +16,7 @@
 #include "core/communicator/transport/request.h"
 #include "core/communicator/transport/tcp_context.h"
 
+#include "communicator_config.pb.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/engine/dram_stager.h"
@@ -24,7 +25,6 @@
 #include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
-#include "proto/communicator_config.pb.h"
 
 namespace tensorcast::communicator {
 
