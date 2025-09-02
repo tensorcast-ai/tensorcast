@@ -5,12 +5,12 @@
 
 #include "core/communicator/misc/common.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
-result_t send_bytes(int sock_fd, uint8_t* buf, int size);
+misc::result_t send_bytes(int sock_fd, uint8_t* buf, int size);
 
-result_t recv_bytes(int sock_fd, uint8_t* buf, int size);
+misc::result_t recv_bytes(int sock_fd, uint8_t* buf, int size);
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // COMMUNICATOR_TRANSPORT_BASE_TRANSPORT_H_

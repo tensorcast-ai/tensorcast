@@ -8,14 +8,14 @@
 #include "gsl/pointers"
 
 using tensorcast::DeviceType;
-using tensorcast::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
 using tensorcast::store::DeviceKey;
-using tensorcast::store::ReplicaKey;
+using tensorcast::store::loading::ReplicaKey;
 
 TEST_CASE("UMA Lease Provider hot residency checks", "[store][uma][residency]") {
   // Setup DVMP and ReplicaMemoryCoordinator
   auto dvmp = std::make_shared<DistributedVirtualMemoryPool>(DistributedVirtualMemoryPool::kDefaultChunkSize);
-  auto rmc = std::make_shared<tensorcast::store::ReplicaMemoryCoordinator>(dvmp);
+  auto rmc = std::make_shared<tensorcast::store::replica::ReplicaMemoryCoordinator>(dvmp);
 
   const std::string artifact_id = "rfc0009-uma-test";
   const size_t two_chunks = 2 * DistributedVirtualMemoryPool::kDefaultChunkSize;
@@ -29,13 +29,13 @@ TEST_CASE("UMA Lease Provider hot residency checks", "[store][uma][residency]") 
 
   // Register UMA mapping (base VA offset = 0)
   const std::string tensor_key = "tensor-key-uma-hot";
-  tensorcast::store::UmaLeaseProvider::instance()->register_mapping(
+  tensorcast::store::components::UmaLeaseProvider::instance()->register_mapping(
       tensor_key,
       key,
       /*base_va_off=*/0,
-      gsl::not_null<std::shared_ptr<tensorcast::store::ReplicaMemoryCoordinator>>{rmc});
+      gsl::not_null<std::shared_ptr<tensorcast::store::replica::ReplicaMemoryCoordinator>>{rmc});
 
-  auto* uma = tensorcast::store::UmaLeaseProvider::instance().get();
+  auto* uma = tensorcast::store::components::UmaLeaseProvider::instance().get();
 
   // Initially COLD – not hot
   REQUIRE_FALSE(uma->is_range_hot(tensor_key, /*offset=*/0, /*bytes=*/1));

@@ -21,7 +21,7 @@
 #include "absl/log/log.h"
 #include "pinned_memory_pool.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 PinnedMemory::~PinnedMemory() {
   LOG(INFO) << "Deallocating " << buffers_.size() << " memory chunks";
@@ -60,4 +60,4 @@ std::vector<char*>& PinnedMemory::get() {
   return buffers_;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

@@ -14,9 +14,9 @@ namespace tensorcast::store::loader {
 
 namespace {
 
-using tensorcast::store::artifact_hash::compute_tree_hash_root_sha256;
-using tensorcast::store::artifact_hash::multibase_multihash_sha256;
-using tensorcast::store::artifact_hash::sha256_digest_bytes;
+using tensorcast::common::compute_tree_hash_root_sha256;
+using tensorcast::common::multibase_multihash_sha256;
+using tensorcast::common::sha256_digest_bytes;
 
 class CpuMemorySourceLocal : public SeekableSource {
  public:

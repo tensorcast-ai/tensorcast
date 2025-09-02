@@ -20,7 +20,7 @@ class DVMPRegionSink : public Sink, public PositionedSink, public DirectWritable
  public:
   struct Options {
     // Per‑replica DVMP region handle (preferred for writes)
-    memory::DistributedVirtualMemoryPool::DvmpRegion region;
+    common::memory::DistributedVirtualMemoryPool::DvmpRegion region;
     // Replace MemoryManager dependency with an injected callback to avoid cycles
     std::function<absl::StatusOr<DirectWriteToken>(absl::Span<const VaRange>)> plan_direct_write_fn;
     uint64_t total_size = 0;

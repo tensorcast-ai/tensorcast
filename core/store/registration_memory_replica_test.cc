@@ -16,10 +16,10 @@
 namespace fs = std::filesystem;
 using tensorcast::DeviceType;
 using tensorcast::store::DeviceKey;
-using tensorcast::store::MemoryState;
-using tensorcast::store::ReplicaKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::ReplicaKey;
+using tensorcast::store::replica::MemoryState;
 
 static StoreEngine make_store(
     const fs::path& storage_root,
@@ -36,11 +36,11 @@ static StoreEngine make_store(
 }
 
 static DeviceKey make_gpu_key(int ordinal) {
-  return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
+  return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
 }
 
 TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
@@ -54,7 +54,7 @@ TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine
   // Create a minimal on-disk replica directory so Replica::create(DiskSource) initializes
   fs::path artifact_dir = temp_root / artifact_id;
   fs::create_directories(artifact_dir);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
   StoreEngine store = make_store(temp_root);
 
@@ -102,7 +102,7 @@ TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine
 }
 
 TEST_CASE("Memory Artifact registration: abort releases allocation", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
@@ -116,7 +116,7 @@ TEST_CASE("Memory Artifact registration: abort releases allocation", "[store_eng
   // Create a minimal on-disk replica directory so Replica::create(DiskSource) initializes
   fs::path artifact_dir2 = temp_root / artifact_id;
   fs::create_directories(artifact_dir2);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir2 / "tensor.data_0", static_cast<size_t>(size_bytes)));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir2 / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
   StoreEngine store = make_store(temp_root);
 
@@ -152,7 +152,7 @@ TEST_CASE("Memory Artifact registration: abort releases allocation", "[store_eng
 }
 
 TEST_CASE("Memory Artifact registration: TTL expiry prevents commit", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
@@ -166,7 +166,7 @@ TEST_CASE("Memory Artifact registration: TTL expiry prevents commit", "[store_en
   // Create a minimal on-disk replica directory so Replica::create(DiskSource) initializes
   fs::path artifact_dir3 = temp_root / artifact_id;
   fs::create_directories(artifact_dir3);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir3 / "tensor.data_0", static_cast<size_t>(size_bytes)));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir3 / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
   StoreEngine store = make_store(temp_root);
 
@@ -200,7 +200,7 @@ TEST_CASE("Memory Artifact registration: TTL expiry prevents commit", "[store_en
 }
 
 TEST_CASE("Memory Artifact registration: invalid arguments rejected", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
@@ -251,7 +251,7 @@ TEST_CASE("Memory Artifact registration: invalid arguments rejected", "[store_en
 }
 
 TEST_CASE("Memory Artifact registration: double commit returns NotFound", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }
@@ -265,7 +265,7 @@ TEST_CASE("Memory Artifact registration: double commit returns NotFound", "[stor
   // Create a minimal on-disk replica directory so Replica::create(DiskSource) initializes
   fs::path artifact_dir4 = temp_root / artifact_id;
   fs::create_directories(artifact_dir4);
-  REQUIRE(tensorcast::tests::create_dummy_file(artifact_dir4 / "tensor.data_0", static_cast<size_t>(size_bytes)));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir4 / "tensor.data_0", static_cast<size_t>(size_bytes)));
 
   StoreEngine store = make_store(temp_root);
 
@@ -293,7 +293,7 @@ TEST_CASE("Memory Artifact registration: double commit returns NotFound", "[stor
 }
 
 TEST_CASE("Memory Artifact registration: commit unknown id returns NotFound", "[store_engine][memory-registration]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping memory registration tests.");
     return;
   }

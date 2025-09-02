@@ -24,8 +24,13 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using namespace tensorcast::testing;
 
 namespace {
 // Write minimal RFC-0007 metadata for a standard partition directory:
@@ -54,7 +59,7 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
   }
 
   // 2) Compute index/data multihash
-  auto index_mh_or = artifact_hash::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
+  auto index_mh_or = tensorcast::common::compute_index_multihash(std::optional<std::string>(idx.dump()), "");
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
@@ -164,7 +169,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   REQUIRE(pool != nullptr);
 
   // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;

@@ -10,11 +10,12 @@
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
+#include "core/communicator/transport/rdma_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 RdmaContext::RdmaContext() {
-  ASSERT(ibv_init() == SUCCESS, "failed to init");
+  misc::ASSERT(ibv_init() == misc::SUCCESS, "failed to init");
   for (int i = 0; i < 16; i++) {
     dev_vector_[i] = nullptr;
   }
@@ -24,32 +25,32 @@ RdmaContext::~RdmaContext() {
   devs_.clear();
 }
 
-result_t RdmaContext::ibv_init() {
-  if (wrap_ibv_symbols() != SUCCESS) {
+misc::result_t RdmaContext::ibv_init() {
+  if (misc::wrap_ibv_symbols() != misc::SUCCESS) {
     LOG(WARNING) << "failed to init ibv symbols";
-    return SYS_ERROR;
+    return misc::SYS_ERROR;
   }
 
-  wrap_ibv_fork_init();
+  misc::wrap_ibv_fork_init();
 
   struct ibv_device** devices;
   int num_dev = 0;
-  if (SUCCESS != wrap_ibv_get_device_list(&devices, &num_dev)) {
-    return SYS_ERROR;
+  if (misc::SUCCESS != misc::wrap_ibv_get_device_list(&devices, &num_dev)) {
+    return misc::SYS_ERROR;
   }
 
   for (int d = 0; d < num_dev; d++) {
     struct ibv_context* context = nullptr;
-    if (SUCCESS != wrap_ibv_open_device(&context, devices[d]) || context == nullptr) {
+    if (misc::SUCCESS != misc::wrap_ibv_open_device(&context, devices[d]) || context == nullptr) {
       LOG(WARNING) << "unable to open IB device" << devices[d]->name;
       continue;
     }
 
     struct ibv_device_attr attr = {};
-    if (SUCCESS != wrap_ibv_query_device(context, &attr)) {
+    if (misc::SUCCESS != misc::wrap_ibv_query_device(context, &attr)) {
       LOG(WARNING) << "unable to query device " << devices[d]->name;
-      if (SUCCESS != wrap_ibv_close_device(context)) {
-        return INTERNAL_ERROR;
+      if (misc::SUCCESS != misc::wrap_ibv_close_device(context)) {
+        return misc::INTERNAL_ERROR;
       }
       continue;
     }
@@ -58,7 +59,7 @@ result_t RdmaContext::ibv_init() {
     for (int port = 1; port <= attr.phys_port_cnt; port++) {
       struct ibv_port_attr port_attr{};
       bzero(&port_attr, sizeof(struct ibv_port_attr));
-      if (SUCCESS != wrap_ibv_query_port(context, port, &port_attr)) {
+      if (misc::SUCCESS != misc::wrap_ibv_query_port(context, port, &port_attr)) {
         LOG(WARNING) << "unable to query port attr " << devices[d]->name;
         continue;
       }
@@ -77,15 +78,15 @@ result_t RdmaContext::ibv_init() {
     }
   }
 
-  if ((SUCCESS != wrap_ibv_free_device_list(devices))) {
-    return INTERNAL_ERROR;
+  if ((misc::SUCCESS != misc::wrap_ibv_free_device_list(devices))) {
+    return misc::INTERNAL_ERROR;
   }
 
   for (auto dev : devs_) {
     io_threads_.push_back(std::make_shared<RdmaThread>(dev));
   }
 
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 net_dev_t RdmaContext::get_dev(const std::string& name) {
@@ -258,49 +259,49 @@ void RdmaThread::notify_recv() {
   recv_cv_.notify_all();
 }
 
-result_t RdmaThread::register_transport(RdmaTransport* t) {
+misc::result_t RdmaThread::register_transport(RdmaTransport* t) {
   add_poll_transport(t);
   add_send_transport(t);
   add_recv_transport(t);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaThread::unregister_transport(RdmaTransport* t) {
+misc::result_t RdmaThread::unregister_transport(RdmaTransport* t) {
   add_poll_transport(t);
   add_send_transport(t);
   add_recv_transport(t);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 void RdmaThread::add_send_transport(RdmaTransport* t) {
-  send_transports_[t->transport_idx_] = t;
+  send_transports_[t->transport_index_] = t;
 }
 
 void RdmaThread::add_poll_transport(RdmaTransport* t) {
   for (int i = 0; i < 1024; i++) {
     if (poll_transports_[i] == nullptr) {
-      t->transport_idx_ = i;
+      t->transport_index_ = i;
       poll_transports_[i] = t;
       return;
     }
   }
-  ASSERT(false, "failed to allocate a valid poll status");
+  misc::ASSERT(false, "failed to allocate a valid poll status");
 }
 
 void RdmaThread::del_send_transport(RdmaTransport* t) {
-  send_transports_[t->transport_idx_] = nullptr;
+  send_transports_[t->transport_index_] = nullptr;
 }
 
 void RdmaThread::del_poll_transport(RdmaTransport* t) {
-  poll_transports_[t->transport_idx_] = nullptr;
+  poll_transports_[t->transport_index_] = nullptr;
 }
 
 void RdmaThread::add_recv_transport(RdmaTransport* t) {
-  recv_transports_[t->transport_idx_] = t;
+  recv_transports_[t->transport_index_] = t;
 }
 
 void RdmaThread::del_recv_transport(RdmaTransport* t) {
-  recv_transports_[t->transport_idx_] = nullptr;
+  recv_transports_[t->transport_index_] = nullptr;
 }
 
 void RdmaThread::send_loop() {
@@ -364,7 +365,7 @@ void RdmaThread::poll_loop() {
     }
 
     lock.unlock();
-    wrap_ibv_poll_cq(net_dev_->get_cq(), 4, wcs, &wr_done);
+    misc::wrap_ibv_poll_cq(net_dev_->get_cq(), 4, wcs, &wr_done);
     lock.lock();
     if (wr_done == 0) {
       continue;
@@ -418,4 +419,4 @@ void RdmaThread::recv_loop() {
   }
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

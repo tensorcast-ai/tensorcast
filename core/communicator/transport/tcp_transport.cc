@@ -13,7 +13,7 @@
 #include "core/communicator/transport/tcp_context.h"
 #include "core/communicator/transport/tcp_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 // Helper function to decode epoll event flags into a readable string
 static std::string decode_epoll_events(uint32_t events) {
@@ -51,8 +51,8 @@ static std::string decode_epoll_events(uint32_t events) {
 
 TcpTransport::TcpTransport(TcpContext* context, int fd, struct sockaddr_in remote_addr)
     : context_(context), fd_(fd), local_addr_(), remote_addr_(remote_addr), recv_func_(nullptr), close_func_() {
-  ASSERT(fd_ != 0, "failed to init tcp transport");
-  CLEAR(local_addr_);
+  misc::ASSERT(fd_ != 0, "failed to init tcp transport");
+  misc::CLEAR(local_addr_);
   socklen_t len = sizeof(local_addr_);
   getsockname(fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), &len);
 
@@ -65,7 +65,7 @@ TcpTransport::~TcpTransport() {
   }
 }
 
-result_t TcpTransport::close() {
+misc::result_t TcpTransport::close() {
   LOG(INFO) << "[TcpTransport::close] Closing transport " << get_remote_url();
   context_->unregister_transport(this);
   recv_func_ = nullptr;
@@ -75,20 +75,20 @@ result_t TcpTransport::close() {
     fd_ = 0;
   }
   context_ = nullptr;
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t TcpTransport::send(const transport_message_t& msg) {
+misc::result_t TcpTransport::send(const transport_message_t& msg) {
   std::unique_lock<std::mutex> lock(mu_);
   COMM_CHECK(send_bytes(fd_, msg->get_header<uint8_t>(), msg->get_header_size()));
   COMM_CHECK(send_bytes(fd_, msg->get_payload<uint8_t>(), msg->get_payload_size()));
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t TcpTransport::recv(uint8_t* buf, uint32_t buf_size) {
+misc::result_t TcpTransport::recv(uint8_t* buf, uint32_t buf_size) {
   std::unique_lock<std::mutex> lock(mu_);
   COMM_CHECK(recv_bytes(fd_, buf, buf_size));
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
 void TcpTransport::set_recv_func(on_recv_func_t recv_func) {
@@ -99,7 +99,7 @@ void TcpTransport::set_close_func(on_close_func_t close_func) {
   close_func_ = close_func;
 }
 
-result_t TcpTransport::process_event(uint32_t event) {
+misc::result_t TcpTransport::process_event(uint32_t event) {
   // Log the full event for debugging
   LOG(INFO) << "[TcpTransport::process_event] Processing event for " << get_remote_url() << " - "
             << decode_epoll_events(event);
@@ -156,21 +156,21 @@ std::string TcpTransport::get_local_url() const {
   return url.str();
 }
 
-result_t TcpTransport::do_close() {
+misc::result_t TcpTransport::do_close() {
   if (close_func_ == nullptr) {
-    return IN_PROGRESS;
+    return misc::IN_PROGRESS;
   }
   COMM_CHECK(close_func_(shared_from_this()));
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t TcpTransport::do_recv() {
+misc::result_t TcpTransport::do_recv() {
   if (recv_func_ == nullptr) {
-    return IN_PROGRESS;
+    return misc::IN_PROGRESS;
   }
 
   COMM_CHECK(recv_func_(shared_from_this()));
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

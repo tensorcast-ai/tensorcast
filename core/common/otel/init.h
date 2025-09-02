@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace tensorcast::obs {
+namespace tensorcast::common::otel {
 
 // Initialize OpenTelemetry C++ SDK + exporter from OTEL_* environment variables.
 // - OTEL_SDK_DISABLED: if set truthy, initialization is skipped
@@ -16,6 +16,5 @@ namespace tensorcast::obs {
 // Extra:
 // - TC_OTEL_CXX_CONSOLE: if truthy, attach console/ostream exporter for debugging
 // Returns true if SDK initialized; false if disabled or on fatal error (logged).
-bool InitFromEnv(const std::string& service_default, const std::string& role);
-
-} // namespace tensorcast::obs
+bool init_from_env(const std::string& service_default, const std::string& role);
+} // namespace tensorcast::common::otel

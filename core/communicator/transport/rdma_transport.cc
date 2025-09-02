@@ -3,9 +3,10 @@
 #include <utility>
 
 #include "core/communicator/misc/utils.h"
+#include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/rdma_transport.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th)
     : context_(context),
@@ -27,20 +28,20 @@ RdmaTransport::~RdmaTransport() {
 
   io_thread_->unregister_transport(this);
   if (qp_ != nullptr) {
-    CHECK_WARN(wrap_ibv_destroy_qp(qp_), "failed to destroy qp");
+    CHECK_WARN(misc::wrap_ibv_destroy_qp(qp_), "failed to destroy qp");
     qp_ = nullptr;
   }
 }
 
-result_t RdmaTransport::read(read_request_t request) {
+misc::result_t RdmaTransport::read(read_request_t request) {
   COMM_CHECK(read_queue_.push(request));
   if (io_thread_ != nullptr) {
     io_thread_->notify_send();
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::connect(RdmaTransportInfo* info) {
+misc::result_t RdmaTransport::connect(RdmaTransportInfo* info) {
   memcpy(&peer_info_, info, sizeof(RdmaTransportInfo));
   COMM_CHECK(do_modify_qp_rtr());
   COMM_CHECK(do_modify_qp_rts());
@@ -49,10 +50,10 @@ result_t RdmaTransport::connect(RdmaTransportInfo* info) {
     io_thread_->notify_send();
     io_thread_->notify_recv();
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
+misc::result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
   info->link_layer = dev_->get_link();
   info->ib_port = dev_->get_port();
   info->mtu = IBV_MTU_4096;
@@ -60,12 +61,12 @@ result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
   info->qpn = qp_->qp_num;
   info->lid = 0;
   memcpy(info->gid, local_gid_.raw, 16);
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::do_init_qp() {
+misc::result_t RdmaTransport::do_init_qp() {
   struct ibv_qp_init_attr init_attr{};
-  CLEAR(init_attr);
+  misc::CLEAR(init_attr);
   init_attr.send_cq = dev_->get_cq();
   init_attr.recv_cq = dev_->get_cq();
   init_attr.qp_type = IBV_QPT_RC;
@@ -78,24 +79,25 @@ result_t RdmaTransport::do_init_qp() {
   COMM_CHECK(dev_->create_qp(&qp_, &init_attr));
 
   struct ibv_qp_attr qp_attr{};
-  CLEAR(qp_attr);
+  misc::CLEAR(qp_attr);
   qp_attr.qp_state = IBV_QPS_INIT;
   qp_attr.pkey_index = 0;
   qp_attr.port_num = dev_->get_port();
   qp_attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
-  COMM_CHECK(wrap_ibv_modify_qp(qp_, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
+  COMM_CHECK(
+      misc::wrap_ibv_modify_qp(qp_, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
 
   COMM_CHECK(dev_->get_best_gid(&local_gid_, &gid_idx_));
 
   LOG(INFO) << "init qp done:"
             << " dev=" << dev_->get_name() << ", qpn=" << qp_->qp_num << ", type=" << qp_->qp_type
-            << ", gid-idx=" << gid_idx_ << ", gid=" << gid2str(local_gid_.raw);
-  return SUCCESS;
+            << ", gid-idx=" << gid_idx_ << ", gid=" << misc::gid2str(local_gid_.raw);
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::do_modify_qp_rtr() {
+misc::result_t RdmaTransport::do_modify_qp_rtr() {
   struct ibv_qp_attr qp_attr{};
-  CLEAR(qp_attr);
+  misc::CLEAR(qp_attr);
   qp_attr.qp_state = IBV_QPS_RTR;
   qp_attr.path_mtu = IBV_MTU_4096;
   qp_attr.dest_qp_num = peer_info_.qpn;
@@ -112,28 +114,31 @@ result_t RdmaTransport::do_modify_qp_rtr() {
   qp_attr.ah_attr.sl = 0;
   qp_attr.ah_attr.src_path_bits = 0;
   qp_attr.ah_attr.port_num = peer_info_.ib_port;
-  COMM_CHECK(wrap_ibv_modify_qp(
-      qp_,
-      &qp_attr,
-      IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
-          IBV_QP_MIN_RNR_TIMER));
-  return SUCCESS;
+  COMM_CHECK(
+      misc::wrap_ibv_modify_qp(
+          qp_,
+          &qp_attr,
+          IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
+              IBV_QP_MIN_RNR_TIMER));
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::do_modify_qp_rts() {
+misc::result_t RdmaTransport::do_modify_qp_rts() {
   struct ibv_qp_attr qp_attr{};
-  CLEAR(qp_attr);
+  misc::CLEAR(qp_attr);
   qp_attr.qp_state = IBV_QPS_RTS;
   qp_attr.timeout = context_->qp_timeout();
   qp_attr.retry_cnt = context_->qp_retry();
   qp_attr.rnr_retry = 7;
   qp_attr.sq_psn = 0;
   qp_attr.max_rd_atomic = 1;
-  COMM_CHECK(wrap_ibv_modify_qp(
-      qp_,
-      &qp_attr,
-      IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC));
-  return SUCCESS;
+  COMM_CHECK(
+      misc::wrap_ibv_modify_qp(
+          qp_,
+          &qp_attr,
+          IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+              IBV_QP_MAX_QP_RD_ATOMIC));
+  return misc::SUCCESS;
 }
 
 bool RdmaTransport::ready_to_send() {
@@ -151,10 +156,10 @@ bool RdmaTransport::ready_to_recv() {
   return false;
 }
 
-result_t RdmaTransport::do_post_send() {
+misc::result_t RdmaTransport::do_post_send() {
   auto req = read_queue_.pop(true);
   if (req == nullptr) {
-    return FAILED;
+    return misc::FAILED;
   }
 
   req->record_rdma_queue_done();
@@ -167,7 +172,7 @@ result_t RdmaTransport::do_post_send() {
   auto local_tensor = req->get_local_tensor();
   auto remote_tensor = req->get_remote_tensor();
 
-  read_wr.wr_id = transport_idx_;
+  read_wr.wr_id = transport_index_;
   read_wr.opcode = IBV_WR_RDMA_READ;
   read_wr.send_flags = IBV_SEND_SIGNALED;
 
@@ -186,18 +191,18 @@ result_t RdmaTransport::do_post_send() {
   read_sge.lkey = mr->lkey;
 
   inflight_queue_.push(req);
-  auto res = wrap_ibv_post_send(qp_, &read_wr, &read_bad_wr);
+  auto res = misc::wrap_ibv_post_send(qp_, &read_wr, &read_bad_wr);
   if (res) {
     req->set_result(
         absl::InternalError(absl::StrFormat("rdma post_send failed: return=%d, error=%s", res, strerror(errno))));
-    return FAILED;
+    return misc::FAILED;
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs) {
+misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs) {
   if (segs.empty()) {
-    return FAILED;
+    return misc::FAILED;
   }
 
   // Ensure QP is ready
@@ -219,9 +224,9 @@ result_t RdmaTransport::read_multi(read_request_t request, const std::vector<Rdm
   for (size_t i = 0; i < segs.size(); ++i) {
     auto& wr = wrs[i];
     auto& sge = sges[i];
-    CLEAR(wr);
-    CLEAR(sge);
-    wr.wr_id = transport_idx_;
+    misc::CLEAR(wr);
+    misc::CLEAR(sge);
+    wr.wr_id = transport_index_;
     wr.opcode = IBV_WR_RDMA_READ;
     wr.send_flags = IBV_SEND_SIGNALED;
     wr.num_sge = 1;
@@ -239,21 +244,21 @@ result_t RdmaTransport::read_multi(read_request_t request, const std::vector<Rdm
     inflight_queue_.push(request);
   }
 
-  auto res = wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
+  auto res = misc::wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
   if (res) {
     request->set_result(
         absl::InternalError(
             absl::StrFormat("rdma post_send (multi) failed: return=%d, error=%s", res, strerror(errno))));
-    return FAILED;
+    return misc::FAILED;
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
+misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
   if (wc->opcode == IBV_WC_RDMA_READ) {
     auto req = inflight_queue_.pop(true);
     if (req == nullptr) {
-      ASSERT(false, "abnormal queue state");
+      misc::ASSERT(false, "abnormal queue state");
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {
@@ -268,11 +273,11 @@ result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
           absl::InternalError(absl::StrFormat("failed to process work completion: wc_status=%d", wc->status)));
     }
   }
-  return SUCCESS;
+  return misc::SUCCESS;
 }
 
-result_t RdmaTransport::do_post_recv() {
-  return SUCCESS;
+misc::result_t RdmaTransport::do_post_recv() {
+  return misc::SUCCESS;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

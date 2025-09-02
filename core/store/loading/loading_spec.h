@@ -18,7 +18,7 @@
 #include "core/store/device_types.h"
 #include "core/store/replica/memory_state.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::loading {
 
 // ══════════════════════════════════════════════════════════════════════════
 // Replica Sources - Describe where data comes from
@@ -152,16 +152,16 @@ struct ReplicaKeyHash {
 struct ReplicaHandle {
   ReplicaKey replica_key;
   std::shared_future<absl::Status> ready_future;
-  MemoryState cpu_state{MemoryState::UNINITIALIZED};
-  MemoryState gpu_state{MemoryState::UNINITIALIZED};
+  replica::MemoryState cpu_state{replica::MemoryState::UNINITIALIZED};
+  replica::MemoryState gpu_state{replica::MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
   CudaIpcHandle cuda_ipc_handle;
 
   [[nodiscard]] const ReplicaKey& key() const {
     return replica_key;
   }
-  [[nodiscard]] MemoryState state(DeviceType type) const;
+  [[nodiscard]] replica::MemoryState state(DeviceType type) const;
   absl::Status wait_ready(std::chrono::milliseconds timeout);
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::loading

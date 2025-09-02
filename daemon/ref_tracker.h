@@ -19,7 +19,7 @@ class RefTracker {
     bool keep_for_global{false};
   };
 
-  void add_ref(const tensorcast::store::ReplicaKey& key, int32_t pid, bool keep_for_global = false) {
+  void add_ref(const store::loading::ReplicaKey& key, int32_t pid, bool keep_for_global = false) {
     absl::MutexLock l(&mu_);
     auto& e = refs_[key];
     e.pids.insert(pid);
@@ -27,7 +27,7 @@ class RefTracker {
     e.keep_for_global = e.keep_for_global || keep_for_global;
   }
 
-  void drop_ref(const tensorcast::store::ReplicaKey& key, int32_t pid) {
+  void drop_ref(const store::loading::ReplicaKey& key, int32_t pid) {
     absl::MutexLock l(&mu_);
     auto it = refs_.find(key);
     if (it == refs_.end()) {
@@ -39,13 +39,13 @@ class RefTracker {
     }
   }
 
-  size_t ref_count(const tensorcast::store::ReplicaKey& key) const {
+  size_t ref_count(const store::loading::ReplicaKey& key) const {
     absl::MutexLock l(&mu_);
     auto it = refs_.find(key);
     return it == refs_.end() ? 0 : it->second.pids.size();
   }
 
-  std::vector<int32_t> pids(const tensorcast::store::ReplicaKey& key) const {
+  std::vector<int32_t> pids(const store::loading::ReplicaKey& key) const {
     absl::MutexLock l(&mu_);
     std::vector<int32_t> out;
     auto it = refs_.find(key);
@@ -57,15 +57,15 @@ class RefTracker {
     return out;
   }
 
-  bool keep_for_global(const tensorcast::store::ReplicaKey& key) const {
+  bool keep_for_global(const store::loading::ReplicaKey& key) const {
     absl::MutexLock l(&mu_);
     auto it = refs_.find(key);
     return it == refs_.end() ? false : it->second.keep_for_global;
   }
 
-  std::vector<tensorcast::store::ReplicaKey> keys() const {
+  std::vector<store::loading::ReplicaKey> keys() const {
     absl::MutexLock l(&mu_);
-    std::vector<tensorcast::store::ReplicaKey> out;
+    std::vector<store::loading::ReplicaKey> out;
     out.reserve(refs_.size());
     for (const auto& kv : refs_)
       out.push_back(kv.first);
@@ -74,8 +74,7 @@ class RefTracker {
 
  private:
   mutable absl::Mutex mu_;
-  absl::flat_hash_map<tensorcast::store::ReplicaKey, Entry, tensorcast::store::ReplicaKeyHash> refs_
-      ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<store::loading::ReplicaKey, Entry, store::loading::ReplicaKeyHash> refs_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

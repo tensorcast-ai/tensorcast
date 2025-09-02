@@ -26,7 +26,7 @@
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::engine {
 
 class CommunicateEngine {
  public:
@@ -40,7 +40,7 @@ class CommunicateEngine {
    * @param local_port local port
    * @return  init result
    */
-  absl::Status init(const std::string& local_ip, uint16_t local_port, int conn_count = kMTcpConnCount);
+  absl::Status init(const std::string& local_ip, uint16_t local_port, int conn_count = base::kMTcpConnCount);
 
   /**
    * Read a remote tensor
@@ -54,7 +54,7 @@ class CommunicateEngine {
    * @param remote_offset remote tensor addr offset
    * @return
    */
-  future_read_result_t read_tensor(
+  transport::future_read_result_t read_tensor(
       const std::string& key,
       uint64_t addr,
       uint64_t bytes,
@@ -132,26 +132,32 @@ class CommunicateEngine {
   }
 
  private:
-  net_dev_t get_net_dev(int dev_type, int dev_id);
+  transport::net_dev_t get_net_dev(int dev_type, int dev_id);
 
-  result_t on_receive_request(const channel_t& channel, const tcp_transport_t& t, const engine_message_t& msg);
-  result_t on_receive_response(const channel_t& channel, const tcp_transport_t& t, const engine_message_t& msg);
+  misc::result_t on_receive_request(
+      const channel_t& channel,
+      const transport::tcp_transport_t& t,
+      const engine_message_t& msg);
+  misc::result_t on_receive_response(
+      const channel_t& channel,
+      const transport::tcp_transport_t& t,
+      const engine_message_t& msg);
 
   void do_read_request_loop();
   void do_channel_gc_loop();
 
-  result_t on_new_client(const tcp_transport_t& t);
+  misc::result_t on_new_client(const transport::tcp_transport_t& t);
 
   absl::StatusOr<channel_t> do_create_channel(const std::string& ip, uint16_t port);
 
   std::atomic_bool stop_;
   std::atomic_bool inited_;
-  tcp_context_t server_context_;
-  tcp_context_t client_context_;
-  rdma_context_t rdma_context_ = nullptr;
-  Queue<read_request_t> request_queue_;
-  Map<std::string, read_request_t> pending_requests_;
-  Map<std::string, channel_t> channels_;
+  transport::tcp_context_t server_context_;
+  transport::tcp_context_t client_context_;
+  transport::rdma_context_t rdma_context_ = nullptr;
+  misc::Queue<transport::read_request_t> request_queue_;
+  misc::Map<std::string, transport::read_request_t> pending_requests_;
+  misc::Map<std::string, channel_t> channels_;
   PartitionTensorStore store_;
   std::thread request_thread_;
   std::thread gc_thread_;
@@ -164,16 +170,16 @@ class CommunicateEngine {
   uint64_t channel_expire_;
 
   // GPU->CPU staging uses unified GPU MemoryStager only
-  std::shared_ptr<MemoryStager> gpu_memory_stager_;
+  std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
 
   // Shared pinned memory pool for GPU operations
-  std::shared_ptr<store::PinnedMemoryPool> gpu_memory_pool_;
+  std::shared_ptr<common::memory::PinnedMemoryPool> gpu_memory_pool_;
   // Dedicated pinned memory pool for CPU staging when configured with a
   // different chunk size than GPU. Falls back to gpu_memory_pool_ when null.
-  std::shared_ptr<store::PinnedMemoryPool> cpu_memory_pool_;
+  std::shared_ptr<common::memory::PinnedMemoryPool> cpu_memory_pool_;
 
   // Unified memory stager (CPU staging in TCP path)
-  std::shared_ptr<MemoryStager> memory_stager_;
+  std::shared_ptr<engine::MemoryStager> memory_stager_;
   std::unique_ptr<MrCache> mr_cache_;
 
   // --- RDMA staged response tracking (server-side) ---
@@ -189,7 +195,7 @@ class CommunicateEngine {
   };
   // key: request key "<tensor_key>:<offset>"
   absl::Mutex staged_mu_;
-  Map<std::string, StagedRdmaSegment> staged_segments_;
+  misc::Map<std::string, StagedRdmaSegment> staged_segments_;
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;
@@ -200,13 +206,13 @@ class CommunicateEngine {
   // Mapping from GPU id -> MemoryStager (GpuNetStager adapter per NUMA node)
   std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_mem_stagers_;
   // Keep pools alive and accessible for MR preregistration
-  std::vector<std::shared_ptr<store::PinnedMemoryPool>> numa_pools_;
+  std::vector<std::shared_ptr<common::memory::PinnedMemoryPool>> numa_pools_;
 
   // Helpers to select NUMA-aware stagers
-  std::shared_ptr<MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
-  std::shared_ptr<MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
+  std::shared_ptr<engine::MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
+  std::shared_ptr<engine::MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine
 
 #endif // CORE_COMMUNICATOR_ENGINE_ENGINE_H_

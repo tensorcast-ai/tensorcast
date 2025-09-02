@@ -42,6 +42,7 @@ sc_header_only_library(
     hdrs = ["concurrency_utils.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":common",
         "@abseil-cpp//absl/synchronization",
     ],
 )

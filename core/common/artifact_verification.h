@@ -10,7 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common {
 
 // Verification levels from least to most thorough
 enum class VerificationLevel {
@@ -87,4 +87,4 @@ class ArtifactVerifier {
       int device_id);
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common

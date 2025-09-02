@@ -21,7 +21,7 @@
 #include "absl/log/log.h"
 #include "core/common/cuda_api.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 PinnedMemoryPool::PinnedMemoryPool(size_t total_size, size_t chunk_size) : chunk_size_(chunk_size) {
   // Ensure chunk_size is aligned for DIRECT_IO support
@@ -161,4 +161,4 @@ std::vector<gsl::not_null<char*>> PinnedMemoryPool::list_buffers() const {
   return out;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

@@ -17,8 +17,16 @@
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::is_cuda_available;
+using tensorcast::testing::read_file_content;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") {
   if (!is_cuda_available()) {
@@ -73,7 +81,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     REQUIRE(pool != nullptr);
 
     // Create DVMP
-    auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
 
     // Use new DiskSource
     DiskSource disk_src;

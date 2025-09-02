@@ -4,15 +4,12 @@
 
 #include <string_view>
 #include "absl/status/statusor.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
+#include "core/store/store_engine.h"
 
-namespace tensorcast::store {
-
-class GlobalStoreClient;
-class ReplicaRegistry;
-class DeviceManager;
-class StoreEngine;
+namespace tensorcast::store::loading {
 
 // MaterializeOrchestrator encapsulates the decision tree for replica materialization
 // (remote replica selection, P2P transport setup, disk fallback, and
@@ -20,7 +17,7 @@ class StoreEngine;
 // StoreEngine::materialize_replica() when mode == AUTO.
 class MaterializeOrchestrator {
  public:
-  MaterializeOrchestrator(StoreEngine* store, GlobalStoreClient* gs_client);
+  MaterializeOrchestrator(StoreEngine* store, components::GlobalStoreClient* gs_client);
 
   // Execute the preparation logic.
   absl::StatusOr<ReplicaHandle> run(
@@ -30,7 +27,7 @@ class MaterializeOrchestrator {
 
  private:
   StoreEngine* store_;
-  GlobalStoreClient* gs_client_;
+  components::GlobalStoreClient* gs_client_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::loading

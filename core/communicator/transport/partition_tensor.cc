@@ -6,7 +6,7 @@
 
 #include <utility>
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t bytes, int mem_type, net_dev_t dev)
     : tensor_key_(std::move(tensor_key)),
@@ -20,7 +20,7 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
 
 PartitionTensor::~PartitionTensor() {
   if (registered_.load()) {
-    CHECK_WARN(wrap_ibv_dereg_mr(mr_), "failed to dereg mr");
+    CHECK_WARN(misc::wrap_ibv_dereg_mr(mr_), "failed to dereg mr");
     registered_.store(false);
     ready_.store(false);
   }
@@ -68,7 +68,7 @@ int PartitionTensor::get_mem_type() const {
 }
 
 void PartitionTensor::register_mr() {
-  Timer timer(true);
+  misc::Timer timer(true);
   int flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
 
   auto addr = get_addr<void>();
@@ -106,4 +106,4 @@ uint64_t RemotePartitionTensor::get_uint64_addr() const {
   return addr_;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport

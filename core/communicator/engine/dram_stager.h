@@ -16,16 +16,16 @@
 #include "core/communicator/engine/memory_stager.h"
 #include "gsl/pointers"
 
-namespace tensorcast::communicator {
-
-class PartitionTensor;
+namespace tensorcast::communicator::engine {
 
 // DRAM (CPU) stager: memcpy from source VA into host-pinned pool buffer.
 // For Phase 1: does not yet acquire DVMP pin leases; this will be added when
 // UMA callbacks are plumbed into the communicator layer.
 class DRAMStager : public MemoryStager {
  public:
-  explicit DRAMStager(gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool, size_t num_buffers_hint = 4);
+  explicit DRAMStager(
+      gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pool,
+      size_t num_buffers_hint = 4);
   ~DRAMStager() override = default;
 
   // UMA pin-lease provider interface (optional). If set, stage() will
@@ -43,7 +43,10 @@ class DRAMStager : public MemoryStager {
   }
   static std::shared_ptr<LeaseProvider> make_noop_lease_provider();
 
-  absl::StatusOr<void*> stage(const std::shared_ptr<PartitionTensor>& tensor, uint64_t offset, uint64_t bytes) override;
+  absl::StatusOr<void*> stage(
+      const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
+      uint64_t offset,
+      uint64_t bytes) override;
 
   absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override;
 
@@ -55,7 +58,7 @@ class DRAMStager : public MemoryStager {
   }
 
  private:
-  gsl::not_null<std::shared_ptr<store::PinnedMemoryPool>> pool_;
+  gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pool_;
   const size_t chunk_size_;
   const size_t num_buffers_hint_;
 
@@ -66,4 +69,4 @@ class DRAMStager : public MemoryStager {
   std::shared_ptr<LeaseProvider> lease_provider_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::engine

@@ -4,7 +4,7 @@
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/misc/utils.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 Timer::Timer(bool init_record) : start_(0), end_(0) {
   if (init_record) {
@@ -24,4 +24,4 @@ uint64_t Timer::record() {
   return cost;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc

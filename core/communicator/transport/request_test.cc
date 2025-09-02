@@ -7,13 +7,13 @@
 #include "core/communicator/base/constants.h"
 #include "core/communicator/transport/request.h"
 
-using tensorcast::communicator::PartitionTensor;
-using tensorcast::communicator::ReadRequest;
+using tensorcast::communicator::transport::PartitionTensor;
+using tensorcast::communicator::transport::ReadRequest;
 
 TEST_CASE("ReadRequest multi-segment completion and per-request ACK action", "[request]") {
   // Create a dummy local tensor (CPU, no net_dev)
   auto local = std::make_shared<PartitionTensor>(
-      "key", /*addr*/ 0, /*bytes*/ 4096, tensorcast::communicator::COMMUNICATE_ENGINE_DEV_CPU, nullptr);
+      "key", /*addr*/ 0, /*bytes*/ 4096, tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU, nullptr);
 
   // Construct ReadRequest
   ReadRequest req("key", "127.0.0.1", 12345, local, /*remote_offset*/ 0);

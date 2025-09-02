@@ -23,7 +23,14 @@
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::CommRegistrationInfo;
+using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
 
 // Helper function to create a dummy file (copied from model_disk_test.cc)
 bool create_dummy_file(const fs::path& path, size_t size) {
@@ -55,7 +62,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   // Initialize a CommunicationManager for test and obtain its engine for
   // dependency injection to ReplicaConfig. Use ephemeral localhost port.
   // ------------------------------------------------------------------
-  auto comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+  auto comm_mgr = std::make_shared<CommunicationManager>();
   absl::Status engine_status = comm_mgr->initialize("127.0.0.1", 16000);
   if (!engine_status.ok()) {
     FAIL("Failed to initialize communication manager: " << engine_status);
@@ -76,7 +83,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   std::shared_ptr<PinnedMemoryPool> pinned_pool = std::make_shared<PinnedMemoryPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
   // Create DVMP and StreamingPinnedBuffer required by ReplicaConfig
-  auto dvmp = std::make_shared<::tensorcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
   REQUIRE(dvmp != nullptr);
 
   // --- Test GPU Registration --- (Requires CUDA device)
@@ -95,7 +102,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     fs::path dummy_file_path = artifact_dir / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, artifact_size));
     // RFC-0007 metadata for standard partitions
-    REQUIRE(::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+    REQUIRE(::tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
     int device_id = 0;
     int device_count;
@@ -206,7 +213,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     fs::path dummy_file_path = artifact_dir / partition_filename;
     REQUIRE(create_dummy_file(dummy_file_path, artifact_size));
     // RFC-0007 metadata for standard partitions
-    REQUIRE(::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+    REQUIRE(::tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
     // Note: No CUDA pool needed for CPU-only test
     int dummy_device_id = 0; // Still need a device ID for config

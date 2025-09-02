@@ -9,7 +9,7 @@
 #include <vector>
 #include "absl/log/log.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 template <class K, class V>
 class Map {
@@ -62,6 +62,6 @@ class Map {
   std::unordered_map<K, V> map_;
 };
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // COMMUNICATOR_MISC_MAP_H_

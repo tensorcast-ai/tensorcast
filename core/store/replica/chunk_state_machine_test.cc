@@ -10,7 +10,7 @@
 
 #include "core/store/replica/chunk_meta.h"
 
-using namespace tensorcast::store;
+using namespace tensorcast::store::replica;
 
 // Helper to test state transitions via raw CAS (no policy)
 class ChunkStateMachine {

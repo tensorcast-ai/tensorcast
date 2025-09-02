@@ -9,17 +9,16 @@
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
 
-namespace tensorcast::obs {
+namespace tensorcast::common::otel {
 
 // Bridge RAII that mirrors existing TraceScope into an OpenTelemetry Span.
 // This is always compiled; if no provider/exporter is configured, spans are no-op.
 class TraceScopeBridge {
  public:
   TraceScopeBridge(const std::string& artifact_id, const std::string& stage) : active_(true) {
-    using namespace opentelemetry;
-    auto tracer = trace::Provider::GetTracerProvider()->GetTracer("tensorcast.core");
+    auto tracer = opentelemetry::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.core");
     span_ = tracer->StartSpan(stage);
-    scope_ = std::make_unique<trace::Scope>(span_);
+    scope_ = std::make_unique<opentelemetry::trace::Scope>(span_);
     // Attach artifact_id as requested for cross-component correlation.
     if (!artifact_id.empty()) {
       span_->SetAttribute("tc.artifact.id", artifact_id);
@@ -56,4 +55,4 @@ class TraceScopeBridge {
   bool active_{true};
 };
 
-} // namespace tensorcast::obs
+} // namespace tensorcast::common::otel

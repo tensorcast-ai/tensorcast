@@ -9,15 +9,16 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 StreamingTensorWriter::StreamingTensorWriter(
     const std::string& filename,
     const Config& config,
-    std::shared_ptr<PinnedMemoryPool> pool)
+    std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool)
     : filename_(filename), config_(config), buffer_size_(config.buffer_size_mb << 20) { // Convert MB to bytes
 
-  streaming_buffer_ = std::make_unique<StreamingPinnedBuffer>(config_.num_buffers, buffer_size_, std::move(pool));
+  streaming_buffer_ = std::make_unique<tensorcast::common::memory::StreamingPinnedBuffer>(
+      config_.num_buffers, buffer_size_, std::move(pool));
   tensor_writer_ = std::make_unique<TensorWriter>(filename_);
 }
 
@@ -226,4 +227,4 @@ absl::Status StreamingTensorWriter::finalize() {
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

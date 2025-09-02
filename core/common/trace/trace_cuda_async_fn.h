@@ -11,7 +11,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/trace/trace_manager.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 namespace detail {
 
 // Internal payload passed to the CUDA host callback.
@@ -85,4 +85,4 @@ inline absl::Status trace_cuda_async(
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

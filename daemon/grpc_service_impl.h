@@ -21,7 +21,7 @@
 
 namespace tensorcast::daemon {
 
-class StoreDaemonServiceImpl final : public ::tensorcast::daemon::StoreDaemon::Service {
+class StoreDaemonServiceImpl final : public daemon::StoreDaemon::Service {
  public:
   explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
       : engine_(std::move(engine)), sessions_(std::chrono::seconds(60)) {
@@ -58,79 +58,77 @@ class StoreDaemonServiceImpl final : public ::tensorcast::daemon::StoreDaemon::S
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::MaterializeReplicaRequest* req,
-      ::tensorcast::daemon::MaterializeReplicaResponse* resp) override;
+      const daemon::MaterializeReplicaRequest* req,
+      daemon::MaterializeReplicaResponse* resp) override;
 
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::ConfirmReplicaRequest* req,
-      ::tensorcast::daemon::ConfirmReplicaResponse* resp) override;
+      const daemon::ConfirmReplicaRequest* req,
+      daemon::ConfirmReplicaResponse* resp) override;
 
   grpc::Status UnloadReplica(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::UnloadReplicaRequest* req,
-      ::tensorcast::daemon::UnloadReplicaResponse* resp) override;
+      const daemon::UnloadReplicaRequest* req,
+      daemon::UnloadReplicaResponse* resp) override;
 
-  grpc::Status ClearMem(
-      grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::ClearMemRequest* req,
-      ::tensorcast::daemon::ClearMemResponse* resp) override;
+  grpc::Status ClearMem(grpc::ServerContext* ctx, const daemon::ClearMemRequest* req, daemon::ClearMemResponse* resp)
+      override;
 
   grpc::Status GetServerConfig(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::GetServerConfigRequest* req,
-      ::tensorcast::daemon::GetServerConfigResponse* resp) override;
+      const daemon::GetServerConfigRequest* req,
+      daemon::GetServerConfigResponse* resp) override;
 
   grpc::Status WaitReplicaVerification(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::ReplicaVerificationRequest* req,
-      ::tensorcast::daemon::ReplicaVerificationResponse* resp) override;
+      const daemon::ReplicaVerificationRequest* req,
+      daemon::ReplicaVerificationResponse* resp) override;
 
   grpc::Status LockTransportChunks(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::LockChunksRequest* req,
-      ::tensorcast::daemon::LockChunksResponse* resp) override;
+      const daemon::LockChunksRequest* req,
+      daemon::LockChunksResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::UnlockChunksRequest* req,
-      ::tensorcast::daemon::UnlockChunksResponse* resp) override;
+      const daemon::UnlockChunksRequest* req,
+      daemon::UnlockChunksResponse* resp) override;
 
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::BeginRegisterArtifactRequest* req,
-      ::tensorcast::daemon::BeginRegisterArtifactResponse* resp) override;
+      const daemon::BeginRegisterArtifactRequest* req,
+      daemon::BeginRegisterArtifactResponse* resp) override;
 
   grpc::Status CommitRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::CommitRegisteredArtifactRequest* req,
-      ::tensorcast::daemon::CommitRegisteredArtifactResponse* resp) override;
+      const daemon::CommitRegisteredArtifactRequest* req,
+      daemon::CommitRegisteredArtifactResponse* resp) override;
 
   grpc::Status AbortRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::AbortRegisteredArtifactRequest* req,
-      ::tensorcast::daemon::AbortRegisteredArtifactResponse* resp) override;
+      const daemon::AbortRegisteredArtifactRequest* req,
+      daemon::AbortRegisteredArtifactResponse* resp) override;
 
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::GetWorkerStatusRequest* req,
-      ::tensorcast::daemon::GetWorkerStatusResponse* resp) override;
+      const daemon::GetWorkerStatusRequest* req,
+      daemon::GetWorkerStatusResponse* resp) override;
 
   grpc::Status GetDetailedStatus(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::GetDetailedStatusRequest* req,
-      ::tensorcast::daemon::GetDetailedStatusResponse* resp) override;
+      const daemon::GetDetailedStatusRequest* req,
+      daemon::GetDetailedStatusResponse* resp) override;
 
   // Legacy GetLoadedReplicas removed; use V2
 
   grpc::Status GetLoadedReplicasV2(
       grpc::ServerContext* ctx,
-      const ::tensorcast::daemon::GetLoadedReplicasV2Request* req,
-      ::tensorcast::daemon::GetLoadedReplicasV2Response* resp) override;
+      const daemon::GetLoadedReplicasV2Request* req,
+      daemon::GetLoadedReplicasV2Response* resp) override;
 
   // Expose current ref-count for a given replica key (for HA state reporting)
-  size_t ref_count_for(const tensorcast::store::ReplicaKey& key) const {
+  size_t ref_count_for(const store::loading::ReplicaKey& key) const {
     return refs_.ref_count(key);
   }
 
@@ -152,10 +150,10 @@ class StoreDaemonServiceImpl final : public ::tensorcast::daemon::StoreDaemon::S
   void stop_sweepers();
 
   // Helpers
-  static tensorcast::store::DeviceKey resolve_device(const ::tensorcast::daemon::MaterializeReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const ::tensorcast::daemon::ConfirmReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const ::tensorcast::daemon::UnloadReplicaRequest& req);
-  static tensorcast::store::ReplicaKey make_replica_key(const std::string& artifact_id);
+  static tensorcast::store::DeviceKey resolve_device(const daemon::MaterializeReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const daemon::ConfirmReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const daemon::UnloadReplicaRequest& req);
+  static store::loading::ReplicaKey make_replica_key(const std::string& artifact_id);
 
   // Shutdown gating
   std::atomic<bool> is_shutting_down_{false};
@@ -170,13 +168,12 @@ class StoreDaemonServiceImpl final : public ::tensorcast::daemon::StoreDaemon::S
   // verification progress decoupled from ready_future state for parity with
   // Python daemon semantics.
   struct VerifEntry {
-    ::tensorcast::daemon::VerificationStatus status{
-        ::tensorcast::daemon::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
+    daemon::VerificationStatus status{daemon::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
     std::string err;
   };
   absl::Mutex verif_mu_;
   absl::flat_hash_map<std::string, VerifEntry> verif_ ABSL_GUARDED_BY(verif_mu_);
-  void set_verif_status(const std::string& uuid, ::tensorcast::daemon::VerificationStatus st, std::string err = "");
+  void set_verif_status(const std::string& uuid, daemon::VerificationStatus st, std::string err = "");
 
   // Background task queue for verification completion and auto-registration
   struct VerifTask {
@@ -184,7 +181,7 @@ class StoreDaemonServiceImpl final : public ::tensorcast::daemon::StoreDaemon::S
     std::shared_future<absl::Status> ready;
   };
   struct AutoRegTask {
-    tensorcast::store::ReplicaKey key;
+    store::loading::ReplicaKey key;
     std::string disk_path;
     std::shared_future<absl::Status> ready;
   };

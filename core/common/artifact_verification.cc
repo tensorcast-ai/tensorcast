@@ -16,7 +16,7 @@
 // for convenience
 using json = nlohmann::json;
 
-namespace tensorcast::store {
+namespace tensorcast::common {
 
 // xxHash64 constants
 static constexpr uint64_t PRIME64_1 = 11400714785074694791ULL;
@@ -526,4 +526,4 @@ absl::Status ArtifactVerifier::verify_artifact_data(
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common

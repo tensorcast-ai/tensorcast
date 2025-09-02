@@ -5,7 +5,7 @@
 
 #include "misc/epoll_wrap.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 #ifdef __APPLE__
 
@@ -23,6 +23,6 @@ int wrap_epoll_wait(int, struct epoll_event*, int maxevents, int timeout) {
 
 #endif
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_

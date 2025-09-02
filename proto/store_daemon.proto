@@ -274,12 +274,12 @@ message GetLoadedReplicasV2Request {
   // Filters
   optional string artifact_id_filter = 1;
   optional int32 device_id_filter = 2;
-  common.Pagination pagination = 100;
+  tensorcast.common.Pagination pagination = 100;
 }
 
 message GetLoadedReplicasV2Response {
   repeated LoadedReplicaInfo replicas = 1;
-  common.PageInfo page_info = 2;
+  tensorcast.common.PageInfo page_info = 2;
 }
 
 // ========== Chunk locking message definitions ==========
@@ -353,7 +353,7 @@ message CommitRegisteredArtifactResponse {
   string artifact_id = 2;                     // Artifact ID
   int32 device_id = 3;                     // Device ID
   uint64 size = 4;                         // Total size
-  common.ArtifactDescriptor descriptor = 5;          // Content-addressed descriptor (RFC-0007)
+  tensorcast.common.ArtifactDescriptor descriptor = 5;          // Content-addressed descriptor (RFC-0007)
 }
 
 // Abort registration request

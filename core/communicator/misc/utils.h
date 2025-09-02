@@ -13,7 +13,7 @@ extern "C" {
 
 #include "core/communicator/misc/common.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 template <class T>
 inline void CLEAR(T& obj) {
@@ -122,6 +122,6 @@ std::string get_default_ip();
 
 uint64_t get_us();
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // CORE_COMMUNICATOR_MISC_UTILS_H_

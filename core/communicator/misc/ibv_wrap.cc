@@ -11,7 +11,7 @@ extern "C" {
 
 #include "core/communicator/misc/ibv_wrap.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 #define IBVERBS_VERSION "IBVERBS_1.1"
 
 #define CHECK_NULL(internal)                        \
@@ -275,4 +275,4 @@ result_t wrap_ibv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr, int att
   IBV_INT_CHECK_RET_ERRNO(modify_qp, modify_qp(qp, attr, attr_mask), 0, "ibv_modify_qp");
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc

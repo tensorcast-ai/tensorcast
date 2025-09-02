@@ -13,11 +13,15 @@
 
 #include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
-#include "core/store/concurrency_utils.h"
+#include "core/testing/concurrency_utils.h"
 
-using namespace tensorcast::tests::store_engine;
-using namespace tensorcast::store;
+using namespace tensorcast::testing;
 using tensorcast::DeviceType;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::store::StoreEngine;
+using tensorcast::store::loading::MaterializeHints;
+using tensorcast::store::loading::ReplicaHandle;
+using tensorcast::store::replica::MemoryState;
 
 // B1: Load same replica to multiple GPUs
 TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") {
@@ -27,7 +31,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   const size_t artifact_size = 50 * 1024 * 1024; // 50MB
 
   TempArtifactFixture fixture("multi_gpu_b1");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
 
@@ -43,7 +47,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   // Load replica to each GPU
   std::vector<ReplicaHandle> handles;
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
 
     hints.disk_path = artifact_id;
     auto handle_or = store->materialize_replica(make_gpu_key(gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -80,7 +84,7 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
     // Strengthen: verify GPU memory content matches file pattern for first few KB
     // Read disk sample
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = tensorcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::testing::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     // Get GPU pointer and compare prefix
@@ -128,13 +132,13 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
   const size_t artifact_size = 16 * 1024 * 1024; // 16MB
 
   TempArtifactFixture fixture("multi_gpu_b2");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // Load to GPU 0 first via LOAD_ONLY (using disk_path)
   {
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
     hints.disk_path = artifact_id;
     auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(handle0_or.ok());
@@ -144,7 +148,7 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
 
   // Now try COPY_ONLY to GPU 1 WITHOUT setting artifact_id → should fail with InvalidArgument
   {
-    tensorcast::store::MaterializeHints hints; // intentionally leave artifact_id empty
+    MaterializeHints hints; // intentionally leave artifact_id empty
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE_FALSE(handle1_or.ok());
     // Error message should clearly indicate missing artifact_id
@@ -160,13 +164,13 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   const size_t artifact_size = 40 * 1024 * 1024; // 40MB
 
   TempArtifactFixture fixture("multi_gpu_b3");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // First load to GPU 0
   {
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
 
     hints.disk_path = artifact_id;
     auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -183,7 +187,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   // Now copy to GPU 1 using COPY_ONLY (GPU-to-GPU transfer enforced).
   auto copy_start = std::chrono::high_resolution_clock::now();
   {
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
     hints.artifact_id = artifact_id; // Needed by COPY_ONLY to locate source instance
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE(handle1_or.ok());
@@ -210,7 +214,7 @@ TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
 
     // Validate content prefix
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = tensorcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::testing::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
     size_t verify_bytes = std::min<size_t>(4096, host_data.size());
     std::vector<char> gpu_prefix(verify_bytes);
@@ -252,7 +256,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   for (int i = 0; i < num_artifacts; ++i) {
     auto artifact_id = generate_artifact_id("balance_model_b4", i);
     artifact_ids.push_back(artifact_id);
-    fixture.create_artifact(artifact_id, artifact_size);
+    fixture.create_model(artifact_id, artifact_size);
   }
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
@@ -269,7 +273,7 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   // Load replicas with round-robin distribution
   for (size_t i = 0; i < artifact_ids.size(); ++i) {
     int target_gpu = i % gpu_count;
-    tensorcast::store::MaterializeHints hints;
+    MaterializeHints hints;
     hints.disk_path = artifact_ids[i];
     auto handle_or =
         store->materialize_replica(make_gpu_key(target_gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -308,12 +312,12 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   const size_t artifact_size = 30 * 1024 * 1024; // 30MB
 
   TempArtifactFixture fixture("multi_gpu_b5");
-  fixture.create_artifact(artifact_id, artifact_size);
+  fixture.create_model(artifact_id, artifact_size);
 
   auto store = make_test_store(fixture.root());
 
   // Load to both GPU 0 and GPU 1
-  tensorcast::store::MaterializeHints hints;
+  MaterializeHints hints;
 
   hints.disk_path = artifact_id;
   auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -328,7 +332,7 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   // Verify full content on both GPUs to ensure data correctness before unload
   {
     auto file_path = fixture.root() / artifact_id / "tensor.data_0";
-    auto host_data = tensorcast::tests::read_file_content(file_path);
+    auto host_data = tensorcast::testing::read_file_content(file_path);
     REQUIRE_FALSE(host_data.empty());
 
     for (int gpu = 0; gpu < 2; ++gpu) {

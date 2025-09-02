@@ -3,7 +3,7 @@
 #ifndef CORE_COMMUNICATOR_BASE_CONSTANTS_H_
 #define CORE_COMMUNICATOR_BASE_CONSTANTS_H_
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::base {
 
 // Device type constants
 enum {
@@ -22,6 +22,6 @@ constexpr int kMTcpConnCount = 8;
 constexpr int kMaxTcpConns = 32;
 constexpr int kMaxFd = 32;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::base
 
 #endif // CORE_COMMUNICATOR_BASE_CONSTANTS_H_

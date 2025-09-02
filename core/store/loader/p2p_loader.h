@@ -15,13 +15,6 @@
 #include "core/store/communication_types.h"
 #include "core/store/loader/loader.h"
 
-// Forward declaration instead of include to avoid circular dependency
-
-// Forward declaration
-namespace tensorcast::communicator {
-class CommunicateEngine;
-} // namespace tensorcast::communicator
-
 namespace tensorcast::store::loader {
 class SeekableSource;
 }

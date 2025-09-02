@@ -17,9 +17,9 @@
 #include <vector>
 
 #include "core/common/cuda_api.h"
-#include "core/store/concurrency_utils.h"
+#include "core/testing/concurrency_utils.h"
 
-using namespace tensorcast::tests::store_engine;
+using namespace tensorcast::testing;
 using namespace tensorcast::store;
 using tensorcast::DeviceType;
 

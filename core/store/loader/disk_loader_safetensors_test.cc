@@ -14,8 +14,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 using tensorcast::store::DiskLoader;
-using tensorcast::store::DiskSource;
 using tensorcast::store::loader::SeekableSource;
+using tensorcast::store::loading::DiskSource;
 
 namespace {
 

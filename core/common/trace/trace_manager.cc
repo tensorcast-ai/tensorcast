@@ -15,7 +15,7 @@
 #include "absl/strings/str_cat.h"
 #include "nlohmann/json.hpp"
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 
 // ----------------------------------------------------------------------
 // Singleton accessor
@@ -270,4 +270,4 @@ void TraceManager::clear_trace(const std::string& artifact_id, const std::string
   }
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

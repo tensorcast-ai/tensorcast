@@ -310,9 +310,9 @@ cc_test(
         "stress",
     ],
     deps = [
-        ":concurrency_utils",
         ":store_engine",
         "//core/testing:catch_main",
+        "//core/testing:concurrency_utils",
         "@catch2//:catch2_main",
     ],
 )
@@ -322,9 +322,9 @@ cc_test(
     srcs = ["edge_test.cc"],
     tags = ["store_engine"],
     deps = [
-        ":concurrency_utils",
         ":store_engine",
         "//core/testing:catch_main",
+        "//core/testing:concurrency_utils",
         "//core/testing:test_helpers",
         "@catch2//:catch2_main",
     ],
@@ -339,9 +339,9 @@ cc_test(
         "stress",
     ],
     deps = [
-        ":concurrency_utils",
         ":store_engine",
         "//core/testing:catch_main",
+        "//core/testing:concurrency_utils",
         "@catch2//:catch2_main",
     ],
 )
@@ -359,10 +359,10 @@ cc_test(
         "store_engine",
     ],
     deps = [
-        ":concurrency_utils",
         ":store_engine",
         "//core/testing:catch_main",
         "//core/testing:common",
+        "//core/testing:concurrency_utils",
         "@catch2//:catch2_main",
     ],
 )
@@ -402,16 +402,7 @@ cc_test(
 
 # Aggregate target removed; use fine-grained deps in dependents.
 
-# Concurrency utilities header for tests
-sc_header_only_library(
-    name = "concurrency_utils",
-    hdrs = ["concurrency_utils.h"],
-    visibility = ["//visibility:private"],
-    deps = [
-        "//core/testing:common",
-        "@abseil-cpp//absl/synchronization",
-    ],
-)
+# Concurrency utilities are provided by //core/testing:concurrency_utils
 
 sc_cc_library(
     name = "uma_lease_provider",

@@ -11,7 +11,7 @@
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::components {
 
 /**
  * @brief Manages GPU devices and CUDA operations for the store engine.
@@ -98,4 +98,4 @@ class DeviceManager {
   static void gpu_mem_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::components

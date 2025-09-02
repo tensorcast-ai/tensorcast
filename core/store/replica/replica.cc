@@ -17,8 +17,9 @@
 #include "core/store/loader/p2p_loader.h"
 #include "core/store/replica/memory_manager.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
+using common::memory::MemoryLocation;
 //--------------------------------------------------------------------------
 // Static Factory: create()
 //--------------------------------------------------------------------------
@@ -33,31 +34,31 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
 
   // --- Create Loader based on Source ---
   std::unique_ptr<IArtifactLoader> loader;
-  MemoryLocation source_type = MemoryLocation::NONE;
+  common::memory::MemoryLocation source_type = common::memory::MemoryLocation::NONE;
 
   absl::Status visitor_status = absl::OkStatus(); // Initialize status
 
   try {
     visitor_status = std::visit( // Capture the status from std::visit
         absl::Overload{
-            [&](const DiskSource& disk_source) -> absl::Status { // Explicitly return absl::Status
+            [&](const loading::DiskSource& disk_source) -> absl::Status { // Explicitly return absl::Status
               VLOG(1) << "Replica(" << config.artifact_identifier << "): Configuring DiskLoader from path "
                       << disk_source.path;
               loader = std::make_unique<DiskLoader>(disk_source);
-              source_type = MemoryLocation::DISK;
+              source_type = common::memory::MemoryLocation::DISK;
               return absl::OkStatus(); // Return OK status
             },
-            [&](const P2PSource& p2p_source) -> absl::Status { // Explicitly return absl::Status
+            [&](const tensorcast::store::P2PSource& p2p_source) -> absl::Status { // Explicitly return absl::Status
               VLOG(1) << "Replica(" << config.artifact_identifier << "): Configuring P2PLoader from " << p2p_source.ip << ":"
                       << p2p_source.port;
               loader = std::make_unique<P2PLoader>(p2p_source);
-              source_type = MemoryLocation::REMOTE;
+              source_type = common::memory::MemoryLocation::REMOTE;
               return absl::OkStatus(); // Return OK status
             },
-            [&](const InlineBufferSource& buffer_source) -> absl::Status {
+            [&](const loading::InlineBufferSource& buffer_source) -> absl::Status {
               VLOG(1) << "Replica(" << config.artifact_identifier << "): Configuring InlineBufferLoader";
               loader = std::make_unique<InlineBufferLoader>(buffer_source);
-              source_type = MemoryLocation::PAGEABLE_CPU; // semantic placeholder for in-memory
+              source_type = common::memory::MemoryLocation::PAGEABLE_CPU; // semantic placeholder for in-memory
               return absl::OkStatus();
             }},
         config.source);
@@ -128,7 +129,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
     dev_key.ordinal = -1;
   }
 
-  ReplicaKey inst_key{.artifact_id = config.artifact_identifier, .device = dev_key, /*replica=*/.replica = 0};
+  loading::ReplicaKey inst_key{.artifact_id = config.artifact_identifier, .device = dev_key, .replica = 0};
 
   // Use absl::WrapUnique to manage the private constructor call
   auto replica_ptr =
@@ -141,10 +142,10 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
 //--------------------------------------------------------------------------
 
 Replica::Replica(
-    ReplicaKey key,
+    loading::ReplicaKey key,
     std::unique_ptr<IArtifactLoader> loader,
     std::shared_ptr<MemoryManager> memory_manager,
-    MemoryLocation source_type)
+    common::memory::MemoryLocation source_type)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
@@ -407,32 +408,33 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
   return new_future;
 }
 
-absl::StatusOr<MemoryLocation> Replica::find_best_source_for_target(MemoryLocation target_location) const {
+absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_target(
+    common::memory::MemoryLocation target_location) const {
   // Assumes mutex_ is held. (Now called within lock scope in ensure_loaded_async)
-  MemoryState cpu_state = memory_manager_->get_state(MemoryLocation::PAGEABLE_CPU);
-  MemoryState gpu_state = memory_manager_->get_state(MemoryLocation::GPU);
+  MemoryState cpu_state = memory_manager_->get_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  MemoryState gpu_state = memory_manager_->get_state(common::memory::MemoryLocation::GPU);
 
-  if (target_location == MemoryLocation::PAGEABLE_CPU) {
+  if (target_location == common::memory::MemoryLocation::PAGEABLE_CPU) {
     // If GPU is loaded, copy from GPU. Otherwise, load from original source.
     if (gpu_state == MemoryState::LOADED) {
-      return MemoryLocation::GPU;
+      return common::memory::MemoryLocation::GPU;
     } // Check if original source is valid for loading to CPU
-    if (original_source_type_ == MemoryLocation::DISK) {
-      return MemoryLocation::DISK;
+    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
+      return common::memory::MemoryLocation::DISK;
     }
-    if (original_source_type_ == MemoryLocation::REMOTE) {
+    if (original_source_type_ == common::memory::MemoryLocation::REMOTE) {
       // Add REMOTE->CPU path if P2PLoader supports it later
-      return MemoryLocation::REMOTE;
+      return common::memory::MemoryLocation::REMOTE;
     }
     return absl::InternalError("Invalid original source type.");
   }
-  if (target_location == MemoryLocation::GPU) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
     // If CPU is loaded, copy from CPU. Otherwise, load from original source.
     if (cpu_state == MemoryState::LOADED) {
-      return MemoryLocation::PAGEABLE_CPU;
+      return common::memory::MemoryLocation::PAGEABLE_CPU;
     } // Can load from DISK (via CPU staging implicitly handled by DiskLoader->copy)
     // or directly from REMOTE if P2P->GPU is supported.
-    if (original_source_type_ == MemoryLocation::DISK) {
+    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
       // Need to ensure CPU is loaded first, then copy.
       // This logic is handled within ensure_loaded_async by calling itself recursively or chaining.
       // Let's simplify: if CPU not loaded, source is DISK (implying DISK->CPU->GPU path)
@@ -443,8 +445,8 @@ absl::StatusOr<MemoryLocation> Replica::find_best_source_for_target(MemoryLocati
       // If CPU not loaded, ultimate source is DISK/REMOTE.
       return original_source_type_;
     }
-    if (original_source_type_ == MemoryLocation::REMOTE) {
-      return MemoryLocation::REMOTE; // Load directly P2P->GPU
+    if (original_source_type_ == common::memory::MemoryLocation::REMOTE) {
+      return common::memory::MemoryLocation::REMOTE; // Load directly P2P->GPU
     }
     return absl::InternalError("Invalid original source type.");
   }
@@ -502,11 +504,11 @@ MemoryManager& Replica::get_memory_manager() const {
 
 absl::StatusOr<CommRegistrationInfo> Replica::enable_remote_memory_access(
     MemoryLocation location,
-    tensorcast::communicator::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Build full chunk list using DVMP metadata snapshot.
-  absl::Span<const store::ChunkMeta> meta = memory_manager_->chunk_snapshot();
+  absl::Span<const ChunkMeta> meta = memory_manager_->chunk_snapshot();
   std::vector<uint32_t> chunks;
   chunks.reserve(meta.size());
   for (uint32_t i = 0; i < meta.size(); ++i) {
@@ -517,7 +519,8 @@ absl::StatusOr<CommRegistrationInfo> Replica::enable_remote_memory_access(
   return memory_manager_->export_chunks_for_p2p(location, chunks, comm_engine);
 }
 
-absl::StatusOr<ArtifactVerificationInfo> Replica::generate_verification_info(MemoryLocation location) const {
+absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> Replica::generate_verification_info(
+    common::memory::MemoryLocation location) const {
   absl::MutexLock lock(&mutex_);
   // Check if data is loaded at the specified location
   MemoryState state = memory_manager_->get_state(location);
@@ -542,18 +545,18 @@ absl::StatusOr<ArtifactVerificationInfo> Replica::generate_verification_info(Mem
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
-  int device_id = (location == MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Generating verification info for " << location_to_string(location)
             << " (" << data_ptrs.size() << " chunks, " << artifact_size << " bytes total)";
 
-  return ArtifactVerifier::generate_verification_info(data_ptrs, data_sizes, device_id);
+  return tensorcast::common::ArtifactVerifier::generate_verification_info(data_ptrs, data_sizes, device_id);
 }
 
 absl::Status Replica::verify_artifact_data(
-    MemoryLocation location,
-    const ArtifactVerificationInfo& expected_info,
-    VerificationLevel level) const {
+    common::memory::MemoryLocation location,
+    const tensorcast::common::ArtifactVerificationInfo& expected_info,
+    tensorcast::common::VerificationLevel level) const {
   absl::MutexLock lock(&mutex_);
 
   // Check if data is loaded at the specified location
@@ -579,15 +582,18 @@ absl::Status Replica::verify_artifact_data(
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
-  int device_id = (location == MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Verifying " << location_to_string(location) << " data at level "
             << static_cast<int>(level);
 
-  return ArtifactVerifier::verify_artifact_data(data_ptrs, data_sizes, expected_info, level, device_id);
+  return tensorcast::common::ArtifactVerifier::verify_artifact_data(
+      data_ptrs, data_sizes, expected_info, level, device_id);
 }
 
-absl::Status Replica::verify_key_points(MemoryLocation location, const ArtifactVerificationInfo& expected_info) const {
+absl::Status Replica::verify_key_points(
+    common::memory::MemoryLocation location,
+    const tensorcast::common::ArtifactVerificationInfo& expected_info) const {
   absl::MutexLock lock(&mutex_);
   // Check if data is loaded at the specified location
   MemoryState state = memory_manager_->get_state(location);
@@ -612,16 +618,16 @@ absl::Status Replica::verify_key_points(MemoryLocation location, const ArtifactV
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
-  int device_id = (location == MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Fast key-point verification for " << location_to_string(location);
 
-  return ArtifactVerifier::verify_key_points(data_ptrs, data_sizes, expected_info, device_id);
+  return tensorcast::common::ArtifactVerifier::verify_key_points(data_ptrs, data_sizes, expected_info, device_id);
 }
 
 absl::Status Replica::disable_remote_memory_access(
     MemoryLocation location,
-    tensorcast::communicator::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Use chunk-scoped unexport. Chunks parameter is currently ignored internally.
@@ -674,4 +680,4 @@ absl::Status Replica::copy_from(const Replica& src) {
   return dst_mm.copy_from_peer(src.get_memory_manager());
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

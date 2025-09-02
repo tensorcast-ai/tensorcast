@@ -4,7 +4,7 @@
 
 #include <cstddef>
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 // Transfer buffer size constants
 constexpr size_t kDefaultMaxBufferBytes = 256ULL << 20; // 256 MB
@@ -12,4 +12,4 @@ constexpr size_t kDefaultMaxBufferBytes = 256ULL << 20; // 256 MB
 // Device ID constants
 constexpr int kCpuDeviceId = -1;
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

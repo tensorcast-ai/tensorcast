@@ -45,7 +45,7 @@ Practical tips: set `service.name` explicitly; attach low-cardinality `tc.*` att
 #### C++ (StoreDaemon / Core)
 
 - **Entry & common wrappers**
-  - SDK init: `core/common/otel/init.h/.cc` provides `InitFromEnv(service, role)`; call early in `daemon/server_main.cc`.
+  - SDK init: `core/common/otel/init.h/.cc` provides `init_from_env(service, role)`; call early in `daemon/server_main.cc`.
   - gRPC propagation: `core/common/otel/grpc_propagation.h` extracts/injects Trace Context on `grpc::{Server,Client}Context`.
   - Trace bridge: `core/common/otel/trace_scope_bridge.h` bridges `SC_TRACE_*` to OTel spans (no business code changes needed).
 - **Where to add spans/events**

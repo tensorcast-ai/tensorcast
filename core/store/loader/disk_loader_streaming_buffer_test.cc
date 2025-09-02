@@ -18,8 +18,16 @@
 #include "core/store/replica/memory_manager.h"
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::DiskLoader;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryManager;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::is_cuda_available;
+using tensorcast::testing::read_file_content;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gpu]") {
   if (!is_cuda_available()) {
@@ -70,7 +78,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
-  auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
+  auto dvmp = std::make_shared<tensorcast::common::memory::DistributedVirtualMemoryPool>();
   auto memmgr = std::make_shared<MemoryManager>(
       "loader_stream_artifact",
       /*device=*/0,

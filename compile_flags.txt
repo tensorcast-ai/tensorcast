@@ -19,6 +19,7 @@
 -Ibazel-bin/proto/global_store_grpc_cpp_pb
 -Ibazel-bin/proto/store_daemon_grpc_cpp_pb
 -Ibazel-bin/proto/common_grpc_cpp_pb
+-Ibazel-bin/proto/communicator_config_cc_lib_pb
 -Iexternal/protobuf+/src
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src

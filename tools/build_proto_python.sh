@@ -37,8 +37,14 @@ while IFS= read -r -d '' file; do
   sed -i -E 's/^import ([A-Za-z0-9_]+)_pb2 as /from . import \1_pb2 as /' "$file"
 done < <(find tensorcast/proto -type f \( -name "*_pb2_grpc.py" -o -name "*_pb2.py" \) -print0)
 
+#!/usr/bin/env bash
+
 # Normalize cross-module imports in *_pb2.py to be relative to tensorcast/proto
 while IFS= read -r -d '' file; do
+  # Special-case: flatten imports from `tensorcast.common` back to local module,
+  # because common.proto is emitted at the root of tensorcast/proto.
+  sed -i -E 's/^from tensorcast\.common import ([A-Za-z0-9_]+)_pb2 as /from . import \1_pb2 as /' "$file"
+  # General case: keep other nested packages relative inside tensorcast/proto
   # Convert e.g., `from tensorcast.common.v1 import common_pb2 as ...` to
   # `from .tensorcast.common.v1 import common_pb2 as ...`
   sed -i -E 's/^from (tensorcast\.[A-Za-z0-9_\.]+) import ([A-Za-z0-9_]+)_pb2 as /from .\1 import \2_pb2 as /' "$file"

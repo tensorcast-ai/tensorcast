@@ -15,7 +15,7 @@
 #include "core/checkpoint/tensor_writer.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 /**
  * @brief A tensor writer that uses streaming pinned buffer for efficient GPU tensor saving.
@@ -40,7 +40,10 @@ class StreamingTensorWriter {
    * @param config Configuration parameters
    * @param pool Shared pinned memory pool
    */
-  StreamingTensorWriter(const std::string& filename, const Config& config, std::shared_ptr<PinnedMemoryPool> pool);
+  StreamingTensorWriter(
+      const std::string& filename,
+      const Config& config,
+      std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool);
 
   ~StreamingTensorWriter();
 
@@ -86,7 +89,7 @@ class StreamingTensorWriter {
   const size_t buffer_size_;
 
   // Streaming buffer for GPU->Host->Disk pipeline
-  std::unique_ptr<StreamingPinnedBuffer> streaming_buffer_;
+  std::unique_ptr<tensorcast::common::memory::StreamingPinnedBuffer> streaming_buffer_;
 
   // Underlying tensor writer for disk I/O
   std::unique_ptr<TensorWriter> tensor_writer_;
@@ -106,4 +109,4 @@ class StreamingTensorWriter {
   bool initialized_{false};
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

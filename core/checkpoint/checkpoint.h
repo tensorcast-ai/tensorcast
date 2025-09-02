@@ -61,7 +61,7 @@ class Tensor {
 #include "absl/status/statusor.h"
 #include "core/common/artifact_verification.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 /**
  * @brief Save tensor data to disk in partitioned format.
@@ -98,9 +98,9 @@ uint64_t calculate_actual_artifact_size(const std::string& disk_path);
  * @param disk_path Path to the directory containing saved replica files.
  * @return ArtifactVerificationInfo Generated verification information.
  */
-ArtifactVerificationInfo generate_verification_info_from_disk(
+tensorcast::common::ArtifactVerificationInfo generate_verification_info_from_disk(
     const std::string& disk_path,
-    tensorcast::store::VerificationLevel max_level = tensorcast::store::VerificationLevel::FULL_HASH);
+    tensorcast::common::VerificationLevel max_level = tensorcast::common::VerificationLevel::FULL_HASH);
 
 /**
  * @brief Restore tensors from GPU memory into PyTorch tensors.
@@ -136,4 +136,4 @@ std::unordered_map<int, std::string> get_device_uuid_map();
 
 // Get a map of GPU IDs to their corresponding UUIDs.
 std::unordered_map<std::string, int> get_gpu_uuid();
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

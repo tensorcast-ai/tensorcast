@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 
 class TraceScope {
  public:
@@ -30,4 +30,4 @@ class TraceScope {
   uint64_t id_ = kInvalidSpan;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

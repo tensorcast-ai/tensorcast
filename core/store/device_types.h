@@ -24,7 +24,7 @@ namespace tensorcast::store {
  * uuid and ordinal >= 0 for intra-node ranking.
  */
 struct DeviceKey {
-  DeviceType type{::tensorcast::DeviceType::CPU};
+  DeviceType type{DeviceType::CPU};
   int32_t ordinal{-1};
   std::string uuid;
 
@@ -34,9 +34,9 @@ struct DeviceKey {
   // String representation for logging / debugging.
   [[nodiscard]] std::string to_string() const {
     const char* type_str = "REMOTE";
-    if (type == ::tensorcast::DeviceType::CPU) {
+    if (type == DeviceType::CPU) {
       type_str = "CPU";
-    } else if (type == ::tensorcast::DeviceType::GPU) {
+    } else if (type == DeviceType::GPU) {
       type_str = "GPU";
     }
     return std::string("DeviceKey{") + type_str + ":" + std::to_string(ordinal) + ":" + uuid + "}";
@@ -54,19 +54,19 @@ struct DeviceKeyHash {
  * @brief Location - Triple describing the medium and device where data resides
  */
 struct Location {
-  MemoryLocation type = MemoryLocation::NONE;
+  common::memory::MemoryLocation type = common::memory::MemoryLocation::NONE;
   int32_t device_id = -1;
   std::string device_uuid;
 
   // Convert to DeviceKey for unified device handling
   [[nodiscard]] DeviceKey to_device_key() const {
     DeviceKey key;
-    if (type == MemoryLocation::GPU) {
-      key.type = ::tensorcast::DeviceType::GPU;
+    if (type == common::memory::MemoryLocation::GPU) {
+      key.type = DeviceType::GPU;
       key.ordinal = device_id;
       key.uuid = device_uuid;
-    } else if (type == MemoryLocation::PAGEABLE_CPU || type == MemoryLocation::DISK) {
-      key.type = ::tensorcast::DeviceType::CPU;
+    } else if (type == common::memory::MemoryLocation::PAGEABLE_CPU || type == common::memory::MemoryLocation::DISK) {
+      key.type = DeviceType::CPU;
       key.ordinal = -1;
     }
     return key;

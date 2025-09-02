@@ -18,15 +18,15 @@
 //  ----------------------------------------------------------------------------
 #include <iostream>
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 inline void show_progress_bar(float progress, const std::string& message = "") {
-  const int barWidth = 70;
+  constexpr int kBarWidth = 70;
   int progress_percent = int(progress * 100.0);
   std::cout << message << progress_percent << "% [";
-  int pos = static_cast<int>(barWidth * progress);
+  int pos = static_cast<int>(kBarWidth * progress);
 
-  for (int i = 0; i < barWidth; ++i) {
+  for (int i = 0; i < kBarWidth; ++i) {
     if (i < pos) {
       std::cout << "=";
     } else if (i == pos) {
@@ -44,4 +44,4 @@ inline void show_progress_bar(float progress, const std::string& message = "") {
   std::cout.flush();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

@@ -53,7 +53,7 @@
 
 #define BUFFER_SIZE 1 << 30
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 uint64_t calculate_actual_artifact_size(const std::string& disk_path) {
   std::filesystem::path tensor_index_path = std::filesystem::path(disk_path) / "tensor_index.json";
@@ -215,9 +215,9 @@ std::unordered_map<std::string, uint64_t> save_tensors(
  * @param disk_path Path to the directory containing saved replica files
  * @return ArtifactVerificationInfo Generated verification information
  */
-ArtifactVerificationInfo generate_verification_info_from_disk(
+tensorcast::common::ArtifactVerificationInfo generate_verification_info_from_disk(
     const std::string& disk_path,
-    VerificationLevel max_level) {
+    tensorcast::common::VerificationLevel max_level) {
   std::filesystem::path artifact_dir(disk_path);
 
   // Try partitioned files first; if none, use .safetensors payloads
@@ -397,8 +397,8 @@ ArtifactVerificationInfo generate_verification_info_from_disk(
 
   // Generate verification info using CPU processing (device_id = -1)
   // This will use the actual artifact size, not file size
-  absl::StatusOr<ArtifactVerificationInfo> verification_result =
-      ArtifactVerifier::generate_verification_info(data_ptrs, data_lengths, -1, max_level);
+  absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> verification_result =
+      tensorcast::common::ArtifactVerifier::generate_verification_info(data_ptrs, data_lengths, -1, max_level);
 
   if (!verification_result.ok()) {
     // Clean up mappings before throwing
@@ -596,7 +596,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
               << "GB, device_id=" << device_id;
 
     // Create pinned memory pool and allocate host buffers
-    auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
+    auto pinned_pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(pool_size, chunk_size);
     std::vector<char*> pinned_buffers;
     if (pinned_pool->allocate(num_buffers * chunk_size, pinned_buffers) != 0) {
       LOG(FATAL) << "Failed to allocate pinned buffers from pool";
@@ -917,4 +917,4 @@ std::unordered_map<int, std::string> get_device_uuid_map() {
   return device_uuid_map;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

@@ -11,9 +11,9 @@ namespace tensorcast::unittests {
 #define KEY "TCP_TENSOR_KEY"
 
 struct TcpTestFixture {
-  communicator::CommunicateEngine* server_;
+  communicator::engine::CommunicateEngine* server_;
   absl::Status server_init_status_;
-  communicator::CommunicateEngine* client_;
+  communicator::engine::CommunicateEngine* client_;
   absl::Status client_init_status_;
   uint32_t server_buf_[BUF_SIZE];
   uint32_t client_buf_[BUF_SIZE];
@@ -21,11 +21,11 @@ struct TcpTestFixture {
   TcpTestFixture() {
     communicator::CommunicatorConfig srv_cfg;
     srv_cfg.set_enable_rdma(false);
-    server_ = new communicator::CommunicateEngine(srv_cfg, 30);
+    server_ = new communicator::engine::CommunicateEngine(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     communicator::CommunicatorConfig cli_cfg;
     cli_cfg.set_enable_rdma(false);
-    client_ = new communicator::CommunicateEngine(cli_cfg, 30);
+    client_ = new communicator::engine::CommunicateEngine(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
     for (uint32_t i = 0; i < BUF_SIZE; i++) {
@@ -51,7 +51,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Register CPU tensor synchronously") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::CommunicateEngine::RegisterTensorOptions opts;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = false;
     opts.async = false;
@@ -59,7 +59,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         opts);
     REQUIRE(status.ok());
@@ -71,7 +71,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
 
     // Note: It appears TCP engine now accepts GPU tensor registration
     // but may handle it internally (possibly as CPU memory)
-    communicator::CommunicateEngine::RegisterTensorOptions opts1;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions opts1;
     opts1.register_mr = false;
     opts1.needs_staging = true; // GPU over TCP requires staging
     opts1.async = true;
@@ -79,7 +79,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_GPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
         opts1);
     REQUIRE(status.ok()); // Updated to match actual behavior
@@ -88,7 +88,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     status = fixture.server_->unregister_tensor(KEY);
     REQUIRE(status.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions opts2;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions opts2;
     opts2.register_mr = false;
     opts2.needs_staging = false;
     opts2.async = true;
@@ -96,7 +96,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         opts2);
     REQUIRE(status.ok());
@@ -105,7 +105,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Register and unregister CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::CommunicateEngine::RegisterTensorOptions opts3;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions opts3;
     opts3.register_mr = false;
     opts3.needs_staging = false;
     opts3.async = false;
@@ -113,7 +113,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         opts3);
     REQUIRE(status.ok());
@@ -132,7 +132,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Read CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::CommunicateEngine::RegisterTensorOptions opts4;
+    communicator::engine::CommunicateEngine::RegisterTensorOptions opts4;
     opts4.register_mr = false;
     opts4.needs_staging = false;
     opts4.async = false;
@@ -140,7 +140,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.server_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         opts4);
     REQUIRE(status.ok());
@@ -151,7 +151,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
           KEY,
           reinterpret_cast<uint64_t>(fixture.client_buf_),
           (BUF_SIZE - offset) * sizeof(uint32_t),
-          communicator::COMMUNICATE_ENGINE_DEV_CPU,
+          communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
           -1,
           "127.0.0.1",
           60000,
@@ -174,7 +174,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
         KEY,
         reinterpret_cast<uint64_t>(fixture.client_buf_),
         sizeof(uint32_t) * BUF_SIZE,
-        communicator::COMMUNICATE_ENGINE_DEV_CPU,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
         -1,
         "127.0.0.1",
         60000);

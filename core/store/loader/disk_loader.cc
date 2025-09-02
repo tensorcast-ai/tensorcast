@@ -40,7 +40,8 @@ std::filesystem::path safe_path_join(const std::filesystem::path& base, const st
 }
 
 // Helper to load verification info from disk if available
-absl::StatusOr<ArtifactVerificationInfo> load_verification_info_from_disk(const std::filesystem::path& artifact_dir) {
+absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> load_verification_info_from_disk(
+    const std::filesystem::path& artifact_dir) {
   std::filesystem::path verification_path = artifact_dir / "verification.json";
   if (!std::filesystem::exists(verification_path)) {
     return absl::NotFoundError("Verification file not found");
@@ -63,7 +64,8 @@ absl::StatusOr<ArtifactVerificationInfo> load_verification_info_from_disk(const 
       return absl::InvalidArgumentError("Verification file is empty");
     }
 
-    absl::StatusOr<ArtifactVerificationInfo> result = ArtifactVerificationInfo::from_json(json_content);
+    absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> result =
+        tensorcast::common::ArtifactVerificationInfo::from_json(json_content);
     if (!result.ok()) {
       return absl::InvalidArgumentError(
           absl::StrFormat(
@@ -81,7 +83,8 @@ absl::StatusOr<ArtifactVerificationInfo> load_verification_info_from_disk(const 
   }
 }
 
-DiskLoader::DiskLoader(DiskSource source) : source_(std::move(source)), artifact_size_(0), initialized_(false) {}
+DiskLoader::DiskLoader(loading::DiskSource source)
+    : source_(std::move(source)), artifact_size_(0), initialized_(false) {}
 
 absl::Status DiskLoader::initialize() {
   absl::MutexLock lock(&mutex_);
@@ -295,7 +298,7 @@ absl::StatusOr<uint64_t> DiskLoader::get_artifact_size() {
   return artifact_size_;
 }
 
-absl::StatusOr<ArtifactVerificationInfo> DiskLoader::get_verification_info() const {
+absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> DiskLoader::get_verification_info() const {
   absl::MutexLock lock(&mutex_);
   if (!initialized_) {
     return absl::FailedPreconditionError("DiskLoader not initialized");

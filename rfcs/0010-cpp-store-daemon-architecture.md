@@ -353,7 +353,7 @@ class StoreDaemonServiceImpl final : public store_daemon::StoreDaemon::Service {
   // ... other RPCs ...
 
  private:
-  struct SessionEntry { tensorcast::store::ReplicaKey key; std::shared_future<absl::Status> ready; std::chrono::steady_clock::time_point expiry; };
+  struct SessionEntry { store::loading::ReplicaKey key; std::shared_future<absl::Status> ready; std::chrono::steady_clock::time_point expiry; };
   absl::Mutex mu_;
   absl::flat_hash_map<std::string, SessionEntry> sessions_ ABSL_GUARDED_BY(mu_);
 };

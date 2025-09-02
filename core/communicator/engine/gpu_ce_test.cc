@@ -7,8 +7,16 @@
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/utils.h"
 
+using tensorcast::testing::g_actor;
+using tensorcast::testing::g_chunk;
+using tensorcast::testing::g_count;
+using tensorcast::testing::g_gpu;
+using tensorcast::testing::g_ip;
+using tensorcast::testing::g_port;
+using tensorcast::testing::parse_options;
+
 int run_server() {
-  tensorcast::communicator::CommunicateEngine engine;
+  tensorcast::communicator::engine::CommunicateEngine engine;
   engine.init("0.0.0.0", g_port);
   uint8_t* addr[8][1024] = {{nullptr}};
 
@@ -31,7 +39,7 @@ int run_server() {
 }
 
 int run_client() {
-  tensorcast::communicator::CommunicateEngine engine;
+  tensorcast::communicator::engine::CommunicateEngine engine;
   engine.init("0.0.0.0", g_port + 1);
   uint8_t* addr[8][1024] = {{nullptr}};
 

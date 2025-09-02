@@ -6,14 +6,22 @@
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/utils.h"
 
+using tensorcast::testing::g_actor;
+using tensorcast::testing::g_chunk;
+using tensorcast::testing::g_count;
+using tensorcast::testing::g_gpu;
+using tensorcast::testing::g_ip;
+using tensorcast::testing::g_port;
+using tensorcast::testing::parse_options;
+
 int run_server() {
   tensorcast::communicator::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
-  tensorcast::communicator::CommunicateEngine engine(cfg);
+  tensorcast::communicator::engine::CommunicateEngine engine(cfg);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
   memset(addr, 0, g_count);
-  communicator::CommunicateEngine::RegisterTensorOptions opts;
+  tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
   opts.register_mr = false;
   opts.needs_staging = false;
   opts.async = false;
@@ -27,7 +35,7 @@ int run_server() {
 int run_client() {
   tensorcast::communicator::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
-  tensorcast::communicator::CommunicateEngine engine(cfg, 10);
+  tensorcast::communicator::engine::CommunicateEngine engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));
 

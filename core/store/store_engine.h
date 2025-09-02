@@ -28,10 +28,12 @@
 
 namespace tensorcast::store {
 
-class MaterializeOrchestrator; // Forward declaration for friend access
+namespace loading {
+class MaterializeOrchestrator;
+} // namespace loading
 
 class StoreEngine {
-  friend class MaterializeOrchestrator;
+  friend class loading::MaterializeOrchestrator;
 
  public:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -44,8 +46,8 @@ class StoreEngine {
   struct ReplicaInfo {
     std::string artifact_id;
     uint64_t size_bytes;
-    MemoryLocation cpu_state;
-    MemoryLocation gpu_state;
+    common::memory::MemoryLocation cpu_state;
+    common::memory::MemoryLocation gpu_state;
     int gpu_device_id;
     std::string gpu_device_uuid;
     bool is_registered_for_comm;
@@ -78,10 +80,10 @@ class StoreEngine {
   /**
    * @brief Unified materialization entry. Replaces materialize_replica().
    */
-  absl::StatusOr<ReplicaHandle> materialize_replica(
+  absl::StatusOr<loading::ReplicaHandle> materialize_replica(
       const DeviceKey& target_device,
       MaterializeMode mode = MaterializeMode::AUTO,
-      const MaterializeHints& hints = {});
+      const loading::MaterializeHints& hints = {});
 
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
@@ -151,27 +153,31 @@ class StoreEngine {
   /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */
-  [[nodiscard]] std::vector<ReplicaKey> list_device_replicas(const DeviceKey& device) const;
+  [[nodiscard]] std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;
 
   // Replica management
   // ─────────────────────────────────────────────────────────────────────
   // NEW ReplicaKey-centric APIs (Multi-Device Binding)
   // ─────────────────────────────────────────────────────────────────────
-  int wait_replica_ready(const ReplicaKey& key);
-  int unload_replica(const ReplicaKey& key);
-  [[nodiscard]] MemoryState get_replica_state(const ReplicaKey& key, DeviceType memory_type) const;
-  absl::StatusOr<uint64_t> get_replica_gpu_ptr(const ReplicaKey& key);
+  int wait_replica_ready(const loading::ReplicaKey& key);
+  int unload_replica(const loading::ReplicaKey& key);
+  [[nodiscard]] replica::MemoryState get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const;
+  absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key);
   // Return total artifact size in bytes for the given replica.
-  absl::StatusOr<uint64_t> get_replica_size(const ReplicaKey& key);
+  absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key);
 
   // Remote memory registration helpers (ReplicaKey version)
-  absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
-  absl::Status disable_remote_replica_access(const ReplicaKey& key, MemoryLocation location);
+  absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location);
+  absl::Status disable_remote_replica_access(const loading::ReplicaKey& key, common::memory::MemoryLocation location);
 
   // Register a loaded replica with the Global Store if connected. When
   // artifact_id_override is provided, it is used as the identifier (e.g.,
   // content-addressed mi2:...); otherwise key.artifact_id is used.
-  absl::Status register_replica_with_global_store(const ReplicaKey& key, std::string_view artifact_id_override = {});
+  absl::Status register_replica_with_global_store(
+      const loading::ReplicaKey& key,
+      std::string_view artifact_id_override = {});
 
   // --------------------------------------------------------------------
   // Memory & Registration helpers
@@ -196,7 +202,7 @@ class StoreEngine {
   absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
 
   // DVMP chunk-state snapshot API for daemon observers (read-only).
-  [[nodiscard]] std::vector<ChunkState> get_chunk_states(std::string_view artifact_id) const;
+  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states(std::string_view artifact_id) const;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Distributed Memory Pool (DVMP) chunk locking API
@@ -210,7 +216,7 @@ class StoreEngine {
    *
    * @return absl::Status OK on success, ResourceExhausted if any chunk is already locked.
    */
-  absl::Status lock_chunks(const ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices);
+  absl::Status lock_chunks(const loading::ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices);
 
   /**
    * @brief Unlock chunks after H2D or P2P transfer completion.
@@ -221,7 +227,10 @@ class StoreEngine {
    *
    * @return absl::Status OK on success.
    */
-  absl::Status unlock_chunks(const ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices, bool copied_gpu);
+  absl::Status unlock_chunks(
+      const loading::ReplicaKey& replica_key,
+      absl::Span<const uint32_t> chunk_indices,
+      bool copied_gpu);
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -239,13 +248,13 @@ class StoreEngine {
   // Core Components
   // ═══════════════════════════════════════════════════════════════════════════
 
-  gsl::not_null<std::unique_ptr<DeviceManager>> device_manager_;
-  gsl::not_null<std::unique_ptr<ReplicaRegistry>> replica_registry_;
-  gsl::not_null<std::unique_ptr<MetricsCollector>> metrics_collector_;
-  std::unique_ptr<GlobalStoreClient> global_store_client_;
-  std::shared_ptr<CommunicationManager> comm_manager_;
-  gsl::not_null<std::shared_ptr<PinnedMemoryPool>> memory_pool_;
-  gsl::not_null<std::shared_ptr<memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
+  gsl::not_null<std::unique_ptr<components::DeviceManager>> device_manager_;
+  gsl::not_null<std::unique_ptr<components::ReplicaRegistry>> replica_registry_;
+  gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
+  std::unique_ptr<components::GlobalStoreClient> global_store_client_;
+  std::shared_ptr<components::CommunicationManager> comm_manager_;
+  gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> memory_pool_;
+  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
   // ═══════════════════════════════════════════════════════════════════════════
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════
@@ -256,27 +265,29 @@ class StoreEngine {
   void initialize_communication_manager(const StoreEngineOptions& opts);
 
   // Replica loading helpers - using new unified types
-  absl::StatusOr<ReplicaHandle> ingest_from_disk_internal(
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk_internal(
       const std::string& artifact_identifier,
-      const DiskSource& source,
-      const ReplicaTarget& target,
-      const MaterializeHints& hints);
+      const loading::DiskSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints);
 
-  absl::StatusOr<ReplicaHandle> ingest_from_p2p_internal(
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p_internal(
       const std::string& artifact_identifier,
       const P2PSource& source,
-      const ReplicaTarget& target,
-      const MaterializeHints& hints);
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints);
 
-  static absl::StatusOr<ReplicaHandle> ingest_from_buffer_internal(
+  static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
-      const InlineBufferSource& source,
-      const ReplicaTarget& target,
-      const MaterializeHints& hints);
+      const loading::InlineBufferSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints);
 
   // Memory management helpers
   absl::Status try_evict_memory_for_replica(size_t required_size);
-  std::shared_ptr<Replica> get_or_create_replica(const std::string& artifact_identifier, const ReplicaConfig& config);
+  std::shared_ptr<replica::Replica> get_or_create_replica(
+      const std::string& artifact_identifier,
+      const replica::ReplicaConfig& config);
 
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
@@ -294,7 +305,7 @@ class StoreEngine {
     std::string schema_version;
     std::string encoding;
     bool enable_p2p{true};
-    std::shared_ptr<Replica> replica; // Backing replica for memory ownership
+    std::shared_ptr<replica::Replica> replica; // Backing replica for memory ownership
     void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
     std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup

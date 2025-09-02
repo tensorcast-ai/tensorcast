@@ -35,8 +35,20 @@
 #include <catch2/catch_test_macros.hpp>
 
 namespace fs = std::filesystem;
-using namespace tensorcast::store;
-using namespace tensorcast::tests;
+using tensorcast::common::ArtifactVerificationInfo;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::store::MB;
+using tensorcast::store::P2PSource;
+using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::Replica;
+using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::testing::create_dummy_file;
+using tensorcast::testing::find_available_port;
+using tensorcast::testing::is_cuda_available;
+using tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir;
 
 // ---------------------------------------------------------------------------
 // Test configuration structure
@@ -92,7 +104,7 @@ struct TestResources {
   bool is_cuda_available = false;
   int device_count = 0;
   size_t pinned_pool_chunk_size_bytes = 0; // Store the chunk size used
-  std::shared_ptr<tensorcast::memory::DistributedVirtualMemoryPool> dvmp;
+  std::shared_ptr<tensorcast::common::memory::DistributedVirtualMemoryPool> dvmp;
 
   bool setup(int gpu_id, size_t artifact_size) {
     actual_artifact_size = artifact_size;
@@ -118,7 +130,7 @@ struct TestResources {
     LOG(INFO) << "PinnedMemoryPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
 
     // Create DVMP and StreamingPinnedBuffer
-    dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
+    dvmp = std::make_shared<tensorcast::common::memory::DistributedVirtualMemoryPool>();
     if (!dvmp) {
       LOG(ERROR) << "Failed to create DistributedVirtualMemoryPool";
       return false;
@@ -212,7 +224,7 @@ class P2PTestServer {
 
     // Initialize Global CommunicateEngine
     LOG(INFO) << "Initializing Global CommunicateEngine for Server on port " << server_port << "...";
-    auto comm_mgr = std::make_shared<tensorcast::store::CommunicationManager>();
+    auto comm_mgr = std::make_shared<CommunicationManager>();
     // The communication engine needs to listen on the same port that clients will connect to
     absl::Status engine_status = comm_mgr->initialize("0.0.0.0", server_port);
     if (!engine_status.ok()) {
@@ -243,7 +255,7 @@ class P2PTestServer {
     }
     // RFC-0007 metadata for standard partitions
     auto st_desc =
-        ::tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(resources.temp_dir / ARTIFACT_SUBDIR);
+        ::tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(resources.temp_dir / ARTIFACT_SUBDIR);
     if (!st_desc.ok()) {
       LOG(ERROR) << "Failed to write descriptor/index: " << st_desc;
       resources.cleanup();
@@ -343,7 +355,7 @@ class P2PTestServer {
 
     // Generate verification information for the registered memory
     LOG(INFO) << "Generating verification information for registered " << register_loc_str << " memory...";
-    absl::StatusOr<tensorcast::store::ArtifactVerificationInfo> verification_info_status =
+    absl::StatusOr<ArtifactVerificationInfo> verification_info_status =
         replica->generate_verification_info(register_location);
 
     if (verification_info_status.ok()) {
@@ -458,9 +470,9 @@ class P2PTestClient {
     LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
     tensorcast::communicator::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false);
-    auto client_comm_engine = std::make_shared<tensorcast::communicator::CommunicateEngine>(cfg);
+    auto client_comm_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     // Bind to a dedicated, available client port to facilitate P2P connections
-    int client_port = tensorcast::communicator::test::find_available_port(server_port + 1);
+    int client_port = find_available_port(server_port + 1);
     if (client_port <= 0 || client_port == server_port) {
       client_port = server_port + 1; // fallback
     }
@@ -809,7 +821,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = tensorcast::communicator::test::find_available_port(50060);
+      int port = find_available_port(50060);
       REQUIRE(port > 0);
       config.server_port = port;
     }
@@ -838,7 +850,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = tensorcast::communicator::test::find_available_port(50070);
+      int port = find_available_port(50070);
       REQUIRE(port > 0);
       config.server_port = port;
     }
@@ -867,7 +879,7 @@ TEST_CASE("Replica P2P Transfer Integration Tests", "[replica_p2p_transfer]") {
 
     P2PTestConfig config;
     {
-      int port = tensorcast::communicator::test::find_available_port(50100);
+      int port = find_available_port(50100);
       REQUIRE(port > 0);
       config.server_port = port;
     }

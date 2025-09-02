@@ -11,7 +11,7 @@
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/partition_tensor.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::transport {
 
 using read_result_t = struct ReadResult {
   absl::Status status = absl::OkStatus();
@@ -83,7 +83,7 @@ class ReadRequest {
   std::promise<read_result_t> result_;
   std::atomic_bool result_set_;
 
-  Timer timer_;
+  misc::Timer timer_;
   read_result_t status_;
   uint64_t remote_offset_;
 
@@ -112,6 +112,6 @@ class WriteRequest {
 
 using write_request_t = std::shared_ptr<WriteRequest>;
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::transport
 
 #endif // CORE_COMMUNICATOR_ENGINE_REQUEST_H_

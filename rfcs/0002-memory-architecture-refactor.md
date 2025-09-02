@@ -52,14 +52,14 @@ absl::Status MemoryManager::finalize_copy_state_(MemoryLocation destination, con
 absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
-    const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
+    const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
-    const tensorcast::store::ReplicaKey& ikey) {
+    const store::loading::ReplicaKey& ikey) {
   // DVMP chunk iteration + UMA lock + memcpy + UMA update + best-effort DVMP unlock
 }
 ```

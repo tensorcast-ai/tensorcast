@@ -10,18 +10,12 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/source.h"
 
-// Forward declaration for CommunicateEngine (needed for some tooling without full header parse)
-
-namespace tensorcast::communicator {
-class CommunicateEngine;
-} // namespace tensorcast::communicator
-
 namespace tensorcast::store::loader {
 
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {
-    std::shared_ptr<communicator::CommunicateEngine> comm_engine; // Communicator instance
+    std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine; // Communicator instance
     std::vector<std::string> memory_keys; // Remote tensor keys in order
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP

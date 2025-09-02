@@ -4,14 +4,14 @@
 
 #include "absl/log/log.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::loading {
 
 absl::Status ReplicaRegistrationHelper::register_local_replica(
-    GlobalStoreClient* gs_client,
+    components::GlobalStoreClient* gs_client,
     std::string_view worker_id,
     std::string_view artifact_id,
     const DeviceKey& device,
-    MemoryLocation location,
+    common::memory::MemoryLocation location,
     uint64_t size_bytes) {
   if (gs_client == nullptr) {
     return absl::FailedPreconditionError("GlobalStoreClient is null");
@@ -33,4 +33,4 @@ absl::Status ReplicaRegistrationHelper::register_local_replica(
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::loading

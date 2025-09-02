@@ -9,7 +9,7 @@
 #include "absl/hash/hash.h"
 #include "core/store/replica/chunk_meta.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 struct ChunkLocation {
   std::string node_id; ///< Node UUID or hostname
@@ -29,4 +29,4 @@ struct ChunkKeyHash {
 // Directory that tracks all replicas of every chunk across the cluster.
 using ChunkDirectory = std::unordered_map<ChunkKey, std::vector<ChunkLocation>, ChunkKeyHash>;
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

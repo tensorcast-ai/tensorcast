@@ -16,23 +16,22 @@
 // 1. Low-level helpers (not intended to be used directly)
 // ---------------------------------------------------------------------------
 
-#define _SC_TRACE_SCOPE_IMPL_EX(artifact_id, request_id, stage)                                \
-  ::tensorcast::store::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
-  ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
-  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                    \
-    artifact_id, stage                                                                         \
+#define _SC_TRACE_SCOPE_IMPL_EX(artifact_id, request_id, stage)                          \
+  common::trace::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
+  common::trace::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
+  common::trace::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
+  common::otel::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                   \
+    artifact_id, stage                                                                   \
   }
 
-#define _SC_TRACE_SCOPE_IMPL_AUTO(stage)                                          \
-  ::tensorcast::store::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(  \
-      ::tensorcast::store::TraceManager::current_request_id());                   \
-  ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__( \
-      ::tensorcast::store::TraceManager::current_artifact_id());                  \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{                        \
-      ::tensorcast::store::TraceManager::current_artifact_id(), stage};           \
-  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {       \
-    ::tensorcast::store::TraceManager::current_artifact_id(), stage               \
+#define _SC_TRACE_SCOPE_IMPL_AUTO(stage)                                                                        \
+  common::trace::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(                                      \
+      common::trace::TraceManager::current_request_id());                                                       \
+  common::trace::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(                                     \
+      common::trace::TraceManager::current_artifact_id());                                                      \
+  common::trace::TraceScope _trace_scope_##__LINE__{common::trace::TraceManager::current_artifact_id(), stage}; \
+  common::otel::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                                          \
+    common::trace::TraceManager::current_artifact_id(), stage                                                   \
   }
 
 // ---------------------------------------------------------------------------
@@ -49,15 +48,15 @@
 
 // Set both request_id and artifact_id along with summary guard and initial trace scope.
 // This should only be used in load_model_from_remote/disk entry points.
-#define SC_TRACE_INIT_GUARD(request_id, artifact_id, stage)                                    \
-  ::tensorcast::store::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
-  ::tensorcast::store::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
-  ::tensorcast::store::TraceSummaryGuard _trace_summary_guard_##__LINE__(artifact_id);         \
-  ::tensorcast::store::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
-  ::tensorcast::obs::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                    \
-    artifact_id, stage                                                                         \
+#define SC_TRACE_INIT_GUARD(request_id, artifact_id, stage)                              \
+  common::trace::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
+  common::trace::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
+  common::trace::TraceSummaryGuard _trace_summary_guard_##__LINE__(artifact_id);         \
+  common::trace::TraceScope _trace_scope_##__LINE__{artifact_id, stage};                 \
+  common::otel::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                   \
+    artifact_id, stage                                                                   \
   }
 
 // Spawn std::async task that automatically propagates current request-id / replica-id.
 // Users must #include "core/common/trace/trace_ctx.h" when using this macro.
-#define SC_TRACE_ASYNC(policy, ...) std::async(policy, ::tensorcast::store::with_trace_ctx(__VA_ARGS__))
+#define SC_TRACE_ASYNC(policy, ...) std::async(policy, common::trace::with_trace_ctx(__VA_ARGS__))

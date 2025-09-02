@@ -12,7 +12,7 @@
 #include "core/store/device_types.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 /**
  * @brief Performs staged CPU to GPU copy using streaming pinned buffer.
@@ -36,14 +36,14 @@ namespace tensorcast::store {
 absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
-    const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
+    const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp,
+    const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
-    const tensorcast::store::ReplicaKey& ikey);
+    const loading::ReplicaKey& ikey);
 
 /**
  * @brief Performs staged GPU to CPU copy using streaming pinned buffer.
@@ -65,11 +65,11 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
 absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
-    const std::shared_ptr<StreamingPinnedBuffer>& streaming_buf,
+    const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
     cudaStream_t stream,
     void* dvmp_base,
-    const std::shared_ptr<::tensorcast::memory::DistributedVirtualMemoryPool>& dvmp);
+    const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp);
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

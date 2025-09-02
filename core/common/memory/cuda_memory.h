@@ -6,7 +6,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/cuda_api.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 /**
  * @brief Represents a block of CUDA device memory.
@@ -102,4 +102,4 @@ class CudaMemory {
   cudaIpcMemHandle_t handle_{}; // Initialize to zero/default
   AllocationType allocation_type_ = AllocationType::UNINITIALIZED;
 };
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

@@ -9,7 +9,7 @@
 #include "absl/log/log.h"
 #include "core/checkpoint/progress_bar.h"
 
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 std::unordered_map<std::string, uint64_t> save_tensors_streaming(
     const std::vector<std::string>& tensor_names,
@@ -46,7 +46,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
             << "async_write=" << (final_config.enable_async_write ? "enabled" : "disabled");
 
   // Create pinned memory pool
-  auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
+  auto pinned_pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(pool_size, chunk_size);
 
   // Create streaming writer
   StreamingTensorWriter writer(tensor_filename, final_config, pinned_pool);
@@ -154,4 +154,4 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
   return tensor_offsets;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

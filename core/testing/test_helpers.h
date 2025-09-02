@@ -9,7 +9,7 @@
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
 
-namespace tensorcast::communicator::test {
+namespace tensorcast::testing {
 
 // Helper to create test data pattern on GPU
 std::vector<uint8_t> create_test_pattern(std::size_t size, uint8_t seed);
@@ -31,4 +31,4 @@ int find_available_port(int base_port = 50000, int max_attempts = 1000);
     }                                                                        \
   } while (0)
 
-} // namespace tensorcast::communicator::test
+} // namespace tensorcast::testing

@@ -18,7 +18,7 @@ extern "C" {
 
 #include "core/communicator/misc/common.h"
 
-namespace tensorcast::communicator {
+namespace tensorcast::communicator::misc {
 
 enum {
   IBV_SUCCESS = 0, //!< The operation was successful
@@ -91,6 +91,6 @@ static inline result_t wrap_ibv_post_recv(struct ibv_qp* qp, struct ibv_recv_wr*
   return SUCCESS;
 }
 
-} // namespace tensorcast::communicator
+} // namespace tensorcast::communicator::misc
 
 #endif // STEPUCX_SRC_MISC_IBV_WRAP_H_

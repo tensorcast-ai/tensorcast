@@ -15,10 +15,16 @@
 #include "core/store/replica/memory_manager.h"
 #include "core/testing/test_helpers.h"
 
-using namespace tensorcast;
-using namespace tensorcast::communicator;
+using tensorcast::common::memory::DistributedVirtualMemoryPool;
+using tensorcast::common::memory::MemoryLocation;
+using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::communicator::CommunicatorConfig;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::store::replica::MemoryManager;
 using namespace tensorcast::store;
-using namespace tensorcast::communicator::test;
+using namespace tensorcast::testing;
 
 TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader]") {
   SKIP_IF_NO_CUDA();
@@ -32,7 +38,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0);
 
     // Set up source engine with GPU tensor
-    communicator::CommunicatorConfig cfg1;
+    CommunicatorConfig cfg1;
     cfg1.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
@@ -46,7 +52,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
-    communicator::CommunicateEngine::RegisterTensorOptions reg_opts;
+    CommunicateEngine::RegisterTensorOptions reg_opts;
     reg_opts.register_mr = false; // RDMA disabled
     reg_opts.needs_staging = true; // GPU over TCP requires staging
     reg_opts.async = false;
@@ -61,7 +67,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
                 .ok());
 
     // Create target engine for loader
-    communicator::CommunicatorConfig cfg2;
+    CommunicatorConfig cfg2;
     cfg2.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
@@ -84,7 +90,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 1 * 1024 * 1024; // 1MB chunks for streaming
     const std::size_t pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(pool_size, chunk_size);
-    auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_artifact", // artifact_identifier
         0, // local_device_id (GPU device 0)
@@ -125,7 +131,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0); // "Failed to find available port for GPU-to-CPU P2P target engine"
 
     // Similar test but with CPU target
-    communicator::CommunicatorConfig cfg3;
+    CommunicatorConfig cfg3;
     cfg3.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
@@ -144,7 +150,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(memcpy_status.message());
     REQUIRE(memcpy_status.ok());
 
-    communicator::CommunicateEngine::RegisterTensorOptions reg_opts2;
+    CommunicateEngine::RegisterTensorOptions reg_opts2;
     reg_opts2.register_mr = false;
     reg_opts2.needs_staging = true;
     reg_opts2.async = false;
@@ -158,7 +164,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(register_status.message());
     REQUIRE(register_status.ok());
 
-    communicator::CommunicatorConfig cfg4;
+    CommunicatorConfig cfg4;
     cfg4.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
@@ -184,7 +190,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
     const std::size_t total_pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedMemoryPool>(total_pool_size, chunk_size);
-    auto dvmp = std::make_shared<tensorcast::memory::DistributedVirtualMemoryPool>();
+    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
     auto mem_manager = std::make_shared<MemoryManager>(
         "test_artifact", // artifact_identifier
         -1, // local_device_id (-1 for CPU)

@@ -22,7 +22,7 @@
 #include <string>
 
 #include "aligned_buffer.h"
-namespace tensorcast::store {
+namespace tensorcast::checkpoint {
 
 [[maybe_unused]] constexpr size_t kPartitionMaxSize = 10L << 30; // 10GB
 
@@ -57,4 +57,4 @@ class TensorWriter final {
   std::unique_ptr<AlignedBuffer> buffer_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::checkpoint

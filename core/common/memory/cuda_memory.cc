@@ -24,7 +24,7 @@
 #include "absl/log/log.h"
 #include "core/common/cuda_api.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::memory {
 
 CudaMemory::~CudaMemory() {
   release_resources();
@@ -173,4 +173,4 @@ void CudaMemory::release_resources() {
   allocation_type_ = AllocationType::UNINITIALIZED;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::memory

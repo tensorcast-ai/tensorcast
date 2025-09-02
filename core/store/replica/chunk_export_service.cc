@@ -9,7 +9,7 @@
 #include "core/store/components/uma_lease_provider.h"
 #include "core/store/replica/transfer_constants.h"
 
-namespace tensorcast::store {
+namespace tensorcast::store::replica {
 
 std::vector<std::pair<uint32_t, uint32_t>> ChunkExportService::coalesce_ranges(std::vector<uint32_t> chunks) {
   std::vector<std::pair<uint32_t, uint32_t>> out;
@@ -34,15 +34,15 @@ std::vector<std::pair<uint32_t, uint32_t>> ChunkExportService::coalesce_ranges(s
 }
 
 absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
-    const ReplicaKey& key,
-    MemoryLocation location,
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation location,
     absl::Span<const uint32_t> chunks,
-    communicator::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
   // Validate parameters
   if (chunks.empty()) {
     return absl::InvalidArgumentError("No chunks specified for export");
   }
-  if (location != MemoryLocation::PAGEABLE_CPU && location != MemoryLocation::GPU) {
+  if (location != common::memory::MemoryLocation::PAGEABLE_CPU && location != common::memory::MemoryLocation::GPU) {
     return absl::InvalidArgumentError("Invalid location for export");
   }
 
@@ -52,21 +52,21 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 
   ExportRecord rec;
 
-  if (location == MemoryLocation::PAGEABLE_CPU) {
+  if (location == common::memory::MemoryLocation::PAGEABLE_CPU) {
     void* base = uma_ ? uma_->get_cpu_base_ptr(key) : nullptr;
     if (!base) {
       return absl::FailedPreconditionError("CPU base not available");
     }
 
     info.device_id = kCpuDeviceId;
-    info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_CPU;
+    info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
 
     // Move semantics to avoid copy
     std::vector<uint32_t> chunk_vec;
     chunk_vec.reserve(chunks.size());
     chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
-    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+    constexpr uint64_t kChunk = common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
     size_t range_idx = 0;
     // NOTE: Phase 1 — do not hold DVMP pin leases across the export lifetime.
     // Staging in the transport path will memcpy into pinned buffers and release
@@ -86,7 +86,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.artifact_id, range_idx++);
-      communicator::CommunicateEngine::RegisterTensorOptions opts;
+      tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
       // Avoid registering an MR for DVMP logical windows; CPU path will be staged for TCP
       opts.register_mr = false;
       // Hint: CPU staged when policy requires. For Phase 1 (TCP), staging happens in transport.
@@ -94,7 +94,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       opts.async = false;
       // Register UMA lease mapping for this exported DVMP window to support
       // short-lived pin leases during staged transfers.
-      store::UmaLeaseProvider::instance()->register_mapping(
+      components::UmaLeaseProvider::instance()->register_mapping(
           tensor_key, key, va_off, gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>{uma_});
 
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
@@ -117,21 +117,21 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     return info;
   }
 
-  if (location == MemoryLocation::GPU) {
+  if (location == common::memory::MemoryLocation::GPU) {
     void* gpu_ptr = uma_ ? uma_->get_gpu_base_ptr(key, key.device.ordinal) : nullptr;
     if (!gpu_ptr) {
       return absl::FailedPreconditionError("GPU base not available");
     }
 
     info.device_id = key.device.ordinal;
-    info.comm_dev_type = communicator::COMMUNICATE_ENGINE_DEV_GPU;
+    info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 
     // Move semantics to avoid copy
     std::vector<uint32_t> chunk_vec;
     chunk_vec.reserve(chunks.size());
     chunk_vec.assign(chunks.begin(), chunks.end());
     auto ranges = coalesce_ranges(std::move(chunk_vec));
-    constexpr uint64_t kChunk = memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
+    constexpr uint64_t kChunk = common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
     size_t range_idx = 0;
     for (const auto& [start, end] : ranges) {
       uint64_t off = static_cast<uint64_t>(start) * kChunk;
@@ -147,10 +147,10 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.artifact_id, range_idx++);
-      communicator::CommunicateEngine::RegisterTensorOptions opts;
+      tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
       opts.register_mr = comm_engine.is_rdma_enabled();
       opts.needs_staging =
-          (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::COMMUNICATE_ENGINE_DEV_GPU);
+          (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::base::COMMUNICATE_ENGINE_DEV_GPU);
       opts.async = false;
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
@@ -176,9 +176,9 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 }
 
 absl::Status ChunkExportService::unexport_chunks(
-    const ReplicaKey& key,
+    const loading::ReplicaKey& key,
     const CommRegistrationInfo& info,
-    communicator::CommunicateEngine& comm_engine) {
+    communicator::engine::CommunicateEngine& comm_engine) {
   // Validate parameters
   if (info.remote_memory_keys.empty()) {
     return absl::OkStatus(); // Nothing to unexport
@@ -208,4 +208,4 @@ absl::Status ChunkExportService::unexport_chunks(
   return first_error.ok() ? absl::OkStatus() : first_error;
 }
 
-} // namespace tensorcast::store
+} // namespace tensorcast::store::replica

@@ -11,10 +11,11 @@
 
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
+#include "core/store/loading/loading_spec.h"
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"
 
-namespace tensorcast::tests::store_engine {
+namespace tensorcast::testing {
 
 // Test setup utilities
 inline void skip_if_no_cuda(const std::string& test_name) {
@@ -57,7 +58,7 @@ inline int random_device_ordinal(int max_device = 3) {
   return dist(gen);
 }
 
-inline std::string generate_model_name(const std::string& prefix, int index) {
+inline std::string generate_artifact_id(const std::string& prefix, int index) {
   return prefix + "_" + std::to_string(index);
 }
 
@@ -167,8 +168,8 @@ inline store::DeviceKey make_gpu_key(int ordinal, const std::string& uuid = "") 
   return store::DeviceKey{DeviceType::GPU, ordinal, uuid};
 }
 
-inline store::ReplicaKey make_replica_key(const std::string& artifact_id, int gpu_ordinal) {
-  return store::ReplicaKey{artifact_id, make_gpu_key(gpu_ordinal), 0};
+inline store::loading::ReplicaKey make_replica_key(const std::string& artifact_id, int gpu_ordinal) {
+  return store::loading::ReplicaKey{artifact_id, make_gpu_key(gpu_ordinal), 0};
 }
 
-} // namespace tensorcast::tests::store_engine
+} // namespace tensorcast::testing

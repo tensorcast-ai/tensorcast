@@ -21,7 +21,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-namespace tensorcast::store {
+namespace tensorcast::common::trace {
 
 // A single timing span for a particular stage.
 struct Span {
@@ -229,4 +229,4 @@ class TraceSummaryGuard {
   std::string request_id_;
 };
 
-} // namespace tensorcast::store
+} // namespace tensorcast::common::trace

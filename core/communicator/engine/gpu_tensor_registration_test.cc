@@ -8,8 +8,10 @@
 #include "core/communicator/engine/engine.h"
 #include "core/testing/test_helpers.h"
 
-using namespace tensorcast::communicator;
-using namespace tensorcast::communicator::test;
+using tensorcast::communicator::CommunicatorConfig;
+using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+using tensorcast::communicator::engine::CommunicateEngine;
+using namespace tensorcast::testing;
 
 TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
   SKIP_IF_NO_CUDA();
