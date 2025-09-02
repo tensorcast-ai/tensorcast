@@ -4,9 +4,9 @@ package tensorcast.global;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
-import "common.proto";
+import "tensorcast/common/common.proto";
 
-service GlobalStore {
+service GlobalStoreService {
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
 
   rpc UpdateReplica(UpdateReplicaRequest) returns (UpdateReplicaResponse) {}
@@ -49,18 +49,20 @@ service GlobalStore {
 }
 
 enum Status {
-  OK = 0;
-  NOT_FOUND = 1;
-  TIMED_OUT = 2;
-  TOO_MANY_REQUESTS = 3;
-  STATE_SYNC_REQUIRED = 4;
-  ERROR = 5;
+  STATUS_UNSPECIFIED = 0;
+  STATUS_NOT_FOUND = 1;
+  STATUS_TIMED_OUT = 2;
+  STATUS_TOO_MANY_REQUESTS = 3;
+  STATUS_STATE_SYNC_REQUIRED = 4;
+  STATUS_ERROR = 5;
+  STATUS_OK = 6;
 }
 
 enum ConnectionStatus {
-  CONNECTED = 0;
-  RECONNECTING = 1;
-  DISCONNECTED = 2;
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_RECONNECTING = 1;
+  CONNECTION_STATUS_DISCONNECTED = 2;
+  CONNECTION_STATUS_CONNECTED = 3;
 }
 
 // ========== Worker管理相关消息 ==========
@@ -177,9 +179,10 @@ message SynchronizeWorkerStateResponse {
 
 message StateChange {
   enum ChangeType {
-    ADD_REPLICA = 0;
-    REMOVE_REPLICA = 1;
-    UPDATE_REPLICA = 2;
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    CHANGE_TYPE_REMOVE_REPLICA = 1;
+    CHANGE_TYPE_UPDATE_REPLICA = 2;
+    CHANGE_TYPE_ADD_REPLICA = 3;
   }
 
   ChangeType type = 1;
@@ -310,11 +313,12 @@ message HealthCheckResponse {
 
 // Chunk state enum (matches DVMP ChunkState)
 enum ChunkState {
-  CHUNK_HOT = 0;         // Resident, not yet transferred
-  CHUNK_LOCKED_TX = 1;   // Being transferred
-  CHUNK_COPIED_GPU = 2;  // Fully copied to GPU
-  CHUNK_COLD = 3;        // Resident but evictable
-  CHUNK_EVICTED = 4;     // Evicted from memory
+  CHUNK_STATE_UNSPECIFIED = 0;     // Unspecified state
+  CHUNK_STATE_LOCKED_TX = 1;       // Being transferred
+  CHUNK_STATE_COPIED_GPU = 2;      // Fully copied to GPU
+  CHUNK_STATE_COLD = 3;            // Resident but evictable
+  CHUNK_STATE_EVICTED = 4;         // Evicted from memory
+  CHUNK_STATE_HOT = 5;             // Resident, not yet transferred
 }
 
 // Query chunk locations request

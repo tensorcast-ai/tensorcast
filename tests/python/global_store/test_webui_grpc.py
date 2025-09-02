@@ -43,7 +43,7 @@ def mock_grpc_client():
         node_address="192.168.1.1",
         node_port=50052,
         memory_size=1073741824,  # 1GB
-        memory_type=common_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
     client.list_replicas.return_value = {

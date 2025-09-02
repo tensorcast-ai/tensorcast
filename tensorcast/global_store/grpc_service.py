@@ -46,7 +46,7 @@ from tensorcast.proto import common_pb2, global_store_pb2, global_store_pb2_grpc
 logger = init_logger(__name__)
 
 
-class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
+class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     """
     gRPC service implementation for the Global Store.
 
@@ -177,16 +177,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("artifact_id is required")
                 return global_store_pb2.GetArtifactInfoByIdResponse(
-                    status=global_store_pb2.Status.ERROR
+                    status=global_store_pb2.Status.STATUS_ERROR
                 )
 
             replicas = self.artifact_service.get_artifact_replicas(artifact_id)
             available_replicas = [self._replica_to_memory_info(r) for r in replicas]
 
             status = (
-                global_store_pb2.Status.OK
+                global_store_pb2.Status.STATUS_OK
                 if available_replicas
-                else global_store_pb2.Status.NOT_FOUND
+                else global_store_pb2.Status.STATUS_NOT_FOUND
             )
             return global_store_pb2.GetArtifactInfoByIdResponse(
                 status=status, replicas=available_replicas
@@ -197,7 +197,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.GetArtifactInfoByIdResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def RegisterReplica(
@@ -281,7 +281,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                     )
 
             return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 artifact_id=registered.artifact_id,
                 replica_id=str(registered.replica_id),
             )
@@ -291,14 +291,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
         except Exception as e:
             logger.exception("Error registering artifact replica")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def UpdateReplica(
@@ -321,9 +321,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             success = self.artifact_service.update_heartbeat(replica_id, artifact_id)
 
             status = (
-                global_store_pb2.Status.OK
+                global_store_pb2.Status.STATUS_OK
                 if success
-                else global_store_pb2.Status.NOT_FOUND
+                else global_store_pb2.Status.STATUS_NOT_FOUND
             )
 
             return global_store_pb2.UpdateReplicaResponse(
@@ -337,7 +337,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.UpdateReplicaResponse(
-                status=global_store_pb2.Status.ERROR,
+                status=global_store_pb2.Status.STATUS_ERROR,
                 artifact_id=request.artifact_id,
                 replica_id=request.replica_id,
             )
@@ -355,9 +355,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             success = self.artifact_service.unregister_replica(replica_id, artifact_id)
 
             status = (
-                global_store_pb2.Status.OK
+                global_store_pb2.Status.STATUS_OK
                 if success
-                else global_store_pb2.Status.NOT_FOUND
+                else global_store_pb2.Status.STATUS_NOT_FOUND
             )
 
             return global_store_pb2.UnregisterReplicaResponse(status=status)
@@ -367,7 +367,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.UnregisterReplicaResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     # Legacy ListReplicas removed in favor of ListReplicasV2
@@ -391,9 +391,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             )
             memory_type_filter = None
             if request.HasField("memory_type"):
-                memory_type_filter = MemoryType(
-                    common_pb2.MemoryType.Name(request.memory_type)
-                )
+                mt = request.memory_type
+                if mt == common_pb2.MemoryType.MEMORY_TYPE_GPU:
+                    memory_type_filter = MemoryType.GPU
+                elif mt == common_pb2.MemoryType.MEMORY_TYPE_RAM:
+                    memory_type_filter = MemoryType.RAM
+                elif mt == common_pb2.MemoryType.MEMORY_TYPE_DISK:
+                    memory_type_filter = MemoryType.DISK
 
             # Fetch all matching replicas
             replicas = self.artifact_service.list_replicas(
@@ -453,18 +457,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details("tensor_index_key is required")
                 return global_store_pb2.GetArtifactIndexResponse(
-                    status=global_store_pb2.Status.ERROR
+                    status=global_store_pb2.Status.STATUS_ERROR
                 )
 
             data = self.artifact_indices.get(request.tensor_index_key)
             if data is None:
                 return global_store_pb2.GetArtifactIndexResponse(
-                    status=global_store_pb2.Status.NOT_FOUND
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
 
             # Defaults until we persist per-key metadata
             return global_store_pb2.GetArtifactIndexResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 tensor_index_data=data,
                 encoding="json",
                 schema_version="v2",
@@ -474,7 +478,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.GetArtifactIndexResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     # ========== Transport Methods ==========
@@ -522,7 +526,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 set_span_attributes({"tc.transport.id": str(transport_id)})
 
             return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 remote_memory_info=remote_info,
                 transport_id=str(transport_id),
             )
@@ -530,14 +534,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         except TimeoutError:
             logger.warning(f"Timeout waiting for artifact {request.artifact_id}")
             return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.TIMED_OUT
+                status=global_store_pb2.Status.STATUS_TIMED_OUT
             )
         except Exception as e:
             logger.exception("Error requesting artifact transport")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def CompleteReplicaTransport(
@@ -556,20 +560,20 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             self.transport_service.complete_transport(transport_id)
 
             return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.OK
+                status=global_store_pb2.Status.STATUS_OK
             )
 
         except NotFoundError:
             logger.warning(f"Transport not found: {request.transport_id}")
             return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.NOT_FOUND
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
             )
         except Exception as e:
             logger.exception("Error completing artifact transport")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     # ========== Worker Methods ==========
@@ -620,7 +624,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
                 if not success:
                     return global_store_pb2.RegisterWorkerResponse(
-                        status=global_store_pb2.Status.ERROR
+                        status=global_store_pb2.Status.STATUS_ERROR
                     )
 
                 # Get the registered worker to get the worker_id
@@ -630,11 +634,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
                 if not registered:
                     return global_store_pb2.RegisterWorkerResponse(
-                        status=global_store_pb2.Status.ERROR
+                        status=global_store_pb2.Status.STATUS_ERROR
                     )
 
                 return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.OK,
+                    status=global_store_pb2.Status.STATUS_OK,
                     worker_id=registered.worker_id,
                     heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
                     state_sync_required=state_sync_required,
@@ -647,7 +651,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 registered = self.worker_service.register_worker(worker)
 
                 return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.OK,
+                    status=global_store_pb2.Status.STATUS_OK,
                     worker_id=registered.worker_id,
                     heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
                     state_sync_required=False,
@@ -659,14 +663,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
             return global_store_pb2.RegisterWorkerResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
         except Exception as e:
             logger.exception("Error registering worker")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.RegisterWorkerResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def WorkerHeartbeat(
@@ -699,9 +703,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                 )
 
                 status = (
-                    global_store_pb2.Status.OK
+                    global_store_pb2.Status.STATUS_OK
                     if success
-                    else global_store_pb2.Status.NOT_FOUND
+                    else global_store_pb2.Status.STATUS_NOT_FOUND
                 )
 
                 return global_store_pb2.WorkerHeartbeatResponse(status=status)
@@ -711,7 +715,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def _handle_enhanced_heartbeat(
@@ -730,7 +734,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
             if not success:
                 return global_store_pb2.WorkerHeartbeatResponse(
-                    status=global_store_pb2.Status.NOT_FOUND
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
 
             # Check if state synchronization is needed
@@ -768,7 +772,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             ts = timestamp_pb2.Timestamp()
             ts.FromSeconds(int(time.time()))
             return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 state_sync_required=state_sync_required,
                 expected_state_version=current_version,
                 obsolete_replicas=obsolete_replicas,
@@ -782,7 +786,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def UnregisterWorker(
@@ -795,9 +799,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             success = self.worker_service.unregister_worker(request.worker_id)
 
             status = (
-                global_store_pb2.Status.OK
+                global_store_pb2.Status.STATUS_OK
                 if success
-                else global_store_pb2.Status.NOT_FOUND
+                else global_store_pb2.Status.STATUS_NOT_FOUND
             )
 
             return global_store_pb2.UnregisterWorkerResponse(status=status)
@@ -807,7 +811,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.UnregisterWorkerResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def ListActiveWorkers(
@@ -875,14 +879,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
             if success:
                 return global_store_pb2.SynchronizeWorkerStateResponse(
-                    status=global_store_pb2.Status.OK,
+                    status=global_store_pb2.Status.STATUS_OK,
                     new_state_version=new_version,
                     state_changes=state_changes,
                     new_state_checksum=new_checksum,
                 )
             else:
                 return global_store_pb2.SynchronizeWorkerStateResponse(
-                    status=global_store_pb2.Status.ERROR
+                    status=global_store_pb2.Status.STATUS_ERROR
                 )
 
         except Exception as e:
@@ -892,7 +896,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.SynchronizeWorkerStateResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def RequestFullStateSync(
@@ -908,14 +912,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
             if success:
                 return global_store_pb2.RequestFullStateSyncResponse(
-                    status=global_store_pb2.Status.OK,
+                    status=global_store_pb2.Status.STATUS_OK,
                     new_state_version=new_version,
                     expected_replicas=expected_replicas,
                     new_state_checksum=new_checksum,
                 )
             else:
                 return global_store_pb2.RequestFullStateSyncResponse(
-                    status=global_store_pb2.Status.ERROR
+                    status=global_store_pb2.Status.STATUS_ERROR
                 )
 
         except Exception as e:
@@ -925,7 +929,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.RequestFullStateSyncResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     # ========== Utility Methods ==========
@@ -936,7 +940,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         context: grpc.ServicerContext,
     ) -> global_store_pb2.HealthCheckResponse:
         """Simple health check endpoint."""
-        return global_store_pb2.HealthCheckResponse(status=global_store_pb2.Status.OK)
+        return global_store_pb2.HealthCheckResponse(
+            status=global_store_pb2.Status.STATUS_OK
+        )
 
     # ========== Chunk Directory Methods ==========
 
@@ -958,7 +964,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             )
 
             return global_store_pb2.QueryChunkLocationsResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 locations=locations,
             )
 
@@ -967,7 +973,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.QueryChunkLocationsResponse(
-                status=global_store_pb2.Status.ERROR
+                status=global_store_pb2.Status.STATUS_ERROR
             )
 
     def BatchUpdateChunkStates(
@@ -988,7 +994,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             )
 
             return global_store_pb2.BatchUpdateChunkStatesResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 updates_applied=updates_applied,
             )
 
@@ -997,7 +1003,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.BatchUpdateChunkStatesResponse(
-                status=global_store_pb2.Status.ERROR,
+                status=global_store_pb2.Status.STATUS_ERROR,
                 updates_applied=0,
             )
 
@@ -1005,12 +1011,20 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
     def _replica_to_memory_info(self, replica: Replica) -> common_pb2.MemoryInfo:
         """Convert Replica to MemoryInfo proto."""
+        # Map domain enum to proto enum
+        if replica.memory_type == MemoryType.GPU:
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_GPU
+        elif replica.memory_type == MemoryType.RAM:
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_RAM
+        else:
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
+
         return common_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
             node_port=replica.node_port,
             memory_size=replica.memory_size,
-            memory_type=common_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
+            memory_type=proto_mem_type,
             device_id=replica.device_id,
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
@@ -1032,13 +1046,21 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             # This keeps validation invariants while allowing simpler clients/tests.
             buffer_sizes = [mem_info.memory_size]
 
+        # Map proto enum to domain enum
+        if mem_info.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU:
+            domain_mem_type = MemoryType.GPU
+        elif mem_info.memory_type == common_pb2.MemoryType.MEMORY_TYPE_RAM:
+            domain_mem_type = MemoryType.RAM
+        else:
+            domain_mem_type = MemoryType.DISK
+
         return Replica(
             artifact_id=artifact_id,
             node_id=mem_info.node_id,
             node_address=mem_info.node_address,
             node_port=mem_info.node_port,
             memory_size=mem_info.memory_size,
-            memory_type=MemoryType(common_pb2.MemoryType.Name(mem_info.memory_type)),
+            memory_type=domain_mem_type,
             device_id=mem_info.device_id,
             max_concurrency=max_concurrency,
             remote_memory_keys=remote_keys,
@@ -1061,7 +1083,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         """
         # Protect against missing heartbeat information.
         if not worker.last_heartbeat:
-            return global_store_pb2.ConnectionStatus.DISCONNECTED
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED
 
         now_ts = time.time()
         last_hb_ts = worker.last_heartbeat.timestamp()
@@ -1072,14 +1094,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
         # Case 1 – healthy
         if age <= timeout_sec and worker.accepting_new_requests:
-            return global_store_pb2.ConnectionStatus.CONNECTED
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_CONNECTED
 
         # Case 2 – within extended window or not accepting
         if age <= timeout_sec * 2:
-            return global_store_pb2.ConnectionStatus.RECONNECTING
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_RECONNECTING
 
         # Otherwise
-        return global_store_pb2.ConnectionStatus.DISCONNECTED
+        return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED
 
     # ========== Testing Utilities ===========
 

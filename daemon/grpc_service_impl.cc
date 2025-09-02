@@ -376,8 +376,8 @@ store::loading::ReplicaKey StoreDaemonServiceImpl::make_replica_key(const std::s
 
 Status StoreDaemonServiceImpl::WaitReplicaVerification(
     grpc::ServerContext* ctx,
-    const daemon::ReplicaVerificationRequest* req,
-    daemon::ReplicaVerificationResponse* resp) {
+    const daemon::WaitReplicaVerificationRequest* req,
+    daemon::WaitReplicaVerificationResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -416,7 +416,7 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   // If no session, treat as unknown UUID
   auto entry = sessions_.get(req->replica_uuid());
   if (!entry.has_value()) {
-    resp->set_status(daemon::VerificationStatus::VERIFICATION_STATUS_UNKNOWN);
+    resp->set_status(daemon::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
     return Status::OK;
   }
   // Bounded wait
@@ -450,8 +450,8 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
 
 Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
-    const daemon::LockChunksRequest* req,
-    daemon::LockChunksResponse* resp) {
+    const daemon::LockTransportChunksRequest* req,
+    daemon::LockTransportChunksResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -500,8 +500,8 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
 
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
-    const daemon::UnlockChunksRequest* req,
-    daemon::UnlockChunksResponse* /*resp*/) {
+    const daemon::UnlockTransportChunksRequest* req,
+    daemon::UnlockTransportChunksResponse* /*resp*/) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);

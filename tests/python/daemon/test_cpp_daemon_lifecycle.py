@@ -43,7 +43,7 @@ def gs_server():
 
     servicer = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
     port = _get_free_port()
     server.add_insecure_port(f"127.0.0.1:{port}")
     server.start()
@@ -102,7 +102,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
     try:
         # Poll ListActiveWorkers until daemon registers
         channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-        stub = global_store_pb2_grpc.GlobalStoreStub(channel)
+        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
 
         deadline = time.time() + 15.0
         found = None

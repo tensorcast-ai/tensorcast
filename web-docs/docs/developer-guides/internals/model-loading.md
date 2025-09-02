@@ -17,10 +17,10 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 
 - **LocalStoreDaemon**: C++ gRPC service (RFC-0011)
   - Binary: `daemon/tensorcast_daemon`
-  - Service: `store_daemon.StoreDaemon` (MaterializeReplica/ConfirmReplica/UnloadReplica)
+  - Service: `store_daemon.StoreDaemonService` (MaterializeReplica/ConfirmReplica/UnloadReplica)
 
 - **GlobalStore**: Python
-  - Entrypoint: `global_store.py::GlobalStoreServicer`
+  - Entrypoint: `tensorcast/global_store/grpc_service.py::GlobalStoreServicer`
 
 - **RemoteStoreDaemon**: Same as LocalStoreDaemon
 

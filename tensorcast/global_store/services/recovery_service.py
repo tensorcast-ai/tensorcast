@@ -258,7 +258,7 @@ class RecoveryService:
             )
 
             change = global_store_pb2.StateChange(
-                type=global_store_pb2.StateChange.ADD_REPLICA,
+                type=global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA,
                 replica_info=local_replica,
                 reason="Local replica not found in global state",
             )
@@ -294,7 +294,7 @@ class RecoveryService:
             replica_info = self._convert_replica_to_proto(global_replica)
 
             change = global_store_pb2.StateChange(
-                type=global_store_pb2.StateChange.REMOVE_REPLICA,
+                type=global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA,
                 replica_info=replica_info,
                 reason="Global replica not found in local state",
             )
@@ -308,7 +308,7 @@ class RecoveryService:
         """Apply state changes to global state."""
         for change in state_changes:
             try:
-                if change.type == global_store_pb2.StateChange.ADD_REPLICA:
+                if change.type == global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA:
                     # Register new replica
                     replica = self._convert_proto_to_replica(
                         change.replica_info, worker_id
@@ -316,7 +316,10 @@ class RecoveryService:
                     self.replica_repository.create_or_update(replica)
                     logger.debug(f"Added replica: {replica.artifact_id}")
 
-                elif change.type == global_store_pb2.StateChange.REMOVE_REPLICA:
+                elif (
+                    change.type
+                    == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
+                ):
                     # Remove replica
                     if change.replica_info.replica_id:
                         replica_id = UUID(change.replica_info.replica_id)
@@ -325,7 +328,10 @@ class RecoveryService:
                             f"Removed replica: {change.replica_info.artifact_id}"
                         )
 
-                elif change.type == global_store_pb2.StateChange.UPDATE_REPLICA:
+                elif (
+                    change.type
+                    == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
+                ):
                     # Update replica
                     replica = self._convert_proto_to_replica(
                         change.replica_info, worker_id
@@ -338,12 +344,20 @@ class RecoveryService:
 
     def _convert_replica_to_proto(self, replica: Replica) -> common_pb2.ReplicaInfo:
         """Convert Replica to proto format."""
+        # Map domain MemoryType to proto MemoryType
+        if replica.memory_type.value == "GPU":
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_GPU
+        elif replica.memory_type.value == "RAM":
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_RAM
+        else:
+            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
+
         memory_info = common_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
             node_port=replica.node_port,
             memory_size=replica.memory_size,
-            memory_type=common_pb2.MemoryType.Value(replica.memory_type.value),  # pyright: ignore[reportArgumentType]
+            memory_type=proto_mem_type,
             device_id=replica.device_id,
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
@@ -375,6 +389,20 @@ class RecoveryService:
         """Convert proto format to Replica."""
         from tensorcast.global_store.models import MemoryType
 
+        # Map proto MemoryType to domain MemoryType string enum
+        if (
+            proto_replica.memory_info.memory_type
+            == common_pb2.MemoryType.MEMORY_TYPE_GPU
+        ):
+            dom_mem_type = "GPU"
+        elif (
+            proto_replica.memory_info.memory_type
+            == common_pb2.MemoryType.MEMORY_TYPE_RAM
+        ):
+            dom_mem_type = "RAM"
+        else:
+            dom_mem_type = "DISK"
+
         return Replica(
             replica_id=UUID(proto_replica.ref.replica_id)
             if proto_replica.ref.replica_id
@@ -384,9 +412,7 @@ class RecoveryService:
             node_address=proto_replica.memory_info.node_address,
             node_port=proto_replica.memory_info.node_port,
             memory_size=proto_replica.memory_info.memory_size,
-            memory_type=MemoryType(
-                common_pb2.MemoryType.Name(proto_replica.memory_info.memory_type)
-            ),
+            memory_type=MemoryType(dom_mem_type),
             device_id=proto_replica.memory_info.device_id,
             max_concurrency=proto_replica.stats.max_concurrency,
             current_requests=proto_replica.stats.current_requests,

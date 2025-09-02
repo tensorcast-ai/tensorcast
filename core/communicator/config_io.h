@@ -5,7 +5,7 @@
 #include <string>
 
 #include "absl/status/statusor.h"
-#include "communicator_config.pb.h"
+#include "tensorcast/communicator/communicator_config.pb.h"
 
 namespace tensorcast::communicator {
 

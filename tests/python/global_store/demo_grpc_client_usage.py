@@ -32,7 +32,7 @@ async def demo_basic_usage():
     print("1. Starting test gRPC server...")
     servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
     print(f"   Server started on port {port}\n")
@@ -95,7 +95,7 @@ async def demo_error_handling():
     # Start server
     servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
 
@@ -137,7 +137,7 @@ async def demo_concurrent_usage():
     # Start server
     servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=20))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
     port = server.add_insecure_port('127.0.0.1:0')
     server.start()
 

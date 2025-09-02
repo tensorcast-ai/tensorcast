@@ -50,7 +50,7 @@ def memory_info():
         node_port=8000,
         remote_memory_keys=["test_key"],
         memory_size=1000000000,
-        memory_type=common_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
 
@@ -67,7 +67,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
-    assert worker_response.status == global_store_pb2.Status.OK
+    assert worker_response.status == global_store_pb2.Status.STATUS_OK
     worker_id = worker_response.worker_id
 
     # Register a artifact replica with max_concurrency of 2
@@ -93,7 +93,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         response = servicer.RequestReplicaTransport(
             transport_request, test_context
         )
-        assert response.status == global_store_pb2.Status.OK
+        assert response.status == global_store_pb2.Status.STATUS_OK
         transports.append(response.transport_id)
 
     # Try to request another transport, which should fail or time out
@@ -107,7 +107,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
-    assert response.status == global_store_pb2.Status.TIMED_OUT
+    assert response.status == global_store_pb2.Status.STATUS_TIMED_OUT
 
     # Complete one transport
     complete_request = global_store_pb2.CompleteReplicaTransportRequest(
@@ -116,7 +116,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
     complete_response = servicer.CompleteReplicaTransport(
         complete_request, test_context
     )
-    assert complete_response.status == global_store_pb2.Status.OK
+    assert complete_response.status == global_store_pb2.Status.STATUS_OK
 
     # Now we should be able to request another transport
     transport_request = global_store_pb2.RequestReplicaTransportRequest(
@@ -128,7 +128,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
-    assert response.status == global_store_pb2.Status.OK
+    assert response.status == global_store_pb2.Status.STATUS_OK
 
 
 def test_transport_wait_timeout(servicer, test_context, memory_info):
@@ -143,7 +143,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
-    assert worker_response.status == global_store_pb2.Status.OK
+    assert worker_response.status == global_store_pb2.Status.STATUS_OK
     worker_id = worker_response.worker_id
 
     # Register a artifact replica with max_concurrency of 1
@@ -165,7 +165,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
     )
 
     response = servicer.RequestReplicaTransport(transport_request, test_context)
-    assert response.status == global_store_pb2.Status.OK
+    assert response.status == global_store_pb2.Status.STATUS_OK
     transport_id = response.transport_id
 
     # Try to request another transport with a very short timeout
@@ -185,7 +185,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
     end_time = time.time()
     elapsed_ms = (end_time - start_time) * 1000
 
-    assert response.status == global_store_pb2.Status.TIMED_OUT
+    assert response.status == global_store_pb2.Status.STATUS_TIMED_OUT
     assert elapsed_ms >= 100  # Should have waited at least the timeout period
 
     # Complete the first transport
@@ -207,7 +207,7 @@ def test_concurrent_transport_requests(servicer, test_context, memory_info):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
-    assert worker_response.status == global_store_pb2.Status.OK
+    assert worker_response.status == global_store_pb2.Status.STATUS_OK
     worker_id = worker_response.worker_id
 
     # Register a artifact replica with max_concurrency of 3
@@ -245,8 +245,8 @@ def test_concurrent_transport_requests(servicer, test_context, memory_info):
         ]
 
     # Verify that we got exactly max_concurrency successful responses
-    successful = [r for r in responses if r.status == global_store_pb2.Status.OK]
-    timed_out = [r for r in responses if r.status == global_store_pb2.Status.TIMED_OUT]
+    successful = [r for r in responses if r.status == global_store_pb2.Status.STATUS_OK]
+    timed_out = [r for r in responses if r.status == global_store_pb2.Status.STATUS_TIMED_OUT]
 
     assert len(successful) == max_concurrency
     assert len(timed_out) == 5 - max_concurrency
@@ -263,7 +263,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         node_port=8000,
         remote_memory_keys=["gpu_key"],
         memory_size=1000000000,
-        memory_type=common_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
 
@@ -273,7 +273,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         node_port=8000,
         remote_memory_keys=["ram_key"],
         memory_size=1000000000,
-        memory_type=common_pb2.MemoryType.RAM,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
         device_id=0,
     )
 
@@ -283,7 +283,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         node_port=8000,
         remote_memory_keys=["disk_key"],
         memory_size=1000000000,
-        memory_type=common_pb2.MemoryType.DISK,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_DISK,
         device_id=0,
     )
 
@@ -297,7 +297,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     gpu_worker_response = servicer.RegisterWorker(gpu_worker_request, test_context)
-    assert gpu_worker_response.status == global_store_pb2.Status.OK
+    assert gpu_worker_response.status == global_store_pb2.Status.STATUS_OK
     gpu_worker_id = gpu_worker_response.worker_id
 
     ram_worker_request = global_store_pb2.RegisterWorkerRequest(
@@ -309,7 +309,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     ram_worker_response = servicer.RegisterWorker(ram_worker_request, test_context)
-    assert ram_worker_response.status == global_store_pb2.Status.OK
+    assert ram_worker_response.status == global_store_pb2.Status.STATUS_OK
     ram_worker_id = ram_worker_response.worker_id
 
     disk_worker_request = global_store_pb2.RegisterWorkerRequest(
@@ -321,7 +321,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
     )
     disk_worker_response = servicer.RegisterWorker(disk_worker_request, test_context)
-    assert disk_worker_response.status == global_store_pb2.Status.OK
+    assert disk_worker_response.status == global_store_pb2.Status.STATUS_OK
     disk_worker_id = disk_worker_response.worker_id
 
     # Register replicas with different memory types
@@ -355,7 +355,7 @@ def test_transport_memory_type_priority(servicer, test_context):
     disk_response = servicer.RequestReplicaTransport(
         disk_transport_request, test_context
     )
-    assert disk_response.status == global_store_pb2.Status.OK
+    assert disk_response.status == global_store_pb2.Status.STATUS_OK
     assert disk_response.remote_memory_info.remote_memory_keys == ["gpu_key"]
 
     # Complete the transport to release the GPU replica
@@ -376,7 +376,7 @@ def test_transport_memory_type_priority(servicer, test_context):
     ram_response = servicer.RequestReplicaTransport(
         ram_transport_request, test_context
     )
-    assert ram_response.status == global_store_pb2.Status.OK
+    assert ram_response.status == global_store_pb2.Status.STATUS_OK
     assert ram_response.remote_memory_info.remote_memory_keys == ["gpu_key"]
 
     # Complete the transport to release the GPU replica
@@ -408,5 +408,5 @@ def test_transport_memory_type_priority(servicer, test_context):
     response = servicer.RequestReplicaTransport(
         gpu_transport_request, test_context
     )
-    assert response.status == global_store_pb2.Status.OK
+    assert response.status == global_store_pb2.Status.STATUS_OK
     assert response.remote_memory_info.remote_memory_keys == ["ram_key"]

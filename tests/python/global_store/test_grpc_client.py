@@ -26,7 +26,7 @@ from tensorcast.proto import global_store_pb2, global_store_pb2_grpc, common_pb2
 from google.protobuf import timestamp_pb2
 
 
-class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
+class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     """Test implementation of Global Store gRPC service."""
 
     def __init__(self):
@@ -61,7 +61,7 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         self.replicas = {
             "artifact-1": [
                 common_pb2.MemoryInfo(
-                    memory_type=common_pb2.MemoryType.GPU,
+                    memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
                     memory_size=1073741824,  # 1GB
                     device_id=0,
                     node_id="node-1",
@@ -69,7 +69,7 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
                     node_port=60052,
                 ),
                 common_pb2.MemoryInfo(
-                    memory_type=common_pb2.MemoryType.RAM,
+                    memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
                     memory_size=1073741824,  # 1GB
                     device_id=0,  # device_id must be non-negative
                     node_id="node-2",
@@ -79,7 +79,7 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
             ],
             "artifact-2": [
                 common_pb2.MemoryInfo(
-                    memory_type=common_pb2.MemoryType.DISK,
+                    memory_type=common_pb2.MemoryType.MEMORY_TYPE_DISK,
                     memory_size=2147483648,  # 2GB
                     device_id=0,  # device_id must be non-negative
                     node_id="node-1",
@@ -160,12 +160,12 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
 
         if request.artifact_id in self.replicas:
             return global_store_pb2.GetArtifactInfoByIdResponse(
-                status=global_store_pb2.Status.OK,
+                status=global_store_pb2.Status.STATUS_OK,
                 replicas=self.replicas[request.artifact_id],
             )
         else:
             return global_store_pb2.GetArtifactInfoByIdResponse(
-                status=global_store_pb2.Status.NOT_FOUND,
+                status=global_store_pb2.Status.STATUS_NOT_FOUND,
             )
 
     # Add other required RPCs with minimal implementation
@@ -203,7 +203,7 @@ class MockGlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServicer):
         """Health check endpoint for testing."""
         self._maybe_fail(context, "HealthCheck")
         return global_store_pb2.HealthCheckResponse(
-            status=global_store_pb2.Status.OK
+            status=global_store_pb2.Status.STATUS_OK
         )
 
 
@@ -231,7 +231,7 @@ def start_test_server(port: int = 0) -> MockServer:
     """
     servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
 
     # Bind to port (0 means choose automatically)
     actual_port = server.add_insecure_port(f'127.0.0.1:{port}')
@@ -363,10 +363,10 @@ class TestGlobalStoreClient:
 
         # Test with memory_type filter
         replicas = await client.list_replicas(
-            memory_type=common_pb2.MemoryType.GPU
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU
         )
         assert all(
-            any(r.memory_type == common_pb2.MemoryType.GPU for r in replica_list)
+            any(r.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU for r in replica_list)
             for replica_list in replicas.values()
         )
 
@@ -551,7 +551,7 @@ class TestEdgeCases:
         # Start a new server with the slow servicer
         servicer = SlowServicer()
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+        global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port('127.0.0.1:0')
         server.start()
 

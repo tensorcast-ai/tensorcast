@@ -10,7 +10,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
-#include "global_store.pb.h"
+#include "tensorcast/global/global_store.pb.h"
 
 namespace tensorcast::daemon {
 

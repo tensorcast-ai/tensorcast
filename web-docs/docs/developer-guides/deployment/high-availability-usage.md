@@ -73,21 +73,19 @@ global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 ### Starting Store Daemon with HA
 
 ```python
-# C++ daemon is now the implementation; use Python config models to launch it
+# C++ daemon is now the implementation; use the Python manager to launch it
 from tensorcast.daemon_config import StoreDaemonConfig
+from tensorcast.daemon_manager import DaemonManager
 
-# Configure with HA enabled
+# Configure with HA enabled (HA settings are read from config/file/env)
 config = StoreDaemonConfig(
     storage_path="/path/to/storage",
     global_store_address="global-store:50051",
     enable_p2p_engine=True,
-    # HA configuration will be read from config file
 )
 
-servicer = StoreDaemonServicer(config=config)
-
-# HA connection manager is started automatically during initialization
-# when global_store_address is provided in the config
+mgr = DaemonManager(config, auto_start=True)
+mgr.ensure_daemon_running()
 ```
 
 ### Worker Recovery Registration
@@ -128,9 +126,9 @@ request = global_store_pb2.WorkerHeartbeatRequest(
     # Enhanced HA fields
     state_version=15,
     state_checksum="md5_hash_of_local_state",
-    registered_models=["model1", "model2", "model3"],
+    registered_artifact_ids=["artifact1", "artifact2", "artifact3"],
     last_successful_sync=1640995200,
-    global_store_status=global_store_pb2.CONNECTED
+    global_store_status=global_store_pb2.ConnectionStatus.CONNECTION_STATUS_CONNECTED
 )
 
 response = global_store_stub.WorkerHeartbeat(request)
@@ -221,7 +219,7 @@ recovery_duration_seconds{type="..."}
 ```bash
 # Check Global Store via gRPC
 grpcurl -plaintext global-store:50051 \
-  global_store.GlobalStore/ListActiveWorkers
+  global_store.GlobalStoreService/ListActiveWorkers
 ```
 
 ## Best Practices

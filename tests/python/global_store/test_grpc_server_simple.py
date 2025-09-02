@@ -19,7 +19,7 @@ def test_server_startup():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
     print("Adding servicer to server...")
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
 
     print("Binding to port...")
     port = server.add_insecure_port("127.0.0.1:0")
@@ -37,7 +37,7 @@ def test_server_startup():
         print("✓ Server is ready!")
 
         # Test a simple RPC
-        stub = global_store_pb2_grpc.GlobalStoreStub(channel)
+        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
         request = global_store_pb2.ListActiveWorkersRequest(include_unavailable=True)
         response = stub.ListActiveWorkers(request, timeout=5)
         print(f"✓ RPC successful! Got {len(response.workers)} workers")

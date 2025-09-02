@@ -9,12 +9,12 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
-#include "common.pb.h"
 #include "core/common/otel/grpc_propagation.h"
-#include "global_store.grpc.pb.h"
-#include "global_store.pb.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
+#include "tensorcast/common/common.pb.h"
+#include "tensorcast/global/global_store.grpc.pb.h"
+#include "tensorcast/global/global_store.pb.h"
 
 namespace tensorcast::store::components {
 
@@ -35,7 +35,7 @@ absl::Status GlobalStoreClient::initialize() {
 
   channel_ = grpc::CreateCustomChannel(config_.global_store_address, grpc::InsecureChannelCredentials(), args);
 
-  stub_ = global::GlobalStore::NewStub(channel_);
+  stub_ = global::GlobalStoreService::NewStub(channel_);
 
   // Test connection with a health check
   global::HealthCheckRequest req;
@@ -53,7 +53,7 @@ absl::Status GlobalStoreClient::initialize() {
   auto span = tracer->StartSpan("GlobalStore/HealthCheck", opts);
   otel::trace::Scope scope(span);
   span->SetAttribute("rpc.system", "grpc");
-  span->SetAttribute("rpc.service", "tensorcast.global.GlobalStore");
+  span->SetAttribute("rpc.service", "tensorcast.global.GlobalStoreService");
   span->SetAttribute("rpc.method", "HealthCheck");
   tensorcast::common::otel::InjectIntoClientMetadata(context);
 
@@ -95,7 +95,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("RegisterWorker failed with status: %d", response.status()));
   }
 
@@ -129,7 +129,7 @@ absl::Status GlobalStoreClient::send_heartbeat(
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("WorkerHeartbeat failed with status: %d", response.status()));
   }
 
@@ -165,7 +165,7 @@ absl::StatusOr<global::WorkerHeartbeatResponse> GlobalStoreClient::send_heartbea
       "WorkerHeartbeat(enhanced)");
   if (!status.ok())
     return status;
-  if (response.status() != global::OK && response.status() != global::STATE_SYNC_REQUIRED) {
+  if (response.status() != global::STATUS_OK && response.status() != global::STATUS_STATE_SYNC_REQUIRED) {
     return absl::InternalError(absl::StrFormat("WorkerHeartbeat(enhanced) failed with status: %d", response.status()));
   }
   return response;
@@ -188,7 +188,7 @@ absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bo
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("UnregisterWorker failed with status: %d", response.status()));
   }
 
@@ -222,7 +222,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("RegisterReplica failed with status: %d", response.status()));
   }
 
@@ -313,7 +313,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
   }
 
@@ -338,7 +338,7 @@ absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id,
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("UnregisterReplica failed with status: %d", response.status()));
   }
 
@@ -377,8 +377,8 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     return status;
   }
 
-  if (response.status() != global::OK) {
-    if (response.status() == global::NOT_FOUND) {
+  if (response.status() != global::STATUS_OK) {
+    if (response.status() == global::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("No available replicas for replica: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("RequestReplicaTransport failed with status: %d", response.status()));
@@ -410,7 +410,7 @@ absl::Status GlobalStoreClient::complete_replica_transport(std::string_view tran
     return status;
   }
 
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("CompleteReplicaTransport failed with status: %d", response.status()));
   }
 
@@ -433,8 +433,8 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
     return status;
   }
 
-  if (response.status() != global::OK) {
-    if (response.status() == global::NOT_FOUND) {
+  if (response.status() != global::STATUS_OK) {
+    if (response.status() == global::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("Artifact not found: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("GetArtifactInfoById failed with status: %d", response.status()));
@@ -468,21 +468,21 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
     up->set_chunk_idx(u.chunk_idx);
     switch (u.state) {
       case ChunkState::HOT:
-        up->set_state(global::CHUNK_HOT);
+        up->set_state(global::CHUNK_STATE_HOT);
         break;
       case ChunkState::LOCKED_TX:
-        up->set_state(global::CHUNK_LOCKED_TX);
+        up->set_state(global::CHUNK_STATE_LOCKED_TX);
         break;
       case ChunkState::COPIED_GPU:
-        up->set_state(global::CHUNK_COPIED_GPU);
+        up->set_state(global::CHUNK_STATE_COPIED_GPU);
         break;
       case ChunkState::EVICTED:
-        up->set_state(global::CHUNK_EVICTED);
+        up->set_state(global::CHUNK_STATE_EVICTED);
         break;
       case ChunkState::COLD:
       case ChunkState::PREEMPTIBLE:
       default:
-        up->set_state(global::CHUNK_COLD);
+        up->set_state(global::CHUNK_STATE_COLD);
         break;
     }
     up->set_device_uuid(u.device_uuid);
@@ -496,7 +496,7 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
       "BatchUpdateChunkStates");
   if (!st.ok())
     return st;
-  if (resp.status() != global::OK) {
+  if (resp.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("BatchUpdateChunkStates failed with status: %d", resp.status()));
   }
   return absl::OkStatus();
@@ -506,25 +506,25 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
 common::MemoryType GlobalStoreClient::convert_to_proto_memory_type(MemoryLocation location) {
   switch (location) {
     case MemoryLocation::GPU:
-      return common::GPU;
+      return common::MEMORY_TYPE_GPU;
     case MemoryLocation::PAGEABLE_CPU:
-      return common::RAM;
+      return common::MEMORY_TYPE_RAM;
     case MemoryLocation::DISK:
-      return common::DISK;
+      return common::MEMORY_TYPE_DISK;
     case MemoryLocation::REMOTE:
-      return common::DISK; // Fallback mapping for REMOTE
+      return common::MEMORY_TYPE_DISK; // Fallback mapping for REMOTE
     default:
-      return common::DISK;
+      return common::MEMORY_TYPE_DISK;
   }
 }
 
 MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(common::MemoryType type) {
   switch (type) {
-    case common::GPU:
+    case common::MEMORY_TYPE_GPU:
       return MemoryLocation::GPU;
-    case common::RAM:
+    case common::MEMORY_TYPE_RAM:
       return MemoryLocation::PAGEABLE_CPU;
-    case common::DISK:
+    case common::MEMORY_TYPE_DISK:
       return MemoryLocation::DISK;
     default:
       return MemoryLocation::DISK;
@@ -593,7 +593,7 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     auto span = tracer->StartSpan(absl::StrFormat("GlobalStore/%s", method_name), opts);
     otel::trace::Scope scope(span);
     span->SetAttribute("rpc.system", "grpc");
-    span->SetAttribute("rpc.service", "tensorcast.global.GlobalStore");
+    span->SetAttribute("rpc.service", "tensorcast.global.GlobalStoreService");
     span->SetAttribute("rpc.method", method_name);
     tensorcast::common::otel::InjectIntoClientMetadata(context);
 
@@ -644,8 +644,8 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
     return status;
   }
 
-  if (response.status() != global::OK) {
-    if (response.status() == global::NOT_FOUND) {
+  if (response.status() != global::STATUS_OK) {
+    if (response.status() == global::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("Artifact not found: %s", artifact_id));
     }
     return absl::InternalError(absl::StrFormat("QueryChunkLocations failed with status: %d", response.status()));
@@ -663,19 +663,19 @@ absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreCli
 
     // Convert proto ChunkState to our ChunkState
     switch (loc.state()) {
-      case global::CHUNK_HOT:
+      case global::CHUNK_STATE_HOT:
         info.state = ChunkState::HOT;
         break;
-      case global::CHUNK_LOCKED_TX:
+      case global::CHUNK_STATE_LOCKED_TX:
         info.state = ChunkState::LOCKED_TX;
         break;
-      case global::CHUNK_COPIED_GPU:
+      case global::CHUNK_STATE_COPIED_GPU:
         info.state = ChunkState::COPIED_GPU;
         break;
-      case global::CHUNK_COLD:
+      case global::CHUNK_STATE_COLD:
         info.state = ChunkState::COLD;
         break;
-      case global::CHUNK_EVICTED:
+      case global::CHUNK_STATE_EVICTED:
         info.state = ChunkState::EVICTED;
         break;
       default:
@@ -712,7 +712,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
       "SynchronizeWorkerState");
   if (!status.ok())
     return status;
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("SynchronizeWorkerState failed with status: %d", response.status()));
   }
   out_changes->clear();
@@ -741,7 +741,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
       "RequestFullStateSync");
   if (!status.ok())
     return status;
-  if (response.status() != global::OK) {
+  if (response.status() != global::STATUS_OK) {
     return absl::InternalError(absl::StrFormat("RequestFullStateSync failed with status: %d", response.status()));
   }
   out_expected_replicas->clear();

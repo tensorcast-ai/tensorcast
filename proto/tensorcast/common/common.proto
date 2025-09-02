@@ -24,9 +24,10 @@ message ArtifactDescriptor {
 }
 
 enum MemoryType {
-  GPU = 0;
-  RAM = 1;
-  DISK = 2;
+  MEMORY_TYPE_UNSPECIFIED = 0;
+  MEMORY_TYPE_RAM = 1;
+  MEMORY_TYPE_GPU = 2;
+  MEMORY_TYPE_DISK = 3;
 }
 
 message MemoryInfo {

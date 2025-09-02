@@ -50,7 +50,7 @@ async def run_integration_test():
     console.print("[yellow]Starting test gRPC server...[/yellow]")
     servicer = MockGlobalStoreServicer()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
     port = server.add_insecure_port("[::]:0")
     server.start()
     console.print(f"[green]✓ Server started on port {port}[/green]\n")
@@ -137,13 +137,13 @@ async def run_integration_test():
 
         # Filter by memory type
         gpu_replicas = await client.list_replicas(
-            memory_type=common_pb2.MemoryType.GPU
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU
         )
         gpu_count = sum(
             1
             for replicas in gpu_replicas.values()
             for r in replicas
-            if r.memory_type == common_pb2.MemoryType.GPU
+            if r.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU
         )
         print_test(
             "Filter by memory type", gpu_count > 0, f"Found {gpu_count} GPU replicas"

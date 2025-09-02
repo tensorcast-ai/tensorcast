@@ -121,6 +121,7 @@ sc_cc_library(
         ":communication_types",
         ":uma_lease_provider",
         "//core/communicator:engine_lib",
+        "//proto:communicator_config_cc_lib",
     ],
 )
 

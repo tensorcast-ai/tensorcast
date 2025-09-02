@@ -6,7 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "proto/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 

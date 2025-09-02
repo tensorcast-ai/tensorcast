@@ -17,11 +17,11 @@
 #include "daemon/replica_session_manager.h"
 #include "daemon/transport_lock_manager.h"
 #include "grpcpp/grpcpp.h"
-#include "store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
-class StoreDaemonServiceImpl final : public daemon::StoreDaemon::Service {
+class StoreDaemonServiceImpl final : public daemon::StoreDaemonService::Service {
  public:
   explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
       : engine_(std::move(engine)), sessions_(std::chrono::seconds(60)) {
@@ -81,18 +81,18 @@ class StoreDaemonServiceImpl final : public daemon::StoreDaemon::Service {
 
   grpc::Status WaitReplicaVerification(
       grpc::ServerContext* ctx,
-      const daemon::ReplicaVerificationRequest* req,
-      daemon::ReplicaVerificationResponse* resp) override;
+      const daemon::WaitReplicaVerificationRequest* req,
+      daemon::WaitReplicaVerificationResponse* resp) override;
 
   grpc::Status LockTransportChunks(
       grpc::ServerContext* ctx,
-      const daemon::LockChunksRequest* req,
-      daemon::LockChunksResponse* resp) override;
+      const daemon::LockTransportChunksRequest* req,
+      daemon::LockTransportChunksResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
-      const daemon::UnlockChunksRequest* req,
-      daemon::UnlockChunksResponse* resp) override;
+      const daemon::UnlockTransportChunksRequest* req,
+      daemon::UnlockTransportChunksResponse* resp) override;
 
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,

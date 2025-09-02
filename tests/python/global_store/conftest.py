@@ -135,7 +135,7 @@ def memory_info():
         node_port=8000,
         remote_memory_keys=["test_key"],
         memory_size=1000000000,
-        memory_type=common_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
 

@@ -113,7 +113,7 @@ def main():
         futures.ThreadPoolExecutor(max_workers=config.max_workers),
         interceptors=[PrometheusInterceptor()],
     )
-    global_store_pb2_grpc.add_GlobalStoreServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
 
     # Bind to port
     server.add_insecure_port(f"[::]:{config.port}")

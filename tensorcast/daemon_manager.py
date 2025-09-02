@@ -119,7 +119,7 @@ class DaemonManager:
         """Check if a daemon is already running at the specified address."""
         with self._span("Client/CheckDaemon", SpanKind.CLIENT) as span:
             channel = grpc.insecure_channel(self.server_address)
-            stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+            stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
             try:
                 request = store_daemon_pb2.GetServerConfigRequest()
                 _ = stub.GetServerConfig(request, timeout=2.0)

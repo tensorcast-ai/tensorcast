@@ -12,13 +12,13 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
-#include "common.pb.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/chunk_meta.h"
-#include "global_store.grpc.pb.h"
-#include "global_store.pb.h"
 #include "grpcpp/grpcpp.h"
+#include "tensorcast/common/common.pb.h"
+#include "tensorcast/global/global_store.grpc.pb.h"
+#include "tensorcast/global/global_store.pb.h"
 
 namespace tensorcast::store::components {
 
@@ -81,7 +81,7 @@ class GlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global::ConnectionStatus connection_status = global::CONNECTED);
+      global::ConnectionStatus connection_status = global::CONNECTION_STATUS_CONNECTED);
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
 
@@ -186,7 +186,7 @@ class GlobalStoreClient {
 
   GlobalStoreClientConfig config_;
   std::shared_ptr<grpc::Channel> channel_;
-  std::unique_ptr<global::GlobalStore::Stub> stub_;
+  std::unique_ptr<global::GlobalStoreService::Stub> stub_;
   std::string worker_id_;
   mutable std::mutex mutex_;
 };

@@ -34,7 +34,7 @@ class TestGRPCService:
 
         update_response = servicer.UpdateReplica(update_request, test_context)
 
-        assert update_response.status == global_store_pb2.Status.OK
+        assert update_response.status == global_store_pb2.Status.STATUS_OK
         assert update_response.artifact_id == "test_artifact"
         assert update_response.replica_id == register_response.replica_id
 
@@ -46,7 +46,7 @@ class TestGRPCService:
 
         response = servicer.UpdateReplica(request, test_context)
 
-        assert response.status == global_store_pb2.Status.NOT_FOUND
+        assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
     def test_unregister_artifact_replica(
         self, servicer, test_context, memory_info, registered_worker
@@ -72,7 +72,7 @@ class TestGRPCService:
             unregister_request, test_context
         )
 
-        assert unregister_response.status == global_store_pb2.Status.OK
+        assert unregister_response.status == global_store_pb2.Status.STATUS_OK
 
     def test_unregister_nonexistent_artifact_replica(self, servicer, test_context):
         """Test unregistering a artifact replica that doesn't exist"""
@@ -82,7 +82,7 @@ class TestGRPCService:
 
         response = servicer.UnregisterReplica(request, test_context)
 
-        assert response.status == global_store_pb2.Status.NOT_FOUND
+        assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
     def test_list_replicas(
         self, servicer, test_context, memory_info, registered_worker
@@ -168,7 +168,7 @@ class TestGRPCService:
             transport_request, test_context
         )
 
-        assert transport_response.status == global_store_pb2.Status.OK
+        assert transport_response.status == global_store_pb2.Status.STATUS_OK
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
 
@@ -216,7 +216,7 @@ class TestGRPCService:
             complete_request, test_context
         )
 
-        assert complete_response.status == global_store_pb2.Status.OK
+        assert complete_response.status == global_store_pb2.Status.STATUS_OK
 
     def test_complete_nonexistent_transport(self, servicer, test_context):
         """Test completing a transport that doesn't exist"""
@@ -226,7 +226,7 @@ class TestGRPCService:
 
         response = servicer.CompleteReplicaTransport(request, test_context)
 
-        assert response.status == global_store_pb2.Status.NOT_FOUND
+        assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""
@@ -292,7 +292,7 @@ class TestGRPCService:
             register_request, test_context
         )
 
-        assert register_response.status == global_store_pb2.Status.OK
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
         replica_id = register_response.replica_id
 
         # 2. List replicas to get replica information
@@ -316,7 +316,7 @@ class TestGRPCService:
             unregister_request, test_context
         )
 
-        assert unregister_response.status == global_store_pb2.Status.OK
+        assert unregister_response.status == global_store_pb2.Status.STATUS_OK
 
         # 5. List replicas again and verify the replica no longer exists
         list_response = servicer.ListReplicasV2(list_request, test_context)
@@ -336,7 +336,7 @@ class TestGRPCService:
 
         response = servicer.RegisterWorker(request, test_context)
 
-        assert response.status == global_store_pb2.Status.OK
+        assert response.status == global_store_pb2.Status.STATUS_OK
         assert response.worker_id is not None
         assert len(response.worker_id) > 0
         assert response.heartbeat_interval_ms > 0
@@ -363,7 +363,7 @@ class TestGRPCService:
 
         heartbeat_response = servicer.WorkerHeartbeat(heartbeat_request, test_context)
 
-        assert heartbeat_response.status == global_store_pb2.Status.OK
+        assert heartbeat_response.status == global_store_pb2.Status.STATUS_OK
 
     def test_worker_unregistration(self, servicer, test_context):
         """Test worker unregistration functionality"""
@@ -387,7 +387,7 @@ class TestGRPCService:
             unregister_request, test_context
         )
 
-        assert unregister_response.status == global_store_pb2.Status.OK
+        assert unregister_response.status == global_store_pb2.Status.STATUS_OK
 
     def test_list_active_workers(self, servicer, test_context):
         """Test listing active workers"""
@@ -436,7 +436,7 @@ class TestGRPCService:
         info_request = global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
         info_response = servicer.GetArtifactInfoById(info_request, test_context)
 
-        assert info_response.status == global_store_pb2.Status.OK
+        assert info_response.status == global_store_pb2.Status.STATUS_OK
         assert len(info_response.replicas) == 1
         assert info_response.replicas[0].node_id == memory_info.node_id
 
@@ -447,4 +447,4 @@ class TestGRPCService:
         )
         info_response = servicer.GetArtifactInfoById(info_request, test_context)
 
-        assert info_response.status == global_store_pb2.Status.NOT_FOUND
+        assert info_response.status == global_store_pb2.Status.STATUS_NOT_FOUND

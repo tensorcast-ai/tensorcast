@@ -317,7 +317,7 @@ def check_service_status(
 
         # Connect to the daemon
         channel = grpc.insecure_channel(f"{host}:{port}")
-        stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+        stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
 
         # Get detailed status
         request = store_daemon_pb2.GetDetailedStatusRequest()
@@ -506,7 +506,7 @@ def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:
     while time.time() < deadline:
         try:
             channel = grpc.insecure_channel(addr)
-            stub = store_daemon_pb2_grpc.StoreDaemonStub(channel)
+            stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
             stub.GetServerConfig(store_daemon_pb2.GetServerConfigRequest(), timeout=1.0)
             channel.close()
             return True

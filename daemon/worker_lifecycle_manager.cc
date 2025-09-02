@@ -121,7 +121,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           state_checksum_,
           registered_ids,
           last_sync_success_ts_,
-          global::CONNECTED);
+          global::CONNECTION_STATUS_CONNECTED);
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
@@ -163,13 +163,13 @@ void WorkerLifecycleManager::heartbeat_loop() {
             auto* mi = rep->mutable_memory_info();
             mi->set_memory_size(i.size_bytes);
             if (i.gpu_state != common::memory::MemoryLocation::NONE) {
-              mi->set_memory_type(common::GPU);
+              mi->set_memory_type(common::MEMORY_TYPE_GPU);
               mi->set_device_id(i.gpu_device_id);
             } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
-              mi->set_memory_type(common::RAM);
+              mi->set_memory_type(common::MEMORY_TYPE_RAM);
               mi->set_device_id(0);
             } else {
-              mi->set_memory_type(common::DISK);
+              mi->set_memory_type(common::MEMORY_TYPE_DISK);
               mi->set_device_id(0);
             }
             rep->mutable_stats()->set_max_concurrency(1);
@@ -196,18 +196,18 @@ void WorkerLifecycleManager::heartbeat_loop() {
             obsolete.reserve(changes.size());
             for (const auto& ch : changes) {
               switch (ch.type()) {
-                case global::StateChange::REMOVE_REPLICA: {
+                case global::StateChange::CHANGE_TYPE_REMOVE_REPLICA: {
                   obsolete.push_back(ch.replica_info().ref().artifact_id());
                   break;
                 }
-                case global::StateChange::ADD_REPLICA: {
+                case global::StateChange::CHANGE_TYPE_ADD_REPLICA: {
                   // Proactively materialize the replica locally on the indicated memory
                   const auto& ri = ch.replica_info();
                   tensorcast::store::DeviceKey dev{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
-                  if (ri.memory_info().memory_type() == common::GPU) {
+                  if (ri.memory_info().memory_type() == common::MEMORY_TYPE_GPU) {
                     dev = tensorcast::store::DeviceRegistry::instance().gpu_key(
                         static_cast<int>(ri.memory_info().device_id()));
-                  } else if (ri.memory_info().memory_type() == common::RAM) {
+                  } else if (ri.memory_info().memory_type() == common::MEMORY_TYPE_RAM) {
                     dev = tensorcast::store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
                   } else {
                     // Ignore DISK-only add in daemon prefetch
@@ -223,7 +223,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   }).detach();
                   break;
                 }
-                case global::StateChange::UPDATE_REPLICA: {
+                case global::StateChange::CHANGE_TYPE_UPDATE_REPLICA: {
                   // Reconcile availability (enable/disable remote access) if applicable
                   const auto& ri = ch.replica_info();
                   const auto artifact_id = ri.ref().artifact_id();

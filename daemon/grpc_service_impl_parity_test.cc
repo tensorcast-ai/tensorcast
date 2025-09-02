@@ -5,7 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -78,13 +78,13 @@ TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]")
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   StoreDaemonServiceImpl svc(engine);
 
-  tensorcast::daemon::ReplicaVerificationRequest req;
+  tensorcast::daemon::WaitReplicaVerificationRequest req;
   req.set_artifact_id("nonexistent");
   req.set_replica_uuid("deadbeef-dead-beef-dead-beefdeadbeef");
   req.set_timeout_ms(10);
-  tensorcast::daemon::ReplicaVerificationResponse resp;
+  tensorcast::daemon::WaitReplicaVerificationResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.WaitReplicaVerification(&ctx, &req, &resp);
   REQUIRE(st.ok());
-  REQUIRE(resp.status() == tensorcast::daemon::VerificationStatus::VERIFICATION_STATUS_UNKNOWN);
+  REQUIRE(resp.status() == tensorcast::daemon::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
 }

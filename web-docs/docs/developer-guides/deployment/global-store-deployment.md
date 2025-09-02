@@ -349,7 +349,7 @@ python -m tensorcast.global_store
    # Trigger full state sync for specific worker
    grpcurl -d '{"worker_id": "worker-123"}' \
      localhost:50051 \
-     global_store.GlobalStore/RequestFullStateSync
+     global_store.GlobalStoreService/RequestFullStateSync
    ```
 
 ## Conclusion

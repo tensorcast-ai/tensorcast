@@ -57,3 +57,4 @@ message CommunicatorConfig {
   AffinityConfig affinity = 6;
   SimpleNumaConfig simple_numa = 7;     // optional; mirrors env-based interim
 }
+

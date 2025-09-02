@@ -51,7 +51,7 @@ class DaemonCtl:
 
         self.server_address = server_address
         self.channel = grpc.insecure_channel(server_address)
-        self.stub = store_daemon_pb2_grpc.StoreDaemonStub(self.channel)
+        self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
         self.checkpoints_in_gpu = {}
 
         # Check environment variable
@@ -410,10 +410,10 @@ class DaemonCtl:
         artifact_identifier: str,
         replica_uuid: str,
         timeout_ms: int = 30000,
-    ) -> store_daemon_pb2.ReplicaVerificationResponse | None:
+    ) -> store_daemon_pb2.WaitReplicaVerificationResponse | None:
         """Block until the daemon returns a PASSED/FAILED status or timeout."""
 
-        request = store_daemon_pb2.ReplicaVerificationRequest(
+        request = store_daemon_pb2.WaitReplicaVerificationRequest(
             artifact_id=artifact_identifier,
             replica_uuid=replica_uuid,
             timeout_ms=timeout_ms,

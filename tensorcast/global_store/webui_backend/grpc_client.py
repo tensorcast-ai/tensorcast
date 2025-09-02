@@ -125,7 +125,7 @@ class GlobalStoreClient:
         """
         self.config = config
         self._channel: Optional[grpc.Channel] = None
-        self._stub: Optional[global_store_pb2_grpc.GlobalStoreStub] = None
+        self._stub: Optional[global_store_pb2_grpc.GlobalStoreServiceStub] = None
         self._connect_lock = asyncio.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4)
 
@@ -139,7 +139,7 @@ class GlobalStoreClient:
 
             def _sync_connect():
                 channel = grpc.insecure_channel(self.config.address)
-                stub = global_store_pb2_grpc.GlobalStoreStub(channel)
+                stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
 
                 # Use dedicated HealthCheck RPC for connectivity verification
                 request = global_store_pb2.HealthCheckRequest()
@@ -323,11 +323,11 @@ class GlobalStoreClient:
                 request, timeout=self.config.timeout
             )
 
-            if response.status == global_store_pb2.Status.OK:
+            if response.status == global_store_pb2.Status.STATUS_OK:
                 return GlobalStoreClient.ArtifactInfo(
                     available_replicas=list(response.replicas)
                 )
-            elif response.status == global_store_pb2.Status.NOT_FOUND:
+            elif response.status == global_store_pb2.Status.STATUS_NOT_FOUND:
                 return None
             else:
                 raise RuntimeError(
@@ -379,11 +379,11 @@ class GlobalStoreClient:
 
         for replicas in all_replicas.values():
             for replica in replicas:
-                if replica.memory_type == common_pb2.MemoryType.GPU:
+                if replica.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU:
                     gpu_replicas += 1
-                elif replica.memory_type == common_pb2.MemoryType.RAM:
+                elif replica.memory_type == common_pb2.MemoryType.MEMORY_TYPE_RAM:
                     ram_replicas += 1
-                elif replica.memory_type == common_pb2.MemoryType.DISK:
+                elif replica.memory_type == common_pb2.MemoryType.MEMORY_TYPE_DISK:
                     disk_replicas += 1
 
         return {

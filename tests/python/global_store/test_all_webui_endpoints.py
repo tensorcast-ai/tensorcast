@@ -57,7 +57,7 @@ def create_mock_client():
         node_address="192.168.1.1",
         node_port=50052,
         memory_size=1073741824,  # 1GB
-        memory_type=common_pb2.MemoryType.GPU,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
     replica2 = common_pb2.MemoryInfo(
@@ -65,7 +65,7 @@ def create_mock_client():
         node_address="192.168.1.2",
         node_port=50052,
         memory_size=2147483648,  # 2GB
-        memory_type=common_pb2.MemoryType.RAM,
+        memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
         device_id=0,
     )
     client.list_replicas.return_value = {

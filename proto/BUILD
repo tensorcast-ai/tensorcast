@@ -5,7 +5,7 @@ package(default_visibility = ["//visibility:public"])
 
 proto_library(
     name = "global_store_proto",
-    srcs = ["global_store.proto"],
+    srcs = ["tensorcast/global/global_store.proto"],
     strip_import_prefix = "",
     deps = [
         ":common_proto",
@@ -30,7 +30,7 @@ cpp_grpc_library(
 # Store Daemon service protos (C++ targets)
 proto_library(
     name = "store_daemon_proto",
-    srcs = ["store_daemon.proto"],
+    srcs = ["tensorcast/daemon/store_daemon.proto"],
     strip_import_prefix = "",
     deps = [
         ":common_proto",
@@ -54,14 +54,14 @@ cpp_grpc_library(
 # Communicator config (messages only)
 proto_library(
     name = "communicator_config_proto",
-    srcs = ["communicator_config.proto"],
+    srcs = ["tensorcast/communicator/communicator_config.proto"],
     strip_import_prefix = "",
 )
 
 proto_library(
     name = "common_proto",
     srcs = [
-        "common.proto",
+        "tensorcast/common/common.proto",
     ],
     strip_import_prefix = "",
     deps = [

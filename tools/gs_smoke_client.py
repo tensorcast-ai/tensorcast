@@ -57,7 +57,7 @@ def main() -> None:
     with tracer.start_as_current_span("Smoke/GSClient"):
         channel = grpc.insecure_channel(address)
         try:
-            stub = global_store_pb2_grpc.GlobalStoreStub(channel)
+            stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
             # HealthCheck
             try:
                 resp = stub.HealthCheck(global_store_pb2.HealthCheckRequest(), timeout=min(2.0, args.timeout))
