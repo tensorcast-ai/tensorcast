@@ -17,11 +17,11 @@
 #include "daemon/replica_session_manager.h"
 #include "daemon/transport_lock_manager.h"
 #include "grpcpp/grpcpp.h"
-#include "tensorcast/daemon/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
-class StoreDaemonServiceImpl final : public daemon::StoreDaemonService::Service {
+class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
  public:
   explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
       : engine_(std::move(engine)), sessions_(std::chrono::seconds(60)) {
@@ -58,74 +58,73 @@ class StoreDaemonServiceImpl final : public daemon::StoreDaemonService::Service 
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
-      const daemon::MaterializeReplicaRequest* req,
-      daemon::MaterializeReplicaResponse* resp) override;
+      const v1::MaterializeReplicaRequest* req,
+      v1::MaterializeReplicaResponse* resp) override;
 
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
-      const daemon::ConfirmReplicaRequest* req,
-      daemon::ConfirmReplicaResponse* resp) override;
+      const v1::ConfirmReplicaRequest* req,
+      v1::ConfirmReplicaResponse* resp) override;
 
   grpc::Status UnloadReplica(
       grpc::ServerContext* ctx,
-      const daemon::UnloadReplicaRequest* req,
-      daemon::UnloadReplicaResponse* resp) override;
+      const v1::UnloadReplicaRequest* req,
+      v1::UnloadReplicaResponse* resp) override;
 
-  grpc::Status ClearMem(grpc::ServerContext* ctx, const daemon::ClearMemRequest* req, daemon::ClearMemResponse* resp)
-      override;
+  grpc::Status ClearMem(grpc::ServerContext* ctx, const v1::ClearMemRequest* req, v1::ClearMemResponse* resp) override;
 
   grpc::Status GetServerConfig(
       grpc::ServerContext* ctx,
-      const daemon::GetServerConfigRequest* req,
-      daemon::GetServerConfigResponse* resp) override;
+      const v1::GetServerConfigRequest* req,
+      v1::GetServerConfigResponse* resp) override;
 
   grpc::Status WaitReplicaVerification(
       grpc::ServerContext* ctx,
-      const daemon::WaitReplicaVerificationRequest* req,
-      daemon::WaitReplicaVerificationResponse* resp) override;
+      const v1::WaitReplicaVerificationRequest* req,
+      v1::WaitReplicaVerificationResponse* resp) override;
 
   grpc::Status LockTransportChunks(
       grpc::ServerContext* ctx,
-      const daemon::LockTransportChunksRequest* req,
-      daemon::LockTransportChunksResponse* resp) override;
+      const v1::LockTransportChunksRequest* req,
+      v1::LockTransportChunksResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
-      const daemon::UnlockTransportChunksRequest* req,
-      daemon::UnlockTransportChunksResponse* resp) override;
+      const v1::UnlockTransportChunksRequest* req,
+      v1::UnlockTransportChunksResponse* resp) override;
 
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
-      const daemon::BeginRegisterArtifactRequest* req,
-      daemon::BeginRegisterArtifactResponse* resp) override;
+      const v1::BeginRegisterArtifactRequest* req,
+      v1::BeginRegisterArtifactResponse* resp) override;
 
   grpc::Status CommitRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const daemon::CommitRegisteredArtifactRequest* req,
-      daemon::CommitRegisteredArtifactResponse* resp) override;
+      const v1::CommitRegisteredArtifactRequest* req,
+      v1::CommitRegisteredArtifactResponse* resp) override;
 
   grpc::Status AbortRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const daemon::AbortRegisteredArtifactRequest* req,
-      daemon::AbortRegisteredArtifactResponse* resp) override;
+      const v1::AbortRegisteredArtifactRequest* req,
+      v1::AbortRegisteredArtifactResponse* resp) override;
 
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,
-      const daemon::GetWorkerStatusRequest* req,
-      daemon::GetWorkerStatusResponse* resp) override;
+      const v1::GetWorkerStatusRequest* req,
+      v1::GetWorkerStatusResponse* resp) override;
 
   grpc::Status GetDetailedStatus(
       grpc::ServerContext* ctx,
-      const daemon::GetDetailedStatusRequest* req,
-      daemon::GetDetailedStatusResponse* resp) override;
+      const v1::GetDetailedStatusRequest* req,
+      v1::GetDetailedStatusResponse* resp) override;
 
   // Legacy GetLoadedReplicas removed; use V2
 
   grpc::Status GetLoadedReplicasV2(
       grpc::ServerContext* ctx,
-      const daemon::GetLoadedReplicasV2Request* req,
-      daemon::GetLoadedReplicasV2Response* resp) override;
+      const v1::GetLoadedReplicasV2Request* req,
+      v1::GetLoadedReplicasV2Response* resp) override;
 
   // Expose current ref-count for a given replica key (for HA state reporting)
   size_t ref_count_for(const store::loading::ReplicaKey& key) const {
@@ -150,9 +149,9 @@ class StoreDaemonServiceImpl final : public daemon::StoreDaemonService::Service 
   void stop_sweepers();
 
   // Helpers
-  static tensorcast::store::DeviceKey resolve_device(const daemon::MaterializeReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const daemon::ConfirmReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const daemon::UnloadReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const v1::MaterializeReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const v1::ConfirmReplicaRequest& req);
+  static tensorcast::store::DeviceKey resolve_device(const v1::UnloadReplicaRequest& req);
   static store::loading::ReplicaKey make_replica_key(const std::string& artifact_id);
 
   // Shutdown gating
@@ -168,12 +167,12 @@ class StoreDaemonServiceImpl final : public daemon::StoreDaemonService::Service 
   // verification progress decoupled from ready_future state for parity with
   // Python daemon semantics.
   struct VerifEntry {
-    daemon::VerificationStatus status{daemon::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
+    v1::VerificationStatus status{v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
     std::string err;
   };
   absl::Mutex verif_mu_;
   absl::flat_hash_map<std::string, VerifEntry> verif_ ABSL_GUARDED_BY(verif_mu_);
-  void set_verif_status(const std::string& uuid, daemon::VerificationStatus st, std::string err = "");
+  void set_verif_status(const std::string& uuid, v1::VerificationStatus st, std::string err = "");
 
   // Background task queue for verification completion and auto-registration
   struct VerifTask {

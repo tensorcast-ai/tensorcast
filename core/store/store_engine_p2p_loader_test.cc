@@ -26,9 +26,9 @@
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::communicator::CommunicatorConfig;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::components::CommunicationManager;

@@ -354,7 +354,7 @@ sc_cc_library(
         "//core/common:pinned_memory_pool_lib",
         "//core/common:system_capabilities_lib",
         "//core/store:uma_lease_provider",
-        "//proto:communicator_config_cc_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
@@ -387,7 +387,7 @@ sc_cc_library(
     hdrs = ["config_io.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//proto:communicator_config_cc_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
         "@nlohmann_json//:json",
         "@protobuf",
         "@yaml-cpp//:yaml-cpp",

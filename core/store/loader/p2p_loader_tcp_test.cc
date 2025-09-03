@@ -18,10 +18,10 @@
 using tensorcast::common::memory::DistributedVirtualMemoryPool;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedMemoryPool;
-using tensorcast::communicator::CommunicatorConfig;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::replica::MemoryManager;
 using namespace tensorcast::store;
 using namespace tensorcast::testing;

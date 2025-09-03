@@ -187,3 +187,8 @@ external
 # Generated protobufs (Python + C++)
 tensorcast/proto
 tensorcast/csrc/proto
+*.pb.h
+*.pb.cc
+*_pb2_grpc.py
+*_pb2.py
+*_pb2.pyi

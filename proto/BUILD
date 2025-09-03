@@ -1,95 +1,65 @@
-load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_grpc_compile", "cpp_grpc_library", "cpp_proto_compile", "cpp_proto_library")
+load("@rules_buf//buf:defs.bzl", "buf_format")
 
 package(default_visibility = ["//visibility:public"])
 
-proto_library(
-    name = "global_store_proto",
-    srcs = ["tensorcast/global/global_store.proto"],
-    strip_import_prefix = "",
-    deps = [
-        ":common_proto",
-        "@protobuf//:duration_proto",
-        "@protobuf//:timestamp_proto",
-    ],
+exports_files(["buf.yaml"])
+
+# Format all .proto files in this package using Buf
+buf_format(
+    name = "buf_format",
 )
 
-cpp_grpc_compile(
-    name = "global_store_grpc",
-    protos = [":global_store_proto"],
-)
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases for refactored proto targets
+# The repo previously depended on top-level //proto:XXX targets. After moving
+# protos under //proto/tensorcast/**, we re-export expected names here.
+# ---------------------------------------------------------------------------
 
-cpp_grpc_library(
-    name = "global_store_grpc_cpp",
-    protos = [":global_store_proto"],
-    deps = [
-        ":common_grpc_cpp",
-    ],
-)
-
-# Store Daemon service protos (C++ targets)
-proto_library(
-    name = "store_daemon_proto",
-    srcs = ["tensorcast/daemon/store_daemon.proto"],
-    strip_import_prefix = "",
-    deps = [
-        ":common_proto",
-        "@protobuf//:timestamp_proto",
-    ],
-)
-
-cpp_grpc_compile(
-    name = "store_daemon_grpc",
-    protos = [":store_daemon_proto"],
-)
-
-cpp_grpc_library(
-    name = "store_daemon_grpc_cpp",
-    protos = [":store_daemon_proto"],
-    deps = [
-        ":common_grpc_cpp",
-    ],
-)
-
-# Communicator config (messages only)
-proto_library(
-    name = "communicator_config_proto",
-    srcs = ["tensorcast/communicator/communicator_config.proto"],
-    strip_import_prefix = "",
-)
-
-proto_library(
-    name = "common_proto",
-    srcs = [
-        "tensorcast/common/common.proto",
-    ],
-    strip_import_prefix = "",
-    deps = [
-        "@protobuf//:duration_proto",
-        "@protobuf//:timestamp_proto",
-    ],
-)
-
-cpp_grpc_compile(
-    name = "common_grpc",
-    protos = [":common_proto"],
-)
-
-cpp_grpc_library(
-    name = "common_grpc_cpp",
-    protos = [":common_proto"],
-)
-
-## artifact/replica merged into common.proto
-
-## Transport module removed (no added value for simple string IDs)
-# Generate C++ protobuf for communicator config (no gRPC services)
-cpp_proto_compile(
-    name = "communicator_config_cc",
-    protos = [":communicator_config_proto"],
-)
-
-cpp_proto_library(
+alias(
     name = "communicator_config_cc_lib",
-    protos = [":communicator_config_proto"],
+    actual = "//proto/tensorcast/communicator/v1:communicator_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "communicator_config_cc",
+    actual = "//proto/tensorcast/communicator/v1:communicator_cc",
+    visibility = ["//visibility:public"],
+)
+
+# Common doesn't define services; map both names to the C++ proto lib
+alias(
+    name = "common_grpc_cpp",
+    actual = "//proto/tensorcast/common/v1:common_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "common_grpc",
+    actual = "//proto/tensorcast/common/v1:common_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "global_store_grpc_cpp",
+    actual = "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "global_store_grpc",
+    actual = "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "store_daemon_grpc_cpp",
+    actual = "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "store_daemon_grpc",
+    actual = "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+    visibility = ["//visibility:public"],
 )

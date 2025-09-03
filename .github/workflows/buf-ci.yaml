@@ -1,0 +1,52 @@
+name: Buf CI
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  delete:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+            path: head
+      - uses: actions/checkout@v4
+        with:
+            path: base
+            ref: ${{ github.event.pull_request.base.sha }}
+      - uses: bufbuild/buf-action@v1
+        with:
+            input: head/proto
+            breaking: |
+                contains(fromJSON('["push", "pull_request"]'), github.event_name) &&
+                !contains(github.event.head_commit.message, 'buf skip breaking')
+            breaking_against: base/proto
+            pr_comment: false
+            # Publishing schema changes to the BSR requires a BSR authentication token.
+            token: ${{ secrets.BUF_TOKEN }}
+            # Include this line if you only want to set up the Action and do nothing else.
+            # setup_only: true
+            # Include a GitHub token to ensure API requests aren't rate limited.
+            # github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Restore proto/gen cache
+        id: restore-proto-gen
+        uses: actions/cache/restore@v4
+        with:
+          path: head/proto/gen
+          key: proto-gen-${{ hashFiles('head/proto/**/*.proto', 'head/proto/buf.gen.yaml', 'head/proto/buf.yaml') }}
+      - name: Setup Buf CLI
+        if: steps.restore-proto-gen.outputs.cache-hit != 'true'
+        uses: bufbuild/buf-setup-action@v1
+      - name: Generate
+        if: steps.restore-proto-gen.outputs.cache-hit != 'true'
+        run: cd head/proto && buf generate
+      - name: Save proto/gen cache
+        if: steps.restore-proto-gen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: head/proto/gen
+          key: proto-gen-${{ hashFiles('head/proto/**/*.proto', 'head/proto/buf.gen.yaml', 'head/proto/buf.yaml') }}

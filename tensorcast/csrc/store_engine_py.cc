@@ -630,7 +630,7 @@ transport layer.)pbdoc")
       .def_static(
           "from_config",
           [](const std::string& listen_addr, uint16_t port, const py::dict& cfg) {
-            using tensorcast::communicator::CommunicatorConfig;
+            using tensorcast::communicator::v1::CommunicatorConfig;
             CommunicatorConfig ccfg;
             auto get_bool = [&cfg](const char* key, bool fb) {
               if (cfg.contains(key) && !cfg[key].is_none())

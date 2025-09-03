@@ -9,7 +9,7 @@
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
-#include "tensorcast/communicator/communicator_config.pb.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::store::components {
 
@@ -53,7 +53,7 @@ class CommunicationManager {
   absl::Status initialize_with_config(
       const std::string& listen_addr,
       uint16_t listen_port,
-      const tensorcast::communicator::CommunicatorConfig& config);
+      const tensorcast::communicator::v1::CommunicatorConfig& config);
 
   /**
    * @brief Check if communication is enabled.

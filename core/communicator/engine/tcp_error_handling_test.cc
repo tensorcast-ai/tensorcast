@@ -22,7 +22,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
 
   SECTION("Invalid tensor registration") {
-    communicator::CommunicatorConfig cfg;
+    communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
     auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
@@ -103,7 +103,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Zero-size transfer handling") {
-    communicator::CommunicatorConfig cfg;
+    communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
     auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());

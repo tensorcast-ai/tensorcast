@@ -21,7 +21,7 @@ sc_cc_library(
         ":transport_lock_manager_hdr",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
@@ -75,7 +75,7 @@ sc_cc_library(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:global_store_grpc_cpp",
+        "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
     ],
 )
 
@@ -104,7 +104,7 @@ cc_test(
     srcs = ["status_utils_test.cc"],
     deps = [
         ":status_utils",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
@@ -116,7 +116,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",
     ],
@@ -128,7 +128,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -139,7 +139,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -150,7 +150,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -162,7 +162,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/testing:common",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -173,7 +173,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto:store_daemon_grpc_cpp",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -186,7 +186,7 @@ cc_test(
         ":worker_lifecycle",
         "//core/store:store_engine",
         "//core/testing:common",
-        "//proto:global_store_grpc_cpp",
+        "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",
     ],

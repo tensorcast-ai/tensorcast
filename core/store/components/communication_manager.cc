@@ -20,7 +20,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   // Phase-5: RDMA enable/disable is now explicitly provided by configuration.
   //          Environment variables are no longer consulted at this layer.
 
-  communicator::CommunicatorConfig cfg;
+  communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(enable_rdma);
   comm_engine_ = std::make_shared<communicator::engine::CommunicateEngine>(cfg);
 
@@ -41,7 +41,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
 absl::Status CommunicationManager::initialize_with_config(
     const std::string& listen_addr,
     uint16_t listen_port,
-    const communicator::CommunicatorConfig& config) {
+    const communicator::v1::CommunicatorConfig& config) {
   comm_engine_ = std::make_shared<communicator::engine::CommunicateEngine>(config);
 
   auto status = comm_engine_->init(listen_addr, listen_port);

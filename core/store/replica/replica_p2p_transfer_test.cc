@@ -468,7 +468,7 @@ class P2PTestClient {
     // Client doesn't need to listen, just connect
     // Create a communication manager without initializing a server
     LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
-    tensorcast::communicator::CommunicatorConfig cfg;
+    tensorcast::communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false);
     auto client_comm_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
     // Bind to a dedicated, available client port to facilitate P2P connections
