@@ -255,29 +255,41 @@ def ensure_external_symlink() -> None:
         print("  ln -s $(bazel info output_base)/external external")
 
 
-def build_libstore_engine_cxx11_abi(
-    develop=True,
-    use_dist_dir=False,
-    pre_cxx11_abi=False,
-    use_fake_cuda=False,
-    use_remote=False,
+def build_store_engine_and_daemon(
+    develop: bool = True,
+    use_fake_cuda: bool = False,
+    use_remote: bool = False,
+    use_dist_dir: bool = False,
 ):
-    if not BUILD_CORE:
+    """Build both core store engine and daemon together in one Bazel invocation.
+
+    - Honors the same flags as individual builders
+    - If BUILD_CORE is false, only the daemon is built
+    - Safely elides sensitive remote headers in logs
+    """
+    if BAZEL_EXE is None:
+        print("Bazel not available; skipping core and daemon build")
         return
 
     cmd = [BAZEL_EXE, "build"]
-    cmd.append("//core:libstore_engine.so")
+
+    # Targets: build store_engine only when BUILD_CORE is enabled; daemon always
+    targets: list[str] = []
+    if BUILD_CORE:
+        targets.append("//core:libstore_engine.so")
+    targets.append("//daemon:tensorcast_daemon")
+    cmd.extend(targets)
 
     if develop:
         cmd.append("--compilation_mode=dbg")
     else:
         cmd.append("--compilation_mode=opt")
+
     if use_dist_dir:
         cmd.append("--distdir=third_party/dist_dir")
 
     if use_fake_cuda:
-        cmd.append("--define")
-        cmd.append("use_fake_cuda=true")
+        cmd += ["--define", "use_fake_cuda=true"]
         print("Building with fake CUDA backend")
 
     if use_remote:
@@ -289,27 +301,17 @@ def build_libstore_engine_cxx11_abi(
         cmd.append("--build_metadata=ROLE=CI")
         cmd.append("--jobs=16")
 
-    # if pre_cxx11_abi:
-    #     cmd.append("--config=pre_cxx11_abi")
-    #     print("using PRE CXX11 ABI build")
-    # else:
-    #     cmd.append("--config=cxx11_abi")
-    #     print("using CXX11 ABI build")
-
-    # cmd.append("--config=linux")
-
-    # Avoid printing sensitive values like remote API keys
     display_cmd = list(cmd)
     if use_remote:
         for i, arg in enumerate(display_cmd):
             if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
-    print(f"building libstore_engine cmd={display_cmd}")
-    status_code = subprocess.run(cmd).returncode
+    print(f"building store_engine and daemon cmd={display_cmd}")
 
+    status_code = subprocess.run(cmd).returncode
     if status_code != 0:
         sys.exit(status_code)
-    # After a successful core build, ensure 'external' symlink exists
+
     ensure_external_symlink()
 
 
@@ -345,18 +347,6 @@ def copy_libstore_engine(debug: bool):
 def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
     return candidate if candidate.exists() else None
-
-def build_daemon_binary(use_fake_cuda: bool = False) -> None:
-    if BAZEL_EXE is None:
-        print("Bazell not available; skipping daemon build")
-        return
-    cmd = [BAZEL_EXE, "build", "//daemon:tensorcast_daemon"]
-    if use_fake_cuda:
-        cmd += ["--define", "use_fake_cuda=true"]
-    print(f"building tensorcast_daemon cmd={cmd}")
-    rc = subprocess.run(cmd).returncode
-    if rc != 0:
-        sys.exit(rc)
 
 def copy_daemon_binary() -> None:
     """Copy daemon binary into package at tensorcast/bin/tensorcast_daemon.
@@ -405,9 +395,12 @@ class DevelopCommand(develop):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_store_engine_and_daemon(
+            develop=True,
+            use_fake_cuda=USE_FAKE_CUDA,
+            use_remote=USE_REMOTE,
+        )
         copy_libstore_engine(debug=True)
-        # For development, just copy existing daemon binary if present
         copy_daemon_binary()
 
         gen_version_file()
@@ -421,15 +414,14 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_store_engine_and_daemon(
+            develop=True,
+            use_fake_cuda=USE_FAKE_CUDA,
+            use_remote=USE_REMOTE,
+        )
         copy_libstore_engine(debug=True)
         BuildExtension.run(self)
         copy_extensions()
-        # Ensure daemon binary is built during build_ext like libstore_engine.so
-        try:
-            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
-        except Exception as e:
-            print(f"Warning: daemon build failed: {e}")
         copy_daemon_binary()
 
 
@@ -444,18 +436,12 @@ class InstallCommand(install):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libstore_engine_cxx11_abi(
+        build_store_engine_and_daemon(
             develop=False,
-            pre_cxx11_abi=PRE_CXX11_ABI,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_libstore_engine(debug=False)
-        # Ensure daemon binary is built and copied for installed package
-        try:
-            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
-        except Exception as e:
-            print(f"Warning: daemon build failed: {e}")
         copy_daemon_binary()
 
         gen_version_file()
@@ -473,13 +459,12 @@ class BdistCommand(bdist_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libstore_engine_cxx11_abi(develop=False, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_store_engine_and_daemon(
+            develop=False,
+            use_fake_cuda=USE_FAKE_CUDA,
+            use_remote=USE_REMOTE,
+        )
         copy_libstore_engine(debug=False)
-        # Wheel should contain the daemon binary
-        try:
-            build_daemon_binary(use_fake_cuda=USE_FAKE_CUDA)
-        except Exception as e:
-            print(f"Warning: daemon build failed: {e}")
         copy_daemon_binary()
 
         gen_version_file()
@@ -497,7 +482,11 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_libstore_engine_cxx11_abi(develop=True, pre_cxx11_abi=PRE_CXX11_ABI, use_fake_cuda=USE_FAKE_CUDA, use_remote=USE_REMOTE)
+        build_store_engine_and_daemon(
+            develop=True,
+            use_fake_cuda=USE_FAKE_CUDA,
+            use_remote=USE_REMOTE,
+        )
         gen_version_file()
         copy_libstore_engine(debug=True)
         copy_daemon_binary()
@@ -636,14 +625,10 @@ if BUILD_EXTENSION:
             dir_path + "/external/grpc+/include",
             dir_path + "/external/protobuf+/src",
             dir_path + "/external/gsl+",
-            # Header-only JSON library used by pybind wrappers
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
-            # Protobuf/grpc generated headers from Bazel build
-            dir_path + "/bazel-bin/proto/global_store_grpc_cpp_pb/proto",
-            dir_path + "/bazel-bin/proto/common_grpc_cpp_pb/proto",
-            dir_path + "/bazel-bin/proto/communicator_config_cc/proto",
+            dir_path + "/proto/gen/cc",
         ]
         if CUDA_DIR:
             _include_dirs.append(CUDA_DIR + "/include")

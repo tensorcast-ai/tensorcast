@@ -6,9 +6,26 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 PROTO_DIR="${ROOT_DIR}/proto"
 
-echo "[proto] Generating Python (and others) via buf in: ${PROTO_DIR}"
+# Determine execution mode: bazel (default) or raw
+MODE="${1:-bazel}"
+
+case "${MODE}" in
+  bazel)
+    echo "[proto] Generating via bazel-run buf in: ${PROTO_DIR}"
+    RUN_CMD=(bazel run @rules_buf_toolchains//:buf -- generate --template buf.gen.yaml)
+    ;;
+  raw)
+    echo "[proto] Generating via raw buf in: ${PROTO_DIR}"
+    RUN_CMD=(buf generate --template buf.gen.yaml)
+    ;;
+  *)
+    echo "Usage: $(basename "$0") [bazel|raw]" >&2
+    exit 1
+    ;;
+esac
+
 cd "${PROTO_DIR}"
-buf generate
+"${RUN_CMD[@]}"
 
 # Post-process generated Python to use package prefix tensorcast.proto.*
 PY_OUT_DIR="${PROTO_DIR}/gen/python/tensorcast"

@@ -23,7 +23,7 @@ register_toolchains("@llvm_toolchain//:all")
 
 bazel_dep(name = "rules_cc", version = "0.2.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.1")
-bazel_dep(name = "abseil-cpp", version = "20250127.1")
+bazel_dep(name = "abseil-cpp", version = "20250512.1")
 bazel_dep(name = "catch2", version = "3.8.1")
 bazel_dep(name = "nlohmann_json", version = "3.12.0")
 bazel_dep(name = "yaml-cpp", version = "0.8.0")
@@ -47,6 +47,7 @@ protoc.toolchain(
 # Register Buf toolchains for using the Buf CLI via Bazel
 buf = use_extension("@rules_buf//buf:extensions.bzl", "buf")
 buf.toolchains(version = "v1.57.0")
+use_repo(buf, "rules_buf_toolchains")
 
 # new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 

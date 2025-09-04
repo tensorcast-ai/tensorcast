@@ -66,11 +66,22 @@ uv run mypy ./tensorcast
 
 ### Protocol Buffer Code Generation
 
-**CRITICAL**: When modifying any `.proto` files, you MUST regenerate the protocol buffer code:
+TensorCast uses Buf for proto management and Python code generation, with Bazel for C++.
+
+**CRITICAL**: After modifying any `.proto` file, run:
 ```bash
+# Generate Python stubs via Buf and build C++ headers via Bazel
 bash tools/build_proto_python.sh
 ```
-This updates generated Python code in `./tensorcast/proto/` directory.
+
+Buf helper targets:
+```bash
+# Format and rewrite .proto files in-place
+bazel run @rules_buf_toolchains//:buf -- format ./proto -w
+
+# Lint protos in //proto
+bazel test //proto/... --test_output=streamed
+```
 
 Note: Communicator config proto package is `tensorcast.communicator` and is consumed directly by C++.
 The daemon loads communicator config from a YAML/JSON file (see `--comm_config_path`).

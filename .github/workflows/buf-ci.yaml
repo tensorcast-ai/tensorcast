@@ -22,8 +22,8 @@ jobs:
         with:
             input: head/proto
             breaking: |
-                contains(fromJSON('["push", "pull_request"]'), github.event_name) &&
-                !contains(github.event.head_commit.message, 'buf skip breaking')
+                {{ contains(fromJSON('["push", "pull_request"]'), github.event_name) &&
+                !contains(github.event.head_commit.message, 'buf skip breaking') }}
             breaking_against: base/proto
             pr_comment: false
             # Publishing schema changes to the BSR requires a BSR authentication token.

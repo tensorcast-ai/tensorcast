@@ -31,6 +31,7 @@ using tensorcast::common::memory::MemoryLocation;
 using tensorcast::store::CommRegistrationInfo;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
+using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
 using tensorcast::store::loading::MaterializeHints;
 using tensorcast::store::loading::ReplicaHandle;
