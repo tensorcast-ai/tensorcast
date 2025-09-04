@@ -38,9 +38,8 @@ tensorcast/csrc/
 
 ## Documentation Index
 
-1. [Architecture Design](./architecture.md) - Module relationships and design patterns
-2. [Data Format Specification](./data-format.md) - Checkpoint file format details
-3. [API Reference](../../../reference/api/checkpoint.md) - Complete API documentation
+1. [Architecture Design](./docs/architecture.md) - Module relationships and design patterns
+2. [Data Format Specification](./docs/data-format.md) - Checkpoint file format details
 
 ## Quick Start
 
@@ -103,4 +102,4 @@ The checkpoint system generates:
 - `tensor_index.json`: Metadata with tensor offsets and sizes
 - Verification information for integrity checking
 
-See [Data Format Specification](./data-format.md) for detailed format documentation.
+See [Data Format Specification](./docs/data-format.md) for detailed format documentation.

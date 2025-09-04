@@ -61,6 +61,7 @@ uv run ruff check .
 uv run ruff format .
 
 # Type checking
+uv run pyright ./tensorcast
 uv run mypy ./tensorcast
 ```
 
@@ -100,13 +101,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **Protocol Buffers** (`/proto/`): Service definitions for distributed communication
 - **User Process Worker**: Responsible for final artifact loading and utilization
 
-### Key Directories
-- `/core/checkpoint/`: Streaming tensor serialization with GPU-to-disk optimization
-- `/core/store/`: Artifact lifecycle management and memory optimization. **The Store Engine used by ArtifactLoader/StoreDaemon is implemented in C++ at `core/store/store_engine.h` with Python bindings at `tensorcast/csrc/store_engine_py.cc`**.
-- `/core/communicator/`: RDMA/TCP communication engines
-- `/tensorcast/global_store/`: Centralized metadata registry with DuckDB backend
-- `/daemon/`: C++ StoreDaemon service (Python layer provides CLI/manager only)
-- `/tests/`: Comprehensive C++ and Python test suites
+
 
 ### Build Systems
 - **Primary**: Bazel with MODULE.bazel (Bzlmod) for C++ core & Daemon
@@ -208,45 +203,54 @@ Store Daemon                    Global Store
 - Transport requests automatically select optimal available replica
 
 
-## Documentation Guidelines
+## Documentation Structure and Project Hierarchy
 
-### Docusaurus Configuration Updates
+This repository’s documentation has been reorganized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
 
-**CRITICAL**: When adding, removing, or moving documentation files, you MUST update the Docusaurus configuration files:
+### Repository-level docs
 
-1. **Update `web-docs/sidebars.ts`**: Add/remove/move entries in the appropriate sidebar section
-2. **Verify paths**: Ensure all file paths in sidebars match actual file locations
-3. **Test navigation**: Confirm that all links work after changes
-4. **Consider structure**: Place user-focused content in user-guides, developer-focused content in developer-guides
+- [Project Quickstart](./README.md) — Top-level guide for setup, builds, tests, and running key services.
+- [Developer Guides Index](./docs/README.md) — Entry point to component development, architecture, and workflows.
+- [Architecture Index](./docs/architecture/README.md) — Architecture docs index and quick navigation by concern.
+- [Architecture Overview](./docs/architecture/architecture-overview.md) — High-level component overview and interactions.
+- [High Availability Design](./docs/architecture/high-availability-design.md) — HA design, recovery, and state synchronization details.
+- [P2P Transfer Strategies](./docs/architecture/p2p-transfer-strategies.md) — P2P transfer strategies, load balancing, and performance notes.
+- [Model Loading Internals](./docs/internals/model-loading.md) — Internal model loading flow and integration points.
+- [Save Dict Flow](./docs/internals/save_dict_flow.md) — End-to-end save_dict data path and artifacts produced.
+- [Adding Metrics](./docs/internals/adding-metrics.md) — How to add and expose new metrics.
 
-Example sidebar update:
-```typescript
-// Adding new user guide
-'user-guides/new-feature-guide',
+### Modules (C++ core and services)
 
-// Moving from user-guides to developer-guides
-'developer-guides/internals/technical-workflow',
-```
+- [Store Engine](./core/store/README.md) — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
+  - [Store Engine Architecture](./core/store/docs/architecture.md) — Detailed engine architecture and component responsibilities.
+  - [State Management](./core/store/docs/state-management.md) — UMA/DVMP state model and lifecycle.
+  - [Device Manager](./core/store/docs/device-manager.md) — Device discovery, UUID/ordinal mapping, and per-device state.
+  - [Device Registry](./core/store/docs/device-registry.md) — Replica/device registry structures and indexing.
 
-### Documentation Organization
+- [Checkpoint Module](./core/checkpoint/README.md) — Overview and streaming save/restore.
+  - [Checkpoint Architecture](./core/checkpoint/docs/architecture.md) — Detailed design and relationships.
+  - [Checkpoint Data Format](./core/checkpoint/docs/data-format.md) — Binary file format and index schema.
+  - [Verification Integration](./core/checkpoint/docs/verification-integration.md) — Integrity verification and integration paths.
 
-- **User Guides** (`web-docs/docs/user-guides/`): End-user focused, practical guides for using the system
-- **Developer Guides** (`web-docs/docs/developer-guides/`): Technical implementation details, architecture, and development workflows
-- **Reference** (`web-docs/docs/reference/`): API documentation, troubleshooting, and reference materials
+- [Communicator](./core/communicator/README.md) — TCP/MTCP/RDMA data-movement engine internals.
 
-### Technical Design and RFCs
+- [Store Daemon](./daemon/README.md) — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
 
-Technical design documents and RFCs are now unified in the `rfcs/` directory using the same naming convention.
+- [Global Store](./tensorcast/global_store/README.md) — Control plane internals (layered architecture, data model, services, flows).
+  - [Global Store Web UI](./tensorcast/global_store/webui_frontend/README.md) — Web UI features, development, and integration.
 
-**Filename Format**: `NNNN-feature-name.md` (e.g., `0001-distributed-virtual-memory-pool.md`)
+### Tests and examples
 
-**Required Sections**:
-- Problem Statement
-- Solution Overview
-- Technical Details (Implementation steps)
-- Testing Strategy
-- Rollout Plan
-- Progress Tracking (using standardized table format)
+- [tests/python/README.md](./tests/python/README.md) — Python test layout and commands for running suites.
+
+### Doc sync rule (required for agents)
+
+- When you change any module code, you must also update its docs:
+  - Update the module’s README.md and any linked docs under docs/ that describe behavior you changed.
+  - Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
+  - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
+  - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
+
 
 ## Coding Standards
 
@@ -332,7 +336,7 @@ Technical design documents and RFCs are now unified in the `rfcs/` directory usi
 - Prefer `contextlib.suppress` over `try/except` for suppressing exceptions
 
 #### Dependencies & Tools
-- **Package Management**: `uv` (preferred)
+- **Package Management**: `uv` (MUST)
 - **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
 - **Type Checking & Linting**: `mypy` and `ruff`
   - `uv run mypy ./tensorcast`

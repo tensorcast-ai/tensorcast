@@ -114,6 +114,6 @@ All three tensors share the same storage but have different shapes/strides/stora
 
 ## 7. Related Documentation
 
-* Checkpoint architecture details – `docs/core/checkpoint/architecture.md`
-* Verification integration – `docs/core/checkpoint/VERIFICATION_INTEGRATION.md`
-* Data format specification – `docs/core/checkpoint/data-format.md`
+* Checkpoint architecture details – `core/checkpoint/docs/architecture.md`
+* Verification integration – `core/checkpoint/docs/verification-integration.md`
+* Data format specification – `core/checkpoint/docs/data-format.md`

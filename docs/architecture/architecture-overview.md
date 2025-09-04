@@ -58,9 +58,11 @@ graph TD
 **Role**: Distributed artifact storage and serving engine
 
 - **Responsibility**: Stores artifacts locally, serves them to clients, handles P2P transfers
-- **Technology**: Python service with high-performance C++ core
+- **Technology**: C++ service with gRPC interface (high-performance StoreEngine core)
 - **Key Feature**: Zero-copy GPU memory sharing via CUDA IPC
-- **Documentation**: [Store Daemon Architecture](./store-daemon.md)
+- **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
+
+> See also: [Store Daemon (C++) Internals](../../daemon/README.md) — thin gRPC layer over the StoreEngine with session/ref tracking, transport locks, lifecycle management, and background sweepers.
 
 ## Key Design Principles
 
@@ -131,6 +133,6 @@ tensorcast start --config config.yaml
 ## Next Steps
 
 - **Global Store Development**: See [Global Store Guide](./global-store.md)
-- **Store Daemon Development**: See [Store Daemon Architecture](./store-daemon.md)
+- **Store Daemon Development**: See [Store Daemon Architecture](../../daemon/README.md)
 - **High Availability**: See [HA Design](./high-availability-design.md)
 - **P2P Transfers**: See [P2P Transfer Strategies](./p2p-transfer-strategies.md)

@@ -20,8 +20,8 @@ Understand how TensorCast works:
 
 Guides for developing specific components:
 
-- **[Global Store Development](architecture/global-store.md)** - Developing the Global Store service
-- **[Store Daemon Development](architecture/store-daemon.md)** - Store Daemon internals and development
+- **[Global Store Development](../tensorcast/global_store/README.md)** - Developing the Global Store service
+- **[Store Daemon Development](../daemon/README.md)** - Store Daemon internals and development
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
 
 ## ⚙️ Core Modules (C++)
@@ -29,16 +29,15 @@ Guides for developing specific components:
 Deep-dive into the high-performance C++ core:
 
 ### Checkpoint Module
-- **[Overview](core/checkpoint/README.md)** - Introduction to the checkpoint system
-- **[Architecture](core/checkpoint/architecture.md)** - Detailed architecture design
-- **[Data Format](core/checkpoint/data-format.md)** - Binary data format specification
-- **[Verification Integration](core/checkpoint/verification-integration.md)** - Artifact integrity verification
+- **[Overview](../core/checkpoint/README.md)** - Introduction to the checkpoint system
+- **[Architecture](../core/checkpoint/docs/architecture.md)** - Detailed architecture design
+- **[Data Format](../core/checkpoint/docs/data-format.md)** - Binary data format specification
+- **[Verification Integration](../core/checkpoint/docs/verification-integration.md)** - Artifact integrity verification
 
 ### Store Module
-- **[Overview](core/store/overview.md)** - Introduction to the core store system
-- **[Architecture](core/store/architecture.md)** - Detailed architecture design
-- **[Performance Guide](core/store/performance.md)** - Performance optimization guide
-- **[State Management](core/store/state-management.md)** - Memory state management
+- **[Overview](../core/store/README.md)** - Introduction to the core store system
+- **[Architecture](../core/store/docs/architecture.md)** - Detailed architecture design
+- **[State Management](../core/store/docs/state-management.md)** - Memory state management
 
 ## Development Workflow
 
@@ -81,7 +80,6 @@ bazel build //tests/cpp:replica_p2p_transfer_test --compilation_mode=dbg
 | Area | Key Documents |
 |------|---------------|
 | **Architecture** | [Component Interactions](architecture/README.md), [HA Design](architecture/high-availability-design.md) |
-| **Python Services** | [Global Store Development](architecture/global-store.md), [Store Daemon Development](architecture/store-daemon.md) |
-| **C++ Core** | [Checkpoint Architecture](core/checkpoint/architecture.md), [Store Architecture](core/store/architecture.md) |
-| **Data Integrity** | [Verification Integration](core/checkpoint/verification-integration.md) |
-
+| **Python Services** | [Global Store Development](../tensorcast/global_store/README.md), [Store Daemon Development](../daemon/README.md) |
+| **C++ Core** | [Checkpoint Architecture](../core/checkpoint/docs/architecture.md), [Store Architecture](../core/store/docs/architecture.md) |
+| **Data Integrity** | [Verification Integration](../core/checkpoint/docs/verification-integration.md) |

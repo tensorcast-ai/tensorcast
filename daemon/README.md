@@ -1,0 +1,290 @@
+---
+title: TensorCast Store Daemon (C++)
+description: Internals guide based on the actual C++ implementation
+sidebar_position: 3
+---
+
+# Store Daemon Internals (C++)
+
+This document describes the internals of the Store Daemon as implemented under `./daemon`. The daemon is a thin gRPC layer over the high‑performance C++ StoreEngine, built with Bazel and integrated with the distributed Global Store control plane.
+
+Binary target: `//daemon:tensorcast_daemon`
+
+Quick run example:
+
+```bash
+bazel build //daemon:tensorcast_daemon
+bazel-bin/daemon/tensorcast_daemon \
+  --listen_addr=0.0.0.0:50051 \
+  --storage_path=/data/models \
+  --p2p_port=9090 \
+  --mem_pool_size=$((8<<30)) \
+  --chunk_size=$((128<<20)) \
+  --io_threads=10 \
+  --global_store_addr=host:50051 \
+  --comm_config_path=/path/to/communicator.yaml
+```
+
+## System Context (Where this daemon fits)
+
+```mermaid
+graph TD
+  subgraph Control Plane
+    GS[Global Store]
+  end
+  subgraph Data Plane
+    SD[Store Daemon (this)]
+  end
+  subgraph Clients
+    C[User Process Worker]
+  end
+
+  GS -.->|gRPC metadata| SD
+  C -->|CUDA IPC| SD
+  SD <--> |RDMA/TCP P2P| SD
+```
+
+## High‑Level Architecture
+
+The daemon is a “thin gRPC layer + StoreEngine” design. The service layer maintains sessions, process references and transport locks, and runs several background sweepers:
+
+```mermaid
+graph TD
+  subgraph Daemon (C++)
+    RPC[StoreDaemonServiceImpl<br/>grpc_service_impl.{h,cc}]
+    SESS[ReplicaSessionManager<br/>replica_session_manager.h]
+    REFS[RefTracker (PID refs)<br/>ref_tracker.h]
+    LOCKS[TransportLockManager<br/>transport_lock_manager.h]
+    BG[Sweepers: sessions/locks/verification/PID/(optional)eviction]
+    WLM[WorkerLifecycleManager<br/>worker_lifecycle_manager.{h,cc}]
+  end
+
+  subgraph Core (C++)
+    ENG[StoreEngine<br/>core/store/store_engine.h]
+    COMM[CommunicationManager]
+    GSCLI[GlobalStoreClient]
+  end
+
+  RPC --> ENG
+  RPC --> SESS
+  RPC --> REFS
+  RPC --> LOCKS
+  WLM --> GSCLI
+  ENG --> COMM
+```
+
+Startup flow (`server_main.cc`):
+- Parse Abseil flags; optionally initialize the communication engine (RDMA/TCP) and pass it via `StoreEngineOptions`.
+- Construct `StoreEngine` and `StoreDaemonServiceImpl`, register the gRPC service and start listening.
+- If `--global_store_addr` is set, start `WorkerLifecycleManager`: register the worker, send heartbeats, and (optionally) sync chunk states.
+- Install signal handling (a `sigwait` thread); on SIGINT/SIGTERM initiate graceful shutdown (reject new loads, stop gRPC).
+
+## Components and Responsibilities
+
+- gRPC service (`grpc_service_impl.{h,cc}`)
+  - Artifact lifecycle RPCs: `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`
+  - Verification wait: `WaitReplicaVerification`
+  - Transport locking: `LockTransportChunks` / `UnlockTransportChunks`
+  - Status: `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`
+  - In‑memory registration: `BeginRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`
+
+- Sessions and references
+  - `ReplicaSessionManager`: maps `replica_uuid` to `ReplicaKey` and a readiness `future` with TTL (default 60s); used by Confirm/Wait paths
+  - `RefTracker`: PID‑based reference tracking with `keep_for_global` cache hint
+  - `TransportLockManager`: lock token store for chunk transport with expiry (default TTL 120s)
+
+- Background sweepers (`StoreDaemonServiceImpl::start_sweepers()`)
+  - Session sweeper: remove expired `replica_uuid` mappings
+  - Lock sweeper: remove expired tokens and proactively `unlock_chunks` to avoid leaks
+  - Verification sweeper: observe ready futures and update `VERIFICATION_STATUS_{PASSED|FAILED}`
+  - PID watcher: periodically scans `/proc/<pid>` to drop refs of dead processes
+  - Optional periodic eviction: GPU LRU eviction when usage exceeds a threshold (env‑driven; see below)
+
+- Worker lifecycle (`worker_lifecycle_manager.{h,cc}`)
+  - Startup: connect to Global Store, register worker, inject worker identity into `StoreEngine`
+  - Heartbeats: report available memory, accepting flag, state version/checksum
+  - Chunk state sync (optional): batch‑update chunk states with device UUIDs
+  - State reconciliation: apply `ADD/UPDATE/REMOVE` changes and clean up obsolete local replicas
+  - Monitor loop: detect stalled heartbeat/sync loops and auto‑restart
+
+## Core Flows
+
+### Asynchronous loading (Materialize → Confirm → Wait)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant D as Daemon RPC
+    participant E as StoreEngine
+
+    C->>D: MaterializeReplica(artifact_id or disk_path, replica_uuid, pid)
+    D->>E: materialize_replica(device, mode, hints)
+    note right of E: Allocate target memory and start background transfer
+    E-->>D: {replica_key, ready_future, cuda_ipc_handle}
+    D->>D: Record sessions[replica_uuid] and PID ref
+    D-->>C: status=ALLOCATED, return CUDA IPC handle
+
+    C->>D: ConfirmReplica(replica_uuid)
+    D->>D: Wait on ready_future within deadline
+    alt Success
+      D-->>C: code=0 (OK)
+    else Failure or timeout
+      D-->>C: code=1 + gRPC error
+    end
+
+    C->>D: WaitReplicaVerification(replica_uuid)
+    D->>D: Consult verification table (updated by background sweeper)
+    D-->>C: {status: IN_PROGRESS|PASSED|FAILED|UNSPECIFIED}
+```
+
+Notes:
+- `MaterializeReplica` requires exactly one of `artifact_id` or `disk_path`; otherwise returns `INVALID_ARGUMENT`.
+- Return semantics: memory allocated, transfer in progress; clients should call `ConfirmReplica`/`WaitReplicaVerification`.
+- Device resolution: prefer `device_uuid`; otherwise use `target_device_type` with sensible defaults (GPU→default card, CPU→-1).
+
+### Transport chunk locking (for P2P)
+
+```mermaid
+sequenceDiagram
+    participant C as Client/Peer
+    participant D as Daemon RPC
+    participant E as StoreEngine
+
+    C->>D: LockTransportChunks(artifact_id, chunk_indices[, device_id])
+    D->>D: Resolve unique device (infer from residency when device_id is absent; error if ambiguous)
+    D->>E: lock_chunks(key, indices)
+    E-->>D: OK
+    D-->>C: lock_token
+
+    C->>D: UnlockTransportChunks(lock_token)
+    D->>D: Lookup token → {key, indices}
+    D->>E: unlock_chunks(key, indices)
+    D-->>C: OK
+```
+
+Notes:
+- Without an explicit `device_id`, the daemon infers a unique GPU from residency; if not unique, returns `INVALID_ARGUMENT`.
+- Expired tokens are swept and unlocked automatically to avoid leaks.
+
+### Worker ↔ Global Store interaction
+
+```mermaid
+flowchart LR
+  subgraph Daemon
+    WLM[WorkerLifecycleManager]
+    ENG[StoreEngine]
+  end
+  GS[(Global Store)]
+
+  WLM -- RegisterWorker --> GS
+  WLM -- Heartbeat(accepting,state_version,checksum) --> GS
+  WLM -- (optional)BatchChunkStates --> GS
+  GS -- SyncChanges(ADD/UPDATE/REMOVE) --> WLM
+  WLM -- Reconcile locally (load/unload/enable-remote) --> ENG
+```
+
+Notes:
+- On startup, perform a full state sync once; afterward send incremental heartbeats and optional chunk state updates.
+- UPDATE changes toggle remote visibility for replicas (enable/disable P2P access).
+- The monitor loop detects stalled heartbeat/sync threads and restarts them.
+
+## Status and Observability
+
+### Status RPCs
+- `GetWorkerStatus`: registration/health/shutdown, memory pool totals, uptime, worker_id
+- `GetDetailedStatus`: device‑level aggregation (GPU totals and loaded replicas), CPU replicas, communication enabled, global totals
+- `GetLoadedReplicasV2`: paginated per‑replica view (`artifact_id`/`device_id` filters) with `ref_count`, `pids`, `keep_for_global`, `last_access_ts`
+
+### OpenTelemetry integration
+- All RPCs extract context from gRPC metadata and start server spans with low‑cardinality attributes by default
+- Set `TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS=1` to include attributes like `device_uuid` and `disk_path`
+
+### Periodic eviction (optional)
+Controlled by environment variables (handled by a background thread in the service layer):
+- `TC_DAEMON_ENABLE_PERIODIC_EVICTION`: enable/disable (default: false)
+- `TC_DAEMON_GPU_MEMORY_LIMIT_FRACTION`: usage threshold (default: 0.90)
+- `TC_DAEMON_EVICTION_CHECK_INTERVAL_MS`: check interval (default: 1000)
+
+Eviction strategy: per‑device LRU of GPU‑resident replicas that have no PID refs and are not `keep_for_global`, unloading until below threshold.
+
+## Reference and unload semantics
+
+- Add refs: `MaterializeReplica` with `pid` adds a PID ref to the `ReplicaKey`; `keep_for_global` can pin as global cache
+- Drop refs:
+  - `UnloadReplica(..., pid=...)` removes that PID ref; if other refs remain, unload is skipped and success is returned (idempotent)
+  - The PID watcher drops refs for dead PIDs automatically
+- Special case: unloading to DISK target is a no‑op and succeeds (compatibility semantics)
+
+## In‑memory registration (begin → commit/abort)
+
+`BeginRegisterArtifact` reserves memory on a target GPU and returns a CUDA IPC handle and `registration_id`. `CommitRegisteredArtifact` finalizes content‑addressed identity and registers the artifact in‑engine. `AbortRegisteredArtifact` aborts and frees resources.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D as Daemon RPC
+    participant E as StoreEngine
+
+    C->>D: BeginRegisterArtifact(artifact_id, device_id, total_size, index...)
+    D->>E: begin_register_artifact(...)
+    E-->>D: {registration_id, cuda_ipc_handle_bytes, device_id, size}
+    D-->>C: Return handle + registration_id
+
+    C->>D: CommitRegisteredArtifact(registration_id)
+    D->>E: commit_registered_artifact(id)
+    E-->>D: {artifact_id(mi2:...), descriptor, device_id, size}
+    D-->>C: Return content‑addressed descriptor (RFC‑0007)
+```
+
+## Key files and build targets
+
+- Service implementation: `daemon/grpc_service_impl.{h,cc}`
+- Lifecycle manager: `daemon/worker_lifecycle_manager.{h,cc}`
+- Session manager: `daemon/replica_session_manager.h`
+- Reference tracker: `daemon/ref_tracker.h`
+- Transport locks: `daemon/transport_lock_manager.h`
+- Entry point: `daemon/server_main.cc` (Bazel: `//daemon:tensorcast_daemon`)
+
+## Common flags (Abseil)
+
+- `--listen_addr=0.0.0.0:50051` gRPC listen address
+- `--storage_path=/path/to/models` optional local artifact storage path
+- `--p2p_port=9090` communication/P2P port
+- `--mem_pool_size`, `--chunk_size`, `--io_threads` engine memory/IO settings
+- `--global_store_addr=host:port` enable Global Store lifecycle integration
+- `--comm_config_path=/path/to/communicator.yaml` enable communication engine (RDMA/TCP)
+- `--force_full_digest_on_load` compute strong digest during load (engine‑side)
+
+Note: periodic eviction is env‑controlled (see “Periodic eviction”), not via flags.
+
+## Testing
+
+Representative C++ tests live under `daemon/*_test.cc`:
+- Compatibility/idempotency: `grpc_service_impl_parity_test.cc`
+- Worker status and device aggregation: `grpc_service_impl_status(_multigpu|_mixed_residency)_test.cc`
+- In‑memory registration: `grpc_service_impl_registration_test.cc`
+- Utilities: `transport_lock_manager_test.cc`, `status_utils_test.cc`
+
+Run examples:
+
+```bash
+bazel test //daemon:grpc_service_impl_status_test
+bazel test //daemon:grpc_service_impl_status_multigpu_test
+bazel test //daemon:grpc_service_impl_registration_test
+```
+
+## Extension guidelines
+
+- When adding RPCs:
+  - Add OpenTelemetry spans in the service layer; keep high‑cardinality attributes behind `TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS`
+  - If temporary state is involved, provide TTL and background sweeping
+- New Global Store interactions should go through `WorkerLifecycleManager` when possible
+- Performance: prefer asynchronous/batch `StoreEngine` APIs and protect shared state consistently (e.g., `absl::Mutex`)
+
+## Differences vs. legacy implementation
+
+- Current daemon is a C++ service. Legacy Python service layers and HTTP health/metrics endpoints were removed; use OpenTelemetry and status RPCs instead.
+- Legacy `GetLoadedReplicas` is removed; use the paginated `GetLoadedReplicasV2`.
+
+For broader system context, see the repository root `README.md`, `AGENTS.md`, and `docs/architecture/architecture-overview.md`.

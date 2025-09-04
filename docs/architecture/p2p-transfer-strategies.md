@@ -75,12 +75,12 @@ ORDER BY updated_at ASC  # older first for deterministic tie-break
 
 ### Load Balancing Implementation
 
-The load balancing logic is implemented in `ReplicaRepository.find_available_for_transport()`. This method performs an atomic operation that both selects the best available replica and increments its request counter in a single transaction:
+The load balancing logic is implemented in `ReplicaRepository.find_available_for_transport()`. This method performs an atomic operation that both selects the best available replica and increments its request counter in a single transaction (using the `artifact_replicas` table):
 
 ```sql
 WITH candidate AS (
     SELECT r.replica_id
-    FROM replicas r
+    FROM artifact_replicas r
     LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
     LEFT JOIN workers w ON r.worker_id = w.worker_id
     WHERE r.artifact_id = ?
@@ -113,7 +113,7 @@ RETURNING replica_id
 
 Key design decisions:
 - **Atomic Selection**: The CTE (Common Table Expression) with UPDATE ensures atomic replica selection and counter increment
-- **Separate Counter Table**: The `replica_counters` table isolates high-frequency counter updates from the main `replicas` table, reducing lock contention
+- **Separate Counter Table**: The `replica_counters` table isolates high-frequency counter updates from the main `artifact_replicas` table, reducing lock contention
 - **Worker Health Check**: Only considers replicas from workers that are accepting requests and have recent heartbeats
 - **Capacity-Driven Fill**: Smaller `max_concurrency` replicas are saturated first so that limited-capacity GPUs are utilised efficiently before larger ones
 - **Load Ratio Calculation**: The load-ratio expression breaks ties among replicas that share the same capacity, ensuring even distribution
@@ -160,25 +160,13 @@ cursor.execute("""
 
 ## Store Daemon Implementation
 
-### Asynchronous Loading Architecture
+### Materialization Behavior (current implementation)
 
-The Store Daemon implements a two-phase asynchronous loading process:
-
-1. **Phase 1 - Memory Allocation (Immediate)**:
-   - Allocates GPU memory for the artifact
-   - Generates CUDA IPC handle
-   - Returns immediately to client with `ALLOCATED` status
-   - Starts background data transfer
-
-2. **Phase 2 - Data Transfer (Background)**:
-   - Transfers artifact data via P2P or disk
-   - Client calls `ConfirmReplica` to wait for completion
-   - Registers replica with Global Store after successful load
-
-This design enables:
-- **Non-blocking Operations**: Clients can materialize_replica while data transfers
-- **Resource Efficiency**: Memory is allocated before expensive transfers
-- **Failure Handling**: Failed transfers don't leave allocated memory
+- **AUTO mode orchestration**: `MaterializeOrchestrator::run()` first requests a transport from Global Store. If granted, it builds a `P2PSource` and calls `StoreEngine::ingest_from_p2p_internal()`; otherwise it falls back to disk via `ingest_from_disk_internal()`.
+- **P2P path (synchronous in engine)**: `ingest_from_p2p_internal()` performs the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
+- **Disk path**: `ingest_from_disk_internal()` starts an async load and waits until the target memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
+- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and registers the local replica via the StoreEngine helper.
+- **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
 
 
 ## P2P Transfer Workflow
@@ -220,14 +208,15 @@ sequenceDiagram
         PO->>GSC: complete_replica_transport(transport_id)
         GSC->>GS: gRPC CompleteReplicaTransport
 
-        PO->>GSC: register_memory_replica(artifact_id, worker_id, ...)
-        GSC->>GS: gRPC RegisterReplica
+        PO->>CS: register_replica_with_global_store(handle.key())
+        CS->>GSC: gRPC RegisterReplica
     else No replica available / transport failed
         Note over PO: Disk fallback
         PO->>CS: ingest_from_disk_internal(artifact_id, disk_source, target, hints)
         CS-->>PO: ReplicaHandle
 
-        PO->>GSC: register_memory_replica(artifact_id, worker_id, ...)
+        PO->>CS: register_replica_with_global_store(handle.key())
+        CS->>GSC: gRPC RegisterReplica
     end
 
     PO-->>CS: ReplicaHandle
@@ -252,12 +241,36 @@ sequenceDiagram
   - Handles replica registration after successful load
 
 - **GlobalStoreClient** (`core/store/components/global_store_client.h/cc`)
-  - `request_model_transport()`: Request P2P transport session
-  - `complete_model_transport()`: Mark transport as complete
-  - `register_model_replica()`: Register local replica with Global Store
+  - `request_replica_transport()`: Request P2P transport session
+  - `complete_replica_transport()`: Mark transport as complete
+  - `register_replica()`: Register local (disk/P2P-loaded) replica with Global Store
 
 - **ReplicaRegistrationHelper** (`core/store/loading/replica_registration_helper.h/cc`)
   - `register_local_replica()`: Helper to register replicas with Global Store
+
+
+## Transport Lifecycle and Failure Handling
+
+### Request phase (server)
+
+- Global Store loops until timeout to find a candidate via `ReplicaRepository.find_available_for_transport()`; on success it creates a `Transport` row and increments a per-replica counter atomically.
+- Retry cadence is controlled by `transport_wait_retry_interval_ms`. The heartbeat staleness cutoff uses `heartbeat_timeout_ms`.
+- Metrics recorded: `inc_transport_request(artifact_id, "success"|"timeout")`, `observe_transport_wait(artifact_id, seconds)`, `inc_active_transports()`.
+
+### Completion phase (server)
+
+- `CompleteReplicaTransport` decrements `replica_counters.current_requests` and marks the transport as completed. Metric: `dec_active_transports()`.
+- Safety-net: `cleanup_expired_transports()` periodically force-completes stuck transports to prevent counter leaks if a daemon crashes or loses connectivity.
+
+### Client-side retries/timeouts
+
+- All Global Store RPCs from the daemon use an exponential backoff helper with jitter (`execute_rpc_with_retry`) and respect `GlobalStoreClientConfig` fields: `max_retries`, `retry_backoff`, and `rpc_timeout`.
+
+## Chunk-aware Remote Memory Export
+
+- The source replica exports chunk metadata from DVMP and registers remote-access handles via `Replica::enable_remote_memory_access()` which internally calls `export_chunks_for_p2p(...)`.
+- The Global Store carries these as `remote_memory_keys` and `buffer_sizes` in `MemoryInfo`. The orchestrator passes them into `P2PSource` so the engine can fetch efficiently.
+- When RDMA is disabled, GPU→GPU transfers over TCP use staging buffers and mark registration options with `needs_staging=true`.
 
 
 ## Performance Optimizations
@@ -270,6 +283,11 @@ The system prioritizes RDMA transfers for optimal performance:
 2. **Connection Establishment**: Create RDMA connections between nodes
 3. **Direct Memory Transfer**: Bypass CPU for memory-to-memory transfers
 4. **Fallback Mechanism**: Fall back to TCP if RDMA fails
+
+Implementation notes:
+- RDMA/TCP is selected by `enable_rdma` in the `CommunicatorConfig` used to initialize `CommunicateEngine` on each side.
+- GPU over TCP requires staging buffers (`needs_staging=true`), while RDMA can register memory regions directly when supported.
+- Remote access uses exported `remote_memory_keys` and `buffer_sizes` provided by the source replica.
 
 ### Memory Pool Management
 
@@ -295,6 +313,10 @@ Reuse connections for multiple transfers:
 - **Load Distribution**: Request distribution across replicas
 - **Transfer Latency**: Time from request to completion
 - **RDMA Utilization**: Percentage of transfers using RDMA vs TCP
+
+Concrete metrics and emitters:
+- Global Store: `inc_transport_request`, `observe_transport_wait`, `inc_active_transports`, `dec_active_transports`.
+- Store Engine: `record_p2p_transfer(bytes, success)`, `record_artifact_load(source, device, phase, seconds)`.
 
 ### Health Checks
 
