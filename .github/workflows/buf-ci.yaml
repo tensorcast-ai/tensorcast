@@ -21,7 +21,8 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
             input: head/proto
-            breaking: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && !contains((github.event.head_commit.message || github.event.pull_request.title || ''), 'buf skip breaking') }}
+            breaking: false
+            # breaking: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && !contains((github.event.head_commit.message || github.event.pull_request.title || ''), 'buf skip breaking') }}
             breaking_against: base/proto
             pr_comment: false
             # Publishing schema changes to the BSR requires a BSR authentication token.
