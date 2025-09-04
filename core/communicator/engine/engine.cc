@@ -44,7 +44,7 @@ using transport::tcp_transport_t;
 
 // No legacy constructors; typed CommunicatorConfig is required.
 
-CommunicateEngine::CommunicateEngine(const CommunicatorConfig& cfg, uint32_t channel_expire_sec)
+CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& cfg, uint32_t channel_expire_sec)
     : stop_(false),
       inited_(false),
       server_context_(new transport::TcpContext()),

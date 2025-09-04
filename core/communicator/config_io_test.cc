@@ -8,9 +8,9 @@
 #include "absl/strings/str_cat.h"
 #include "core/communicator/config_io.h"
 
-using tensorcast::communicator::CommunicatorConfig;
 using tensorcast::communicator::LoadCommunicatorConfigFromFile;
 using tensorcast::communicator::NormalizeDefaults;
+using tensorcast::communicator::v1::CommunicatorConfig;
 
 static std::string write_temp_file(const std::string& content, const std::string& suffix) {
   // Write into the test's working directory

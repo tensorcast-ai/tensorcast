@@ -10,9 +10,13 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
-#include "tensorcast/global/global_store.pb.h"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::daemon {
+
+// Aliases for versioned proto namespaces used in lifecycle manager
+namespace global_store = ::tensorcast::global_store::v1;
+namespace commonpb = ::tensorcast::common::v1;
 
 class WorkerLifecycleManager {
  public:
@@ -54,7 +58,7 @@ class WorkerLifecycleManager {
   void chunk_sync_loop();
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
-  void apply_full_state(const std::vector<common::ReplicaInfo>& expected);
+  void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
 
   std::shared_ptr<store::StoreEngine> engine_;

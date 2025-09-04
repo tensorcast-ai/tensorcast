@@ -13,6 +13,7 @@
         "ms-python.debugpy",
         "charliermarsh.ruff",
         "zxh404.vscode-proto3",
+        "bufbuild.vscode-buf"
     ],
     "unwantedRecommendations": [
         "ms-vscode.cpptools-extension-pack"

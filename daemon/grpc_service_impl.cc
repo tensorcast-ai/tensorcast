@@ -38,8 +38,8 @@ using status_utils::to_grpc_status;
 
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
-    const daemon::MaterializeReplicaRequest* req,
-    daemon::MaterializeReplicaResponse* resp) {
+    const v1::MaterializeReplicaRequest* req,
+    v1::MaterializeReplicaResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = tensorcast::common::otel::ExtractFromServerMetadata(*ctx);
@@ -65,7 +65,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     span->SetAttribute("tc.device.uuid", req->device_uuid());
   }
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req->size_bytes()));
-  using daemon::MaterializeReplicaStatus;
+  using v1::MaterializeReplicaStatus;
 
   // Reject new materialization while shutting down to align with Python daemon
   if (is_shutting_down_.load()) {
@@ -112,7 +112,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     sessions_.put(req->replica_uuid(), handle.replica_key, handle.ready_future);
     // Initialize verification registry entry and enqueue a background task to
     // update status to PASSED/FAILED after the ready_future resolves.
-    set_verif_status(req->replica_uuid(), daemon::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS);
+    set_verif_status(req->replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS);
     {
       absl::MutexLock l(&bg_tasks_mu_);
       verif_tasks_.push_back(VerifTask{req->replica_uuid(), handle.ready_future});
@@ -138,8 +138,8 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
 
 Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
-    const daemon::ConfirmReplicaRequest* req,
-    daemon::ConfirmReplicaResponse* resp) {
+    const v1::ConfirmReplicaRequest* req,
+    v1::ConfirmReplicaResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -196,8 +196,8 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
 
 Status StoreDaemonServiceImpl::UnloadReplica(
     grpc::ServerContext* ctx,
-    const daemon::UnloadReplicaRequest* req,
-    daemon::UnloadReplicaResponse* resp) {
+    const v1::UnloadReplicaRequest* req,
+    v1::UnloadReplicaResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -217,7 +217,7 @@ Status StoreDaemonServiceImpl::UnloadReplica(
   }
   resp->set_disk_path(req->disk_path());
   // Python parity: DISK-target unload is a no-op idempotent success
-  if (req->target_device_type() == daemon::DeviceType::DEVICE_TYPE_DISK) {
+  if (req->target_device_type() == v1::DeviceType::DEVICE_TYPE_DISK) {
     resp->set_code(0);
     return Status::OK;
   }
@@ -267,8 +267,8 @@ Status StoreDaemonServiceImpl::UnloadReplica(
 
 Status StoreDaemonServiceImpl::ClearMem(
     grpc::ServerContext* ctx,
-    const daemon::ClearMemRequest* /*req*/,
-    daemon::ClearMemResponse* /*resp*/) {
+    const v1::ClearMemRequest* /*req*/,
+    v1::ClearMemResponse* /*resp*/) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -288,8 +288,8 @@ Status StoreDaemonServiceImpl::ClearMem(
 
 Status StoreDaemonServiceImpl::GetServerConfig(
     grpc::ServerContext* ctx,
-    const daemon::GetServerConfigRequest* /*req*/,
-    daemon::GetServerConfigResponse* resp) {
+    const v1::GetServerConfigRequest* /*req*/,
+    v1::GetServerConfigResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -319,7 +319,7 @@ static tensorcast::store::DeviceKey default_gpu_key() {
   return tensorcast::store::DeviceRegistry::instance().gpu_key(0);
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const daemon::MaterializeReplicaRequest& req) {
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::MaterializeReplicaRequest& req) {
   using tensorcast::DeviceType;
   using tensorcast::store::DeviceKey;
   if (!req.device_uuid().empty()) {
@@ -327,40 +327,40 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const daemon
     return tensorcast::store::DeviceRegistry::instance().normalize(key);
   }
   switch (req.target_device_type()) {
-    case daemon::DeviceType::DEVICE_TYPE_CPU:
+    case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{DeviceType::CPU, -1, ""};
-    case daemon::DeviceType::DEVICE_TYPE_DISK:
+    case v1::DeviceType::DEVICE_TYPE_DISK:
       // Treat as ingest-from-disk to default GPU for v1 parity
       return default_gpu_key();
-    case daemon::DeviceType::DEVICE_TYPE_GPU:
+    case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
       return default_gpu_key();
   }
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const daemon::ConfirmReplicaRequest& req) {
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::ConfirmReplicaRequest& req) {
   using tensorcast::DeviceType;
   using tensorcast::store::DeviceKey;
   switch (req.target_device_type()) {
-    case daemon::DeviceType::DEVICE_TYPE_CPU:
+    case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-    case daemon::DeviceType::DEVICE_TYPE_DISK:
+    case v1::DeviceType::DEVICE_TYPE_DISK:
       return default_gpu_key();
-    case daemon::DeviceType::DEVICE_TYPE_GPU:
+    case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
       return default_gpu_key();
   }
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const daemon::UnloadReplicaRequest& req) {
+tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::UnloadReplicaRequest& req) {
   using tensorcast::DeviceType;
   using tensorcast::store::DeviceKey;
   switch (req.target_device_type()) {
-    case daemon::DeviceType::DEVICE_TYPE_CPU:
+    case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-    case daemon::DeviceType::DEVICE_TYPE_DISK:
+    case v1::DeviceType::DEVICE_TYPE_DISK:
       return default_gpu_key();
-    case daemon::DeviceType::DEVICE_TYPE_GPU:
+    case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
       return default_gpu_key();
   }
@@ -376,8 +376,8 @@ store::loading::ReplicaKey StoreDaemonServiceImpl::make_replica_key(const std::s
 
 Status StoreDaemonServiceImpl::WaitReplicaVerification(
     grpc::ServerContext* ctx,
-    const daemon::WaitReplicaVerificationRequest* req,
-    daemon::WaitReplicaVerificationResponse* resp) {
+    const v1::WaitReplicaVerificationRequest* req,
+    v1::WaitReplicaVerificationResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -396,7 +396,7 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   // Consult verification registry (populated by MaterializeReplica) to see
   // if we already have a terminal status. If so, return immediately; otherwise
   // proceed to wait on the readiness future with bounded timeout.
-  std::optional<daemon::VerificationStatus> known_status;
+  std::optional<v1::VerificationStatus> known_status;
   std::string known_err;
   {
     absl::MutexLock l(&verif_mu_);
@@ -404,8 +404,8 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
     if (it != verif_.end()) {
       known_status = it->second.status;
       known_err = it->second.err;
-      if (*known_status == daemon::VerificationStatus::VERIFICATION_STATUS_PASSED ||
-          *known_status == daemon::VerificationStatus::VERIFICATION_STATUS_FAILED) {
+      if (*known_status == v1::VerificationStatus::VERIFICATION_STATUS_PASSED ||
+          *known_status == v1::VerificationStatus::VERIFICATION_STATUS_FAILED) {
         resp->set_status(*known_status);
         if (!known_err.empty())
           resp->set_err_msg(known_err);
@@ -416,7 +416,7 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   // If no session, treat as unknown UUID
   auto entry = sessions_.get(req->replica_uuid());
   if (!entry.has_value()) {
-    resp->set_status(daemon::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
+    resp->set_status(v1::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
     return Status::OK;
   }
   // Bounded wait
@@ -440,18 +440,18 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   }
   absl::Status st = entry->ready.get();
   if (st.ok()) {
-    resp->set_status(daemon::VerificationStatus::VERIFICATION_STATUS_PASSED);
+    resp->set_status(v1::VerificationStatus::VERIFICATION_STATUS_PASSED);
     return Status::OK;
   }
-  resp->set_status(daemon::VerificationStatus::VERIFICATION_STATUS_FAILED);
+  resp->set_status(v1::VerificationStatus::VERIFICATION_STATUS_FAILED);
   resp->set_err_msg(std::string(st.message()));
   return to_grpc_status(st);
 }
 
 Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
-    const daemon::LockTransportChunksRequest* req,
-    daemon::LockTransportChunksResponse* resp) {
+    const v1::LockTransportChunksRequest* req,
+    v1::LockTransportChunksResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -500,8 +500,8 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
 
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
-    const daemon::UnlockTransportChunksRequest* req,
-    daemon::UnlockTransportChunksResponse* /*resp*/) {
+    const v1::UnlockTransportChunksRequest* req,
+    v1::UnlockTransportChunksResponse* /*resp*/) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -529,8 +529,8 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
 
 Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     grpc::ServerContext* ctx,
-    const daemon::BeginRegisterArtifactRequest* req,
-    daemon::BeginRegisterArtifactResponse* resp) {
+    const v1::BeginRegisterArtifactRequest* req,
+    v1::BeginRegisterArtifactResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -574,8 +574,8 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
 
 Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     grpc::ServerContext* ctx,
-    const daemon::CommitRegisteredArtifactRequest* req,
-    daemon::CommitRegisteredArtifactResponse* resp) {
+    const v1::CommitRegisteredArtifactRequest* req,
+    v1::CommitRegisteredArtifactResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -612,8 +612,8 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
 
 Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
     grpc::ServerContext* ctx,
-    const daemon::AbortRegisteredArtifactRequest* req,
-    daemon::AbortRegisteredArtifactResponse* resp) {
+    const v1::AbortRegisteredArtifactRequest* req,
+    v1::AbortRegisteredArtifactResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -678,9 +678,9 @@ void StoreDaemonServiceImpl::start_sweepers() {
         const std::string& uuid = p.first;
         const absl::Status& st = p.second;
         if (st.ok()) {
-          set_verif_status(uuid, daemon::VerificationStatus::VERIFICATION_STATUS_PASSED);
+          set_verif_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_PASSED);
         } else {
-          set_verif_status(uuid, daemon::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
+          set_verif_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
         }
       }
 
@@ -852,8 +852,8 @@ void StoreDaemonServiceImpl::stop_sweepers() {
 
 Status StoreDaemonServiceImpl::GetWorkerStatus(
     grpc::ServerContext* ctx,
-    const daemon::GetWorkerStatusRequest* /*req*/,
-    daemon::GetWorkerStatusResponse* resp) {
+    const v1::GetWorkerStatusRequest* /*req*/,
+    v1::GetWorkerStatusResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -878,8 +878,8 @@ Status StoreDaemonServiceImpl::GetWorkerStatus(
 
 Status StoreDaemonServiceImpl::GetDetailedStatus(
     grpc::ServerContext* ctx,
-    const daemon::GetDetailedStatusRequest* /*req*/,
-    daemon::GetDetailedStatusResponse* resp) {
+    const v1::GetDetailedStatusRequest* /*req*/,
+    v1::GetDetailedStatusResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -909,7 +909,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
   uint64_t total_bytes = 0;
   int32_t total_replicas = 0;
   struct GpuAgg {
-    daemon::GpuDeviceInfo* out;
+    v1::GpuDeviceInfo* out;
     bool mem_filled{false};
   };
   absl::flat_hash_map<int, GpuAgg> gpu_map;
@@ -942,7 +942,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
       auto* r = it->second.out->add_loaded_replicas();
       r->set_artifact_id(info.artifact_id);
       r->set_artifact_size_bytes(info.size_bytes);
-      r->set_location(daemon::MemoryLocation::MEMORY_LOCATION_GPU);
+      r->set_location(v1::MemoryLocation::MEMORY_LOCATION_GPU);
       r->set_loaded_timestamp(
           std::chrono::duration_cast<std::chrono::seconds>(info.load_time.time_since_epoch()).count());
       r->set_last_access_timestamp(
@@ -956,7 +956,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
       auto* r = resp->add_cpu_replicas();
       r->set_artifact_id(info.artifact_id);
       r->set_artifact_size_bytes(info.size_bytes);
-      r->set_location(daemon::MemoryLocation::MEMORY_LOCATION_PAGEABLE_CPU);
+      r->set_location(v1::MemoryLocation::MEMORY_LOCATION_PAGEABLE_CPU);
       r->set_loaded_timestamp(
           std::chrono::duration_cast<std::chrono::seconds>(info.load_time.time_since_epoch()).count());
       r->set_last_access_timestamp(
@@ -980,7 +980,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
   return Status::OK;
 }
 
-void StoreDaemonServiceImpl::set_verif_status(const std::string& uuid, daemon::VerificationStatus st, std::string err) {
+void StoreDaemonServiceImpl::set_verif_status(const std::string& uuid, v1::VerificationStatus st, std::string err) {
   absl::MutexLock l(&verif_mu_);
   verif_[uuid] = VerifEntry{.status = st, .err = std::move(err)};
 }
@@ -989,8 +989,8 @@ void StoreDaemonServiceImpl::set_verif_status(const std::string& uuid, daemon::V
 
 Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
     grpc::ServerContext* ctx,
-    const daemon::GetLoadedReplicasV2Request* req,
-    daemon::GetLoadedReplicasV2Response* resp) {
+    const v1::GetLoadedReplicasV2Request* req,
+    v1::GetLoadedReplicasV2Response* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);

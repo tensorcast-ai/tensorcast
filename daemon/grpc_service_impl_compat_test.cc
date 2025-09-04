@@ -5,7 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "tensorcast/daemon/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 

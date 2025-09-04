@@ -11,15 +11,12 @@
 -I.
 -Icore
 -Itensorcast
+-Iproto/gen/cc
 -Itests/cpp
 -Ibazel-bin/external/catch2+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
--Ibazel-bin/proto/global_store_grpc_cpp_pb
--Ibazel-bin/proto/store_daemon_grpc_cpp_pb
--Ibazel-bin/proto/common_grpc_cpp_pb
--Ibazel-bin/proto/communicator_config_cc_lib_pb
 -Iexternal/protobuf+/src
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src

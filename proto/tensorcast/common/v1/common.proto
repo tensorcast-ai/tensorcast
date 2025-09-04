@@ -2,15 +2,63 @@ syntax = "proto3";
 
 package tensorcast.common.v1;
 
-// Generic pagination request parameters
+import "google/protobuf/timestamp.proto";
+
 message Pagination {
   optional uint32 page_size = 1;
-  optional string page_token = 2; // opaque token
+  optional string page_token = 2;
 }
 
-// Generic page information for responses
 message PageInfo {
-  optional string next_page_token = 1; // opaque token
-  optional uint32 total_size = 2;      // total items matching the query
+  optional string next_page_token = 1;
+  optional uint32 total_size = 2;
 }
 
+message ArtifactDescriptor {
+  string artifact_id = 1;
+  string index_multihash = 2;
+  string data_multihash = 3;
+  string schema_version = 4;
+  string encoding = 5;
+  uint64 total_size = 6;
+}
+
+enum MemoryType {
+  MEMORY_TYPE_UNSPECIFIED = 0;
+  MEMORY_TYPE_RAM = 1;
+  MEMORY_TYPE_GPU = 2;
+  MEMORY_TYPE_DISK = 3;
+}
+
+message MemoryInfo {
+  string node_id = 1;
+  string node_address = 2;
+  uint32 node_port = 3;
+  uint64 memory_size = 5;
+  MemoryType memory_type = 6;
+  uint32 device_id = 7;
+  repeated string remote_memory_keys = 8;
+  repeated uint64 buffer_sizes = 9;
+  bool is_memory_replica = 10;
+  string tensor_index_key = 11;
+  google.protobuf.Timestamp creation_ts = 12;
+  string source_process_id = 13;
+}
+
+message ReplicaRef {
+  string artifact_id = 1;
+  string replica_id = 2;
+}
+
+message ReplicaStats {
+  uint32 max_concurrency = 1;
+  uint32 current_requests = 2;
+  bool is_available = 3;
+  google.protobuf.Timestamp registered_ts = 4;
+}
+
+message ReplicaInfo {
+  ReplicaRef ref = 1;
+  MemoryInfo memory_info = 2;
+  ReplicaStats stats = 3;
+}

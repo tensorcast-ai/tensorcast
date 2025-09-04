@@ -24,13 +24,13 @@
 #include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
 #include "core/communicator/misc/ibv_wrap.h"
-#include "tensorcast/communicator/communicator_config.pb.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::communicator::engine {
 
 class CommunicateEngine {
  public:
-  explicit CommunicateEngine(const CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
+  explicit CommunicateEngine(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
   ~CommunicateEngine();
 
@@ -164,7 +164,7 @@ class CommunicateEngine {
   bool enable_rdma_;
   int mtcp_conn_count_;
   uint32_t ack_ttl_ms_ = 30000;
-  CommunicatorConfig config_{}; // defaults unless provided
+  v1::CommunicatorConfig config_{}; // defaults unless provided
   std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
 
   uint64_t channel_expire_;

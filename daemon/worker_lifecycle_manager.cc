@@ -15,6 +15,9 @@
 
 namespace tensorcast::daemon {
 
+namespace global_store = ::tensorcast::global_store::v1;
+namespace commonpb = ::tensorcast::common::v1;
+
 using namespace std::chrono_literals;
 
 absl::Status WorkerLifecycleManager::start() {
@@ -52,7 +55,7 @@ absl::Status WorkerLifecycleManager::start() {
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
   if (gs_) {
-    std::vector<common::ReplicaInfo> expected;
+    std::vector<commonpb::ReplicaInfo> expected;
     auto full_or = gs_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
     if (full_or.ok()) {
       state_version_ = full_or->first;
@@ -121,7 +124,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           state_checksum_,
           registered_ids,
           last_sync_success_ts_,
-          global::CONNECTION_STATUS_CONNECTED);
+          global_store::CONNECTION_STATUS_CONNECTED);
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
@@ -144,7 +147,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
             (hb.expected_state_version() > 0 && hb.expected_state_version() != state_version_);
         if (needs_sync) {
           // Build local state for synchronize call
-          global::WorkerLocalState local_state;
+          global_store::WorkerLocalState local_state;
           local_state.set_worker_id(worker_id_);
           local_state.set_state_version(state_version_);
           local_state.set_state_checksum(state_checksum_);
@@ -163,13 +166,13 @@ void WorkerLifecycleManager::heartbeat_loop() {
             auto* mi = rep->mutable_memory_info();
             mi->set_memory_size(i.size_bytes);
             if (i.gpu_state != common::memory::MemoryLocation::NONE) {
-              mi->set_memory_type(common::MEMORY_TYPE_GPU);
+              mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
               mi->set_device_id(i.gpu_device_id);
             } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
-              mi->set_memory_type(common::MEMORY_TYPE_RAM);
+              mi->set_memory_type(commonpb::MEMORY_TYPE_RAM);
               mi->set_device_id(0);
             } else {
-              mi->set_memory_type(common::MEMORY_TYPE_DISK);
+              mi->set_memory_type(commonpb::MEMORY_TYPE_DISK);
               mi->set_device_id(0);
             }
             rep->mutable_stats()->set_max_concurrency(1);
@@ -185,7 +188,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
             rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
           }
 
-          std::vector<global::StateChange> changes;
+          std::vector<global_store::StateChange> changes;
           auto sync_or = gs_->synchronize_worker_state(local_state, /*force_full_sync=*/false, &changes);
           if (sync_or.ok()) {
             state_version_ = sync_or->first;
@@ -196,18 +199,18 @@ void WorkerLifecycleManager::heartbeat_loop() {
             obsolete.reserve(changes.size());
             for (const auto& ch : changes) {
               switch (ch.type()) {
-                case global::StateChange::CHANGE_TYPE_REMOVE_REPLICA: {
+                case global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA: {
                   obsolete.push_back(ch.replica_info().ref().artifact_id());
                   break;
                 }
-                case global::StateChange::CHANGE_TYPE_ADD_REPLICA: {
+                case global_store::StateChange::CHANGE_TYPE_ADD_REPLICA: {
                   // Proactively materialize the replica locally on the indicated memory
                   const auto& ri = ch.replica_info();
                   tensorcast::store::DeviceKey dev{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
-                  if (ri.memory_info().memory_type() == common::MEMORY_TYPE_GPU) {
+                  if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_GPU) {
                     dev = tensorcast::store::DeviceRegistry::instance().gpu_key(
                         static_cast<int>(ri.memory_info().device_id()));
-                  } else if (ri.memory_info().memory_type() == common::MEMORY_TYPE_RAM) {
+                  } else if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_RAM) {
                     dev = tensorcast::store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
                   } else {
                     // Ignore DISK-only add in daemon prefetch
@@ -223,7 +226,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   }).detach();
                   break;
                 }
-                case global::StateChange::CHANGE_TYPE_UPDATE_REPLICA: {
+                case global_store::StateChange::CHANGE_TYPE_UPDATE_REPLICA: {
                   // Reconcile availability (enable/disable remote access) if applicable
                   const auto& ri = ch.replica_info();
                   const auto artifact_id = ri.ref().artifact_id();
@@ -255,7 +258,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
             VLOG(1) << "SynchronizeWorkerState returned: " << sync_or.status();
             sync_failure_.fetch_add(1);
             // Fallback to full-state sync if server indicates desync or errors persist
-            std::vector<common::ReplicaInfo> expected;
+            std::vector<commonpb::ReplicaInfo> expected;
             auto full_or = gs_->request_full_state_sync(worker_id_, state_version_, &expected);
             if (full_or.ok()) {
               state_version_ = full_or->first;
@@ -384,7 +387,7 @@ void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::stri
   }
 }
 
-void WorkerLifecycleManager::apply_full_state(const std::vector<common::ReplicaInfo>& expected) {
+void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected) {
   // Build a set of expected artifact_ids for quick lookup
   absl::flat_hash_set<std::string> expected_ids;
   expected_ids.reserve(expected.size());

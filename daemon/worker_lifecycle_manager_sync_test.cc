@@ -14,8 +14,8 @@
 #include "core/testing/common.h"
 #include "daemon/worker_lifecycle_manager.h"
 #include "grpcpp/grpcpp.h"
-#include "tensorcast/global/global_store.grpc.pb.h"
-#include "tensorcast/global/global_store.pb.h"
+#include "tensorcast/global_store/v1/global_store.grpc.pb.h"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace fs = std::filesystem;
 using tensorcast::DeviceType;
@@ -30,7 +30,7 @@ static DeviceKey make_gpu_key(int ordinal) {
 }
 
 // Minimal in-process fake Global Store service
-class FakeGlobalStoreService final : public global::GlobalStoreService::Service {
+class FakeGlobalStoreService final : public global_store::GlobalStoreService::Service {
  public:
   explicit FakeGlobalStoreService(std::vector<std::string> expected_ids, std::string obsolete_id)
       : expected_ids_(std::move(expected_ids)) {
@@ -63,18 +63,18 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status HealthCheck(
       ::grpc::ServerContext*,
-      const global::HealthCheckRequest*,
-      global::HealthCheckResponse* resp) override {
-    resp->set_status(global::STATUS_OK);
+      const global_store::HealthCheckRequest*,
+      global_store::HealthCheckResponse* resp) override {
+    resp->set_status(global_store::STATUS_OK);
     return ::grpc::Status::OK;
   }
 
   ::grpc::Status RegisterWorker(
       ::grpc::ServerContext*,
-      const global::RegisterWorkerRequest* req,
-      global::RegisterWorkerResponse* resp) override {
+      const global_store::RegisterWorkerRequest* req,
+      global_store::RegisterWorkerResponse* resp) override {
     (void)req;
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     resp->set_worker_id("worker-1");
     resp->set_heartbeat_interval_ms(1000);
     resp->set_state_sync_required(true);
@@ -84,10 +84,10 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status WorkerHeartbeat(
       ::grpc::ServerContext*,
-      const global::WorkerHeartbeatRequest* req,
-      global::WorkerHeartbeatResponse* resp) override {
+      const global_store::WorkerHeartbeatRequest* req,
+      global_store::WorkerHeartbeatResponse* resp) override {
     (void)req;
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     resp->set_state_sync_required(hb_state_sync_required_);
     if (hb_expected_state_version_ > 0)
       resp->set_expected_state_version(hb_expected_state_version_);
@@ -98,10 +98,10 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status RequestFullStateSync(
       ::grpc::ServerContext*,
-      const global::RequestFullStateSyncRequest* req,
-      global::RequestFullStateSyncResponse* resp) override {
+      const global_store::RequestFullStateSyncRequest* req,
+      global_store::RequestFullStateSyncResponse* resp) override {
     (void)req;
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     resp->set_new_state_version(1);
     resp->set_new_state_checksum("v1");
     for (const auto& id : expected_ids_) {
@@ -109,7 +109,7 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
       rep->set_artifact_id(id);
       // Minimal MemoryInfo; the daemon only inspects artifact_id in apply_full_state()
       auto* mi = rep->mutable_memory_info();
-      mi->set_memory_type(global::MEMORY_TYPE_GPU);
+      mi->set_memory_type(global_store::MEMORY_TYPE_GPU);
       mi->set_device_id(0);
       mi->set_memory_size(0);
     }
@@ -118,19 +118,19 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status SynchronizeWorkerState(
       ::grpc::ServerContext*,
-      const global::SynchronizeWorkerStateRequest* req,
-      global::SynchronizeWorkerStateResponse* resp) override {
+      const global_store::SynchronizeWorkerStateRequest* req,
+      global_store::SynchronizeWorkerStateResponse* resp) override {
     (void)req;
     if (sync_should_fail_) {
-      resp->set_status(global::STATUS_ERROR);
+      resp->set_status(global_store::STATUS_ERROR);
       return ::grpc::Status::OK;
     }
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     resp->set_new_state_version(2);
     resp->set_new_state_checksum("v2");
     for (const auto& id : sync_remove_ids_) {
       auto* ch = resp->add_state_changes();
-      ch->set_type(global::StateChange::CHANGE_TYPE_REMOVE_REPLICA);
+      ch->set_type(global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA);
       ch->mutable_replica_info()->set_artifact_id(id);
     }
     return ::grpc::Status::OK;
@@ -138,10 +138,10 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status BatchUpdateChunkStates(
       ::grpc::ServerContext*,
-      const global::BatchUpdateChunkStatesRequest* req,
-      global::BatchUpdateChunkStatesResponse* resp) override {
+      const global_store::BatchUpdateChunkStatesRequest* req,
+      global_store::BatchUpdateChunkStatesResponse* resp) override {
     std::lock_guard<std::mutex> l(mu_);
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     resp->set_updates_applied(req->updates_size());
     total_chunk_updates_ += req->updates_size();
     return ::grpc::Status::OK;
@@ -149,10 +149,10 @@ class FakeGlobalStoreService final : public global::GlobalStoreService::Service 
 
   ::grpc::Status UnregisterWorker(
       ::grpc::ServerContext*,
-      const global::UnregisterWorkerRequest* req,
-      global::UnregisterWorkerResponse* resp) override {
+      const global_store::UnregisterWorkerRequest* req,
+      global_store::UnregisterWorkerResponse* resp) override {
     (void)req;
-    resp->set_status(global::STATUS_OK);
+    resp->set_status(global_store::STATUS_OK);
     return ::grpc::Status::OK;
   }
 

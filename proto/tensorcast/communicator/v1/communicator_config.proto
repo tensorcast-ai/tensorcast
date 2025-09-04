@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package tensorcast.communicator.v1;
+
+// Typed configuration for the communicator engine and staging behavior.
+
+message StagerConfig {
+  bool stage_cpu_for_rdma = 1; // default: true
+  uint32 stage_chunk_mb_cpu = 2; // default: 4
+  uint32 stage_chunk_mb_gpu = 3; // default: 16
+  int32 buffers_per_flow = 4; // default: 4
+}
+
+message RdmaConfig {
+  int32 outstanding_wr = 1; // default: 64
+  uint32 ack_ttl_ms = 2; // default: 30000
+  // RDMA QP tuning
+  int32 traffic_class = 3; // default: 186 (TOS)
+  int32 qp_timeout = 4; // default: 20
+  int32 qp_retry = 5; // default: 7
+}
+
+message PoolConfig {
+  bool preregister_mr = 1; // default: true
+  uint64 pool_size_bytes = 2; // default: 8 GiB
+  uint64 chunk_bytes = 3; // default: 64 MiB
+}
+
+message TransportConfig {
+  int32 tcp_conn_count = 1; // default: 8
+  int32 tcp_tos = 2; // default: 0 (no change)
+  int32 connect_timeout_sec = 3; // default: 10
+}
+
+message AffinityConfig {
+  bool enable = 1; // reserved for future CPU pinning
+}
+
+message SimpleNumaNode {
+  int32 id = 1;
+  repeated string nics = 2;
+  repeated int32 gpus = 3;
+  bool is_default = 4;
+}
+
+message SimpleNumaConfig {
+  bool enable = 1; // default: false
+  repeated SimpleNumaNode nodes = 2;
+}
+
+message CommunicatorConfig {
+  bool enable_rdma = 1; // default: false
+  StagerConfig stager = 2;
+  RdmaConfig rdma = 3;
+  PoolConfig pool = 4;
+  TransportConfig transport = 5;
+  AffinityConfig affinity = 6;
+  SimpleNumaConfig simple_numa = 7; // optional; mirrors env-based interim
+}

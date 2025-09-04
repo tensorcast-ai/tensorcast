@@ -15,7 +15,7 @@ using tensorcast::testing::g_port;
 using tensorcast::testing::parse_options;
 
 int run_server() {
-  tensorcast::communicator::CommunicatorConfig cfg;
+  tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
   tensorcast::communicator::engine::CommunicateEngine engine(cfg);
   engine.init(g_ip, g_port);
@@ -33,7 +33,7 @@ int run_server() {
 }
 
 int run_client() {
-  tensorcast::communicator::CommunicatorConfig cfg;
+  tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
   tensorcast::communicator::engine::CommunicateEngine engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);

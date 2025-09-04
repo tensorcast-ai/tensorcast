@@ -1,81 +1,46 @@
-#! /bin/bash
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Generate Python protobuf files using grpc_tools (recursive)
-echo "Generating Python protobuf files using grpc_tools..."
+# Determine repository root based on this script's location
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+PROTO_DIR="${ROOT_DIR}/proto"
 
-# Collect all proto files under proto/ (absolute paths)
-mapfile -t PROTOS < <(find proto -type f -name "*.proto" | sort)
-if [ ${#PROTOS[@]} -eq 0 ]; then
-  echo "No .proto files found under ./proto" >&2
-  exit 1
+# Determine execution mode: bazel (default) or raw
+MODE="${1:-bazel}"
+
+case "${MODE}" in
+  bazel)
+    echo "[proto] Generating via bazel-run buf in: ${PROTO_DIR}"
+    RUN_CMD=(bazel run @rules_buf_toolchains//:buf -- generate --template buf.gen.yaml)
+    ;;
+  raw)
+    echo "[proto] Generating via raw buf in: ${PROTO_DIR}"
+    RUN_CMD=(buf generate --template buf.gen.yaml)
+    ;;
+  *)
+    echo "Usage: $(basename "$0") [bazel|raw]" >&2
+    exit 1
+    ;;
+esac
+
+cd "${PROTO_DIR}"
+"${RUN_CMD[@]}"
+
+# Post-process generated Python to use package prefix tensorcast.proto.*
+PY_OUT_DIR="${PROTO_DIR}/gen/python/tensorcast"
+if [[ -d "${PY_OUT_DIR}" ]]; then
+  echo "[proto] Rewriting Python imports under ${PY_OUT_DIR} (tensorcast.* -> tensorcast.proto.*)"
+  # Replace lines starting with "from tensorcast." but skip ones already using tensorcast.proto.
+  # Applies to both .py and .pyi files.
+  find "${PY_OUT_DIR}" -type f \( -name "*.py" -o -name "*.pyi" \) \
+    -exec sed -i -E \
+      -e '/^[[:space:]]*from[[:space:]]+tensorcast\.proto\./b' \
+      -e 's/^[[:space:]]*from[[:space:]]+tensorcast\./from tensorcast.proto./' {} +
+else
+  echo "[proto] Skipping import rewrite: directory not found: ${PY_OUT_DIR}"
 fi
 
-# Clean and recreate output root to avoid stale nested paths
-rm -rf tensorcast/proto
-mkdir -p tensorcast/proto
+echo "[proto] Done."
 
-# Build relative paths w.r.t. proto/ for protoc inputs
-REL_PROTOS=()
-for p in "${PROTOS[@]}"; do
-  REL_PROTOS+=("${p#proto/}")
-done
 
-# Generate Python and gRPC Python stubs
-uv run python -m grpc_tools.protoc \
-  --python_out=tensorcast/proto \
-  --pyi_out=tensorcast/proto \
-  --grpc_python_out=tensorcast/proto \
-  --proto_path=proto \
-  "${REL_PROTOS[@]}"
-
-echo "Python protobuf files generated successfully!"
-
-# Normalize imports to be package-relative in both *_pb2.py and *_pb2_grpc.py
-while IFS= read -r -d '' file; do
-  sed -i -E 's/^import ([A-Za-z0-9_]+)_pb2 as /from . import \1_pb2 as /' "$file"
-done < <(find tensorcast/proto -type f \( -name "*_pb2_grpc.py" -o -name "*_pb2.py" \) -print0)
-
-#!/usr/bin/env bash
-
-# Normalize cross-module imports in *_pb2.py to be relative to tensorcast/proto
-while IFS= read -r -d '' file; do
-  # Special-case: flatten imports from `tensorcast.common` back to local module,
-  # because common.proto is emitted at the root of tensorcast/proto.
-  sed -i -E 's/^from tensorcast\.common import ([A-Za-z0-9_]+)_pb2 as /from . import \1_pb2 as /' "$file"
-  # General case: keep other nested packages relative inside tensorcast/proto
-  # Convert e.g., `from tensorcast.common.v1 import common_pb2 as ...` to
-  # `from .tensorcast.common.v1 import common_pb2 as ...`
-  sed -i -E 's/^from (tensorcast\.[A-Za-z0-9_\.]+) import ([A-Za-z0-9_]+)_pb2 as /from .\1 import \2_pb2 as /' "$file"
-done < <(find tensorcast/proto -type f -name "*_pb2.py" -print0)
-
-# Ensure every directory under tensorcast/proto is a Python package
-while IFS= read -r -d '' dir; do
-  if [ ! -f "$dir/__init__.py" ]; then
-    echo "# Package marker" > "$dir/__init__.py"
-  fi
-done < <(find tensorcast/proto -type d -print0)
-
-# get directory of this script
-current_dir=$(dirname "$0")
-root_dir=$(dirname "$current_dir")
-
-# Build C++ proto/grpc headers for both services (if present)
-echo "Building C++ proto targets..."
-bazel build //proto:global_store_grpc //proto:store_daemon_grpc //proto:communicator_config_cc \
-  //proto:common_grpc || {
-  echo "Error: Failed to build proto targets" >&2
-  exit 1
-}
-
-# Copy generated headers into tensorcast/csrc/proto
-mkdir -p "$root_dir/tensorcast/csrc/proto"
-for tgt in global_store_grpc store_daemon_grpc common_grpc communicator_config_cc; do
-  if ls "$root_dir/bazel-bin/proto/$tgt/proto"/*.pb.h >/dev/null 2>&1; then
-    cp -f "$root_dir/bazel-bin/proto/$tgt/proto"/*.pb.h "$root_dir/tensorcast/csrc/proto"
-  fi
-done
-
-# Format generated Python files (recursively)
-uv run ruff format tensorcast/proto

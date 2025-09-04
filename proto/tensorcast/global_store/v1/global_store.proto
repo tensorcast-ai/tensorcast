@@ -1,18 +1,17 @@
 syntax = "proto3";
 
-package tensorcast.global;
+package tensorcast.global_store.v1;
 
-import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
-import "tensorcast/common/common.proto";
+import "google/protobuf/timestamp.proto";
+import "tensorcast/common/v1/common.proto";
 
 service GlobalStoreService {
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
 
   rpc UpdateReplica(UpdateReplicaRequest) returns (UpdateReplicaResponse) {}
 
-  rpc UnregisterReplica(UnregisterReplicaRequest)
-      returns (UnregisterReplicaResponse) {}
+  rpc UnregisterReplica(UnregisterReplicaRequest) returns (UnregisterReplicaResponse) {}
 
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
 
@@ -69,56 +68,56 @@ enum ConnectionStatus {
 
 // Worker注册请求
 message RegisterWorkerRequest {
-  string node_id = 1;                     // 节点主机名
-  string node_address = 2;                // IP地址
-  uint32 grpc_port = 3;                  // gRPC 服务端口
-  uint32 p2p_port = 4;                  // COMM 端口
-  uint64 mem_pool_total_size = 5;        // 内存池总大小（字节）
-  uint64 mem_pool_available_size = 6;    // 内存池可用大小（字节）
+  string node_id = 1; // 节点主机名
+  string node_address = 2; // IP地址
+  uint32 grpc_port = 3; // gRPC 服务端口
+  uint32 p2p_port = 4; // COMM 端口
+  uint64 mem_pool_total_size = 5; // 内存池总大小（字节）
+  uint64 mem_pool_available_size = 6; // 内存池可用大小（字节）
 
   // HA fields
-  bool is_recovery_registration = 7;      // 是否为恢复注册
-  string previous_worker_id = 8;          // 上一个 Worker ID (用于恢复)
+  bool is_recovery_registration = 7; // 是否为恢复注册
+  string previous_worker_id = 8; // 上一个 Worker ID (用于恢复)
 }
 
 message RegisterWorkerResponse {
   Status status = 1;
-  string worker_id = 2;                   // 系统分配的 Worker ID
-  uint32 heartbeat_interval_ms = 3;      // 建议的心跳间隔（毫秒）
+  string worker_id = 2; // 系统分配的 Worker ID
+  uint32 heartbeat_interval_ms = 3; // 建议的心跳间隔（毫秒）
 
   // HA fields
-  bool state_sync_required = 4;          // 是否需要状态同步
-  uint64 expected_state_version = 5;     // 期望的状态版本
+  bool state_sync_required = 4; // 是否需要状态同步
+  uint64 expected_state_version = 5; // 期望的状态版本
 }
 
 // Enhanced Worker心跳
 message WorkerHeartbeatRequest {
   string worker_id = 1;
-  uint64 mem_pool_available_size = 2;    // 当前内存池可用大小（字节）
-  bool accepting_new_requests = 3;       // 是否接受新请求（用于优雅退出）
+  uint64 mem_pool_available_size = 2; // 当前内存池可用大小（字节）
+  bool accepting_new_requests = 3; // 是否接受新请求（用于优雅退出）
 
   // Enhanced fields for HA
-  uint64 state_version = 4;              // 增量状态版本
-  string state_checksum = 5;             // 当前状态校验和
+  uint64 state_version = 4; // 增量状态版本
+  string state_checksum = 5; // 当前状态校验和
   repeated string registered_artifact_ids = 6; // 本地注册的 Artifact 列表（内容寻址ID）
-  int64 last_successful_sync = 7;        // 最后成功同步时间戳
+  int64 last_successful_sync = 7; // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
 }
 
 message WorkerHeartbeatResponse {
-  Status status = 1;                     // OK 或 NOT_FOUND
+  Status status = 1; // OK 或 NOT_FOUND
 
   // Enhanced fields for HA
-  bool state_sync_required = 2;          // 触发状态同步
-  uint64 expected_state_version = 3;     // 期望状态版本
-  repeated string obsolete_replicas = 4;   // 应该取消注册的副本
+  bool state_sync_required = 2; // 触发状态同步
+  uint64 expected_state_version = 3; // 期望状态版本
+  repeated string obsolete_replicas = 4; // 应该取消注册的副本
   google.protobuf.Timestamp server_timestamp_ts = 5; // 服务器时间戳（标准类型）
 }
 
 // Worker注销
 message UnregisterWorkerRequest {
   string worker_id = 1;
-  bool is_graceful_shutdown = 2;         // 是否为优雅关闭
+  bool is_graceful_shutdown = 2; // 是否为优雅关闭
 }
 
 message UnregisterWorkerResponse {
@@ -127,7 +126,7 @@ message UnregisterWorkerResponse {
 
 // 查询活跃Worker
 message ListActiveWorkersRequest {
-  bool include_unavailable = 1;          // 是否包含不接受新请求的 Worker
+  bool include_unavailable = 1; // 是否包含不接受新请求的 Worker
 }
 
 message ListActiveWorkersResponse {
@@ -143,8 +142,8 @@ message ListActiveWorkersResponse {
     google.protobuf.Timestamp last_heartbeat_ts = 9; // 标准时间戳
 
     // HA fields
-    uint64 state_version = 10;           // 当前状态版本
-    ConnectionStatus status = 11;        // 连接状态
+    uint64 state_version = 10; // 当前状态版本
+    ConnectionStatus status = 11; // 连接状态
   }
   repeated WorkerInfo workers = 1;
 }
@@ -155,7 +154,7 @@ message WorkerLocalState {
   string worker_id = 1;
   uint64 state_version = 2;
   string state_checksum = 3;
-  repeated tensorcast.common.ReplicaInfo local_replicas = 4;
+  repeated tensorcast.common.v1.ReplicaInfo local_replicas = 4;
   google.protobuf.Timestamp last_update_ts = 5;
 }
 
@@ -167,7 +166,7 @@ message WorkerLocalState {
 message SynchronizeWorkerStateRequest {
   string worker_id = 1;
   WorkerLocalState local_state = 2;
-  bool force_full_sync = 3;              // 强制完整同步
+  bool force_full_sync = 3; // 强制完整同步
 }
 
 message SynchronizeWorkerStateResponse {
@@ -186,7 +185,7 @@ message StateChange {
   }
 
   ChangeType type = 1;
-  tensorcast.common.ReplicaInfo replica_info = 2;
+  tensorcast.common.v1.ReplicaInfo replica_info = 2;
   string reason = 3;
 }
 
@@ -198,7 +197,7 @@ message RequestFullStateSyncRequest {
 message RequestFullStateSyncResponse {
   Status status = 1;
   uint64 new_state_version = 2;
-  repeated tensorcast.common.ReplicaInfo expected_replicas = 3;
+  repeated tensorcast.common.v1.ReplicaInfo expected_replicas = 3;
   string new_state_checksum = 4;
 }
 
@@ -206,44 +205,44 @@ message RequestFullStateSyncResponse {
 
 // Content-addressed artifact info
 message GetArtifactInfoByIdRequest {
-  string artifact_id = 1;                      // "mi2:..."
+  string artifact_id = 1; // "mi2:..."
 }
 
 message GetArtifactInfoByIdResponse {
   Status status = 1;
-  repeated tensorcast.common.MemoryInfo replicas = 2;         // All replicas under the content ID
+  repeated tensorcast.common.v1.MemoryInfo replicas = 2; // All replicas under the content ID
 }
 
 // Get artifact index request
 message GetArtifactIndexRequest {
-  string tensor_index_key = 1;             // SHA-256 hash of canonical index
+  string tensor_index_key = 1; // SHA-256 hash of canonical index
 }
 
 // Get artifact index response
 message GetArtifactIndexResponse {
   Status status = 1;
-  bytes tensor_index_data = 2;             // Canonical JSON bytes
-  string encoding = 3;                     // Encoding format (e.g., "json")
-  string schema_version = 4;               // Schema version (e.g., "v2")
+  bytes tensor_index_data = 2; // Canonical JSON bytes
+  string encoding = 3; // Encoding format (e.g., "json")
+  string schema_version = 4; // Schema version (e.g., "v2")
 }
 
 // Legacy ListReplicas removed in favor of V2
 
 message RegisterReplicaRequest {
-  string artifact_id = 1;                      // content-addressed ID (mi2:...), optional for disk/mixed flows
-  tensorcast.common.MemoryInfo mem_info = 2;
+  string artifact_id = 1; // content-addressed ID (mi2:...), optional for disk/mixed flows
+  tensorcast.common.v1.MemoryInfo mem_info = 2;
   uint32 max_concurrency = 3;
   string worker_id = 4;
 
   // Optional tensor index data for UPSERT (if key not yet in artifact_indices)
-  optional bytes tensor_index_data = 5;    // Canonical JSON bytes (for UPSERT)
-  optional string encoding = 6;            // Encoding format (e.g., "json")
-  optional string schema_version = 7;      // Schema version (e.g., "v2")
+  optional bytes tensor_index_data = 5; // Canonical JSON bytes (for UPSERT)
+  optional string encoding = 6; // Encoding format (e.g., "json")
+  optional string schema_version = 7; // Schema version (e.g., "v2")
   // Legacy disk path for non-content-addressed cases
   optional string disk_path = 8;
 
   // RFC-0007: Optionally include content-addressed descriptor for persistence
-  optional tensorcast.common.ArtifactDescriptor descriptor = 9;
+  optional tensorcast.common.v1.ArtifactDescriptor descriptor = 9;
 }
 
 message RegisterReplicaResponse {
@@ -277,8 +276,8 @@ message UnregisterReplicaResponse {
 // MemoryInfoList removed with legacy ListReplicas
 
 message RequestReplicaTransportRequest {
-  string artifact_id = 1;                      // content-addressed id
-  tensorcast.common.MemoryInfo local_memory_info = 2;
+  string artifact_id = 1; // content-addressed id
+  tensorcast.common.v1.MemoryInfo local_memory_info = 2;
   google.protobuf.Duration wait_timeout_dur = 3; // 标准超时时长
   string source_node_id = 4;
   string source_address = 5;
@@ -287,7 +286,7 @@ message RequestReplicaTransportRequest {
 
 message RequestReplicaTransportResponse {
   Status status = 1;
-  tensorcast.common.MemoryInfo remote_memory_info = 2;
+  tensorcast.common.v1.MemoryInfo remote_memory_info = 2;
   string transport_id = 3;
 }
 
@@ -313,18 +312,18 @@ message HealthCheckResponse {
 
 // Chunk state enum (matches DVMP ChunkState)
 enum ChunkState {
-  CHUNK_STATE_UNSPECIFIED = 0;     // Unspecified state
-  CHUNK_STATE_LOCKED_TX = 1;       // Being transferred
-  CHUNK_STATE_COPIED_GPU = 2;      // Fully copied to GPU
-  CHUNK_STATE_COLD = 3;            // Resident but evictable
-  CHUNK_STATE_EVICTED = 4;         // Evicted from memory
-  CHUNK_STATE_HOT = 5;             // Resident, not yet transferred
+  CHUNK_STATE_UNSPECIFIED = 0; // Unspecified state
+  CHUNK_STATE_LOCKED_TX = 1; // Being transferred
+  CHUNK_STATE_COPIED_GPU = 2; // Fully copied to GPU
+  CHUNK_STATE_COLD = 3; // Resident but evictable
+  CHUNK_STATE_EVICTED = 4; // Evicted from memory
+  CHUNK_STATE_HOT = 5; // Resident, not yet transferred
 }
 
 // Query chunk locations request
 message QueryChunkLocationsRequest {
   string artifact_id = 1;
-  repeated uint32 chunk_indices = 2;  // Specific chunks to query
+  repeated uint32 chunk_indices = 2; // Specific chunks to query
 }
 
 // Information about a chunk location
@@ -371,22 +370,22 @@ message BatchUpdateChunkStatesResponse {
 // Flattened record for V2 listing
 message ArtifactReplicaRecord {
   string artifact_id = 1;
-  tensorcast.common.MemoryInfo memory_info = 2;
+  tensorcast.common.v1.MemoryInfo memory_info = 2;
 }
 
 message ListReplicasV2Request {
   // Optional filters
   optional string node_id = 1;
   optional string node_address = 2;
-  optional tensorcast.common.MemoryType memory_type = 3;
+  optional tensorcast.common.v1.MemoryType memory_type = 3;
   optional uint32 device_id = 4;
   optional string artifact_id = 5;
 
   // Pagination
-  tensorcast.common.Pagination pagination = 100;
+  tensorcast.common.v1.Pagination pagination = 100;
 }
 
 message ListReplicasV2Response {
   repeated ArtifactReplicaRecord replicas = 1;
-  tensorcast.common.PageInfo page_info = 2;
+  tensorcast.common.v1.PageInfo page_info = 2;
 }

@@ -93,8 +93,8 @@ sc_cc_library(
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store/replica:chunk_meta",
-        "//proto:common_grpc_cpp",
-        "//proto:global_store_grpc_cpp",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
         "@opentelemetry-cpp//api:api",
@@ -121,7 +121,7 @@ sc_cc_library(
         ":communication_types",
         ":uma_lease_provider",
         "//core/communicator:engine_lib",
-        "//proto:communicator_config_cc_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
 )
 

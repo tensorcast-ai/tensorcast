@@ -30,14 +30,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(target_port > 0);
 
     // Create source and target engines in TCP mode
-    communicator::CommunicatorConfig cfg1;
+    communicator::v1::CommunicatorConfig cfg1;
     cfg1.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg1);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
-    communicator::CommunicatorConfig cfg2;
+    communicator::v1::CommunicatorConfig cfg2;
     cfg2.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg2);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
@@ -107,14 +107,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(target_port > 0);
 
     // Create source engine in TCP mode
-    communicator::CommunicatorConfig cfg3;
+    communicator::v1::CommunicatorConfig cfg3;
     cfg3.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
-    communicator::CommunicatorConfig cfg4;
+    communicator::v1::CommunicatorConfig cfg4;
     cfg4.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
@@ -186,14 +186,14 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     CAPTURE(target_port);
     REQUIRE(target_port > 0);
 
-    communicator::CommunicatorConfig cfg5;
+    communicator::v1::CommunicatorConfig cfg5;
     cfg5.set_enable_rdma(false); /* disable RDMA */
     auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg5);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
-    communicator::CommunicatorConfig cfg6;
+    communicator::v1::CommunicatorConfig cfg6;
     cfg6.set_enable_rdma(false); /* disable RDMA */
     auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg6);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);

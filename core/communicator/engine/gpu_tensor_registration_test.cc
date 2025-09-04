@@ -8,9 +8,9 @@
 #include "core/communicator/engine/engine.h"
 #include "core/testing/test_helpers.h"
 
-using tensorcast::communicator::CommunicatorConfig;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::v1::CommunicatorConfig;
 using namespace tensorcast::testing;
 
 TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {

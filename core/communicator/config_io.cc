@@ -15,7 +15,7 @@
 
 #include "yaml-cpp/yaml.h"
 
-namespace tc = tensorcast::communicator;
+namespace tc = tensorcast::communicator::v1;
 
 namespace tensorcast::communicator {
 
