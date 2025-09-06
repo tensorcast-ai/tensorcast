@@ -210,7 +210,7 @@ class TestErrorHandling:
         # The servicer should reject unknown enum values
         response = servicer.RegisterReplica(request, test_context)
         # Should return an error status for invalid memory type
-        assert response.status == global_store_pb2.Status.ERROR
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
         assert not response.replica_id  # No replica should be created
 
     def test_grpc_context_abort(self, servicer):
