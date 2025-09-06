@@ -163,6 +163,22 @@ sc_cc_library(
     ],
 )
 
+# Segment plan linearization (AVBS) over GPU memory with PAD=0 semantics
+sc_cc_library(
+    name = "segment_plan_source",
+    srcs = ["segment_plan_source.cc"],
+    hdrs = ["segment_plan_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        ":source_hash",
+        "//core/common:cuda_api_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
 # Sink implementations
 sc_cc_library(
     name = "gpu_memory_sink",

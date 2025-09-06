@@ -1,6 +1,5 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import ctypes
 import json
 import os
 import threading
@@ -16,6 +15,15 @@ from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as store_daemon_pb2
+from tensorcast.types import (
+    ArtifactDescriptor,
+    CoalescedHandshake,
+    CoalescedPlan,
+    DVMPPlan,
+    Handshake,
+    LeasePlan,
+    LeaseSegment,
+)
 
 logger = init_logger(__name__)
 # Global daemon address configuration
@@ -57,9 +65,9 @@ def get_daemon_address() -> str:
     return _global_daemon_address
 
 
-ctypes.CDLL(os.path.join(os.path.dirname(__file__), "lib/libstore_engine.so"))
 from tensorcast._C import (  # noqa: E402
     build_canonical_index_from_safetensors,
+    get_cuda_memory_handle,
     get_cuda_memory_ptr,
     get_device_uuid_map,
     inspect_or_generate_descriptor,
@@ -71,6 +79,110 @@ from tensorcast._C import (  # noqa: E402
 
 def _get_uuid():
     return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# RFC-0014 Python SDK helpers
+# ---------------------------------------------------------------------------
+
+
+class RegisterArtifactOptions:
+    def __init__(
+        self,
+        *,
+        plan: str = "vram_coalesced",
+        p2p_prefer: str = "vram",
+        max_inflight_bytes: int = 512 * 1024 * 1024,
+        release_on_tensor_commit: bool = True,
+        min_tensor_bytes: int = 64 * 1024,
+        max_tensor_count: int = 8192,
+        lease_bytes_limit: int = 0,
+    ) -> None:
+        self.plan = plan
+        self.p2p_prefer = p2p_prefer
+        self.max_inflight_bytes = int(max_inflight_bytes)
+        self.release_on_tensor_commit = bool(release_on_tensor_commit)
+        self.min_tensor_bytes = int(min_tensor_bytes)
+        self.max_tensor_count = int(max_tensor_count)
+        self.lease_bytes_limit = int(lease_bytes_limit)
+
+
+class RegisteredArtifact:
+    def __init__(
+        self, registration_id: str, daemon_address: str, *, ttl_ms: int | None = None
+    ) -> None:
+        self.registration_id = registration_id
+        self._addr = daemon_address
+        self._ttl_ms = int(ttl_ms) if ttl_ms and ttl_ms > 0 else 0
+        self._ka_thread: threading.Thread | None = None
+        self._ka_stop = threading.Event()
+        self._epoch: int = 0
+
+    def __enter__(self) -> "RegisteredArtifact":
+        if self._ttl_ms > 0 and self._ka_thread is None:
+
+            def _keepalive() -> None:
+                ctl = DaemonCtl(self._addr)
+                interval = max(1.0, self._ttl_ms / 2000.0)
+                while not self._ka_stop.wait(interval):
+                    try:
+                        ctl.keep_alive_registered_artifact(
+                            self.registration_id, self._ttl_ms, self._epoch
+                        )
+                        self._epoch += 1
+                    except Exception:  # noqa: BLE001
+                        logger.exception("KeepAliveRegisterArtifact failed")
+                        continue
+
+            t = threading.Thread(target=_keepalive, daemon=True)
+            t.start()
+            self._ka_thread = t
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._ka_stop.set()
+        if self._ka_thread and self._ka_thread.is_alive():
+            self._ka_thread.join(timeout=1.0)
+
+    def commit(self, timeout_s: float = 60.0) -> ArtifactDescriptor:
+        ctl = DaemonCtl(self._addr)
+        desc = ctl.commit_registered_artifact(self.registration_id, timeout_s=timeout_s)
+        self.__exit__(None, None, None)
+        return desc
+
+    def abort(self, timeout_s: float = 15.0) -> bool:
+        self.__exit__(None, None, None)
+        ctl = DaemonCtl(self._addr)
+        return ctl.abort_registered_artifact(self.registration_id, timeout_s=timeout_s)
+
+    def revoke(self, reason: str = "", timeout_s: float = 10.0) -> bool:
+        self.__exit__(None, None, None)
+        ctl = DaemonCtl(self._addr)
+        return ctl.revoke_registered_artifact(self.registration_id, reason)
+
+
+def begin_register_artifact_sdk(
+    *,
+    device_id: int,
+    total_size_bytes: int,
+    ttl_ms: int | None,
+    tensor_index_data: bytes,
+    plan: CoalescedPlan | DVMPPlan | LeasePlan,
+    daemon_address: str,
+) -> tuple[RegisteredArtifact, Handshake]:
+    ctl = DaemonCtl(daemon_address)
+    out = ctl.begin_register_artifact(
+        device_id=device_id,
+        total_size_bytes=total_size_bytes,
+        ttl_ms=ttl_ms,
+        tensor_index_data=tensor_index_data,
+        encoding="json",
+        schema_version="v2",
+        plan=plan,
+        timeout_s=60.0,
+    )
+    handle = RegisteredArtifact(out.registration_id, daemon_address, ttl_ms=ttl_ms or 0)
+    return handle, out.handshake
 
 
 def calculate_tensor_device_offsets(
@@ -531,19 +643,15 @@ def load_dict(
 
 def register_artifact(
     artifact: dict[str, torch.Tensor],
-    artifact_id: str,
     *,
+    options: RegisterArtifactOptions,
     device_id: int | torch.device | None = None,
-    enable_p2p: bool = True,
     ttl_ms: int | None = None,
     daemon_address: str | None = None,
-) -> tuple[dict[str, torch.Tensor], dict]:
-    """Register an in-memory tensor dict as a coalesced GPU memory replica.
+) -> tuple[dict[str, torch.Tensor], ArtifactDescriptor]:
+    """Register an in-memory tensor dict per RFC-0014.
 
-    Returns a tuple ``(state_dict, commit_info)`` where:
-    - ``state_dict``: tensors reference the daemon-owned memory
-    - ``commit_info``: includes ``registration_id``, ``artifact_id`` (mi2:...),
-      ``device_id``, ``size_bytes``, and ``descriptor`` (RFC-0007 ArtifactDescriptor)
+    Returns (state_dict, descriptor_dict). For non-coalesced plans, state_dict is the input mapping.
     """
     if not artifact:
         raise ValueError("artifact must not be empty")
@@ -627,72 +735,152 @@ def register_artifact(
         tensor_index_v2, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
 
-    # Begin registration with inline index data, wrapped with an OTel span
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
     ctl = DaemonCtl(daemon_address or get_daemon_address())
-    with tracer.start_as_current_span(
-        "Client/RegisterArtifact", kind=SpanKind.INTERNAL
-    ):
-        set_span_attributes(
-            {
-                "tc.artifact.id": artifact_id,
-                "tc.device.id": int(target_device_id),
-                "tc.size.bytes": int(total_size_bytes),
-                "tc.enable_p2p": bool(enable_p2p),
-            }
-        )
-        begin = ctl.begin_register_artifact(
-            artifact_id=artifact_id,
-            device_id=target_device_id,
-            total_size_bytes=total_size_bytes,
-            enable_p2p=enable_p2p,
-            ttl_ms=ttl_ms if ttl_ms is not None else 0,
-            tensor_index_data=index_bytes,
-            encoding="json",
-            schema_version="v2",
-            timeout_s=60.0,
-        )
 
-    cuda_handle = begin["daemon_ipc_handle"]
-    # Map daemon-owned memory into this process
-    base_ptr = get_cuda_memory_ptr(target_device_id, cuda_handle)
-
-    # Create destination tensors that reference the mapped memory
-    dest_state_dict = restore_tensors(
-        tensor_meta_index,
-        {target_device_id: int(base_ptr)},
-        tensor_device_offsets,
-        True,
-    )
-
-    # Copy payloads into daemon memory
-    for name, src in artifact.items():
-        dst = dest_state_dict[name]
-        local = src
-        if input_mode == "cpu":
-            # Move CPU → target GPU
-            local = local.to(torch.device("cuda", target_device_id), non_blocking=True)
-        else:
-            # Already CUDA; validate on the same device
-            if local.device.index != target_device_id:
-                raise ValueError(
-                    f"Tensor '{name}' device mismatch: expected cuda:{target_device_id}, got {local.device}"
-                )
-        if local.dtype != dst.dtype:
-            local = local.to(dst.dtype)
-        if tuple(local.shape) != tuple(dst.shape):
-            raise ValueError(
-                f"Shape mismatch for tensor '{name}': {tuple(local.shape)} vs {tuple(dst.shape)}"
+    # Build a canonical index bytes and a Begin request per plan
+    kind = options.plan
+    if kind == "vram_coalesced":
+        with tracer.start_as_current_span(
+            "Client/RegisterArtifact.Coalesced", kind=SpanKind.INTERNAL
+        ):
+            plan_model = CoalescedPlan(
+                kind="coalesced",
+                max_inflight_bytes=options.max_inflight_bytes,
+                release_on_tensor_commit=options.release_on_tensor_commit,
             )
-        dst.copy_(local, non_blocking=True)
+            begin = ctl.begin_register_artifact(
+                device_id=target_device_id,
+                total_size_bytes=total_size_bytes,
+                ttl_ms=ttl_ms if ttl_ms else 0,
+                tensor_index_data=index_bytes,
+                encoding="json",
+                schema_version="v2",
+                plan=plan_model,
+            )
+            if not isinstance(begin.handshake, CoalescedHandshake):
+                raise RuntimeError("Unexpected handshake type for coalesced plan")
+            cuda_handle = begin.handshake.daemon_ipc_handle
+            base_ptr = get_cuda_memory_ptr(target_device_id, cuda_handle)
+            dest_state_dict = restore_tensors(
+                tensor_meta_index,
+                {target_device_id: int(base_ptr)},
+                tensor_device_offsets,
+                True,
+            )
+            for name, src in artifact.items():
+                dst = dest_state_dict[name]
+                local = src
+                if input_mode == "cpu":
+                    local = local.to(
+                        torch.device("cuda", target_device_id), non_blocking=True
+                    )
+                else:
+                    if local.device.index != target_device_id:
+                        raise ValueError(
+                            f"Tensor '{name}' device mismatch: expected cuda:{target_device_id}, got {local.device}"
+                        )
+                if local.dtype != dst.dtype:
+                    local = local.to(dst.dtype)
+                if tuple(local.shape) != tuple(dst.shape):
+                    raise ValueError(
+                        f"Shape mismatch for tensor '{name}': {tuple(local.shape)} vs {tuple(dst.shape)}"
+                    )
+                dst.copy_(local, non_blocking=True)
+            torch.cuda.synchronize(target_device_id)
+            desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            return dest_state_dict, desc
 
-    # Ensure writes complete before commit
-    torch.cuda.synchronize(target_device_id)
+    elif kind == "dvmp":
+        # DVMP: upload bytes into daemon-owned CPU buffer via FeedRegisterArtifact
+        with tracer.start_as_current_span(
+            "Client/RegisterArtifact.DVMP", kind=SpanKind.INTERNAL
+        ):
+            # Begin
+            plan_model = DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0)
+            begin = ctl.begin_register_artifact(
+                device_id=target_device_id,
+                total_size_bytes=total_size_bytes,
+                ttl_ms=ttl_ms if ttl_ms else 0,
+                tensor_index_data=index_bytes,
+                encoding="json",
+                schema_version="v2",
+                plan=plan_model,
+            )
+            # Linearize into a single bytearray in SegmentPlan order
+            buf = bytearray(total_size_bytes)
+            for name in sorted(tensor_meta_index.keys()):
+                dst_off, storage_size, *_ = tensor_index_v2[name]
+                src = artifact[name]
+                b = src.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
+                if len(b) != int(storage_size):
+                    raise ValueError(
+                        f"Tensor '{name}' raw byte size mismatch: {len(b)} vs {storage_size}"
+                    )
+                buf[dst_off : dst_off + storage_size] = b
+            ok = ctl.feed_register_artifact_dvmp_chunk(
+                begin.registration_id, 0, bytes(buf), last=True
+            )
+            if not ok:
+                raise RuntimeError("DVMP feed failed")
+            desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            return artifact, desc
 
-    # Finalize registration and optionally return content-addressed descriptor
-    commit_info = ctl.commit_registered_artifact(
-        begin["registration_id"], timeout_s=60.0
-    )
+    elif kind == "vram_leased":
+        # VRAM Lease: export CUDA IPC handles for unique storages and feed as LeaseSegments
+        with tracer.start_as_current_span(
+            "Client/RegisterArtifact.Lease", kind=SpanKind.INTERNAL
+        ):
+            if input_mode != "cuda":
+                raise ValueError(
+                    "vram_leased plan requires CUDA tensors (device_id must be inferred)"
+                )
+            # Build unique storage chunks. Sorting by destination offset keeps logs
+            # stable, but the daemon no longer requires ordering (dst_offset is explicit).
+            # Reuse the unique chunks computed earlier.
+            chunks = list(unique_chunks)  # (src_offset, size, dst_offset, stream_idx)
+            chunks.sort(key=lambda x: int(x[2]))
 
-    return dest_state_dict, commit_info
+            # Export CUDA IPC handle via pybind (core implementation)
+            def _export_cuda_ipc_handle(ptr: int) -> bytes:
+                # Returns raw cudaIpcMemHandle_t bytes
+                return get_cuda_memory_handle(target_device_id, int(ptr))
+
+            segments: list[LeaseSegment] = []
+            for src_off, size_bytes, _dst_off, _stream in chunks:
+                handle_bytes = _export_cuda_ipc_handle(int(src_off))
+                segments.append(
+                    LeaseSegment(
+                        device_id=int(target_device_id),
+                        cuda_ipc_handle=handle_bytes,
+                        base_addr=0,
+                        length=int(size_bytes),
+                        dst_offset=int(_dst_off),
+                    )
+                )
+            plan_model = LeasePlan(
+                kind="lease",
+                min_tensor_bytes=options.min_tensor_bytes,
+                max_tensor_count=options.max_tensor_count,
+                lease_bytes_limit=options.lease_bytes_limit,
+            )
+            begin = ctl.begin_register_artifact(
+                device_id=target_device_id,
+                total_size_bytes=total_size_bytes,
+                ttl_ms=ttl_ms if ttl_ms else 0,
+                tensor_index_data=index_bytes,
+                encoding="json",
+                schema_version="v2",
+                plan=plan_model,
+            )
+            ok = ctl.feed_register_artifact_lease_segments(
+                begin.registration_id, segments
+            )
+            if not ok:
+                raise RuntimeError("Lease segments feed failed")
+            desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            return artifact, desc
+
+    else:
+        raise ValueError(f"Unknown plan: {kind}")

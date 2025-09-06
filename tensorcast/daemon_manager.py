@@ -40,8 +40,16 @@ class DaemonManager:
         config: StoreDaemonConfig,
         auto_start: bool = True,
     ):
-        # Initialize OTel in a library-friendly manner (no downgrade).
-        ensure_client_otel("tensorcast-client", role="client")
+        # Initialize OTel in a library-friendly manner; if instrumentation is
+        # unavailable in the environment (e.g., minimal test env), proceed
+        # without instrumentation rather than failing hard.
+        try:
+            ensure_client_otel("tensorcast-client", role="client")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OpenTelemetry client instrumentation unavailable (%s); proceeding without it",
+                exc,
+            )
 
         self.config = config
         self.auto_start = auto_start

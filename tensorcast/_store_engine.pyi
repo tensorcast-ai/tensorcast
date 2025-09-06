@@ -136,46 +136,7 @@ class StoreEngine:
 
     def get_replica_size(self, replica_key: ReplicaKey) -> int: ...
 
-    # ---- Memory Artifact Registration (RFC-0006 Phase A) ----
-    class ArtifactRegistration(TypedDict, total=False):
-        artifact_id: str
-        tensor_index_key: str
-        tensor_index_data: Optional[str]
-        schema_version: str
-        encoding: str
-        device_id: int
-        total_size_bytes: int
-        enable_p2p: bool
-        ttl_ms: int
-
-    class RegistrationBeginResult(TypedDict):
-        registration_id: str
-        device_id: int
-        size_bytes: int
-        daemon_ipc_handle: bytes
-
-    class RegistrationCommitResult(TypedDict):
-        registration_id: str
-        artifact_id: str
-        device_id: int
-        size_bytes: int
-        # RFC-0007 descriptor fields (content-addressed identity)
-        index_multihash: str
-        data_multihash: str
-        schema_version: str
-        encoding: str
-
-    def begin_register_artifact(
-        self,
-        registration: ArtifactRegistration,
-    ) -> RegistrationBeginResult: ...
-
-    def commit_registered_artifact(
-        self,
-        registration_id: str,
-    ) -> RegistrationCommitResult: ...
-
-    def abort_registered_artifact(self, registration_id: str) -> bool: ...
+    # (RFC-0014) PyBind registration wrappers removed. Use StoreDaemon gRPC via Python SDK.
 
     # ---- Distributed Memory Pool helpers ----
     def lock_chunks(

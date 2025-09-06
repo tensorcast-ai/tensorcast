@@ -6,7 +6,7 @@ import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 from tensorcast import init
-from tensorcast.torch_util import register_artifact
+from tensorcast.torch_util import RegisterArtifactOptions, register_artifact
 
 init()
 
@@ -18,7 +18,8 @@ artifact = AutoModelForCausalLM.from_pretrained(
 
 state_dict = artifact.state_dict()
 
-saved_dict, commit_info = register_artifact(state_dict, "Qwen3-0.6B", device_id=0)
+opts = RegisterArtifactOptions(plan="vram_coalesced")
+saved_dict, commit_info = register_artifact(state_dict, options=opts, device_id=0)
 
 
 def assert_state_dict_equal(

@@ -19,8 +19,11 @@ sc_cc_library(
         ":session_manager_hdr",
         ":status_utils",
         ":transport_lock_manager_hdr",
+        "//core/common:artifact_hash_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store:store_engine",
+        "//core/store/loader:segment_plan_source",
+        "//core/store/loader:source_hash",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
@@ -118,6 +121,29 @@ cc_test(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/log",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_keepalive_revoke_test",
+    srcs = ["grpc_service_impl_keepalive_revoke_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_lease_copy_test",
+    srcs = ["grpc_service_impl_lease_copy_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store/loader:source_hash",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )

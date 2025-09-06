@@ -271,12 +271,14 @@ def build_store_engine_and_daemon(
         print("Bazel not available; skipping core and daemon build")
         return
 
+    if not BUILD_CORE:
+        return
+
     cmd = [BAZEL_EXE, "build"]
 
     # Targets: build store_engine only when BUILD_CORE is enabled; daemon always
     targets: list[str] = []
-    if BUILD_CORE:
-        targets.append("//core:libstore_engine.so")
+    targets.append("//core:libstore_engine.so")
     targets.append("//daemon:tensorcast_daemon")
     cmd.extend(targets)
 

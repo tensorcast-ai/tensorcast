@@ -79,3 +79,40 @@ sequenceDiagram
 7. **Confirmation**: Confirm artifact loading completion
 8. **Registration**: Register replica with GlobalStore (if using distributed setup)
 9. **Cleanup**: Unregister when inference instance exits
+
+## In-Memory Registration (RFC-0014)
+
+- Unified API: BeginRegisterArtifact → FeedRegisterArtifact/FeedRegisterArtifactStream → CommitRegisteredArtifact.
+- Realization Plans:
+  - Coalesced VRAM: daemon allocates a single VRAM segment and exposes CUDA IPC to the SDK which writes tensor bytes directly.
+  - DVMP: client streams CPU chunks (via unary or streaming RPC); daemon writes into DVMP memory and computes data hash over SegmentPlan (PAD=0).
+- VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by linearizing SegmentPlan (PAD=0) from leased memory.
+
+### LeaseSegments ↔ SegmentPlan
+
+- Robust protocol: each `LeasedSegment` now includes `dst_offset` (destination offset in the coalesced VRAM buffer). This removes any ordering assumption when sending lease segments.
+- Daemon behavior:
+  - Builds the `SegmentPlan` from canonical index bytes.
+  - Zeros all `PAD` intervals in the destination VRAM buffer.
+  - Copies each `LeasedSegment` payload into `dst_offset .. dst_offset+length` regardless of feed order.
+- Client behavior:
+  - SDK already computes a coalesced layout and sets `dst_offset` per unique storage block.
+  - Ordering no longer matters, but the SDK still sorts for stable traces.
+
+Recommended: use `RegisteredArtifact` as a context manager to benefit from automatic keepalive when `ttl_ms` is provided, e.g.:
+
+```
+with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
+    # feed DVMP chunks or LeaseSegments here if needed
+    desc = handle.commit()
+```
+- Commit returns RFC-0007 content-addressed descriptor (artifact_id = mi2:index_multihash:data_multihash).
+- Same-machine consumers always materialize to daemon-owned coalesced VRAM (CUDA IPC) for zero-copy use.
+
+### SDK Helpers
+
+- High-level one-shot helper: `tensorcast.torch_util.register_artifact(state_dict, options=..., ttl_ms=..., daemon_address=...)` handles Begin → (Feed/Copy) → Commit and returns the destination tensors (coalesced when applicable) and the RFC‑0007 descriptor.
+- Lifecycle handle: `tensorcast.torch_util.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
+  - Auto-sends keepalive when `ttl_ms` is provided
+  - Exposes `commit()`, `abort()`, `revoke()` and context manager semantics
+  - Allows advanced callers to perform manual feed (e.g., DVMP chunks) before commit

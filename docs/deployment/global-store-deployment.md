@@ -166,6 +166,18 @@ Exposed via the unified metrics system:
 - Worker registration/deregistration counts
 - Active worker count
 - Artifact registration metrics
+  - tc_register_begin_coalesced_total
+  - tc_register_begin_dvmp_total
+  - tc_register_begin_lease_total
+  - tc_register_commit_coalesced_total
+  - tc_register_commit_dvmp_total
+  - tc_register_commit_lease_total
+  - tc_register_abort_total
+  - tc_register_keepalive_total
+  - tc_register_revoke_total
+  - tc_register_feed_dvmp_bytes_total
+  - tc_register_feed_lease_segments_total
+  - tc_register_feed_lease_bytes_total
 - Request latencies
 - Error rates
 

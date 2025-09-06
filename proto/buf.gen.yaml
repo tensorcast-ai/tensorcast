@@ -6,11 +6,11 @@ plugins:
     out: gen/cc
   - remote: buf.build/grpc/cpp:v1.74.1
     out: gen/cc
-  - protoc_builtin: python
+  - remote: buf.build/protocolbuffers/python:v31.1
     out: gen/python
   - remote: buf.build/grpc/python:v1.74.1
     out: gen/python
-  - remote: buf.build/protocolbuffers/pyi:v32.0
+  - remote: buf.build/protocolbuffers/pyi:v31.1
     out: gen/python
 inputs:
   - directory: ./

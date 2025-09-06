@@ -9,10 +9,28 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
-import tensorcast.proto.store_daemon_pb2_grpc as store_daemon_pb2_grpc
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
+
+# Use v1 daemon proto path
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2 as store_daemon_pb2,
+)
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2_grpc as store_daemon_pb2_grpc,
+)
+from tensorcast.types import (
+    ArtifactDescriptor,
+    BeginRegisterArtifactResult,
+    CoalescedHandshake,
+    DVMPEmptyHandshake,
+    DVMPRingHandshake,
+    DVMPStreamHandshake,
+    LeaseHandshake,
+    LeaseSegment,
+    Plan,
+    ServerConfig,
+)
 
 logger = init_logger(__name__)
 
@@ -211,7 +229,7 @@ class DaemonCtl:
                     logger.error(f"Error: {e}")
                     return False
 
-    def get_server_config(self):
+    def get_server_config(self) -> ServerConfig:
         with self._client_span("Client/GetServerConfig") as span:
             request = store_daemon_pb2.GetServerConfigRequest()
             try:
@@ -219,12 +237,12 @@ class DaemonCtl:
             except grpc.RpcError as e:
                 span.record_exception(e)
                 logger.error(f"Error: {e}")
-                return None
+                raise RuntimeError("GetServerConfig failed") from e
             else:
-                return {
-                    "chunk_size": response.chunk_size,
-                    "mem_pool_size": response.mem_pool_size,
-                }
+                return ServerConfig(
+                    chunk_size=int(response.chunk_size),
+                    mem_pool_size=int(response.mem_pool_size),
+                )
 
     # ------------------------------------------------------------------
     # Memory Artifact registration (outer-layer client API)
@@ -233,42 +251,46 @@ class DaemonCtl:
     def begin_register_artifact(
         self,
         *,
-        artifact_id: str,
         device_id: int,
         total_size_bytes: int,
-        enable_p2p: bool = False,
         ttl_ms: int | None = None,
         tensor_index_key: str | None = None,
         tensor_index_data: bytes | None = None,
         encoding: str = "json",
         schema_version: str = "v2",
+        plan: Plan | None = None,
         timeout_s: float = 30.0,
-    ) -> dict:
-        """Begin registration of an in-memory tensor dict.
+    ) -> BeginRegisterArtifactResult:
+        """Begin unified artifact registration (RFC-0014).
 
-        Returns a dict with keys: registration_id, daemon_ipc_handle, device_id, size_bytes.
+        Args:
+            device_id: target device ordinal (single-GPU invariant per RFC-0014).
+            total_size_bytes: AVBS total size (8B aligned).
+            ttl_ms: optional TTL used by Lease/DVMP plans.
+            tensor_index_key: optional hex key of canonical index.
+            tensor_index_data: optional canonical index bytes (preferred).
+            encoding: "json" or "cbor" for index bytes.
+            schema_version: index schema version (e.g., "v2").
+            plan: oneof plan options dict: {"kind": "coalesced"|"dvmp"|"lease", ...}.
+
+        Returns:
+            Dict with registration_id, device_id, total_size, and optional handshake:
+            - coalesced: {"daemon_ipc_handle": bytes}
+            - dvmp: {"dvmp": {"stream_token" or ring info}}
         """
-
-        if not artifact_id or device_id < 0 or total_size_bytes <= 0:
+        if device_id < 0 or total_size_bytes <= 0:
             raise ValueError("Invalid arguments for begin_register_artifact")
-
         if not tensor_index_key and tensor_index_data is None:
             raise ValueError(
                 "Either tensor_index_key or tensor_index_data must be provided"
             )
 
         req = store_daemon_pb2.BeginRegisterArtifactRequest(
-            artifact_id=artifact_id,
             device_id=int(device_id),
             total_size=int(total_size_bytes),
-            enable_p2p=bool(enable_p2p),
         )
-
-        # Optional TTL presence should be explicit only when provided
-        if ttl_ms is not None:
+        if ttl_ms is not None and ttl_ms > 0:
             req.ttl_ms = int(ttl_ms)
-
-        # Oneof index: key vs data
         if tensor_index_data is not None:
             req.tensor_index_data.CopyFrom(
                 store_daemon_pb2.TensorIndexData(
@@ -280,13 +302,20 @@ class DaemonCtl:
         else:
             req.tensor_index_key = tensor_index_key or ""
 
+        # Plan oneof
+        if plan is None:
+            from tensorcast.types import CoalescedPlan as _DefaultPlan
+
+            plan = _DefaultPlan()
+        kind = plan.kind
+        plan.apply_to_begin_request(req)
+
         with self._client_span("Client/BeginRegisterArtifact") as span:
             set_span_attributes(
                 {
-                    "tc.artifact.id": artifact_id,
                     "tc.device.id": int(device_id),
                     "tc.size.bytes": int(total_size_bytes),
-                    "tc.enable_p2p": bool(enable_p2p),
+                    "tc.plan": str(kind),
                 }
             )
             try:
@@ -304,27 +333,43 @@ class DaemonCtl:
                     raise MemoryError(str(e)) from e
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
                     raise TimeoutError(str(e)) from e
-                # if code == grpc.StatusCode.NOT_FOUND:
-                #     raise FileNotFoundError(str(e)) from e
                 raise RuntimeError(f"BeginRegisterArtifact failed: {e}") from e
 
-            return {
-                "registration_id": resp.registration_id,
-                "daemon_ipc_handle": bytes(resp.daemon_ipc_handle),
-                "device_id": int(resp.device_id),
-                "size_bytes": int(resp.size),
-            }
+            # Build typed handshake result
+            if resp.HasField("coalesced"):
+                handshake = CoalescedHandshake(
+                    daemon_ipc_handle=bytes(resp.coalesced.daemon_ipc_handle)
+                )
+            elif resp.HasField("dvmp"):
+                if resp.dvmp.HasField("ring"):
+                    handshake = DVMPRingHandshake(
+                        name=resp.dvmp.ring.name,
+                        ring_bytes=int(resp.dvmp.ring.ring_bytes),
+                    )
+                elif resp.dvmp.HasField("stream"):
+                    handshake = DVMPStreamHandshake(stream_token=resp.dvmp.stream.token)
+                else:
+                    handshake = DVMPEmptyHandshake()
+            elif resp.HasField("lease"):
+                handshake = LeaseHandshake()
+            else:
+                # Should not happen given daemon oneof
+                handshake = DVMPEmptyHandshake()
+
+            return BeginRegisterArtifactResult(
+                registration_id=resp.registration_id,
+                device_id=int(resp.device_id),
+                total_size=int(resp.total_size),
+                handshake=handshake,
+            )
 
     def commit_registered_artifact(
         self,
         registration_id: str,
         *,
         timeout_s: float = 30.0,
-    ) -> dict:
-        """Commit a previously begun tensor dict registration.
-
-        Returns a dict with keys: registration_id, artifact_id, device_id, size_bytes, descriptor.
-        """
+    ) -> ArtifactDescriptor:
+        """Commit a previously begun tensor dict registration and return descriptor (RFC-0007)."""
 
         if not registration_id:
             raise ValueError("registration_id is required")
@@ -351,22 +396,14 @@ class DaemonCtl:
                 raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
 
             desc = resp.descriptor
-            assert desc is not None
-            descriptor_dict = {
-                "artifact_id": desc.artifact_id,
-                "index_multihash": desc.index_multihash,
-                "data_multihash": desc.data_multihash,
-                "schema_version": desc.schema_version,
-                "encoding": desc.encoding,
-                "total_size": int(desc.total_size),
-            }
-            return {
-                "registration_id": resp.registration_id,
-                "artifact_id": resp.artifact_id,
-                "device_id": int(resp.device_id),
-                "size_bytes": int(resp.size),
-                "descriptor": descriptor_dict,
-            }
+            return ArtifactDescriptor(
+                artifact_id=desc.artifact_id,
+                index_multihash=desc.index_multihash,
+                data_multihash=desc.data_multihash,
+                schema_version=desc.schema_version,
+                encoding=desc.encoding,
+                total_size=int(desc.total_size),
+            )
 
     def abort_registered_artifact(
         self, registration_id: str, *, timeout_s: float = 15.0
@@ -380,7 +417,7 @@ class DaemonCtl:
         )
         with self._client_span("Client/AbortRegisteredArtifact") as span:
             try:
-                resp = self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
+                self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
             except grpc.RpcError as e:
                 span.record_exception(e)
                 code = e.code()
@@ -399,7 +436,75 @@ class DaemonCtl:
                     return False
                 raise RuntimeError(f"AbortRegisteredArtifact failed: {e}") from e
 
-            return bool(resp.ok)
+            return True
+
+    # ------------------------------------------------------------------
+    # Registration feed/keepalive helpers (Lease/DVMP)
+    # ------------------------------------------------------------------
+
+    def feed_register_artifact_dvmp_chunk(
+        self, registration_id: str, offset: int, data: bytes, last: bool = True
+    ) -> bool:
+        req = store_daemon_pb2.FeedRegisterArtifactRequest(
+            registration_id=registration_id,
+            dvmp_chunk=store_daemon_pb2.DvmpChunk(
+                offset=int(offset), data=data, last=bool(last)
+            ),
+        )
+        try:
+            self.stub.FeedRegisterArtifact(req, timeout=30.0)
+            return True
+        except grpc.RpcError as e:  # noqa: BLE001
+            logger.error(f"FeedRegisterArtifact(dvmp) failed: {e}")
+            return False
+
+    def feed_register_artifact_lease_segments(
+        self, registration_id: str, segments: list[LeaseSegment]
+    ) -> bool:
+        msg = store_daemon_pb2.LeaseSegments()
+        for s in segments:
+            seg = msg.segments.add()
+            seg.device_id = int(s.device_id)
+            seg.cuda_ipc_handle = s.cuda_ipc_handle
+            seg.base_addr = int(s.base_addr)
+            seg.length = int(s.length)
+            seg.dst_offset = int(s.dst_offset)
+        req = store_daemon_pb2.FeedRegisterArtifactRequest(
+            registration_id=registration_id
+        )
+        req.lease_segments.CopyFrom(msg)
+        try:
+            self.stub.FeedRegisterArtifact(req, timeout=30.0)
+            return True
+        except grpc.RpcError as e:  # noqa: BLE001
+            logger.error(f"FeedRegisterArtifact(lease) failed: {e}")
+            return False
+
+    def keep_alive_registered_artifact(
+        self, registration_id: str, ttl_ms: int, epoch: int
+    ) -> bool:
+        req = store_daemon_pb2.KeepAliveRegisterArtifactRequest(
+            registration_id=registration_id, ttl_ms=int(ttl_ms), epoch=int(epoch)
+        )
+        try:
+            self.stub.KeepAliveRegisterArtifact(req, timeout=10.0)
+            return True
+        except grpc.RpcError as e:
+            logger.error(f"KeepAliveRegisterArtifact failed: {e}")
+            return False
+
+    def revoke_registered_artifact(
+        self, registration_id: str, reason: str = ""
+    ) -> bool:
+        req = store_daemon_pb2.RevokeRegisteredArtifactRequest(
+            registration_id=registration_id, reason=reason
+        )
+        try:
+            self.stub.RevokeRegisteredArtifact(req, timeout=10.0)
+            return True
+        except grpc.RpcError as e:
+            logger.error(f"RevokeRegisteredArtifact failed: {e}")
+            return False
 
     # ------------------------------------------------------------------
     # Verification helpers
