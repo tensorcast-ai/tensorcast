@@ -73,7 +73,7 @@ This section reflects what is implemented today (code‑aligned), so this RFC ca
 - Daemon control client (SDK)
   - `tensorcast/daemon_ctl.py` uses the v1 proto and provides wrappers:
     - Begin/Feed/KeepAlive/Commit/Abort/Revoke; DVMP/Lease use `feed_register_artifact_*`; Commit returns a descriptor.
-    - The streaming feed wrapper is not yet exposed in SDK (proto has `FeedRegisterArtifactStream`).
+- The streaming feed wrapper is exposed and used by the SDK. DVMP uses client‑streaming feed by default (unary feed is deprecated for DVMP).
 
 - Unified Proto (v1)
   - `proto/tensorcast/daemon/v1/store_daemon.proto` provides:
@@ -150,7 +150,7 @@ Piece <|-- PAD
 - Validation: segments must be single‑device homogeneous; destination ranges must be in‑bounds; overlapping ranges are undefined and should be avoided by clients.
 
 - RP‑C: DVMP (CPU UMA)
-  - Begin returns an upload channel (SDK currently uses unary feed; proto also offers streaming and ring). The server writes into UMA via `DVMPRegionSink::write_at`; Commit computes `mi2:` and registers.
+- Begin returns an upload channel. The SDK uses client‑streaming feed; the server writes into UMA via `DVMPRegionSink::write_at`; Commit computes `mi2:` and registers.
   - Same‑machine first materialize: DVMP→VRAM coalescence, then CUDA IPC; cross‑machine via DRAMStager.
 
 ### 2.3 Cross‑Machine and Same‑Machine (aligned to 0009/0001)
@@ -168,7 +168,7 @@ Piece <|-- PAD
 
 ### 3.1 Proto (Final)
 
-- Method family: `BeginRegisterArtifact` / `FeedRegisterArtifact` / `FeedRegisterArtifactStream` / `KeepAliveRegisterArtifact` / `CommitRegisteredArtifact` / `AbortRegisteredArtifact` / `RevokeRegisteredArtifact`.
+- Method family: `BeginRegisterArtifact` / `FeedRegisterArtifactStream` / `KeepAliveRegisterArtifact` / `CommitRegisteredArtifact` / `AbortRegisteredArtifact` / `RevokeRegisteredArtifact`. Unary feed has been removed; streaming is canonical for all plans.
 - Begin: `device_id/total_size/ttl_ms/oneof index/oneof plan`; returns a `oneof handshake` (coalesced.ipc, dvmp.channel, lease empty).
 - Commit: returns `ArtifactDescriptor` only (`mi2:` + multihashes + schema/encoding/total_size).
 - See code for exact message definitions; not duplicated here.
@@ -238,7 +238,7 @@ flowchart TD
 
 - Unified RPCs (v1) and SDK wrappers: implemented.
 - Hashing unification: Commit computes `data_multihash` via SegmentPlan (PAD=0) consistently across Lease/DVMP/VRAM; fall back to contiguous GPU hashing when plan is absent.
-- DVMP upload: unary feed available; server writes UMA via `DVMPRegionSink::write_at`.
+- DVMP upload: client‑streaming feed is used; server writes UMA via `DVMPRegionSink::write_at`.
 - Lease lifecycle: segment feed, TTL, KeepAlive/Revoke RPCs; Commit materializes to daemon VRAM and registers.
 - Staged‑only P2P: `MemoryStager`/`GpuNetStager`/`DRAMStager` used in the engine (EX + ACK release).
 - Global Store: `artifact_indices` / `artifacts` / `artifact_replicas` and `GetArtifactIndex` are operational.
@@ -251,7 +251,7 @@ Short‑term (target next iteration):
 
 1) SDK ergonomics
 - Add `abort()/keep_alive()/revoke()` methods to `RegisteredArtifact` calling `DaemonCtl` internally, to provide object‑oriented lifecycle.
-- Expose streaming feed wrappers in SDK, prioritizing DVMP streaming (avoids building large user‑space buffers).
+- DONE: Streaming feed wrappers are exposed; DVMP uses client‑streaming by default.
 
 2) Lease improvements
 - Coalesce adjacent DATA pieces during Lease→VRAM materialization to reduce D2D calls; batch per tensor and use CUDA streams for parallelism.
@@ -309,7 +309,7 @@ sequenceDiagram
     DM->>DM: Hash via SegmentPlan (PAD=0)
     DM->>DM: Register COALESCED_VRAM
   else RP-B vram_leased
-    CL->>DM: FeedRegisterArtifact{lease_segments}
+    CL->>DM: FeedRegisterArtifactStream{lease_segments}
     loop every ttl_ms/2
       CL->>DM: KeepAliveRegisterArtifact
     end
@@ -317,8 +317,8 @@ sequenceDiagram
     DM->>DM: Copy Lease→VRAM + zero PAD
     DM->>DM: Register LEASED_VRAM (materialized)
   else RP-C dvmp
-    DM-->>CL: handshake.dvmp.channel (ring|grpc)
-    CL->>DM: FeedRegisterArtifact{dvmp_chunk} (SegmentPlan order)
+    DM-->>CL: handshake.dvmp.channel (grpc stream)
+    CL->>DM: FeedRegisterArtifactStream{dvmp_chunk} (SegmentPlan order)
     DM->>DV: DVMPRegionSink.write_at
     CL->>DM: CommitRegisteredArtifact
     DM->>DM: Hash DVMP via SegmentPlan (PAD=0)

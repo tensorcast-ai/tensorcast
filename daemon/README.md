@@ -221,14 +221,14 @@ Eviction strategy: per‑device LRU of GPU‑resident replicas that have no PID 
 The daemon exposes a unified verb‑noun API to register in‑memory artifacts per RFC‑0014:
 
 - Begin: `BeginRegisterArtifact(device_id, total_size, index, plan[, ttl_ms])`
-- Feed: `FeedRegisterArtifact{dvmp_chunk|lease_segments}` (unary) or `FeedRegisterArtifactStream` (client‑streaming)
+- Feed: `FeedRegisterArtifactStream` (client‑streaming). This is the only supported feed path for all plans.
 - KeepAlive: `KeepAliveRegisterArtifact(registration_id, ttl_ms, epoch)`
 - Commit: `CommitRegisteredArtifact(registration_id)` → returns RFC‑0007 content‑addressed descriptor (`mi2:`)
 - Abort/Revoke: abort frees pending resources; revoke also drops DVMP/Lease intermediates
 
 Realization plans (RP):
 - Coalesced VRAM: daemon allocates a single VRAM segment and returns CUDA IPC to the client (client writes into daemon VRAM).
-- DVMP (CPU UMA): client uploads chunks (unary or streaming); daemon routes chunks directly into engine‑owned DVMP (UMA) via DVMP‑owned IO (`write_at`), and hashing uses SegmentPlan (PAD=0).
+- DVMP (CPU UMA): client uploads chunks via streaming; daemon routes chunks directly into engine‑owned DVMP (UMA) via DVMP‑owned IO (`write_at`), and hashing uses SegmentPlan (PAD=0).
 - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks; daemon linearizes SegmentPlan (PAD=0) from leased memory.
 
 LeaseSegments robustness:
@@ -238,7 +238,7 @@ LeaseSegments robustness:
 
 TTL semantics:
 - If `ttl_ms` is set at Begin, the registration expires unless refreshed by `KeepAliveRegisterArtifact` (SDK can auto‑keepalive). `CommitRegisteredArtifact` returns `DEADLINE_EXCEEDED` on expiry (DVMP/Lease). `RevokeRegisteredArtifact` cleans DVMP buffers and Lease segments.
- - Optional fail-fast: TTL is also enforced during `FeedRegisterArtifact{,Stream}`; expired registrations fail with `DEADLINE_EXCEEDED` and are cleaned up.
+ - Optional fail-fast: TTL is also enforced during `FeedRegisterArtifactStream`; expired registrations fail with `DEADLINE_EXCEEDED` and are cleaned up.
 
 Metrics:
 - `tc_register_ttl_expired_feed_total`: TTL expirations during Feed.

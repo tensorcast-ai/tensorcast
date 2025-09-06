@@ -813,7 +813,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
 
   if (!status.ok()) {
     p2p_span->SetAttribute("error", true);
-    p2p_span->AddEvent("p2p_ingest_error", {{"message", status.message()}});
+    p2p_span->AddEvent("p2p_ingest_error", {{"message", std::string(status.message())}});
     if (absl::IsResourceExhausted(status)) {
       // Try to evict memory
       LOG(WARNING) << "Resource exhausted, attempting memory eviction";
@@ -1755,12 +1755,16 @@ absl::Status StoreEngine::feed_register_dvmp_chunk(
     std::lock_guard<std::mutex> lock(pending_mutex_);
     auto it = pending_regs_.find(std::string(registration_id));
     if (it == pending_regs_.end()) {
+      LOG(ERROR) << "DVMP feed: registration_id not found: " << registration_id;
       return absl::NotFoundError("registration_id not found");
     }
     if (it->second.plan != PendingRegistrationEntry::Plan::DVMP) {
+      LOG(ERROR) << "DVMP feed: plan mismatch for reg_id=" << registration_id;
       return absl::FailedPreconditionError("registration plan is not DVMP");
     }
     if (offset + bytes > it->second.size_bytes) {
+      LOG(ERROR) << "DVMP feed OOB: offset=" << offset << ", bytes=" << bytes
+                 << ", total_size=" << it->second.size_bytes << ", reg_id=" << registration_id;
       return absl::OutOfRangeError("DVMP feed write would exceed total size");
     }
     replica = it->second.replica;
@@ -1920,6 +1924,19 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   result.schema_version = entry.schema_version;
   result.encoding = entry.encoding;
   return result;
+}
+
+absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms) {
+  if (ttl_ms == 0) {
+    return absl::OkStatus();
+  }
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  auto it = pending_regs_.find(std::string(registration_id));
+  if (it == pending_regs_.end()) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  it->second.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  return absl::OkStatus();
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {

@@ -108,15 +108,13 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::AbortRegisteredArtifactRequest* req,
       v1::AbortRegisteredArtifactResponse* resp) override;
 
-  grpc::Status FeedRegisterArtifact(
-      grpc::ServerContext* ctx,
-      const v1::FeedRegisterArtifactRequest* req,
-      v1::FeedRegisterArtifactResponse* resp) override;
-
   grpc::Status FeedRegisterArtifactStream(
       grpc::ServerContext* ctx,
       ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
       v1::FeedRegisterArtifactStreamResponse* resp) override;
+
+  // Testing/helper overload: process a vector of streaming requests without standing up a gRPC server
+  grpc::Status FeedRegisterArtifactStreamVector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
 
   grpc::Status KeepAliveRegisterArtifact(
       grpc::ServerContext* ctx,
@@ -213,6 +211,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   struct RegMeta {
     RegPlan plan{RegPlan::COALESCED};
     std::chrono::time_point<std::chrono::steady_clock> expiry{};
+    // Remember TTL duration so stream frames can refresh expiry without extra RPCs
+    uint32_t ttl_ms{0};
     uint64_t epoch{0};
     uint64_t total_size{0};
     int device_id{0};

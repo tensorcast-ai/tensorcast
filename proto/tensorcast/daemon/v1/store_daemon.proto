@@ -43,7 +43,8 @@ service StoreDaemonService {
   // ========== Memory Artifact Registration ==========
   // New canonical RPC names
   rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
-  rpc FeedRegisterArtifact(FeedRegisterArtifactRequest) returns (FeedRegisterArtifactResponse) {}
+  // NOTE: Deprecated for DVMP; retained for Lease and internal/tests compatibility.
+  // Clients should prefer FeedRegisterArtifactStream.
   rpc FeedRegisterArtifactStream(stream FeedRegisterArtifactStreamRequest) returns (FeedRegisterArtifactStreamResponse) {}
   rpc KeepAliveRegisterArtifact(KeepAliveRegisterArtifactRequest) returns (KeepAliveRegisterArtifactResponse) {}
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
@@ -377,7 +378,9 @@ message BeginRegisterArtifactResponse {
   }
 }
 
-message CoalescedHandshake { bytes daemon_ipc_handle = 1; }
+message CoalescedHandshake {
+  bytes daemon_ipc_handle = 1;
+}
 
 message DvmpHandshake {
   oneof channel {
@@ -385,19 +388,14 @@ message DvmpHandshake {
     DvmpGrpcStream stream = 2;
   }
 }
-message DvmpShmRing { string name = 1; uint32 ring_bytes = 2; }
-message DvmpGrpcStream { string token = 1; }
-message LeaseHandshake {}
-
-// Feed registration data
-message FeedRegisterArtifactRequest {
-  string registration_id = 1; // Registration ID from Begin
-  oneof feed {
-    DvmpChunk dvmp_chunk = 10;         // DVMP data chunk
-    LeaseSegments lease_segments = 11; // Lease VRAM segments batch
-  }
+message DvmpShmRing {
+  string name = 1;
+  uint32 ring_bytes = 2;
 }
-message FeedRegisterArtifactResponse {}
+message DvmpGrpcStream {
+  string token = 1;
+}
+message LeaseHandshake {}
 
 // Stream variants must not reuse unary messages per lint
 message FeedRegisterArtifactStreamRequest {
@@ -409,8 +407,14 @@ message FeedRegisterArtifactStreamRequest {
 }
 message FeedRegisterArtifactStreamResponse {}
 
-message DvmpChunk { uint64 offset = 1; bytes data = 2; bool last = 3; }
-message LeaseSegments { repeated LeasedSegment segments = 1; }
+message DvmpChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+  bool last = 3;
+}
+message LeaseSegments {
+  repeated LeasedSegment segments = 1;
+}
 message LeasedSegment {
   int32 device_id = 1;
   bytes cuda_ipc_handle = 2;
@@ -422,7 +426,11 @@ message LeasedSegment {
 }
 
 // Keep alive for lease lifecycle
-message KeepAliveRegisterArtifactRequest { string registration_id = 1; uint32 ttl_ms = 2; uint64 epoch = 3; }
+message KeepAliveRegisterArtifactRequest {
+  string registration_id = 1;
+  uint32 ttl_ms = 2;
+  uint64 epoch = 3;
+}
 message KeepAliveRegisterArtifactResponse {}
 
 // Commit registration request
@@ -445,5 +453,8 @@ message AbortRegisteredArtifactRequest {
 message AbortRegisteredArtifactResponse {}
 
 // Revoke registration (lease only)
-message RevokeRegisteredArtifactRequest { string registration_id = 1; string reason = 2; }
+message RevokeRegisteredArtifactRequest {
+  string registration_id = 1;
+  string reason = 2;
+}
 message RevokeRegisteredArtifactResponse {}

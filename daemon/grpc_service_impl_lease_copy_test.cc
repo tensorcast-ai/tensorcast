@@ -69,7 +69,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h2, p2).ok());
 
   // Feed in reverse order to validate order independence; include explicit dst_offset
-  tensorcast::daemon::v1::FeedRegisterArtifactRequest freq;
+  tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest freq;
   freq.set_registration_id(bresp.registration_id());
   auto* ls = freq.mutable_lease_segments();
   auto* s2 = ls->add_segments();
@@ -85,8 +85,10 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   s1->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h1), sizeof(cudaIpcMemHandle_t)));
   s1->set_dst_offset(0);
 
-  tensorcast::daemon::v1::FeedRegisterArtifactResponse fresp;
-  st = svc.FeedRegisterArtifact(nullptr, &freq, &fresp);
+  // Use helper to feed streaming vector without spinning up gRPC server
+  std::vector<tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest> reqs;
+  reqs.push_back(freq);
+  st = svc.FeedRegisterArtifactStreamVector(reqs);
   REQUIRE(st.ok());
 
   // Commit

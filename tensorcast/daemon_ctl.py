@@ -445,39 +445,84 @@ class DaemonCtl:
     def feed_register_artifact_dvmp_chunk(
         self, registration_id: str, offset: int, data: bytes, last: bool = True
     ) -> bool:
-        req = store_daemon_pb2.FeedRegisterArtifactRequest(
-            registration_id=registration_id,
-            dvmp_chunk=store_daemon_pb2.DvmpChunk(
-                offset=int(offset), data=data, last=bool(last)
-            ),
+        # Unified stream-only implementation: build single-frame stream
+        stream_req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+            registration_id=registration_id
         )
+        stream_req.dvmp_chunk.offset = int(offset)
+        stream_req.dvmp_chunk.data = data
+        stream_req.dvmp_chunk.last = bool(last)
         try:
-            self.stub.FeedRegisterArtifact(req, timeout=30.0)
+            self.stub.FeedRegisterArtifactStream(iter([stream_req]), timeout=30.0)
             return True
         except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifact(dvmp) failed: {e}")
+            logger.error(f"FeedRegisterArtifactStream(dvmp) failed: {e}")
+            return False
+
+    def feed_register_artifact_dvmp_stream_data(
+        self,
+        registration_id: str,
+        data: bytes,
+        *,
+        offset: int = 0,
+        chunk_size: int | None = None,
+        timeout_s: float = 60.0,
+    ) -> bool:
+        """Stream DVMP bytes using FeedRegisterArtifactStream.
+
+        Splits payload by daemon chunk_size when not provided.
+        """
+        if chunk_size is None:
+            try:
+                cfg = self.get_server_config()
+                chunk_size = max(1, int(cfg.chunk_size))
+            except Exception:
+                chunk_size = 4 * 1024 * 1024
+
+        def _iter():
+            nonlocal offset
+            n = len(data)
+            pos = 0
+            while pos < n:
+                take = min(chunk_size, n - pos)
+                req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                    registration_id=registration_id
+                )
+                req.dvmp_chunk.offset = int(offset + pos)
+                req.dvmp_chunk.data = data[pos : pos + take]
+                pos += take
+                req.dvmp_chunk.last = pos >= n
+                yield req
+
+        try:
+            self.stub.FeedRegisterArtifactStream(_iter(), timeout=timeout_s)
+            return True
+        except grpc.RpcError as e:  # noqa: BLE001
+            logger.error(f"FeedRegisterArtifactStream(dvmp,data) failed: {e}")
             return False
 
     def feed_register_artifact_lease_segments(
         self, registration_id: str, segments: list[LeaseSegment]
     ) -> bool:
-        msg = store_daemon_pb2.LeaseSegments()
-        for s in segments:
-            seg = msg.segments.add()
-            seg.device_id = int(s.device_id)
-            seg.cuda_ipc_handle = s.cuda_ipc_handle
-            seg.base_addr = int(s.base_addr)
-            seg.length = int(s.length)
-            seg.dst_offset = int(s.dst_offset)
-        req = store_daemon_pb2.FeedRegisterArtifactRequest(
-            registration_id=registration_id
-        )
-        req.lease_segments.CopyFrom(msg)
+        # Stream lease segments via FeedRegisterArtifactStream
+        def _iter():
+            req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                registration_id=registration_id
+            )
+            for s in segments:
+                seg = req.lease_segments.segments.add()
+                seg.device_id = int(s.device_id)
+                seg.cuda_ipc_handle = s.cuda_ipc_handle
+                seg.base_addr = int(s.base_addr)
+                seg.length = int(s.length)
+                seg.dst_offset = int(s.dst_offset)
+            yield req
+
         try:
-            self.stub.FeedRegisterArtifact(req, timeout=30.0)
+            self.stub.FeedRegisterArtifactStream(_iter(), timeout=30.0)
             return True
         except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifact(lease) failed: {e}")
+            logger.error(f"FeedRegisterArtifactStream(lease) failed: {e}")
             return False
 
     def keep_alive_registered_artifact(

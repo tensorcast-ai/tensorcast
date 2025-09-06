@@ -13,7 +13,6 @@ actions:
     steps:
       - run: sudo apt-get update && sudo apt-get install -y git libxml2
       - run: |
-          CUDA_HOME=/usr/local/cuda \
           bazel test //core/... \
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
             --define use_fake_cuda=true \

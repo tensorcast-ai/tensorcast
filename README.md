@@ -166,8 +166,8 @@ handle, handshake = begin_register_artifact_sdk(
 
 ctl = DaemonCtl(daemon_addr)
 with handle as h:
-    # Feed DVMP chunk in SegmentPlan order (here only one piece)
-    ok = ctl.feed_register_artifact_dvmp_chunk(h.registration_id, 0, buf, last=True)
+    # Stream DVMP bytes in SegmentPlan order (here only one piece)
+    ok = ctl.feed_register_artifact_dvmp_stream_data(h.registration_id, buf, offset=0)
     if not ok:
         raise RuntimeError("DVMP feed failed")
 

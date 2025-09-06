@@ -154,6 +154,14 @@ class StoreEngine {
    */
   absl::Status abort_registered_artifact(std::string_view registration_id);
 
+  /**
+   * @brief Refresh TTL for a pending registration to keep it alive.
+   *
+   * Extends the internal expiry_time used for TTL enforcement during
+   * CommitRegisteredArtifact. No-op when ttl_ms == 0.
+   */
+  absl::Status keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms);
+
   // ------------------------------------------------------------------------
   // Query helpers (multi-device binding)
   // ------------------------------------------------------------------------

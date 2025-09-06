@@ -20,8 +20,28 @@ import time
 import grpc
 
 def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Popen:
-    bin_path = Path(__file__).resolve().parents[2] / "tensorcast" / "bin" / "tensorcast_daemon"
+    repo_root = Path(__file__).resolve().parents[2]
+    # Allow overriding daemon binary via env for local builds.
+    override = os.environ.get("TENSORCAST_DAEMON_BIN")
+    if override:
+        bin_path = Path(override)
+    else:
+        # Prefer a locally built Bazel daemon if present (supports FakeCuda build).
+        bazel_bin = repo_root / "bazel-bin" / "daemon" / "tensorcast_daemon"
+        if bazel_bin.exists() and os.access(bazel_bin, os.X_OK):
+            bin_path = bazel_bin
+        else:
+            # Fallback to packaged binary from the Python wheel
+            bin_path = repo_root / "tensorcast" / "bin" / "tensorcast_daemon"
     assert bin_path.exists() and os.access(bin_path, os.X_OK)
+    # Ensure libtorch shared libraries are discoverable by the daemon.
+    # This helps environments where system loader paths do not include
+    # the PyTorch wheel's bundled libraries.
+    torch_libdir = Path(torch.__file__).resolve().parent / "lib"
+    env = os.environ.copy()
+    if torch_libdir.exists():
+        ld_path = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{torch_libdir}:{ld_path}" if ld_path else str(torch_libdir)
     args = [
         str(bin_path),
         f"--listen_addr={listen_addr}",
@@ -32,7 +52,7 @@ def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Pop
         "--io_threads=2",
         "--enable_p2p_access=true",
     ]
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     # Wait for readiness
     deadline = time.time() + 10
     ok = False
@@ -66,7 +86,7 @@ def test_register_dvmp_stream_commit(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
 
     try:
         # Build small CPU tensors, enforce DVMP plan by passing device_id
@@ -97,7 +117,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
     try:
         device = torch.device("cuda", 0)
         # Two tensors that share no storage (unique blocks)
@@ -127,7 +147,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
 
     try:
         import json, random
@@ -223,17 +243,41 @@ def test_dvmp_ttl_expiry(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
 
     try:
-        # Small CPU tensors
-        state = {"x": torch.zeros((2, 2), dtype=torch.float32)}
-        opts = RegisterArtifactOptions(plan="dvmp")
-        # Very small TTL to trigger expiry
+        # Build minimal v2 index JSON for a single tensor
+        import json
+        import numpy as np
+        ttl = 50  # ms
+        shape = [2, 2]
+        stride = [2, 1]
+        size_bytes = 4 * 4  # float32 * 4
+        tensor_index_v2 = {"x": [0, size_bytes, shape, stride, "torch.float32", 0]}
+        index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+        # Begin with dvmp plan and TTL using SDK handle
+        handle, _hs = begin_register_artifact_sdk(
+            device_id=0,
+            total_size_bytes=size_bytes,
+            ttl_ms=ttl,
+            tensor_index_data=index_bytes,
+            plan=DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0),
+            daemon_address=listen,
+        )
+
+        # Feed dvmp chunk
+        buf = (np.zeros((2, 2), dtype=np.float32)).tobytes()
+        ctl = DaemonCtl(listen)
+        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, buf, offset=0)
+        assert ok
+
+        # Sleep beyond TTL to force expiry
+        time.sleep((ttl * 3) / 1000.0)
+
+        # Commit should fail due to expiry (DEADLINE_EXCEEDED)
         with pytest.raises(Exception):
-            # We expect commit to raise TimeoutError (DEADLINE_EXCEEDED)
-            # Sleep beyond TTL after feeding
-            _, _ = register_artifact(state, options=opts, device_id=0, daemon_address=listen, ttl_ms=50)
+            _ = handle.commit()
     finally:
         try:
             proc.terminate()
@@ -249,7 +293,7 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
 
     try:
         # Build minimal v2 index JSON for a single tensor
@@ -289,7 +333,7 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
         import numpy as np
         buf = (np.zeros((2, 2), dtype=np.float32)).tobytes()
         ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_dvmp_chunk(handle.registration_id, 0, buf, last=True)
+        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, buf, offset=0)
         assert ok
 
         # Sleep beyond initial TTL so that commit would have failed without keepalive
@@ -315,7 +359,7 @@ def test_ttl_expiry_on_feed_paths(tmp_path: Path):
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
     except RuntimeError as e:
-        pytest.skip(f"daemon not startable in this environment: {e}")
+        pytest.fail(str(e))
 
     try:
         # DVMP: begin with very short TTL, then attempt to feed after expiry
@@ -334,7 +378,7 @@ def test_ttl_expiry_on_feed_paths(tmp_path: Path):
         )
         time.sleep(0.08)
         ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_dvmp_chunk(handle.registration_id, 0, bytes([0] * size_bytes), last=True)
+        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, bytes([0] * size_bytes), offset=0)
         assert not ok, "DVMP feed should fail after TTL expiry"
 
         # Lease path: if CUDA available

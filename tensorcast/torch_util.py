@@ -793,7 +793,7 @@ def register_artifact(
             return dest_state_dict, desc
 
     elif kind == "dvmp":
-        # DVMP: upload bytes into daemon-owned CPU buffer via FeedRegisterArtifact
+        # DVMP: upload bytes into daemon-owned CPU buffer via FeedRegisterArtifactStream
         with tracer.start_as_current_span(
             "Client/RegisterArtifact.DVMP", kind=SpanKind.INTERNAL
         ):
@@ -808,8 +808,9 @@ def register_artifact(
                 schema_version="v2",
                 plan=plan_model,
             )
-            # Linearize into a single bytearray in SegmentPlan order
-            buf = bytearray(total_size_bytes)
+            # Stream in daemon-preferred chunk size without assembling a giant buffer
+            # Build generator that yields contiguous slices mapped to their destination offsets
+            frames: list[tuple[int, bytes]] = []
             for name in sorted(tensor_meta_index.keys()):
                 dst_off, storage_size, *_ = tensor_index_v2[name]
                 src = artifact[name]
@@ -818,10 +819,32 @@ def register_artifact(
                     raise ValueError(
                         f"Tensor '{name}' raw byte size mismatch: {len(b)} vs {storage_size}"
                     )
-                buf[dst_off : dst_off + storage_size] = b
-            ok = ctl.feed_register_artifact_dvmp_chunk(
-                begin.registration_id, 0, bytes(buf), last=True
-            )
+                frames.append((int(dst_off), b))
+
+            # Concatenate frames into one bytes is suboptimal for memory; stream each frame with proper offset
+            ok_all = True
+            # Determine chunk size from daemon
+            try:
+                cfg = ctl.get_server_config()
+                chunk_size = int(cfg.chunk_size)
+                if chunk_size <= 0:
+                    chunk_size = 4 * 1024 * 1024
+            except Exception:
+                chunk_size = 4 * 1024 * 1024
+
+            # Send each frame, possibly split by chunk_size
+            for off, data_bytes in frames:
+                ok = ctl.feed_register_artifact_dvmp_stream_data(
+                    begin.registration_id,
+                    data_bytes,
+                    offset=int(off),
+                    chunk_size=chunk_size,
+                    timeout_s=60.0,
+                )
+                if not ok:
+                    ok_all = False
+                    break
+            ok = ok_all
             if not ok:
                 raise RuntimeError("DVMP feed failed")
             desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)

@@ -82,10 +82,10 @@ sequenceDiagram
 
 ## In-Memory Registration (RFC-0014)
 
-- Unified API: BeginRegisterArtifact → FeedRegisterArtifact/FeedRegisterArtifactStream → CommitRegisteredArtifact.
+- Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:
   - Coalesced VRAM: daemon allocates a single VRAM segment and exposes CUDA IPC to the SDK which writes tensor bytes directly.
-  - DVMP: client streams CPU chunks (via unary or streaming RPC); daemon writes into DVMP memory and computes data hash over SegmentPlan (PAD=0).
+  - DVMP: client streams CPU chunks via a client‑streaming RPC; the daemon writes into DVMP memory and computes data hash over SegmentPlan (PAD=0). Each stream frame refreshes TTL (if set), and TTL is also propagated into the engine so that commit checks honor keepalives.
 - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by linearizing SegmentPlan (PAD=0) from leased memory.
 
 ### LeaseSegments ↔ SegmentPlan

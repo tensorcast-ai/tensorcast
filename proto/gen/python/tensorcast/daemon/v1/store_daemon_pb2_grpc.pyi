@@ -21,7 +21,6 @@ class StoreDaemonServiceStub:
     LockTransportChunks: grpc.UnaryUnaryMultiCallable
     UnlockTransportChunks: grpc.UnaryUnaryMultiCallable
     BeginRegisterArtifact: grpc.UnaryUnaryMultiCallable
-    FeedRegisterArtifact: grpc.UnaryUnaryMultiCallable
     FeedRegisterArtifactStream: grpc.StreamUnaryMultiCallable
     KeepAliveRegisterArtifact: grpc.UnaryUnaryMultiCallable
     CommitRegisteredArtifact: grpc.UnaryUnaryMultiCallable
@@ -42,7 +41,6 @@ class StoreDaemonServiceServicer:
     def LockTransportChunks(self, request: pb2.LockTransportChunksRequest, context: ServicerContext) -> pb2.LockTransportChunksResponse: ...
     def UnlockTransportChunks(self, request: pb2.UnlockTransportChunksRequest, context: ServicerContext) -> pb2.UnlockTransportChunksResponse: ...
     def BeginRegisterArtifact(self, request: pb2.BeginRegisterArtifactRequest, context: ServicerContext) -> pb2.BeginRegisterArtifactResponse: ...
-    def FeedRegisterArtifact(self, request: pb2.FeedRegisterArtifactRequest, context: ServicerContext) -> pb2.FeedRegisterArtifactResponse: ...
     def FeedRegisterArtifactStream(self, request_iterator: Iterable[pb2.FeedRegisterArtifactStreamRequest], context: ServicerContext) -> pb2.FeedRegisterArtifactStreamResponse: ...
     def KeepAliveRegisterArtifact(self, request: pb2.KeepAliveRegisterArtifactRequest, context: ServicerContext) -> pb2.KeepAliveRegisterArtifactResponse: ...
     def CommitRegisteredArtifact(self, request: pb2.CommitRegisteredArtifactRequest, context: ServicerContext) -> pb2.CommitRegisteredArtifactResponse: ...
@@ -223,19 +221,6 @@ class StoreDaemonService:
     ) -> pb2.BeginRegisterArtifactResponse: ...
 
     @staticmethod
-    def FeedRegisterArtifact(
-        request: pb2.FeedRegisterArtifactRequest,
-        target: str,
-        options: Sequence[Tuple[str, Any]] = ...,
-        channel_credentials: Optional[grpc.ChannelCredentials] = ...,
-        call_credentials: Optional[grpc.CallCredentials] = ...,
-        insecure: bool = ...,
-        compression: Optional[grpc.Compression] = ...,
-        wait_for_ready: Optional[bool] = ...,
-        timeout: Optional[float] = ...,
-        metadata: Optional[Sequence[Tuple[str, str]]] = ...,
-    ) -> pb2.FeedRegisterArtifactResponse: ...
-
     @staticmethod
     def FeedRegisterArtifactStream(
         request_iterator: Iterable[pb2.FeedRegisterArtifactStreamRequest],
@@ -305,5 +290,4 @@ class StoreDaemonService:
         timeout: Optional[float] = ...,
         metadata: Optional[Sequence[Tuple[str, str]]] = ...,
     ) -> pb2.RevokeRegisteredArtifactResponse: ...
-
 
