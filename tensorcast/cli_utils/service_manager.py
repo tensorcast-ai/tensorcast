@@ -30,7 +30,10 @@ from tensorcast.cli_utils.pid_manager import (
 )
 from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger, setup_logging
-from tensorcast.proto import store_daemon_pb2, store_daemon_pb2_grpc
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2,
+    store_daemon_pb2_grpc,
+)
 
 logger = init_logger(__name__)
 
@@ -304,11 +307,6 @@ def check_service_status(
 
     # Try to connect to the StoreDaemon and get detailed status
     try:
-        import grpc
-
-        from tensorcast.cli_utils.config_loader import load_config
-        from tensorcast.proto import store_daemon_pb2, store_daemon_pb2_grpc
-
         # Resolve address preference: explicit host/port -> config default
         if host is None or port is None:
             config = load_config(None, {})  # default config

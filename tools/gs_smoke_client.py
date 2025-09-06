@@ -25,7 +25,10 @@ import grpc
 from opentelemetry import trace
 
 from tensorcast.observability.otel import setup_otel
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import (
+    global_store_pb2,
+    global_store_pb2_grpc,
+)
 
 
 def main() -> None:

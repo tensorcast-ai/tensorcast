@@ -28,7 +28,10 @@ from tensorcast.cli_utils.service_manager import (
     _ensure_cpp_daemon_binary,
 )
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import (
+    global_store_pb2,
+    global_store_pb2_grpc,
+)
 
 
 def _get_free_port() -> int:

@@ -5,7 +5,7 @@
 from typing import List, Optional, Tuple
 
 from tensorcast.logger import init_logger
-from tensorcast.proto import global_store_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 from .base import BaseRepository
 

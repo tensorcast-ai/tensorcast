@@ -13,11 +13,15 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
-import tensorcast.proto.store_daemon_pb2_grpc as store_daemon_pb2_grpc
 from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2 as store_daemon_pb2,
+)
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2_grpc as store_daemon_pb2_grpc,
+)
 
 logger = init_logger(__name__)
 

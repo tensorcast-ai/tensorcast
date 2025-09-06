@@ -18,7 +18,8 @@ from tensorcast.global_store.repositories import (
     WorkerRepository,
 )
 from tensorcast.logger import init_logger
-from tensorcast.proto import common_pb2, global_store_pb2
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
 

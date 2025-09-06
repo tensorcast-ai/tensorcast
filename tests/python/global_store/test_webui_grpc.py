@@ -9,7 +9,8 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     GlobalStoreClient,
     GlobalStoreClientConfig,
 )
-from tensorcast.proto import global_store_pb2, common_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.common.v1 import common_pb2
 from google.protobuf import timestamp_pb2
 from tensorcast.global_store.webui_backend.grpc_client import WorkerInfoWrapper
 

@@ -19,8 +19,8 @@ from typing import Callable, Optional, TypeVar
 import grpc
 
 from tensorcast.logger import init_logger
-from tensorcast.proto import (
-    common_pb2,
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
     global_store_pb2_grpc,  # noqa: E402
 )
@@ -277,7 +277,7 @@ class GlobalStoreClient:
             if node_id is not None:
                 request.node_id = node_id
             if memory_type is not None:
-                request.memory_type = memory_type
+                request.memory_type = memory_type  # type: ignore[assignment]
             if device_id is not None:
                 request.device_id = device_id
 

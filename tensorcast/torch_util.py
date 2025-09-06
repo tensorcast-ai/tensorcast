@@ -12,10 +12,10 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-import tensorcast.proto.store_daemon_pb2 as store_daemon_pb2
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
+from tensorcast.proto.daemon.v1 import store_daemon_pb2 as store_daemon_pb2
 
 logger = init_logger(__name__)
 # Global daemon address configuration

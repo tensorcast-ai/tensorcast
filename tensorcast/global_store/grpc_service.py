@@ -41,7 +41,11 @@ from tensorcast.global_store.services import (
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import set_span_attributes
-from tensorcast.proto import common_pb2, global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.global_store.v1 import (
+    global_store_pb2,
+    global_store_pb2_grpc,
+)
 
 logger = init_logger(__name__)
 

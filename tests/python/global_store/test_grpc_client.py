@@ -22,7 +22,11 @@ from tensorcast.global_store.webui_backend.grpc_client import (
     close_global_store_client,
     get_global_store_client,
 )
-from tensorcast.proto import global_store_pb2, global_store_pb2_grpc, common_pb2
+from tensorcast.proto.global_store.v1 import (
+    global_store_pb2,
+    global_store_pb2_grpc,
+)
+from tensorcast.proto.common.v1 import common_pb2
 from google.protobuf import timestamp_pb2
 
 

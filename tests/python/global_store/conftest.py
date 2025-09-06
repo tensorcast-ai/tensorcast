@@ -11,7 +11,8 @@ import pytest
 import duckdb
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto import global_store_pb2, common_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (

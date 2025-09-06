@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 from google.protobuf import json_format
 
-from tensorcast.proto import communicator_config_pb2 as pb
+from tensorcast.proto.communicator.v1 import communicator_config_pb2 as pb
 
 
 def _normalize_defaults(cfg: pb.CommunicatorConfig) -> None:

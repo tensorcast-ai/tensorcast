@@ -24,7 +24,7 @@ from tensorcast.global_store.metrics import (
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import setup_otel
-from tensorcast.proto import global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 
 logger = init_logger(__name__)
 
