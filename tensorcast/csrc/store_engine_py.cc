@@ -361,7 +361,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("replica_key"),
           py::arg("location"),
           "Disable remote memory access for the given instance.")
-      // Removed legacy registration wrappers (RFC-0014). Use gRPC StoreDaemon via Python SDK.
       .def(
           "lock_chunks",
           [](StoreEngine& cs, const ReplicaKey& key, const std::vector<uint32_t>& chunk_indices) {

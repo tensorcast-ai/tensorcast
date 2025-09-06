@@ -136,8 +136,6 @@ class StoreEngine:
 
     def get_replica_size(self, replica_key: ReplicaKey) -> int: ...
 
-    # (RFC-0014) PyBind registration wrappers removed. Use StoreDaemon gRPC via Python SDK.
-
     # ---- Distributed Memory Pool helpers ----
     def lock_chunks(
         self,
