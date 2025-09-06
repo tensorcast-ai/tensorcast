@@ -12,12 +12,16 @@
 #include <optional>
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/otel/grpc_propagation.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
+#include "core/store/loader/segment_plan_source.h"
+#include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/context/runtime_context.h"
+#include "opentelemetry/metrics/provider.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 
@@ -542,33 +546,124 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "BeginRegisterArtifact");
-  span->SetAttribute("tc.artifact.id", req->artifact_id());
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req->total_size()));
   tensorcast::store::StoreEngine::ArtifactRegistration reg;
-  reg.artifact_id = req->artifact_id();
+  // Use a temporary placeholder identifier for pre-commit residency; replaced at Commit with mi2:...
+  reg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
   reg.device_id = req->device_id();
   reg.total_size_bytes = req->total_size();
-  reg.enable_p2p = req->enable_p2p();
+  // Plan handling
+  reg.enable_p2p = true;
   if (req->has_ttl_ms())
     reg.ttl_ms = req->ttl_ms();
-  if (req->has_tensor_index_key()) {
-    reg.tensor_index_key = req->tensor_index_key();
-  } else if (req->has_tensor_index_data()) {
-    reg.tensor_index_data = std::string(req->tensor_index_data().data().begin(), req->tensor_index_data().data().end());
-    reg.schema_version = req->tensor_index_data().schema_version();
-    reg.encoding = req->tensor_index_data().encoding();
+  // Build registration meta
+  RegPlan plan = RegPlan::COALESCED;
+  if (req->has_dvmp())
+    plan = RegPlan::DVMP;
+  else if (req->has_lease())
+    plan = RegPlan::LEASE;
+  RegMeta meta;
+  meta.plan = plan;
+  meta.total_size = req->total_size();
+  meta.device_id = req->device_id();
+  if (req->has_ttl_ms() && req->ttl_ms() > 0) {
+    meta.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req->ttl_ms());
+    meta.ttl_ms = static_cast<uint32_t>(req->ttl_ms());
   }
-  auto begin_or = engine_->begin_register_artifact(reg);
-  if (!begin_or.ok())
-    return to_grpc_status(begin_or.status());
-  const auto& out = begin_or.value();
-  resp->set_registration_id(out.registration_id);
-  // Copy IPC handle bytes
-  resp->set_daemon_ipc_handle(
-      reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
-  resp->set_device_id(out.device_id);
-  resp->set_size(out.size_bytes);
+  if (req->has_tensor_index_key()) {
+    meta.index_key_hex = req->tensor_index_key();
+  } else if (req->has_tensor_index_data()) {
+    meta.index_data = std::string(req->tensor_index_data().data().begin(), req->tensor_index_data().data().end());
+  }
+
+  if (plan == RegPlan::COALESCED) {
+    if (req->has_tensor_index_key())
+      reg.tensor_index_key = req->tensor_index_key();
+    if (req->has_tensor_index_data()) {
+      reg.tensor_index_data = meta.index_data;
+      reg.schema_version = req->tensor_index_data().schema_version();
+      reg.encoding = req->tensor_index_data().encoding();
+    }
+    auto begin_or = engine_->begin_register_artifact(reg);
+    if (!begin_or.ok()) {
+      LOG(ERROR) << "BeginRegisterArtifact failed: " << begin_or.status();
+      return to_grpc_status(begin_or.status());
+    }
+    const auto& out = begin_or.value();
+    resp->set_registration_id(out.registration_id);
+    auto* hs = resp->mutable_coalesced();
+    hs->set_daemon_ipc_handle(
+        reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+    resp->set_device_id(out.device_id);
+    resp->set_total_size(out.size_bytes);
+    // Metrics: begin (coalesced)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_begin_coalesced_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_begin_coalesced_total unavailable";
+    }
+    {
+      absl::MutexLock l(&reg_mu_);
+      reg_meta_[out.registration_id] = meta;
+    }
+  } else if (plan == RegPlan::DVMP) {
+    // Engine-backed DVMP begin: allocate DVMP/UMA CPU region
+    store::StoreEngine::ArtifactRegistration a;
+    a.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
+    if (req->has_tensor_index_key())
+      a.tensor_index_key = req->tensor_index_key();
+    if (req->has_tensor_index_data()) {
+      a.tensor_index_data = std::string(req->tensor_index_data().data().begin(), req->tensor_index_data().data().end());
+      a.schema_version = req->tensor_index_data().schema_version();
+      a.encoding = req->tensor_index_data().encoding();
+    }
+    a.device_id = req->device_id();
+    a.total_size_bytes = req->total_size();
+    a.enable_p2p = true;
+    if (req->has_ttl_ms())
+      a.ttl_ms = req->ttl_ms();
+    auto begin_or = engine_->begin_register_artifact_dvmp(a);
+    if (!begin_or.ok())
+      return to_grpc_status(begin_or.status());
+    const auto& out = begin_or.value();
+    resp->set_registration_id(out.registration_id);
+    auto* hs = resp->mutable_dvmp()->mutable_stream();
+    hs->set_token(out.registration_id);
+    resp->set_device_id(out.device_id);
+    resp->set_total_size(out.size_bytes);
+    // Metrics: begin (dvmp)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_begin_dvmp_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_begin_dvmp_total unavailable";
+    }
+    {
+      absl::MutexLock l(&reg_mu_);
+      reg_meta_[out.registration_id] = meta;
+    }
+  } else {
+    // Lease plan stub: return empty lease handshake
+    std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
+    resp->set_registration_id(reg_id);
+    (void)resp->mutable_lease();
+    resp->set_device_id(req->device_id());
+    resp->set_total_size(req->total_size());
+    // Metrics: begin (lease)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_begin_lease_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_begin_lease_total unavailable";
+    }
+    absl::MutexLock l(&reg_mu_);
+    reg_meta_[reg_id] = meta;
+  }
   return Status::OK;
 }
 
@@ -590,23 +685,244 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
   if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
     span->SetAttribute("tc.registration.id", req->registration_id());
   }
-  auto commit_or = engine_->commit_registered_artifact(req->registration_id());
-  if (!commit_or.ok())
-    return to_grpc_status(commit_or.status());
-  const auto& out = commit_or.value();
-  resp->set_registration_id(out.registration_id);
-  resp->set_artifact_id(out.artifact_id);
-  resp->set_device_id(out.device_id);
-  resp->set_size(out.size_bytes);
-  // Populate RFC-0007 content-addressed descriptor for parity with Python daemon
-  // and client expectations.
-  auto* desc = resp->mutable_descriptor_();
-  desc->set_artifact_id(out.artifact_id);
-  desc->set_index_multihash(out.index_multihash);
-  desc->set_data_multihash(out.data_multihash);
-  desc->set_schema_version(out.schema_version);
-  desc->set_encoding(out.encoding);
-  desc->set_total_size(out.size_bytes);
+  // Decide path by plan
+  RegMeta meta;
+  {
+    absl::MutexLock l(&reg_mu_);
+    auto it = reg_meta_.find(req->registration_id());
+    if (it != reg_meta_.end())
+      meta = it->second;
+  }
+  if (meta.plan == RegPlan::DVMP) {
+    // TTL enforcement: if expired, cleanup and fail fast
+    if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
+      absl::MutexLock l(&reg_mu_);
+      reg_meta_.erase(req->registration_id());
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
+        counter->Add(1.0);
+      } catch (...) {
+        VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
+      }
+      return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+    }
+    // Delegate to engine to compute descriptor and map mi2 id
+    auto commit_or = engine_->commit_registered_artifact(req->registration_id());
+    if (!commit_or.ok())
+      return to_grpc_status(commit_or.status());
+    const auto& out = commit_or.value();
+    auto* desc = resp->mutable_descriptor_();
+    desc->set_artifact_id(out.artifact_id);
+    desc->set_index_multihash(out.index_multihash);
+    desc->set_data_multihash(out.data_multihash);
+    desc->set_schema_version(out.schema_version);
+    desc->set_encoding(out.encoding);
+    desc->set_total_size(out.size_bytes);
+    // Metrics: commit (dvmp)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_commit_dvmp_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_commit_dvmp_total unavailable";
+    }
+    absl::MutexLock l(&reg_mu_);
+    reg_meta_.erase(req->registration_id());
+    return Status::OK;
+  } else if (meta.plan == RegPlan::LEASE) {
+    if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
+      absl::MutexLock l(&reg_mu_);
+      reg_meta_.erase(req->registration_id());
+      reg_leases_.erase(req->registration_id());
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
+        counter->Add(1.0);
+      } catch (...) {
+        VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
+      }
+      return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+    }
+    if (meta.index_data.empty() && meta.index_key_hex.empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "lease commit requires index (data or key)"};
+    }
+    if (meta.index_data.empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "lease commit requires canonical index bytes (v2 json)"};
+    }
+    // Build SegmentPlan
+    auto plan_or =
+        tensorcast::store::loader::build_segment_plan_from_canonical_index_json(meta.index_data, meta.total_size, 8);
+    if (!plan_or.ok())
+      return to_grpc_status(plan_or.status());
+    auto plan = *plan_or;
+    // Copy lease segments under lock
+    std::vector<LeaseSegMeta> lease_vec;
+    {
+      absl::MutexLock l(&reg_mu_);
+      auto itl = reg_leases_.find(req->registration_id());
+      if (itl == reg_leases_.end())
+        return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
+      lease_vec = itl->second;
+    }
+    // Map IPC handles for source segments
+    struct Opened {
+      int device_id;
+      void* ptr;
+      uint64_t base;
+      uint64_t len;
+    };
+    std::vector<Opened> opened;
+    opened.reserve(lease_vec.size());
+    for (const auto& seg : lease_vec) {
+      cudaIpcMemHandle_t h{};
+      size_t n = std::min(sizeof(h), seg.handle_bytes.size());
+      if (n > 0)
+        std::memcpy(&h, seg.handle_bytes.data(), n);
+      void* dev_ptr = nullptr;
+      if (auto st = tensorcast::cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+        for (const auto& o : opened)
+          (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+        return to_grpc_status(st);
+      }
+      opened.push_back(Opened{seg.device_id, dev_ptr, seg.base_offset, seg.length});
+    }
+    // Begin coalesced VRAM registration in engine (internal-only)
+    store::StoreEngine::ArtifactRegistration areg;
+    areg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
+    areg.tensor_index_key = meta.index_key_hex;
+    areg.tensor_index_data = meta.index_data; // canonical JSON
+    areg.schema_version = "v2";
+    areg.encoding = "json";
+    areg.device_id = meta.device_id;
+    areg.total_size_bytes = meta.total_size;
+    areg.enable_p2p = true;
+    auto begin2_or = engine_->begin_register_artifact(areg);
+    if (!begin2_or.ok()) {
+      for (const auto& o : opened)
+        (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+      return to_grpc_status(begin2_or.status());
+    }
+    const auto& out2 = begin2_or.value();
+    // Ensure pending registration is aborted on any error prior to successful commit
+    struct RegAbortGuard {
+      tensorcast::store::StoreEngine* engine;
+      std::string id;
+      bool active{true};
+      ~RegAbortGuard() {
+        if (active && engine) {
+          (void)engine->abort_registered_artifact(id);
+        }
+      }
+      void release() {
+        active = false;
+      }
+    } abort_guard{.engine = engine_.get(), .id = out2.registration_id};
+    // Open IPC handle for destination coalesced VRAM
+    cudaIpcMemHandle_t hdst{};
+    std::memcpy(&hdst, out2.cuda_ipc_handle_bytes.data(), sizeof(hdst));
+    void* dst_dev = nullptr;
+    if (auto st = tensorcast::cuda::open_ipc_mem_handle(&dst_dev, hdst, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+      for (const auto& o : opened)
+        (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+      return to_grpc_status(st);
+    }
+    // Zero PAD segments per plan to ensure deterministic padding
+    (void)tensorcast::cuda::set_device(meta.device_id);
+    for (const auto& p : plan) {
+      if (p.kind != tensorcast::store::loader::SegmentPiece::PAD)
+        continue;
+      if (p.length == 0)
+        continue;
+      auto st =
+          tensorcast::cuda::memset(static_cast<uint8_t*>(dst_dev) + p.dst_offset, 0, static_cast<size_t>(p.length));
+      if (!st.ok()) {
+        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        for (const auto& o : opened)
+          (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+        return to_grpc_status(st);
+      }
+    }
+    // Copy each leased segment to its explicit destination offset; order-free
+    for (size_t j = 0; j < opened.size(); ++j) {
+      const auto& o = opened[j];
+      const uint64_t dst_off = lease_vec[j].dst_offset;
+      // Validate destination range within [0, total_size)
+      if (dst_off > meta.total_size || o.len > meta.total_size || dst_off + o.len > meta.total_size) {
+        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        for (const auto& k : opened)
+          (void)tensorcast::cuda::close_ipc_mem_handle(k.ptr);
+        return {StatusCode::OUT_OF_RANGE, "lease segment dst range out of bounds"};
+      }
+      auto st = tensorcast::cuda::memcpy(
+          static_cast<uint8_t*>(dst_dev) + dst_off,
+          static_cast<uint8_t*>(o.ptr) + o.base,
+          static_cast<size_t>(o.len),
+          cudaMemcpyDeviceToDevice);
+      if (!st.ok()) {
+        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        for (const auto& k : opened)
+          (void)tensorcast::cuda::close_ipc_mem_handle(k.ptr);
+        return to_grpc_status(st);
+      }
+    }
+    (void)tensorcast::cuda::device_synchronize();
+    (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+    for (const auto& o : opened)
+      (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+    // Commit the coalesced registration in engine to finalize and compute descriptor
+    auto commit2_or = engine_->commit_registered_artifact(out2.registration_id);
+    if (!commit2_or.ok())
+      return to_grpc_status(commit2_or.status());
+    // Successful commit; prevent abort on scope exit
+    abort_guard.release();
+    const auto& d = commit2_or.value();
+    auto* desc = resp->mutable_descriptor_();
+    desc->set_artifact_id(d.artifact_id);
+    desc->set_index_multihash(d.index_multihash);
+    desc->set_data_multihash(d.data_multihash);
+    desc->set_schema_version(d.schema_version);
+    desc->set_encoding(d.encoding);
+    desc->set_total_size(d.size_bytes);
+    // Metrics: commit (lease)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_commit_lease_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_commit_lease_total unavailable";
+    }
+    // Cleanup lease meta
+    absl::MutexLock l2(&reg_mu_);
+    reg_meta_.erase(req->registration_id());
+    reg_leases_.erase(req->registration_id());
+    return Status::OK;
+  } else {
+    auto commit_or = engine_->commit_registered_artifact(req->registration_id());
+    if (!commit_or.ok())
+      return to_grpc_status(commit_or.status());
+    const auto& out = commit_or.value();
+    auto* desc = resp->mutable_descriptor_();
+    desc->set_artifact_id(out.artifact_id);
+    desc->set_index_multihash(out.index_multihash);
+    desc->set_data_multihash(out.data_multihash);
+    desc->set_schema_version(out.schema_version);
+    desc->set_encoding(out.encoding);
+    desc->set_total_size(out.size_bytes);
+    // Metrics: commit (coalesced)
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_commit_coalesced_total unavailable";
+    }
+    absl::MutexLock l(&reg_mu_);
+    reg_meta_.erase(req->registration_id());
+    return Status::OK;
+  }
   return Status::OK;
 }
 
@@ -631,7 +947,212 @@ Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
   auto st = engine_->abort_registered_artifact(req->registration_id());
   if (!st.ok())
     return to_grpc_status(st);
-  resp->set_ok(true);
+  // Metrics: abort
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_abort_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_abort_total unavailable";
+  }
+  return Status::OK;
+}
+
+// Removed unary FeedRegisterArtifact; use streaming variant only
+
+Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
+    grpc::ServerContext* /*ctx*/,
+    ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
+    v1::FeedRegisterArtifactStreamResponse* /*resp*/) {
+  v1::FeedRegisterArtifactStreamRequest req;
+  std::string reg_id;
+  bool saw_last = false;
+  while (reader->Read(&req)) {
+    if (reg_id.empty()) {
+      reg_id = req.registration_id();
+      // Validate registration exists
+      absl::MutexLock l(&reg_mu_);
+      if (!reg_meta_.contains(reg_id)) {
+        return {StatusCode::NOT_FOUND, "registration_id not found"};
+      }
+      // Optional TTL fail-fast at first read
+      auto it = reg_meta_.find(reg_id);
+      if (it != reg_meta_.end() && it->second.expiry.time_since_epoch().count() > 0 &&
+          std::chrono::steady_clock::now() > it->second.expiry) {
+        reg_meta_.erase(reg_id);
+        reg_leases_.erase(reg_id);
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_feed_total");
+          counter->Add(1.0);
+        } catch (...) {
+          VLOG(1) << "metrics counter tc_register_ttl_expired_feed_total unavailable";
+        }
+        return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+      }
+    } else if (req.registration_id() != reg_id) {
+      return {StatusCode::INVALID_ARGUMENT, "registration_id changed in stream"};
+    }
+
+    // Refresh TTL on every frame when TTL was set at Begin (daemon meta + engine)
+    {
+      absl::MutexLock l(&reg_mu_);
+      auto it = reg_meta_.find(reg_id);
+      if (it != reg_meta_.end() && it->second.ttl_ms > 0) {
+        it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(it->second.ttl_ms);
+      }
+    }
+    {
+      absl::MutexLock l(&reg_mu_);
+      auto it = reg_meta_.find(reg_id);
+      if (it != reg_meta_.end() && it->second.ttl_ms > 0) {
+        (void)engine_->keep_alive_registered_artifact(reg_id, it->second.ttl_ms);
+      }
+    }
+
+    if (req.has_dvmp_chunk()) {
+      const auto& ck = req.dvmp_chunk();
+      auto st = engine_->feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
+      if (!st.ok())
+        return to_grpc_status(st);
+      if (ck.last()) {
+        saw_last = true;
+      }
+    } else if (req.has_lease_segments()) {
+      absl::MutexLock l(&reg_mu_);
+      auto& vec = reg_leases_[reg_id];
+      for (const auto& s : req.lease_segments().segments()) {
+        LeaseSegMeta m;
+        m.device_id = s.device_id();
+        m.handle_bytes = s.cuda_ipc_handle();
+        m.base_offset = s.base_addr();
+        m.length = s.length();
+        m.dst_offset = s.dst_offset();
+        vec.push_back(std::move(m));
+      }
+    } else {
+      return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
+    }
+  }
+  // Note: Do not auto-commit here. Commit is performed explicitly via
+  // CommitRegisteredArtifact to keep lifecycle consistent and allow
+  // callers to interleave KeepAlive calls after streaming finishes.
+  return Status::OK;
+}
+
+grpc::Status StoreDaemonServiceImpl::FeedRegisterArtifactStreamVector(
+    const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
+  std::string reg_id;
+  bool saw_last = false;
+  for (const auto& req : reqs) {
+    if (reg_id.empty()) {
+      reg_id = req.registration_id();
+      absl::MutexLock l(&reg_mu_);
+      if (!reg_meta_.contains(reg_id)) {
+        return {StatusCode::NOT_FOUND, "registration_id not found"};
+      }
+      auto it = reg_meta_.find(reg_id);
+      if (it != reg_meta_.end() && it->second.expiry.time_since_epoch().count() > 0 &&
+          std::chrono::steady_clock::now() > it->second.expiry) {
+        reg_meta_.erase(reg_id);
+        reg_leases_.erase(reg_id);
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_feed_total");
+          counter->Add(1.0);
+        } catch (...) {
+          VLOG(1) << "metrics counter tc_register_ttl_expired_feed_total unavailable";
+        }
+        return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+      }
+    } else if (req.registration_id() != reg_id) {
+      return {StatusCode::INVALID_ARGUMENT, "registration_id changed in stream"};
+    }
+
+    // Refresh TTL
+    {
+      absl::MutexLock l(&reg_mu_);
+      auto it = reg_meta_.find(reg_id);
+      if (it != reg_meta_.end() && it->second.ttl_ms > 0) {
+        it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(it->second.ttl_ms);
+        (void)engine_->keep_alive_registered_artifact(reg_id, it->second.ttl_ms);
+      }
+    }
+
+    if (req.has_dvmp_chunk()) {
+      const auto& ck = req.dvmp_chunk();
+      auto st = engine_->feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
+      if (!st.ok())
+        return to_grpc_status(st);
+      if (ck.last())
+        saw_last = true;
+    } else if (req.has_lease_segments()) {
+      absl::MutexLock l(&reg_mu_);
+      auto& vec = reg_leases_[reg_id];
+      for (const auto& s : req.lease_segments().segments()) {
+        LeaseSegMeta m;
+        m.device_id = s.device_id();
+        m.handle_bytes = s.cuda_ipc_handle();
+        m.base_offset = s.base_addr();
+        m.length = s.length();
+        m.dst_offset = s.dst_offset();
+        vec.push_back(std::move(m));
+      }
+    } else {
+      return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
+    }
+  }
+  (void)saw_last; // no auto-commit
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
+    grpc::ServerContext* /*ctx*/,
+    const v1::KeepAliveRegisterArtifactRequest* req,
+    v1::KeepAliveRegisterArtifactResponse* /*resp*/) {
+  absl::MutexLock l(&reg_mu_);
+  auto it = reg_meta_.find(req->registration_id());
+  if (it == reg_meta_.end()) {
+    return {StatusCode::NOT_FOUND, "registration_id not found"};
+  }
+  it->second.epoch = req->epoch();
+  if (req->ttl_ms() > 0) {
+    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req->ttl_ms());
+    it->second.ttl_ms = static_cast<uint32_t>(req->ttl_ms());
+    // Propagate to engine so internal TTL check also extends
+    (void)engine_->keep_alive_registered_artifact(req->registration_id(), it->second.ttl_ms);
+  }
+  // Metrics: keepalive
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_keepalive_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_keepalive_total unavailable";
+  }
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
+    grpc::ServerContext* /*ctx*/,
+    const v1::RevokeRegisteredArtifactRequest* req,
+    v1::RevokeRegisteredArtifactResponse* /*resp*/) {
+  // Best-effort abort + cleanup meta
+  (void)engine_->abort_registered_artifact(req->registration_id());
+  absl::MutexLock l(&reg_mu_);
+  reg_meta_.erase(req->registration_id());
+  reg_buffers_.erase(req->registration_id());
+  reg_leases_.erase(req->registration_id());
+  // Metrics: revoke
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_revoke_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_revoke_total unavailable";
+  }
   return Status::OK;
 }
 

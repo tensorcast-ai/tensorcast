@@ -36,6 +36,8 @@
 #include "core/store/loader/safetensors_util.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
+// SegmentPlan linearization (PAD=0 hashing)
+#include "core/store/loader/segment_plan_source.h"
 #include "core/store/loading/materialize_orchestrator.h"
 #include "core/store/loading/replica_registration_helper.h"
 #include "opentelemetry/trace/provider.h"
@@ -811,7 +813,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
 
   if (!status.ok()) {
     p2p_span->SetAttribute("error", true);
-    p2p_span->AddEvent("p2p_ingest_error", {{"message", status.message()}});
+    p2p_span->AddEvent("p2p_ingest_error", {{"message", std::string(status.message())}});
     if (absl::IsResourceExhausted(status)) {
       // Try to evict memory
       LOG(WARNING) << "Resource exhausted, attempting memory eviction";
@@ -1652,6 +1654,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   entry.replica = replica;
   entry.gpu_ptr = base_ptr;
   entry.ipc_handle = *ipc_or;
+  entry.plan = PendingRegistrationEntry::Plan::COALESCED;
 
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -1664,6 +1667,111 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   out.size_bytes = reg.total_size_bytes;
   std::memcpy(out.cuda_ipc_handle_bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
   return out;
+}
+
+absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact_dvmp(
+    const ArtifactRegistration& reg) {
+  if (reg.total_size_bytes == 0) {
+    return absl::InvalidArgumentError("total_size_bytes must be > 0");
+  }
+  // Accept either pre-existing index key or inline index data.
+  if (reg.tensor_index_key.empty() && !reg.tensor_index_data.has_value()) {
+    return absl::InvalidArgumentError("tensor index key or data must be provided");
+  }
+
+  // Build ReplicaConfig for CPU residency; use InlineBufferSource to indicate size.
+  InlineBufferSource ib_source{.data = nullptr, .size_bytes = reg.total_size_bytes};
+  replica::ReplicaConfig cfg{
+      .source = ib_source,
+      .artifact_identifier = reg.artifact_id,
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_memory_pool = memory_pool_,
+      .dvmp = dvmp_,
+      .expected_artifact_size = reg.total_size_bytes};
+  cfg.pinned_memory_timeout = pinned_memory_timeout_;
+
+  auto create_or = Replica::create(cfg);
+  if (!create_or.ok()) {
+    return create_or.status();
+  }
+  auto replica = std::shared_ptr<Replica>(std::move(create_or.value()));
+
+  // Allocate DVMP-backed PAGEABLE_CPU memory.
+  absl::Status st = replica->get_memory_manager().allocate_memory(MemoryLocation::PAGEABLE_CPU);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Register CPU-resident replica under temporary identifier for lifecycle tracking.
+  DeviceKey cpu_key{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  ReplicaKey inst_key{.artifact_id = reg.artifact_id, .device = cpu_key, /*replica=*/.replica = 0};
+  (void)replica_registry_->emplace(inst_key, replica);
+
+  // Create registration id and track pending DVMP registration.
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<uint64_t> dis;
+  auto reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid(), "_", dis(gen));
+
+  PendingRegistrationEntry entry;
+  entry.registration_id = reg_id;
+  entry.artifact_id = reg.artifact_id;
+  entry.device_id = reg.device_id;
+  entry.size_bytes = reg.total_size_bytes;
+  entry.tensor_index_key = reg.tensor_index_key;
+  entry.tensor_index_data = reg.tensor_index_data;
+  entry.schema_version = reg.schema_version;
+  entry.encoding = reg.encoding;
+  entry.enable_p2p = reg.enable_p2p;
+  if (reg.ttl_ms > 0) {
+    entry.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reg.ttl_ms);
+  }
+  entry.replica = replica;
+  entry.gpu_ptr = nullptr;
+  std::memset(&entry.ipc_handle, 0, sizeof(entry.ipc_handle));
+  entry.plan = PendingRegistrationEntry::Plan::DVMP;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_regs_.emplace(reg_id, std::move(entry));
+  }
+
+  RegistrationBeginResult out;
+  out.registration_id = reg_id;
+  out.device_id = reg.device_id;
+  out.size_bytes = reg.total_size_bytes;
+  // IPC handle remains zero for DVMP plan
+  return out;
+}
+
+absl::Status StoreEngine::feed_register_dvmp_chunk(
+    std::string_view registration_id,
+    uint64_t offset,
+    const void* data,
+    size_t bytes) {
+  std::shared_ptr<Replica> replica;
+  std::string art_id;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_regs_.find(std::string(registration_id));
+    if (it == pending_regs_.end()) {
+      LOG(ERROR) << "DVMP feed: registration_id not found: " << registration_id;
+      return absl::NotFoundError("registration_id not found");
+    }
+    if (it->second.plan != PendingRegistrationEntry::Plan::DVMP) {
+      LOG(ERROR) << "DVMP feed: plan mismatch for reg_id=" << registration_id;
+      return absl::FailedPreconditionError("registration plan is not DVMP");
+    }
+    if (offset + bytes > it->second.size_bytes) {
+      LOG(ERROR) << "DVMP feed OOB: offset=" << offset << ", bytes=" << bytes
+                 << ", total_size=" << it->second.size_bytes << ", reg_id=" << registration_id;
+      return absl::OutOfRangeError("DVMP feed write would exceed total size");
+    }
+    replica = it->second.replica;
+    art_id = it->second.artifact_id;
+  }
+  auto dvmp = replica->get_memory_manager().get_dvmp();
+  return dvmp->write_at(art_id, offset, data, bytes);
 }
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
@@ -1702,14 +1810,43 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     return index_mh_or.status();
   }
 
-  // 2) data_multihash from GPU memory tree-hash root (sha2-256 leaves, base32 multibase)
-  void* gpu_ptr = nullptr;
-  {
-    const auto ptrs = entry.replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-    gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+  // 2) data_multihash via SegmentPlan linearization (PAD=0).
+  absl::StatusOr<std::string> data_mh_or;
+  if (entry.plan == PendingRegistrationEntry::Plan::DVMP) {
+    // Hash directly from DVMP CPU memory (zero-initialized PAD regions).
+    auto region_or = dvmp_->region_info(entry.artifact_id);
+    if (!region_or.ok()) {
+      return region_or.status();
+    }
+    auto mh_or = loader::compute_data_multihash_from_cpu_memory(region_or->cpu_base, entry.size_bytes);
+    if (!mh_or.ok())
+      return mh_or.status();
+    data_mh_or = *mh_or;
+  } else {
+    void* gpu_ptr = nullptr;
+    {
+      const auto ptrs = entry.replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+      gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+    }
+    if (entry.tensor_index_data.has_value() && !entry.tensor_index_data->empty() && entry.encoding == "json") {
+      auto plan_or = loader::build_segment_plan_from_canonical_index_json(
+          *entry.tensor_index_data, entry.size_bytes, /*align_bytes=*/8);
+      if (plan_or.ok()) {
+        auto mh_or = loader::compute_data_multihash_from_gpu_plan(
+            gpu_ptr, entry.device_id, absl::MakeSpan(*plan_or), entry.size_bytes);
+        if (!mh_or.ok())
+          return mh_or.status();
+        data_mh_or = *mh_or;
+      } else {
+        return plan_or.status();
+      }
+    } else {
+      auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
+      if (!mh_or.ok())
+        return mh_or.status();
+      data_mh_or = *mh_or;
+    }
   }
-  absl::StatusOr<std::string> data_mh_or =
-      common::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
   if (!data_mh_or.ok()) {
     return data_mh_or.status();
   }
@@ -1723,7 +1860,10 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // subsequently reference the instance by its mi2: identifier (in addition to the
   // original logical artifact_id used during Begin/Commit).
   {
-    DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = entry.device_id, .uuid = ""};
+    DeviceKey dev_key{
+        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .uuid = ""};
     ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, /*replica=*/.replica = 0};
     (void)replica_registry_->emplace(mi2_key, entry.replica);
   }
@@ -1731,7 +1871,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Export remote memory keys if communication is enabled (GPU location).
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
-  if (entry.enable_p2p && comm_manager_ && comm_manager_->is_enabled()) {
+  if (entry.plan != PendingRegistrationEntry::Plan::DVMP && entry.enable_p2p && comm_manager_ &&
+      comm_manager_->is_enabled()) {
     auto reg_info_or = entry.replica->enable_remote_memory_access(MemoryLocation::GPU, comm_manager_->get_engine());
     if (!reg_info_or.ok()) {
       return reg_info_or.status();
@@ -1745,7 +1886,10 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
 
   // Register with Global Store (memory replica). Provide tensor_index_key and optional UPSERT data.
   if (global_store_client_ && global_store_client_->is_connected()) {
-    DeviceKey device{.type = DeviceType::GPU, .ordinal = entry.device_id, .uuid = ""};
+    DeviceKey device{
+        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .uuid = ""};
     const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
     auto reg_or = global_store_client_->register_memory_replica(
         entry.artifact_id,
@@ -1780,6 +1924,19 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   result.schema_version = entry.schema_version;
   result.encoding = entry.encoding;
   return result;
+}
+
+absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms) {
+  if (ttl_ms == 0) {
+    return absl::OkStatus();
+  }
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  auto it = pending_regs_.find(std::string(registration_id));
+  if (it == pending_regs_.end()) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  it->second.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  return absl::OkStatus();
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {

@@ -51,30 +51,17 @@ absl::Status CudaMemory::allocate(size_t size, int device_id) {
     return status;
   }
 
-  // Get IPC handle if possible (allocation succeeded)
-  // Note: IPC handle might fail if IPC is disabled or on certain platforms/configurations
-  std::string ipc_handle_str;
-  status = cuda::get_ipc_handle(data_, &ipc_handle_str);
+  // Get native IPC mem handle if possible; continue without if unsupported
+  status = cuda::get_ipc_mem_handle(&handle_, data_);
   if (!status.ok()) {
-    // Log but do not treat as fatal if IPC handle cannot be acquired.
-    LOG(WARNING) << "CudaMemory::allocate - get_ipc_handle failed (continuing without IPC handle): " << status;
-  } else {
-    // Convert string handle back to cudaIpcMemHandle_t for compatibility
-    // This is a temporary measure until we fully migrate to string-based handles
-    if (ipc_handle_str.size() == sizeof(cudaIpcMemHandle_t) * 2) {
-      for (size_t i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
-        std::string byte_str = ipc_handle_str.substr(i * 2, 2);
-        reinterpret_cast<unsigned char*>(&handle_)[i] = static_cast<unsigned char>(std::stoi(byte_str, nullptr, 16));
-      }
-    }
+    LOG(WARNING) << "CudaMemory::allocate - get_ipc_mem_handle failed (continuing without IPC handle): " << status;
   }
 
   size_ = size;
   device_id_ = device_id;
   allocation_type_ = AllocationType::DIRECT;
 
-  VLOG(1) << "CudaMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address " << data_
-          << ", handle=" << ipc_handle_str;
+  VLOG(1) << "CudaMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address " << data_;
   return absl::OkStatus();
 }
 

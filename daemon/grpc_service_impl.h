@@ -108,6 +108,24 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::AbortRegisteredArtifactRequest* req,
       v1::AbortRegisteredArtifactResponse* resp) override;
 
+  grpc::Status FeedRegisterArtifactStream(
+      grpc::ServerContext* ctx,
+      ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
+      v1::FeedRegisterArtifactStreamResponse* resp) override;
+
+  // Testing/helper overload: process a vector of streaming requests without standing up a gRPC server
+  grpc::Status FeedRegisterArtifactStreamVector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
+
+  grpc::Status KeepAliveRegisterArtifact(
+      grpc::ServerContext* ctx,
+      const v1::KeepAliveRegisterArtifactRequest* req,
+      v1::KeepAliveRegisterArtifactResponse* resp) override;
+
+  grpc::Status RevokeRegisteredArtifact(
+      grpc::ServerContext* ctx,
+      const v1::RevokeRegisteredArtifactRequest* req,
+      v1::RevokeRegisteredArtifactResponse* resp) override;
+
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,
@@ -187,6 +205,32 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   absl::Mutex bg_tasks_mu_;
   std::deque<VerifTask> verif_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
   std::deque<AutoRegTask> auto_reg_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
+
+  // Lightweight registration metadata for unified Begin/Feed/KeepAlive/Commit lifecycle.
+  enum class RegPlan : uint8_t { COALESCED = 0, DVMP = 1, LEASE = 2 };
+  struct RegMeta {
+    RegPlan plan{RegPlan::COALESCED};
+    std::chrono::time_point<std::chrono::steady_clock> expiry{};
+    // Remember TTL duration so stream frames can refresh expiry without extra RPCs
+    uint32_t ttl_ms{0};
+    uint64_t epoch{0};
+    uint64_t total_size{0};
+    int device_id{0};
+    std::string index_key_hex; // optional
+    std::string index_data; // optional canonical index JSON bytes
+  };
+  absl::Mutex reg_mu_;
+  absl::flat_hash_map<std::string, RegMeta> reg_meta_ ABSL_GUARDED_BY(reg_mu_);
+  absl::flat_hash_map<std::string, std::vector<uint8_t>> reg_buffers_ ABSL_GUARDED_BY(reg_mu_);
+
+  struct LeaseSegMeta {
+    int device_id{0};
+    std::string handle_bytes; // raw cudaIpcMemHandle_t bytes
+    uint64_t base_offset{0}; // offset within mapped handle
+    uint64_t length{0};
+    uint64_t dst_offset{0}; // destination offset in coalesced buffer
+  };
+  absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(reg_mu_);
 };
 
 } // namespace tensorcast::daemon

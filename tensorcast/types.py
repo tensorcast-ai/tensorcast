@@ -1,0 +1,205 @@
+#  Copyright (c) 2025, TensorCast Team.
+
+from __future__ import annotations
+
+from typing import Literal, Union
+
+from pydantic import BaseModel, ConfigDict
+
+from tensorcast.proto.daemon.v1 import (
+    store_daemon_pb2 as store_daemon_pb2,
+)
+
+# ---------------------------------------------------------------------------
+# Canonical typed models used across the Python SDK in place of raw dicts
+# ---------------------------------------------------------------------------
+
+
+class ServerConfig(BaseModel):
+    """Daemon server runtime configuration (client-facing subset)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_size: int
+    mem_pool_size: int
+
+
+# ----------------------------- Handshake models ----------------------------
+
+
+class CoalescedHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["coalesced"] = "coalesced"
+    daemon_ipc_handle: bytes
+
+
+class DVMPRingHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["dvmp_ring"] = "dvmp_ring"
+    name: str
+    ring_bytes: int
+
+
+class DVMPStreamHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["dvmp_stream"] = "dvmp_stream"
+    stream_token: str
+
+
+class DVMPEmptyHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["dvmp"] = "dvmp"
+
+
+class LeaseHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["lease"] = "lease"
+
+
+Handshake = Union[
+    CoalescedHandshake,
+    DVMPRingHandshake,
+    DVMPStreamHandshake,
+    DVMPEmptyHandshake,
+    LeaseHandshake,
+]
+
+
+class BeginRegisterArtifactResult(BaseModel):
+    """Result for BeginRegisterArtifact, replacing mixed dict outputs.
+
+    Always includes a concrete handshake variant to avoid optional fields.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    registration_id: str
+    device_id: int
+    total_size: int
+    handshake: Handshake
+
+
+class ArtifactDescriptor(BaseModel):
+    """Artifact descriptor (RFC-0007) returned at commit time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    artifact_id: str
+    index_multihash: str
+    data_multihash: str
+    schema_version: str
+    encoding: str
+    total_size: int
+
+
+# ------------------------------ Plan models --------------------------------
+
+
+class PlanBase(BaseModel):
+    """Abstract base for plan variants with a typed applicator to the proto."""
+
+    model_config = ConfigDict(frozen=True)
+
+    def apply_to_begin_request(
+        self, req: store_daemon_pb2.BeginRegisterArtifactRequest
+    ) -> None:
+        raise NotImplementedError
+
+
+class CoalescedPlan(PlanBase):
+    # Accept legacy alias but normalize at call sites to coalesced semantics
+    kind: Literal["coalesced", "vram_coalesced"] = "coalesced"
+    max_inflight_bytes: int = 512 * 1024 * 1024
+    release_on_tensor_commit: bool = True
+
+    def apply_to_begin_request(
+        self, req: store_daemon_pb2.BeginRegisterArtifactRequest
+    ) -> None:
+        co = store_daemon_pb2.CoalescedOptions()
+        co.max_inflight_bytes = int(self.max_inflight_bytes)
+        co.release_on_tensor_commit = bool(self.release_on_tensor_commit)
+        req.coalesced.CopyFrom(co)
+
+
+class DVMPPlan(PlanBase):
+    # Accept aliases for UMA/CPU pathways but treat as DVMP in daemon
+    kind: Literal["dvmp", "uma", "cpu"] = "dvmp"
+    # 1: SHM_RING, 2: GRPC_STREAM (daemon enum mapping handled by client)
+    preferred_channel: Literal[1, 2] = 2
+    ring_bytes: int = 0
+
+    def apply_to_begin_request(
+        self, req: store_daemon_pb2.BeginRegisterArtifactRequest
+    ) -> None:
+        dv = store_daemon_pb2.DvmpOptions()
+        if int(self.preferred_channel) == 1:
+            dv.preferred_channel = store_daemon_pb2.DvmpOptions.Channel.CHANNEL_SHM_RING
+            if int(self.ring_bytes) > 0:
+                dv.ring_bytes = int(self.ring_bytes)
+        else:
+            dv.preferred_channel = (
+                store_daemon_pb2.DvmpOptions.Channel.CHANNEL_GRPC_STREAM
+            )
+        req.dvmp.CopyFrom(dv)
+
+
+class LeasePlan(PlanBase):
+    kind: Literal["lease", "vram_leased"] = "lease"
+    min_tensor_bytes: int = 64 * 1024
+    max_tensor_count: int = 8192
+    lease_bytes_limit: int = 0
+
+    def apply_to_begin_request(
+        self, req: store_daemon_pb2.BeginRegisterArtifactRequest
+    ) -> None:
+        lo = store_daemon_pb2.LeaseOptions()
+        lo.min_tensor_bytes = int(self.min_tensor_bytes)
+        lo.max_tensor_count = int(self.max_tensor_count)
+        lo.lease_bytes_limit = int(self.lease_bytes_limit)
+        req.lease.CopyFrom(lo)
+
+
+Plan = Union[CoalescedPlan, DVMPPlan, LeasePlan]
+
+
+# ---------------------------- Segment feed model ---------------------------
+
+
+class LeaseSegment(BaseModel):
+    """A single lease segment exported from CUDA IPC and fed to the daemon.
+
+    dst_offset is mandatory to eliminate ordering assumptions and reduce
+    optional branching in downstream logic.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    device_id: int
+    cuda_ipc_handle: bytes
+    base_addr: int = 0
+    length: int
+    dst_offset: int
+
+
+__all__ = [
+    "ServerConfig",
+    "CoalescedHandshake",
+    "DVMPRingHandshake",
+    "DVMPStreamHandshake",
+    "DVMPEmptyHandshake",
+    "LeaseHandshake",
+    "Handshake",
+    "BeginRegisterArtifactResult",
+    "ArtifactDescriptor",
+    "PlanBase",
+    "CoalescedPlan",
+    "DVMPPlan",
+    "LeasePlan",
+    "Plan",
+    "LeaseSegment",
+]

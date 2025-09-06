@@ -271,12 +271,14 @@ def build_store_engine_and_daemon(
         print("Bazel not available; skipping core and daemon build")
         return
 
+    if not BUILD_CORE:
+        return
+
     cmd = [BAZEL_EXE, "build"]
 
     # Targets: build store_engine only when BUILD_CORE is enabled; daemon always
     targets: list[str] = []
-    if BUILD_CORE:
-        targets.append("//core:libstore_engine.so")
+    targets.append("//core:libstore_engine.so")
     targets.append("//daemon:tensorcast_daemon")
     cmd.extend(targets)
 
@@ -325,55 +327,86 @@ def gen_version_file():
         f.write('__cuda_version__ = "' + __cuda_version__ + '"\n')
 
 
-def copy_libstore_engine(debug: bool):
-    if not BUILD_EXTENSION:
+def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_executable: bool = False) -> None:
+    """Create dst from src using either copy or symlink depending on prefer_copy.
+
+    - If dst exists and the existing type (file vs symlink) differs from the desired
+      action, print a warning, then replace it with the desired type.
+    - Always remove the existing path before creating the new one.
+    - When copying an executable, ensure mode is 0o755.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if not src.exists():
+        print(f"Warning: source for {name} not found at {src}; skipping")
         return
 
-    if not os.path.exists(dir_path + "/tensorcast/lib"):
-        os.makedirs(dir_path + "/tensorcast/lib")
+    existing_is_link = dst.is_symlink()
+    exists = dst.exists() or existing_is_link
+    desired_is_link = not prefer_copy
 
-    target = dir_path + "/tensorcast/lib/libstore_engine.so"
-    if os.path.exists(target):
-        print(f"Removing {target}")
-        os.remove(target)
+    if exists:
+        if existing_is_link != desired_is_link:
+            prev = "symlink" if existing_is_link else "copy"
+            curr = "symlink" if desired_is_link else "copy"
+            print(f"Warning: {name}: switching from {prev} to {curr}; replacing {dst}")
+        try:
+            dst.unlink()
+        except Exception:
+            # Fallback if it's not a symlink/regular file
+            try:
+                os.remove(str(dst))
+            except Exception:
+                pass
+
+    if prefer_copy:
+        copyfile(str(src), str(dst))
+        if make_executable:
+            os.chmod(str(dst), 0o755)
+    else:
+        # Use absolute path for stability
+        os.symlink(str(src.resolve()), str(dst))
 
 
-    print(f"Copying {dir_path + '/bazel-bin/core/libstore_engine.so'} to {target}")
-    copyfile(
-            dir_path + "/bazel-bin/core/libstore_engine.so",
-            target
-    )
+def copy_libstore_engine(debug: bool):
+    """Place libstore_engine into tensorcast/lib.
+
+    - In RELEASE mode: copy the file
+    - In default mode: create a symlink to Bazel output to avoid repeated copies
+    """
+    # Determine placement mode based on RELEASE flag
+    prefer_copy = RELEASE
+
+    src = Path(dir_path) / "bazel-bin" / "core" / "libstore_engine.so"
+    dst = Path(dir_path) / "tensorcast" / "lib" / "libstore_engine.so"
+
+    _place_artifact(src, dst, prefer_copy=prefer_copy, name="libstore_engine.so", make_executable=False)
 
 def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
     return candidate if candidate.exists() else None
 
 def copy_daemon_binary() -> None:
-    """Copy daemon binary into package at tensorcast/bin/tensorcast_daemon.
+    """Place daemon binary into package at tensorcast/bin/tensorcast_daemon.
 
     Source precedence: TENSORCAST_DAEMON_BIN env -> bazel-bin output.
+
+    - In RELEASE mode: copy the file
+    - In default mode: create a symlink to avoid repeated copies
     """
-    target_dir = Path(dir_path) / "tensorcast" / "bin"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "tensorcast_daemon"
-    if target.exists():
-        try:
-            target.unlink()
-        except Exception:
-            pass
+    prefer_copy = RELEASE
+
+    target = Path(dir_path) / "tensorcast" / "bin" / "tensorcast_daemon"
 
     src_env = os.environ.get("TENSORCAST_DAEMON_BIN")
     if src_env and Path(src_env).exists():
-        print(f"Copying {src_env} -> {target}")
-        copyfile(src_env, target)
-        os.chmod(target, 0o755)
+        src = Path(src_env)
+        _place_artifact(src, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
         return
 
     bazel_bin = find_bazel_daemon_binary()
     if bazel_bin is not None:
-        print(f"Copying {bazel_bin} -> {target}")
-        copyfile(bazel_bin, target)
-        os.chmod(target, 0o755)
+        _place_artifact(bazel_bin, target, prefer_copy=prefer_copy, name="tensorcast_daemon", make_executable=True)
         return
 
     print("Warning: tensorcast_daemon binary not found; package will not include daemon binary.")
@@ -591,21 +624,6 @@ def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
         # Non-fatal; build may still succeed if system CUDA provides libcudart.so
         print(f"Warning: could not create libcudart.so symlink in {lib_dir}: {e}")
 
-
-def cuda_dir():
-    return os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-
-if BUILD_EXTENSION:
-    CUDA_DIR = cuda_dir()
-    if CUDA_DIR:
-        os.environ["CUDA_HOME"] = CUDA_DIR
-else:
-    CUDA_DIR = None
-
-# Place this line here to make CUDA_HOME environment variable available
-
-
-
 if BUILD_EXTENSION:
     CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
     if CUDA_RUNTIME_LIB_DIR:
@@ -617,7 +635,6 @@ if BUILD_EXTENSION:
     }
 
     for name, sources in EXTENSIONS.items():
-        # Build include dirs dynamically to avoid None concatenation when CUDA_DIR is unset
         _include_dirs = [
             dir_path,
             dir_path + "/tensorcast/csrc",
@@ -630,8 +647,6 @@ if BUILD_EXTENSION:
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
             dir_path + "/proto/gen/cc",
         ]
-        if CUDA_DIR:
-            _include_dirs.append(CUDA_DIR + "/include")
 
         # Library search paths
         _library_dirs = [
@@ -639,9 +654,6 @@ if BUILD_EXTENSION:
         ]
         if CUDA_RUNTIME_LIB_DIR:
             _library_dirs.append(CUDA_RUNTIME_LIB_DIR)
-        # Add CUDA toolkit lib64 if available (for completeness)
-        if CUDA_DIR and os.path.isdir(CUDA_DIR + "/lib64"):
-            _library_dirs.append(CUDA_DIR + "/lib64")
 
         # Add rpaths for runtime resolution
         rpath_flags = []

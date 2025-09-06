@@ -96,116 +96,45 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 ## Architecture Overview
 
 ### Core Components
-- **C++ Core** (`/core/`): High-performance checkpoint, store, and communicator modules with CUDA/P2P support
-- **Python Services** (`/tensorcast/`): gRPC-based global store and client libraries with PyTorch integration. The Store Daemon is now implemented in C++ (see `/daemon`), while the Global Store and Python clients remain in Python.
-- **Protocol Buffers** (`/proto/`): Service definitions for distributed communication
-- **User Process Worker**: Responsible for final artifact loading and utilization
-
-
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides DVMP/UMA memory model, replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
+- **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
+- **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
+- **User Process Worker**: Client process consuming artifacts via `tensorcast.torch_util.py` (`load_dict()`), mapping CUDA IPC handles for zero‑copy GPU access.
 
 ### Build Systems
-- **Primary**: Bazel with MODULE.bazel (Bzlmod) for C++ core & Daemon
-- **Secondary**: setuptools + uv for Python packaging
-- **Dependencies**: LibTorch 2.6.0/2.7.0, CUDA 12.6+, gRPC, Protocol Buffers
+- **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
+- **Secondary**: setuptools + `uv` for Python packaging/clients
+- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.6+, gRPC, Protocol Buffers
 
-### Distributed System Architecture
+### Runtime Topology
 ```
-                          ┌─────────────────┐
-                          │  Global Store   │
-                          │   (Master)      │
-                          │                 │
-                          │ - Artifact Registry│
-                          │ - Load Balancer │
-                          │ - P2P Coord.    │
-                          └────────┬────────┘
-                                   │
-                ┌──────────────────┴──────────────────┐
-                │                                      │
-    ┌───────────▼───────────┐          ┌──────────────▼──────────┐
-    │   Store Daemon #1     │          │    Store Daemon #N      │
-    │     (Worker)          │   ...    │      (Worker)           │
-    │                       │          │                         │
-    │ - Local Artifact Storage │          │ - Local Artifact Storage   │
-    │ - CPU/GPU Memory      │          │ - CPU/GPU Memory        │
-    │ - P2P Server          │          │ - P2P Server            │
-    └───────────┬───────────┘          └──────────────┬──────────┘
-                │                                      │
-    ┌───────────▼───────────┐          ┌──────────────▼──────────┐
-    │  User Process Worker  │          │  User Process Worker    │
-    │                       │          │                         │
-    │ - Artifact Inference     │          │ - Artifact Inference       │
-    │ - Training Workloads  │          │ - Training Workloads    │
-    │ - PyTorch Integration │          │ - PyTorch Integration   │
-    │ - Artifact Access via    │          │ - Artifact Access via      │
-    │   torch_util.py       │          │   torch_util.py         │
-    └───────────────────────┘          └─────────────────────────┘
-          Node 1                              Node N
+                          ┌─────────────────────────────┐
+                          │         Global Store        │
+                          │  (Metadata & Coordination)  │
+                          └──────────────┬──────────────┘
+                                         │ gRPC (metadata only)
+                ┌────────────────────────┴────────────────────────┐
+                │                                               │
+    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
+    │   Store Daemon #1     │  RDMA/TCP (P2P data)  │    Store Daemon #N    │
+    │  (C++ over StoreEngine)│<-------------------->│  (C++ over StoreEngine)│
+    │ - DVMP/UMA memory     │                       │ - DVMP/UMA memory     │
+    │ - Disk & P2P loaders  │                       │ - Disk & P2P loaders  │
+    │ - CUDA IPC export     │                       │ - CUDA IPC export     │
+    └───────────┬───────────┘                       └───────────┬───────────┘
+                │                                               │
+                │ CUDA IPC (GPU mapping)                        │
+    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
+    │ User Process Worker   │                       │ User Process Worker   │
+    │  (PyTorch client)     │                       │  (PyTorch client)     │
+    └───────────────────────┘                       └───────────────────────┘
 ```
-
-### System Layer Responsibilities
-
-#### Global Store (Control Plane)
-- Centralized artifact registry and metadata management
-- Load balancing across available replicas
-- P2P transport coordination between nodes
-- Worker health monitoring and failover
-
-#### Store Daemon (Storage Layer)
-- Local artifact storage and memory management
-- CPU/GPU memory pool allocation
-- P2P server for peer-to-peer transfers (RDMA or TCP)
-- Artifact loading from disk or remote nodes
-- Registration of local replicas with Global Store
-
-#### User Process Worker (Application Layer)
-- **Primary Interface**: Uses `tensorcast.torch_util.py` for artifact operations
-- **Artifact Loading**: Calls `load_dict()` to load models from Store Daemon
-- **Artifact Usage**: Runs inference, training, and other ML workloads
-- **PyTorch Integration**: Direct tensor operations and artifact manipulation
-- **Memory Access**: Accesses models in Store Daemon's memory pools
-- **Lifecycle Management**: Triggers artifact confirmation and cleanup via Store Daemon
-
-### Artifact Loading Workflows
-
-#### P2P-Enabled Loading (Preferred)
-```
-Store Daemon                        Global Store
-     |                                   |
-     |-------- GetArtifactInfoById ----->|
-     |<------- Available Replicas -------|
-     |                                   |
-     |-- RequestReplicaTransport ------->|
-     |<------ Transport Info & ID -------|
-     |                                   |
-     |   (Load via RDMA/TCP from peer)   |
-     |                                   |
-     |-- CompleteReplicaTransport ------>|
-     |<------ Confirmation --------------|
-     |                                   |
-     |-- RegisterReplica --------------->|
-     |<-------- Replica ID --------------|
-```
-
-#### Fallback to Disk Loading
-```
-Store Daemon                    Global Store
-     |                               |
-     |   (Load from local disk)      |
-     |                               |
-     |-- RegisterReplica ---------->|
-     |<------ Replica ID ------------|
-```
-
-### Load Balancing & Concurrency
-- Global Store prioritizes replicas by: **GPU > RAM > DISK**, then by load ratio
-- Each replica tracks `max_concurrency` and `current_requests`
-- Atomic operations ensure thread-safe request allocation
-- Transport requests automatically select optimal available replica
-
 
 ## Documentation Structure and Project Hierarchy
 
 This repository’s documentation has been reorganized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
+Note: When writing documentation, you may use Mermaid diagrams to illustrate flows, state machines, hierarchies, and architecture where appropriate.
 
 ### Repository-level docs
 
@@ -327,7 +256,7 @@ This repository’s documentation has been reorganized so that each module owns 
 - Avoid dynamic attribute access (`getattr`, `hasattr`, `setattr`)
 - Avoid Optional types unless necessary
 - Avoid `isinstance` checks unless truly necessary; rely on precise type hints and intentional polymorphism instead of runtime type checks
-- Use Pydantic models over raw dictionaries for input validation
+- Prefer Pydantic models over raw dictionaries for any use cases
 
 #### Error Handling
 - Use `logger.exception()` instead of `logger.error()` for exceptions with traceback
@@ -355,23 +284,21 @@ This repository’s documentation has been reorganized so that each module owns 
 ### Software Design Philosophy
 
 #### Complexity Reduction
-- **Strategic Programming**: Work for the team and future maintainers, not just yourself
-- **Deep Modules**: Create modules with simple interfaces but powerful functionality
+- **Strategic Programming**: Work for the team and future maintainers, not just yourself. Always prioritize code that is easy to understand, modify, and extend over clever or overly optimized solutions.
+- **Deep Modules**: Create modules with simple interfaces but powerful functionality. Avoid shallow modules/functions/classes that only a simple wrapper over a few lines of code.
 - **Minimize Optional Types**: Avoid Optional[T] and Result[T, E] unless absolutely necessary
-- **Layer Architecture**: Each layer should only import from layers below it
+- **Layer Architecture**: Each layer should only import from layers below it.
 - **Information Hiding**: Keep implementation details private, expose only what's necessary
 
 #### Comment-First Development
 1. Write the interface comment first
-2. Write the function signature
-3. Write the implementation
-4. Comments should describe the "what" and "why", not the "how"
+2. Comments should describe the "what" and "why", not the "how"
 
 #### Error Handling Philosophy
 - Define errors out of existence when possible
 - Use exceptions for exceptional cases
-- Make common errors impossible through API design
+- Always make common errors impossible through API design
 - Avoid partial failures - operations should be atomic
 
 ### Code Fixing and Testing
-- When fixing tests, always first understand the actual functionality of the test and the code behind that functionality. Make the test match the functionality, rather than making the functionality match the original test (while also ensuring the functionality is reasonable)
+- When debugging or fixing tests, always first understand the actual functionality of the test and the code behind that functionality. Make the test match the functionality, rather than making the functionality match the original test (while also ensuring the functionality is reasonable)

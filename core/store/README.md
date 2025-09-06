@@ -265,7 +265,7 @@ flowchart LR
 
 During disk ingestion or commit of in-memory registration:
 - `index_multihash` is derived from canonical index bytes (safetensors or tensor_index.json). When absent, it is computed.
-- `data_multihash` is computed from the loaded buffer (GPU fast path; CPU fallback available for disk ingestion).
+- `data_multihash` is computed by linearizing the canonical SegmentPlan (PAD=0) over the loaded buffer. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing.
 - For disk ingestion, missing descriptors are materialized under the artifact directory:
   - `artifact_descriptor.json` (index/data multihash, sizes)
   - `tensor_index.json` (canonical, when needed)
@@ -280,7 +280,7 @@ flowchart TD
   Start[need bytes on GPU d] --> Query[query free memory]
   Query -->|enough| Done
   Query -->|not enough| LRU[iterate LRU instances on device d]
-  LRU --> Release[release GPU memory of LOADED instances (safe)]
+  LRU --> Release["release GPU memory of LOADED instances (safe)"]
   Release --> Recheck[re-check free memory]
   Recheck -->|enough| Done
   Recheck -->|not enough| LRU

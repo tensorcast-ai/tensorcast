@@ -43,8 +43,13 @@ service StoreDaemonService {
   // ========== Memory Artifact Registration ==========
   // New canonical RPC names
   rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
+  // NOTE: Deprecated for DVMP; retained for Lease and internal/tests compatibility.
+  // Clients should prefer FeedRegisterArtifactStream.
+  rpc FeedRegisterArtifactStream(stream FeedRegisterArtifactStreamRequest) returns (FeedRegisterArtifactStreamResponse) {}
+  rpc KeepAliveRegisterArtifact(KeepAliveRegisterArtifactRequest) returns (KeepAliveRegisterArtifactResponse) {}
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
+  rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -315,33 +320,118 @@ message UnlockTransportChunksResponse {
 
 // Begin registration request
 message BeginRegisterArtifactRequest {
-  string artifact_id = 1; // Artifact identifier
-  int32 device_id = 2; // Target GPU device ID
-  uint64 total_size = 3; // Total size in bytes (8-byte aligned)
-  bool enable_p2p = 4; // Enable P2P transfer
-  optional uint32 ttl_ms = 5; // TTL for registration (milliseconds)
+  int32 device_id = 1; // Target GPU device ID
+  uint64 total_size = 2; // Total size in bytes (8-byte aligned)
+  optional uint32 ttl_ms = 3; // TTL for registration (milliseconds), used by Lease
 
   // Tensor index can be provided as key or data
   oneof index {
-    string tensor_index_key = 6; // SHA-256 hash of canonical JSON index
-    TensorIndexData tensor_index_data = 7; // Full index data
+    string tensor_index_key = 4; // SHA-256 hash of canonical index bytes
+    TensorIndexData tensor_index_data = 5; // Full canonical index bytes (CBOR/JSON)
+  }
+
+  // Realization plan options
+  oneof plan {
+    CoalescedOptions coalesced = 10;
+    DvmpOptions dvmp = 11;
+    LeaseOptions lease = 12;
   }
 }
 
 // Tensor index data with metadata
 message TensorIndexData {
-  bytes data = 1; // Canonical JSON bytes
+  bytes data = 1; // Canonical index bytes (CBOR preferred; strict canonical JSON allowed)
   string schema_version = 2; // Schema version (e.g., "v2")
-  string encoding = 3; // Encoding format (e.g., "json")
+  string encoding = 3; // Encoding format ("cbor" or "json")
+}
+
+message CoalescedOptions {
+  uint64 max_inflight_bytes = 1;
+  bool release_on_tensor_commit = 2;
+}
+
+message DvmpOptions {
+  enum Channel {
+    CHANNEL_UNSPECIFIED = 0;
+    CHANNEL_SHM_RING = 1;
+    CHANNEL_GRPC_STREAM = 2;
+  }
+  Channel preferred_channel = 1;
+  uint32 ring_bytes = 2; // For SHM_RING
+}
+
+message LeaseOptions {
+  uint64 min_tensor_bytes = 1;
+  uint32 max_tensor_count = 2;
+  uint64 lease_bytes_limit = 3; // 0 = daemon policy
 }
 
 // Begin registration response
 message BeginRegisterArtifactResponse {
-  string registration_id = 1; // Registration ID for commit/abort
-  bytes daemon_ipc_handle = 2; // CUDA IPC handle for target memory
-  int32 device_id = 3; // Confirmed device ID
-  uint64 size = 4; // Allocated size
+  string registration_id = 1; // Registration ID for subsequent calls
+  int32 device_id = 2; // Confirmed device ID
+  uint64 total_size = 3; // Confirmed total size
+  oneof handshake {
+    CoalescedHandshake coalesced = 10;
+    DvmpHandshake dvmp = 11;
+    LeaseHandshake lease = 12;
+  }
 }
+
+message CoalescedHandshake {
+  bytes daemon_ipc_handle = 1;
+}
+
+message DvmpHandshake {
+  oneof channel {
+    DvmpShmRing ring = 1;
+    DvmpGrpcStream stream = 2;
+  }
+}
+message DvmpShmRing {
+  string name = 1;
+  uint32 ring_bytes = 2;
+}
+message DvmpGrpcStream {
+  string token = 1;
+}
+message LeaseHandshake {}
+
+// Stream variants must not reuse unary messages per lint
+message FeedRegisterArtifactStreamRequest {
+  string registration_id = 1;
+  oneof feed {
+    DvmpChunk dvmp_chunk = 10;
+    LeaseSegments lease_segments = 11;
+  }
+}
+message FeedRegisterArtifactStreamResponse {}
+
+message DvmpChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+  bool last = 3;
+}
+message LeaseSegments {
+  repeated LeasedSegment segments = 1;
+}
+message LeasedSegment {
+  int32 device_id = 1;
+  bytes cuda_ipc_handle = 2;
+  uint64 base_addr = 3;
+  uint64 length = 4;
+  // Destination offset in the coalesced VRAM buffer (bytes).
+  // This locates the DATA interval within the SegmentPlan; PAD is handled by the daemon.
+  uint64 dst_offset = 5;
+}
+
+// Keep alive for lease lifecycle
+message KeepAliveRegisterArtifactRequest {
+  string registration_id = 1;
+  uint32 ttl_ms = 2;
+  uint64 epoch = 3;
+}
+message KeepAliveRegisterArtifactResponse {}
 
 // Commit registration request
 message CommitRegisteredArtifactRequest {
@@ -351,11 +441,7 @@ message CommitRegisteredArtifactRequest {
 // Artifact descriptor conveying content-addressed identity and related metadata
 // Commit registration response
 message CommitRegisteredArtifactResponse {
-  string registration_id = 1; // Confirmed registration ID
-  string artifact_id = 2; // Artifact ID
-  int32 device_id = 3; // Device ID
-  uint64 size = 4; // Total size
-  tensorcast.common.v1.ArtifactDescriptor descriptor = 5; // Content-addressed descriptor (RFC-0007)
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 1; // Content-addressed descriptor (RFC-0007)
 }
 
 // Abort registration request
@@ -364,6 +450,11 @@ message AbortRegisteredArtifactRequest {
 }
 
 // Abort registration response
-message AbortRegisteredArtifactResponse {
-  bool ok = 1; // Success status
+message AbortRegisteredArtifactResponse {}
+
+// Revoke registration (lease only)
+message RevokeRegisteredArtifactRequest {
+  string registration_id = 1;
+  string reason = 2;
 }
+message RevokeRegisteredArtifactResponse {}

@@ -115,6 +115,19 @@ class StoreEngine {
    */
   absl::StatusOr<RegistrationBeginResult> begin_register_artifact(const ArtifactRegistration& reg);
 
+  // DVMP (CPU UMA) registration begin. Allocates DVMP-backed PAGEABLE_CPU region
+  // and prepares a pending registration tracked by registration_id. No GPU memory
+  // is allocated in this path.
+  absl::StatusOr<RegistrationBeginResult> begin_register_artifact_dvmp(const ArtifactRegistration& reg);
+
+  // Writes a DVMP data chunk into the pending registration's DVMP region at the
+  // specified virtual address offset. Updates DVMP chunk metadata accordingly.
+  absl::Status feed_register_dvmp_chunk(
+      std::string_view registration_id,
+      uint64_t offset,
+      const void* data,
+      size_t bytes);
+
   /**
    * @brief Commit a previously begun registration.  Finalizes the replica by
    * exporting remote memory keys (if communication engine is enabled) and
@@ -140,6 +153,14 @@ class StoreEngine {
    * @brief Abort a pending registration and release allocated memory.
    */
   absl::Status abort_registered_artifact(std::string_view registration_id);
+
+  /**
+   * @brief Refresh TTL for a pending registration to keep it alive.
+   *
+   * Extends the internal expiry_time used for TTL enforcement during
+   * CommitRegisteredArtifact. No-op when ttl_ms == 0.
+   */
+  absl::Status keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms);
 
   // ------------------------------------------------------------------------
   // Query helpers (multi-device binding)
@@ -309,6 +330,7 @@ class StoreEngine {
     void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
     std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
+    enum class Plan : uint8_t { COALESCED = 0, DVMP = 1 } plan{Plan::COALESCED};
   };
 
   std::mutex pending_mutex_;

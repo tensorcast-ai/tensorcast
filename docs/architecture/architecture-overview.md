@@ -10,7 +10,7 @@ This document provides a high-level overview of the distributed artifact storage
 
 ## System Architecture
 
-The distributed artifact storage system consists of two main components working together to provide efficient artifact storage and serving capabilities across a cluster:
+The system comprises a control plane (Global Store), a data plane (Store Daemons), and clients (User Process Workers) working together to provide efficient artifact storage and serving across a cluster:
 
 ```mermaid
 graph TD
@@ -60,9 +60,17 @@ graph TD
 - **Responsibility**: Stores artifacts locally, serves them to clients, handles P2P transfers
 - **Technology**: C++ service with gRPC interface (high-performance StoreEngine core)
 - **Key Feature**: Zero-copy GPU memory sharing via CUDA IPC
+- **Implementation Notes**: Thin gRPC layer over `StoreEngine`; manages sessions, PID references, and transport locks; exports CUDA IPC handles to clients
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
 
 > See also: [Store Daemon (C++) Internals](../../daemon/README.md) — thin gRPC layer over the StoreEngine with session/ref tracking, transport locks, lifecycle management, and background sweepers.
+
+### 3. User Process Worker
+**Role**: PyTorch client process accessing artifacts
+
+- **Interface**: Uses `tensorcast.torch_util.py` (`load_dict()`) to request artifacts
+- **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
+- **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 
 ## Key Design Principles
 
@@ -87,52 +95,40 @@ graph TD
 - System designed for eventual consistency
 - **Documentation**: [High Availability Design](./high-availability-design.md)
 
-## Interaction Patterns
+## Artifact Load Paths
 
-### Artifact Loading Flow
-1. Client requests artifact from local Store Daemon
-2. Store Daemon checks local storage
-3. If not available locally:
-   - Queries Global Store for replica locations
-   - Global Store selects optimal source using load balancing
-   - Store Daemon transfers artifact via P2P from source
-4. Store Daemon returns CUDA IPC handle to client
-5. Client maps GPU memory and accesses artifact directly
-
-### Load Balancing
-The system implements sophisticated load balancing for artifact transfers:
-- Prioritizes by memory type (GPU > RAM > DISK)
-- Considers current load on each replica
-- Ensures even distribution across the cluster
-- **Documentation**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
-
-## Deployment Modes
-
-### 1. Standalone Mode
-- Single Store Daemon without Global Store
-- Suitable for single-node deployments
-- Artifacts loaded from local disk only
-
-### 2. Distributed Mode
-- Multiple Store Daemons coordinated by Global Store
-- Full P2P transfer capabilities
-- Load balancing and high availability features
-
-## Quick Start
-
-### Starting Global Store
-```bash
-python -m tensorcast.global_store --db /path/to/models.db
+### P2P‑first Loading (Preferred)
+```
+Store Daemon                        Global Store
+     |                                   |
+     |-------- Query Artifact ---------->|
+     |<------- Candidate Replicas -------|
+     |                                   |
+     |-- Request Transport  ------------>|
+     |<------ Transport Grant -----------|
+     |                                   |
+     |   (RDMA/TCP transfer from peer)   |
+     |                                   |
+     |-- Complete Transport ------------>|
+     |<------ Confirmation --------------|
+     |                                   |
+     |-- Register Local Replica -------->|
+     |<------ Replica ID ----------------|
 ```
 
-### Starting Store Daemon
-```bash
-tensorcast start --config config.yaml
+### Disk Fallback
+```
+Store Daemon                        Global Store
+     |                                   |
+     |   (Load from local disk)          |
+     |                                   |
+     |-- Register Local Replica -------->|
+     |<------ Replica ID ----------------|
 ```
 
-## Next Steps
+## Load Balancing & Concurrency
+- Prioritization: GPU > RAM > DISK, then by per‑replica load ratio
+- Each replica tracks `max_concurrency` and `current_requests`; selection is atomic
+- Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
+- **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
 
-- **Global Store Development**: See [Global Store Guide](./global-store.md)
-- **Store Daemon Development**: See [Store Daemon Architecture](../../daemon/README.md)
-- **High Availability**: See [HA Design](./high-availability-design.md)
-- **P2P Transfers**: See [P2P Transfer Strategies](./p2p-transfer-strategies.md)

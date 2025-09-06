@@ -29,6 +29,16 @@ logging.basicConfig(
 )
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers used in the test suite.
+
+    Registering here avoids PytestUnknownMarkWarning for marks that may be
+    provided by optional plugins (e.g., pytest-timeout). This keeps output
+    clean even when those plugins are not installed in the environment.
+    """
+    config.addinivalue_line("markers", "timeout: per-test timeout in seconds")
+
+
 @pytest.fixture(autouse=True)
 def setup_logging():
     """Setup logging for tests."""

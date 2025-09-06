@@ -226,6 +226,7 @@ sc_cc_library(
         "//core/store/loader:canonical_index",
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
+        "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
         "//core/store/replica",
         "//core/store/replica:memory_state",

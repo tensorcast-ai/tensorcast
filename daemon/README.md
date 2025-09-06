@@ -216,26 +216,38 @@ Eviction strategy: per‑device LRU of GPU‑resident replicas that have no PID 
   - The PID watcher drops refs for dead PIDs automatically
 - Special case: unloading to DISK target is a no‑op and succeeds (compatibility semantics)
 
-## In‑memory registration (begin → commit/abort)
+## In‑memory registration (Unified; begin → feed/keepalive → commit/abort/revoke)
 
-`BeginRegisterArtifact` reserves memory on a target GPU and returns a CUDA IPC handle and `registration_id`. `CommitRegisteredArtifact` finalizes content‑addressed identity and registers the artifact in‑engine. `AbortRegisteredArtifact` aborts and frees resources.
+The daemon exposes a unified verb‑noun API to register in‑memory artifacts per RFC‑0014:
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant D as Daemon RPC
-    participant E as StoreEngine
+- Begin: `BeginRegisterArtifact(device_id, total_size, index, plan[, ttl_ms])`
+- Feed: `FeedRegisterArtifactStream` (client‑streaming). This is the only supported feed path for all plans.
+- KeepAlive: `KeepAliveRegisterArtifact(registration_id, ttl_ms, epoch)`
+- Commit: `CommitRegisteredArtifact(registration_id)` → returns RFC‑0007 content‑addressed descriptor (`mi2:`)
+- Abort/Revoke: abort frees pending resources; revoke also drops DVMP/Lease intermediates
 
-    C->>D: BeginRegisterArtifact(artifact_id, device_id, total_size, index...)
-    D->>E: begin_register_artifact(...)
-    E-->>D: {registration_id, cuda_ipc_handle_bytes, device_id, size}
-    D-->>C: Return handle + registration_id
+Realization plans (RP):
+- Coalesced VRAM: daemon allocates a single VRAM segment and returns CUDA IPC to the client (client writes into daemon VRAM).
+- DVMP (CPU UMA): client uploads chunks via streaming; daemon routes chunks directly into engine‑owned DVMP (UMA) via DVMP‑owned IO (`write_at`), and hashing uses SegmentPlan (PAD=0).
+- VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks; daemon linearizes SegmentPlan (PAD=0) from leased memory.
 
-    C->>D: CommitRegisteredArtifact(registration_id)
-    D->>E: commit_registered_artifact(id)
-    E-->>D: {artifact_id(mi2:...), descriptor, device_id, size}
-    D-->>C: Return content‑addressed descriptor (RFC‑0007)
-```
+LeaseSegments robustness:
+- Each `LeasedSegment` carries `dst_offset` (destination offset in coalesced VRAM).
+- The daemon zero-fills PAD intervals per SegmentPlan and copies each lease payload into `dst_offset..dst_offset+length`.
+- Segment order is irrelevant; clients may send in any order.
+
+TTL semantics:
+- If `ttl_ms` is set at Begin, the registration expires unless refreshed by `KeepAliveRegisterArtifact` (SDK can auto‑keepalive). `CommitRegisteredArtifact` returns `DEADLINE_EXCEEDED` on expiry (DVMP/Lease). `RevokeRegisteredArtifact` cleans DVMP buffers and Lease segments.
+ - Optional fail-fast: TTL is also enforced during `FeedRegisterArtifactStream`; expired registrations fail with `DEADLINE_EXCEEDED` and are cleaned up.
+
+Metrics:
+- `tc_register_ttl_expired_feed_total`: TTL expirations during Feed.
+- `tc_register_ttl_expired_commit_total`: TTL expirations during Commit.
+
+Hashing and identity:
+- `index_multihash` from canonical index bytes or key
+- `data_multihash` via SegmentPlan linearization with PAD=0 across RP‑A/B/C (coalesced/dvmp/lease) → byte‑equivalent results
+- `artifact_id = mi2:<index_multihash>:<data_multihash>`
 
 ## Key files and build targets
 

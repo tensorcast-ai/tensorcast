@@ -20,7 +20,6 @@ jobs:
         shell: bash
     env:
       USE_FAKE_CUDA: "1"
-      CUDA_HOME: "/usr/local/cuda"
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
@@ -160,7 +159,6 @@ jobs:
         shell: bash
     env:
       USE_FAKE_CUDA: "1"
-      CUDA_HOME: "/usr/local/cuda"
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
