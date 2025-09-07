@@ -50,6 +50,10 @@ service StoreDaemonService {
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
+
+  // ========== RFC-0014: Key-based materialization and publish ==========
+  rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
+  rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -458,3 +462,30 @@ message RevokeRegisteredArtifactRequest {
   string reason = 2;
 }
 message RevokeRegisteredArtifactResponse {}
+
+// RFC-0014
+message MaterializeByKeyRequest {
+  string key = 1;
+  int32 device_id = 2;
+  int32 pinned_allocation_timeout_ms = 3;
+  int32 pid = 4;
+  string replica_uuid = 5; // RFC-0014: track session for Confirm/Verification
+}
+message MaterializeByKeyResponse {
+  optional MemCopyHandle mem_handle = 1;
+  MaterializeReplicaStatus status = 2;
+  string artifact_id = 3;
+  string used_disk_path = 4;
+}
+
+message PublishReplicaKeyRequest {
+  string key = 1;
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
+  string replica_uuid = 3;
+  string disk_path = 4; // optional
+  bool fail_if_exists = 5; // default semantics: true
+}
+message PublishReplicaKeyResponse {
+  bool ok = 1;
+  string conflict_reason = 2;
+}

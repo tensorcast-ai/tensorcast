@@ -15,9 +15,9 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
-- **LocalStoreDaemon**: C++ gRPC service (RFC-0011)
+- **LocalStoreDaemon**: C++ gRPC service (RFC‑0011, RFC‑0014)
   - Binary: `daemon/tensorcast_daemon`
-  - Service: `store_daemon.StoreDaemonService` (MaterializeReplica/ConfirmReplica/UnloadReplica)
+  - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/ConfirmReplica/UnloadReplica；兼容保留 MaterializeReplica)
 
 - **GlobalStore**: Python
   - Entrypoint: `tensorcast/global_store/grpc_service.py::GlobalStoreServicer`
@@ -37,11 +37,11 @@ sequenceDiagram
     InferenceInstance->>LocalStoreDaemon: 0. Malloc CUDA Memory
     Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
-    InferenceInstance->>LocalStoreDaemon: 1. MaterializeReplica (alloc + async load)
-    Note left of LocalStoreDaemon: RPC: MaterializeReplica
+    InferenceInstance->>LocalStoreDaemon: 1. MaterializeByKey (alloc + async load)
+    Note left of LocalStoreDaemon: RPC: MaterializeByKey (RFC‑0014)
 
-    LocalStoreDaemon->>GlobalStore: 2. Request Artifact MetaInfo
-    Note left of GlobalStore: RPC: GetArtifactInfoById
+    LocalStoreDaemon->>GlobalStore: 2. Resolve Key → Artifact ID
+    Note left of GlobalStore: RPC: ResolveKeyMapping
 
     LocalStoreDaemon->>GlobalStore: 3. If not in local,<br/>request a remote replica
     Note left of GlobalStore: RPC: RequestReplicaTransport
@@ -53,7 +53,7 @@ sequenceDiagram
         LocalStoreDaemon-->>RemoteStoreDaemon: 5.1 load_artifact_from_remote (via P2P comm_engine.read_tensor)
     else NOT have remote replica
         LocalStoreDaemon->>JuiceFS:
-        JuiceFS-->>LocalStoreDaemon: 5.2 If not have remote replica,<br/>load_artifact_from_disk
+        JuiceFS-->>LocalStoreDaemon: 5.2 If not have remote replica,<br/>load_artifact_from_disk (daemon orchestrator fallback)
     end
 
     InferenceInstance->>LocalStoreDaemon: 6. Finish loading
@@ -71,12 +71,12 @@ sequenceDiagram
 ## Key Steps Explained
 
 1. **Memory Allocation**: InferenceInstance allocates CUDA memory for artifact storage
-2. **Artifact Request**: Request artifact weights using CUDA IPC
-3. **Metadata Lookup**: LocalStoreDaemon queries GlobalStore for artifact metadata
+2. **Artifact Request**: Request artifact by human key using CUDA IPC (`MaterializeByKey`)
+3. **Key Resolution**: LocalStoreDaemon resolves key → artifact_id; the daemon orchestrator selects a source, falls back to disk when needed (based on published disk_path hints).
 4. **Replica Location**: Request remote replica location if artifact not available locally
-5. **Artifact Loading**: Load artifact either via P2P from remote daemon or from disk
+5. **Artifact Loading**: Load artifact via P2P from remote daemon or from disk (fallback handled by daemon orchestrator, not the client)
 6. **GPU Transfer**: Copy artifact to GPU memory
-7. **Confirmation**: Confirm artifact loading completion
+7. **Confirmation**: Confirm artifact loading completion (client provides `replica_uuid` in `MaterializeByKeyRequest`)
 8. **Registration**: Register replica with GlobalStore (if using distributed setup)
 9. **Cleanup**: Unregister when inference instance exits
 

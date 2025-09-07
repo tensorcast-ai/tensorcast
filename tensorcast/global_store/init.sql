@@ -166,3 +166,21 @@ CREATE INDEX idx_chunk_directory_update_time ON chunk_directory(last_update_time
 CREATE INDEX idx_chunk_directory_source_selection ON chunk_directory(
     artifact_id, chunk_idx, chunk_state, node_load_ratio
 );
+
+-- ========== RFC-0014: Key → Artifact Mapping ==========
+-- Maps a human-friendly key to a single content-addressed artifact_id.
+-- Optional hints allow clients to fall back to a disk path when P2P fails.
+
+CREATE TABLE IF NOT EXISTS key_mappings (
+    key TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    replica_uuid TEXT NULL,
+    daemon_address TEXT NULL,
+    disk_path TEXT NULL,
+    -- Soft TTL tracking for housekeeping; not enforced at read path.
+    ttl_seconds BIGINT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);

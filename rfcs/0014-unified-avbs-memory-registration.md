@@ -1,8 +1,8 @@
-# 0015 — AVBS Unified In‑Memory Registration (merging 0006 and 0014)
+# 0014 — AVBS Unified In‑Memory Registration
 
 Author: TensorCast Team
 Status: Final (executed, deduplicated)
-Supersedes: 0006, 0014 (this RFC consolidates both as the single source of truth)
+Supersedes: 0006 (consolidates prior drafts into a single source of truth)
 Depends on: 0001 (DVMP 2.0), 0007 (Content‑addressed mi2), 0009 (MemoryStager & Staged P2P)
 
 ---
@@ -14,11 +14,11 @@ Depends on: 0001 (DVMP 2.0), 0007 (Content‑addressed mi2), 0009 (MemoryStager 
   - RP‑A: Daemon‑owned Coalesced VRAM
   - RP‑B: VRAM Lease (FDML, foreign device memory lease)
   - RP‑C: DVMP (CPU UMA)
-- Unified gRPC method family: Begin/Feed/KeepAlive/Commit/Abort/Revoke (oneof plan/handshake/feed). The SDK exposes a single `register_artifact` entry and routes to the selected plan.
+- Unified gRPC method family: Begin/FeedStream/KeepAlive/Commit/Abort/Revoke (oneof plan/handshake/feed). The SDK exposes a single `register_artifact` entry and routes to the selected plan.
 - Cross‑machine transfers strictly follow staged‑only (RFC‑0009): DVMP/Lease/VRAM always go through a MemoryStager (DRAM/GPU) into pooled host‑pinned buffers before network; ACK releases; direct MR on DVMP/Lease is forbidden.
 - Same‑machine zero‑copy invariant: consumers always map the daemon‑owned Coalesced VRAM via CUDA IPC. For DVMP/Lease sources, the first materialize coalesces into daemon VRAM.
 
-This RFC merges RFC‑0006 “coalesced VRAM memory replica registration” into RFC‑0014’s “AVBS + Realization Plans” abstraction, deduped and aligned to current code.
+This RFC merges RFC‑0006 “coalesced VRAM memory replica registration” into the “AVBS + Realization Plans” abstraction, deduped and aligned to current code.
 
 ### 0.1 Why (Problems & Motivation)
 
@@ -65,19 +65,19 @@ This section reflects what is implemented today (code‑aligned), so this RFC ca
     - `RegisterArtifactOptions` (simple class, not Pydantic): plan=`vram_coalesced|dvmp|vram_leased` and per‑plan options.
     - `register_artifact(state_dict, options, device_id?, ttl_ms?, daemon_address?)`: routes to unified RPC per plan:
       - vram_coalesced: Begin → IPC map → chunked writes → Commit.
-      - dvmp: Begin → linearize into bytes → Feed(DVMP chunk) → Commit.
-      - vram_leased: Begin → collect CUDA IPC segments via PyBind (`_C.get_cuda_memory_handle`) with explicit `dst_offset` per segment → Feed(segments) → Commit.
+      - dvmp: Begin → linearize into bytes → FeedStream(DVMP chunks) → Commit.
+      - vram_leased: Begin → collect CUDA IPC segments via PyBind (`_C.get_cuda_memory_handle`) with explicit `dst_offset` per segment → FeedStream(segments) → Commit.
     - Returns `(dest_state_dict, descriptor_dict)`, where `descriptor_dict` includes `artifact_id / index_multihash / data_multihash / schema_version / encoding / total_size`.
   - `RegisteredArtifact` currently implements `commit()` only (SDK handle). `abort/keep_alive/revoke` are provided via `DaemonCtl` (see improvements).
 
 - Daemon control client (SDK)
   - `tensorcast/daemon_ctl.py` uses the v1 proto and provides wrappers:
     - Begin/Feed/KeepAlive/Commit/Abort/Revoke; DVMP/Lease use `feed_register_artifact_*`; Commit returns a descriptor.
-- The streaming feed wrapper is exposed and used by the SDK. DVMP uses client‑streaming feed by default (unary feed is deprecated for DVMP).
+- The streaming feed wrapper is exposed and used by the SDK. DVMP uses client‑streaming feed only; unary feed has been removed.
 
 - Unified Proto (v1)
   - `proto/tensorcast/daemon/v1/store_daemon.proto` provides:
-    - Method family: Begin / Feed / FeedStream / KeepAlive / Commit / Abort / Revoke (oneof plan/handshake/feed).
+    - Method family: Begin / FeedStream / KeepAlive / Commit / Abort / Revoke (oneof plan/handshake/feed). Streaming is canonical for all plans.
     - Plan options: `CoalescedOptions`, `DvmpOptions` (channel preference), `LeaseOptions`.
     - Begin index uses oneof: `tensor_index_key | tensor_index_data{encoding,schema_version}`.
 
@@ -149,8 +149,8 @@ Piece <|-- PAD
 - Order independence: segment feed order is irrelevant; correctness relies solely on `dst_offset` and `length`.
 - Validation: segments must be single‑device homogeneous; destination ranges must be in‑bounds; overlapping ranges are undefined and should be avoided by clients.
 
-- RP‑C: DVMP (CPU UMA)
-- Begin returns an upload channel. The SDK uses client‑streaming feed; the server writes into UMA via `DVMPRegionSink::write_at`; Commit computes `mi2:` and registers.
+ - RP‑C: DVMP (CPU UMA)
+  - Begin returns an upload channel. The SDK uses client‑streaming feed; the server writes into UMA via `DVMPRegionSink::write_at`; Commit computes `mi2:` and registers.
   - Same‑machine first materialize: DVMP→VRAM coalescence, then CUDA IPC; cross‑machine via DRAMStager.
 
 ### 2.3 Cross‑Machine and Same‑Machine (aligned to 0009/0001)
@@ -180,7 +180,7 @@ Piece <|-- PAD
 - Control plane: `DaemonCtl` wraps unified RPCs; exposes `begin/feed/keepalive/commit/abort/revoke`.
 - Note: SDK `RegisteredArtifact` currently implements `commit()` only; lifecycle methods are available via `DaemonCtl` (see improvements).
 
-### 3.4 Hash & Descriptor Calculation (Mermaid)
+### 3.3 Hash & Descriptor Calculation (Mermaid)
 
 ```mermaid
 flowchart TD
@@ -193,7 +193,7 @@ flowchart TD
   G --> H
 ```
 
-### 3.3 Behavior & Error Semantics (What)
+### 3.4 Behavior & Error Semantics (What)
 
 - Begin: validates `device_id/total_size` and index (key or data), returns a plan‑specific handshake (coalesced IPC / DVMP channel / empty for lease).
 - Feed:
@@ -292,7 +292,7 @@ Security & policy:
 
 The unified registration is: Begin → (Feed/KeepAlive) → Commit/Abort/Revoke. Same‑machine materialize always maps Coalesced VRAM; cross‑machine is strictly staged‑only with ACK‑driven release. See RFC‑0009 and code for details.
 
-### 9.2 Unified Registration (Mermaid)
+### 9.1 Unified Registration (Mermaid)
 
 ```mermaid
 sequenceDiagram
@@ -326,7 +326,7 @@ sequenceDiagram
   end
 ```
 
-### 9.3 Same‑Machine Materialization (Mermaid)
+### 9.2 Same‑Machine Materialization (Mermaid)
 
 ```mermaid
 sequenceDiagram
@@ -351,7 +351,7 @@ sequenceDiagram
   end
 ```
 
-### 9.4 Cross‑Machine Transfer (Mermaid)
+### 9.3 Cross‑Machine Transfer (Mermaid)
 
 ```mermaid
 sequenceDiagram
@@ -376,7 +376,7 @@ sequenceDiagram
   end
 ```
 
-### 9.1 Failure Scenarios & Recovery (What)
+### 9.4 Failure Scenarios & Recovery (What)
 
 - Crash after Begin: TTL expiry auto‑reclaims; client retries Begin idempotently (same index/key reusable).
 - Feed loss/replay: DVMP uses `offset` to uniquely position idempotent writes; Lease forbids overwriting segments (replays are no‑ops).
@@ -389,8 +389,8 @@ sequenceDiagram
 
 - Python:
   - Begin → IPC map → Commit (coalesced)
-  - DVMP: feed (unary) + Commit (TTL expiry tests)
-  - Lease: segment feed + Commit (runs when CUDA is available; same‑process IPC fallback is env‑gated)
+  - DVMP: streaming feed + Commit (TTL expiry tests)
+  - Lease: streaming segment feed + Commit (runs when CUDA is available)
 - C++:
   - StoreEngine: unit tests for Begin/Feed/Commit/Abort/TTL and hashing equivalence
   - Communicator: EX + ACK staged transfer regression
@@ -415,7 +415,7 @@ This RFC unifies RFC‑0006 and RFC‑0014 under the “AVBS + Realization Plans
 - Cross‑machine strictly staged‑only, avoiding pin explosions and complex resource states.
 - Method family and SDK are unified; remaining work focuses on ergonomics and metadata fidelity.
 
-> Note: with RFC‑0015 in effect, 0006/0014 are historical references only and will not be maintained separately.
+> Note: RFC‑0006 is now a historical reference and will not be maintained separately; this RFC is the single source of truth for unified registration.
 
 ---
 
@@ -431,3 +431,125 @@ This RFC unifies RFC‑0006 and RFC‑0014 under the “AVBS + Realization Plans
   - Avoids broad pinning, NUMA penalties, and conflicts with DVMP eviction; builds stability on small, controlled pooled buffers (ACK reclaimable).
 - Why key‑first in Global Store?
   - Dedup/reduction: replicas carry only the index key; the BLOB is upserted/fetched on demand, reducing metadata amplification and sync complexity.
+
+---
+
+## 14. Key‑Based Artifact Mapping and Disk Fallback (Merged from RFC‑0017)
+
+This section integrates the capabilities originally proposed in RFC‑0017 into the unified registration and consumption model defined by this document. It enables directed cross‑node lookup via a human/automation friendly key and provides a robust disk‑source fallback path with strict consistency validation.
+
+### 14.1 Capabilities (What)
+
+- Key → Artifact mapping:
+  - A globally unique string key resolves to exactly one `artifact_id` (content‑addressed `mi2:`).
+  - Multiple replicas (VRAM/DVMP/DISK) may exist for the same `artifact_id`; load balancing selects the best source.
+  - Upserts are idempotent when `artifact_id` matches; conflicting `artifact_id` is rejected.
+- Disk source and fallback:
+  - Registration can include a `disk_path` pointing to a canonical checkpoint directory (see Store Checkpoint format).
+  - On P2P failure, the system falls back to the registered disk path and loads the artifact, preserving the same reconstruction/verification guarantees.
+  - When `disk_path == ""` the daemon may choose an effective path under its configured `storage_root` and persist the checkpoint after Commit (Phase 2 rollout).
+- Client SDK:
+  - `RegisterArtifactOptions` gains `key: str | None` and `disk_path: str | None`.
+  - `get_artifact(key, ...)` materializes by key, preferring P2P, with automatic disk fallback.
+
+### 14.2 Consistency & Validation (Why)
+
+Strict consistency is enforced via canonical Index v2 bytes and optional verification hash:
+
+- The client builds canonical Index v2 bytes (stable key order/encoding) during registration.
+- If `disk_path/tensor_index.json` exists, it is parsed and re‑canonicalized; the bytes (or multihash) must exactly match.
+- If `verification.json.full_artifact_hash` exists, it must match the computed value.
+- Any mismatch fails registration with `INVALID_ARGUMENT` and a concise diff summary.
+
+Note: Validation concerns metadata and reconstruction‑critical fields (dtype/shape/stride/storage_offset, layout), not full data file byte‑equality.
+
+### 14.3 Control Plane & Ownership (Where)
+
+- Store Daemon:
+  - Owns local registration materialization and (optionally) disk persistence when `disk_path == ""`.
+  - Publishes key→artifact mapping to the Global Store upon successful Commit (when a `key` is provided).
+- Global Store:
+  - Owns the authoritative, globally unique mapping `key → artifact_id` with TTL and idempotence guarantees.
+  - Continues to track replicas by `artifact_id` (VRAM/DVMP/DISK) and supports selection/liveness via existing tables.
+
+### 14.4 API Surface (How)
+
+Client SDK (Python):
+
+- `RegisterArtifactOptions`:
+  - `key: str | None = None`
+  - `disk_path: str | None = None`  // empty string means "daemon chooses path and persists" (Phase 2)
+- Registration semantics:
+  - If `disk_path` is non‑empty and exists, validate metadata before Begin/Commit; on failure, abort without committing.
+  - On successful Commit: if `key` is provided, publish key mapping; if `disk_path == ""`, daemon may persist and register a DISK replica (Phase 2).
+- Retrieval:
+  - `get_artifact(key, device_id=0, options=GetArtifactOptions)` prefers P2P; on failure, falls back to DISK if available. `GetArtifactOptions` includes `prefer`, `pinned_allocation_timeout_ms`, `wait_for_completion`, `enable_verification`.
+
+Store Daemon (gRPC additions):
+
+- `PublishReplicaKey(PublishReplicaKeyRequest) → PublishReplicaKeyResponse`
+- `MaterializeByKey(MaterializeByKeyRequest) → MaterializeByKeyResponse`
+
+Global Store (gRPC additions):
+
+- `UpsertKeyMapping(UpsertKeyMappingRequest) → UpsertKeyMappingResponse`
+- `ResolveKeyMapping(ResolveKeyMappingRequest) → ResolveKeyMappingResponse`
+- `RevokeKeyMapping(RevokeKeyMappingRequest) → RevokeKeyMappingResponse`
+
+Example proto (abridged for clarity):
+
+```proto
+// Store Daemon Service
+rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
+rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
+
+message PublishReplicaKeyRequest {
+  string key = 1;
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
+  string replica_uuid = 3;
+  string disk_path = 4; // "" lets daemon choose under storage_root (Phase 2)
+  bool fail_if_exists = 5; // default true
+  bool validate_disk = 6;  // default true
+}
+
+// Global Store Service
+rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
+rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
+```
+
+### 14.5 Interactions (Flows)
+
+- Register with key and disk:
+  1) Client validates existing `disk_path` (if provided and exists).
+  2) Begin/Feed/Commit unified registration; Commit returns `artifact_id`.
+  3) If `disk_path == ""`, daemon may persist under `storage_root` and register DISK replica (Phase 2).
+  4) Daemon publishes `key → artifact_id` to Global Store.
+- Get by key:
+  1) Client calls local daemon `MaterializeByKey(key, ...)`.
+  2) Daemon resolves key → `artifact_id` via Global Store and selects the best replica (VRAM/DVMP preferred, DISK lowest).
+  3) Transfer via staged‑only P2P; on failure, load from DISK fallback.
+
+### 14.6 Observability
+
+- Client attributes: `tc.get_artifact.source={p2p|disk}`, `tc.get_artifact.fallback={true|false}`,
+  `tc.register_artifact.disk.validate={pass|fail}`, `tc.register_artifact.disk.persist_bytes/seconds`.
+- Daemon metrics: `materialize_by_key_total{result=success|fallback|error}`, `p2p_transfer_seconds`, `disk_load_seconds`, `fallback_seconds`, `key_mapping_state{state=publish|revoke|conflict}`.
+- Global Store metrics: `key_mapping_total{op=upsert|resolve|revoke, result=ok|conflict|error}`.
+
+### 14.7 Compatibility & Migration
+
+- All additions are optional; legacy `artifact_id`‑based flows remain unchanged.
+- Default path derivation is only active when `disk_path == ""` and is daemon‑controlled (Phase 2).
+
+### 14.8 Execution Status & Phasing
+
+- Phase 1 (SDK + control plane):
+  - SDK options `key/disk_path`, metadata validation, `get_artifact(key, ...)`.
+  - Global Store RPCs and backing table(s) for key mappings, TTL, and idempotent upserts.
+  - Daemon RPCs to publish keys and materialize by key; fallback hints wired to the orchestrator.
+- Phase 2 (daemon persistence):
+  - Enable `disk_path == ""` behavior: daemon persists to `${storage_root}/${artifact_id}/${replica_uuid}/` atomically post‑Commit and registers a DISK replica.
+- Phase 3 (observability & hardening):
+  - Emit metrics listed above and exercise failure drills (P2P failure, disk unreachable, mapping conflicts).
+

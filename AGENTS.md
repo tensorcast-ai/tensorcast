@@ -12,7 +12,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 
 #### C++ Core (Bazel) and Python Extension
 ```bash
-# Build all. BUILD_CORE means cxx files in core/
+# Build all. BUILD_CORE means cxx files in core/ and ./daemon
 #  BUILD_EXTENSION means cxx files in tensorcast/csrc
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.

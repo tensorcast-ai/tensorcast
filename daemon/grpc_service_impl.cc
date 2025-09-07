@@ -14,6 +14,7 @@
 #include "absl/strings/str_format.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/otel/grpc_propagation.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/loader/segment_plan_source.h"
@@ -187,6 +188,127 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
   }
   resp->set_code(1);
   return to_grpc_status(st);
+}
+
+// RFC-0014: Materialize by key using Global Store mapping
+Status StoreDaemonServiceImpl::MaterializeByKey(
+    grpc::ServerContext* ctx,
+    const v1::MaterializeByKeyRequest* req,
+    v1::MaterializeByKeyResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/MaterializeByKey", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "MaterializeByKey");
+  span->SetAttribute("tc.key", req->key());
+
+  using v1::MaterializeReplicaStatus;
+  if (is_shutting_down_.load()) {
+    resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->key().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+
+  // Resolve key via a transient GlobalStoreClient (avoids exposing engine internals).
+  store::components::GlobalStoreClientConfig cfg;
+  auto gs = std::make_unique<store::components::GlobalStoreClient>(cfg);
+  auto st = gs->initialize();
+  if (!st.ok()) {
+    resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(st);
+  }
+  auto mapping_or = gs->resolve_key_mapping(req->key());
+  if (!mapping_or.ok()) {
+    resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(mapping_or.status());
+  }
+  auto mapping = *mapping_or;
+  span->SetAttribute("tc.artifact.id", mapping.artifact_id);
+
+  const auto device = store::DeviceKey{.type = store::DeviceType::GPU, .ordinal = req->device_id(), .uuid = ""};
+  store::loading::MaterializeHints hints;
+  if (req->pinned_allocation_timeout_ms() > 0) {
+    hints.pinned_timeout = std::chrono::milliseconds(req->pinned_allocation_timeout_ms());
+  }
+  hints.artifact_id = mapping.artifact_id;
+  // RFC-0014: provide optional disk fallback when mapping carries disk_path
+  if (!mapping.disk_path.empty()) {
+    hints.disk_path = mapping.disk_path;
+  }
+
+  auto result = engine_->materialize_replica(device, store::StoreEngine::MaterializeMode::AUTO, hints);
+  if (!result.ok()) {
+    resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(result.status());
+  }
+  const auto& handle = *result;
+  // RFC-0014: if client supplied a replica_uuid, register a session for Confirm/Verification
+  if (!req->replica_uuid().empty()) {
+    sessions_.put(req->replica_uuid(), handle.replica_key, handle.ready_future);
+    set_verif_status(req->replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS);
+    {
+      absl::MutexLock l(&bg_tasks_mu_);
+      verif_tasks_.push_back(VerifTask{.uuid = req->replica_uuid(), .ready = handle.ready_future});
+    }
+  }
+  if (handle.cuda_ipc_handle.is_valid()) {
+    auto* mem = resp->mutable_mem_handle();
+    mem->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
+  }
+  resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  resp->set_artifact_id(mapping.artifact_id);
+  resp->set_used_disk_path(mapping.disk_path);
+  return grpc::Status::OK;
+}
+
+// RFC-0014: Publish key mapping – lightweight wrapper to Global Store
+Status StoreDaemonServiceImpl::PublishReplicaKey(
+    grpc::ServerContext* ctx,
+    const v1::PublishReplicaKeyRequest* req,
+    v1::PublishReplicaKeyResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/PublishReplicaKey", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "PublishReplicaKey");
+  span->SetAttribute("tc.key", req->key());
+
+  if (req->key().empty() || !req->has_descriptor() || req->descriptor().artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key and descriptor.artifact_id are required"};
+  }
+  if (is_shutting_down_.load()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  store::components::GlobalStoreClientConfig cfg;
+  auto gs = std::make_unique<store::components::GlobalStoreClient>(cfg);
+  auto st = gs->initialize();
+  if (!st.ok()) {
+    resp->set_ok(false);
+    return to_grpc_status(st);
+  }
+  auto up = gs->upsert_key_mapping(req->key(), req->descriptor().artifact_id(), req->disk_path());
+  if (!up.ok()) {
+    resp->set_ok(false);
+    resp->set_conflict_reason(std::string(up.message()));
+    return to_grpc_status(up);
+  }
+  resp->set_ok(true);
+  return grpc::Status::OK;
 }
 
 Status StoreDaemonServiceImpl::UnloadReplica(

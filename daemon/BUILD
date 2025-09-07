@@ -21,6 +21,7 @@ sc_cc_library(
         ":transport_lock_manager_hdr",
         "//core/common:artifact_hash_lib",
         "//core/common:otel_grpc_propagation_lib",
+        "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",

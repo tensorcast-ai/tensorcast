@@ -147,6 +147,16 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::RevokeRegisteredArtifactRequest* req,
       v1::RevokeRegisteredArtifactResponse* resp) override;
 
+  // RFC-0014
+  grpc::Status MaterializeByKey(
+      grpc::ServerContext* ctx,
+      const v1::MaterializeByKeyRequest* req,
+      v1::MaterializeByKeyResponse* resp) override;
+  grpc::Status PublishReplicaKey(
+      grpc::ServerContext* ctx,
+      const v1::PublishReplicaKeyRequest* req,
+      v1::PublishReplicaKeyResponse* resp) override;
+
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,

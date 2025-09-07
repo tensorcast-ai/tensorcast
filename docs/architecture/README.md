@@ -12,6 +12,11 @@ This section contains detailed technical documentation about the system architec
 ### [Architecture Overview](./architecture-overview.md)
 High-level overview of the system architecture, core components, and design principles. Start here to understand how the system works.
 
+### Key-based Loading (RFC‑0015)
+Recommended client API is key-based: clients call the daemon’s `MaterializeByKey` and reconstruct tensors using canonical indices fetched from Global Store (`GetArtifactIndexById`). The daemon resolves the key, orchestrates P2P transfers, and performs disk fallback when needed. See:
+- [P2P Transfer Strategies](./p2p-transfer-strategies.md)
+- [Internals: Artifact Loading Workflow](../internals/model-loading.md)
+
 ### [Global Store Development Guide](../../tensorcast/global_store/README.md)
 Detailed development guide for the Global Store component, including its layered architecture, API reference, and implementation details.
 
