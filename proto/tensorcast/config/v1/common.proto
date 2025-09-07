@@ -17,7 +17,7 @@ message GrpcServer {
   google.protobuf.Duration keepalive_time = 3;
   google.protobuf.Duration keepalive_timeout = 4;
   google.protobuf.Duration max_connection_idle = 5; // 0s = disabled
-  google.protobuf.Duration max_connection_age = 6;  // 0s = disabled
+  google.protobuf.Duration max_connection_age = 6; // 0s = disabled
   bool tcp_nodelay = 7;
   bool so_reuseport = 8;
   message Tls {
@@ -48,11 +48,11 @@ message Observability {
   }
 
   message Logging {
-    LogLevel level = 1;               // Canonical log level
-    string file = 2;                  // Optional logfile path
-    bool otel_context_enabled = 3;    // Whether to enrich logs with OTel context
-    string sink_file = 4;             // Optional enriched sink file
-    int32 vlog_level = 5;             // Verbosity level for VLOG
+    LogLevel level = 1; // Canonical log level
+    string file = 2; // Optional logfile path
+    bool otel_context_enabled = 3; // Whether to enrich logs with OTel context
+    string sink_file = 4; // Optional enriched sink file
+    int32 vlog_level = 5; // Verbosity level for VLOG
   }
 
   message OTel {
@@ -60,17 +60,17 @@ message Observability {
     string exporter_otlp_endpoint = 2;
     OTelProtocol exporter_protocol = 3; // grpc or http/protobuf
     string service_name = 4;
-    string sampler = 5;            // e.g., parentbased_traceidratio
-    string sampler_arg = 6;        // e.g., 1.0
+    string sampler = 5; // e.g., parentbased_traceidratio
+    string sampler_arg = 6; // e.g., 1.0
   }
 
   message OTelCxx {
-    bool sdk_disabled = 1;                 // OTEL_SDK_DISABLED
+    bool sdk_disabled = 1; // OTEL_SDK_DISABLED
     // Endpoint/protocol inherit from Observability.OTel; only C++-specific
     // knobs remain here to avoid duplication and ensure single source of truth.
-    bool exporter_insecure = 2;            // OTEL_EXPORTER_OTLP_INSECURE
+    bool exporter_insecure = 2; // OTEL_EXPORTER_OTLP_INSECURE
     map<string, string> exporter_headers = 3; // OTEL_EXPORTER_OTLP_HEADERS
-    bool console_exporter = 4;             // Optional console exporter for debugging
+    bool console_exporter = 4; // Optional console exporter for debugging
   }
 
   message Tracing {
@@ -86,5 +86,5 @@ message Observability {
 // Optional metadata block for auditing/versioning config files.
 message ConfigMeta {
   string schema_version = 1; // e.g., "v1"
-  string description = 2;    // free-form description for operators
+  string description = 2; // free-form description for operators
 }

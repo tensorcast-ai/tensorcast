@@ -66,8 +66,8 @@ message Engine {
 
 message CheckpointStreaming {
   uint32 num_buffers = 1;
-  uint64 io_chunk_bytes = 2;      // Renamed to avoid confusion with engine.chunk_bytes
-  uint64 pinned_pool_bytes = 3;   // Clarify this is a streaming pinned pool
+  uint64 io_chunk_bytes = 2; // Renamed to avoid confusion with engine.chunk_bytes
+  uint64 pinned_pool_bytes = 3; // Clarify this is a streaming pinned pool
 }
 
 message DaemonConfig {
@@ -87,11 +87,15 @@ message DaemonConfig {
   }
   Compatibility compatibility = 7;
 
-  message Checkpoint { CheckpointStreaming streaming = 1; }
+  message Checkpoint {
+    CheckpointStreaming streaming = 1;
+  }
   Checkpoint checkpoint = 8;
 
   message Debug {
-    message Cuda { bool enable_same_process_ipc_fallback = 1; }
+    message Cuda {
+      bool enable_same_process_ipc_fallback = 1;
+    }
     Cuda cuda = 1;
   }
   Debug debug = 9;

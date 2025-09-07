@@ -8,8 +8,8 @@ import "tensorcast/config/v1/common.proto";
 message DaemonLauncher {
   reserved 1; // address (host:port string)
   tensorcast.config.v1.SocketAddress target = 10; // default daemon target
-  string bin_path = 2;            // path to store daemon binary (optional)
-  string python_interpreter = 3;  // python interpreter for wrappers (optional)
+  string bin_path = 2; // path to store daemon binary (optional)
+  string python_interpreter = 3; // python interpreter for wrappers (optional)
 }
 
 message ClientDefaults {
