@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <future>
 #include <memory>
 #include <vector>
 
@@ -74,6 +73,7 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
     return absl::NotFoundError("No tensor.data partitions in fallback dir");
   }
   std::vector<std::pair<fs::path, size_t>> pair;
+  pair.reserve(paths.size());
   for (size_t i = 0; i < paths.size(); ++i)
     pair.emplace_back(paths[i], sizes[i]);
   std::sort(
@@ -108,17 +108,16 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       .total_size = source_.size_bytes};
   auto remote_src = std::make_shared<store::loader::RemoteKeySource>(src_opts);
 
-  // Optional disk fallback via env var TENSORCAST_FALLBACK_MODEL_DIR
-  const char* fb_dir_env = ::getenv("TENSORCAST_FALLBACK_MODEL_DIR");
-  if (fb_dir_env != nullptr && std::strlen(fb_dir_env) > 0) {
-    auto disk_opts_or = build_fallback_disk_source_opts(fb_dir_env, 128 * 1024 * 1024, source_.size_bytes);
+  // Optional disk fallback via configured directory
+  if (!source_.fallback_disk_dir.empty()) {
+    auto disk_opts_or =
+        build_fallback_disk_source_opts(source_.fallback_disk_dir, 128 * 1024 * 1024, source_.size_bytes);
     if (disk_opts_or.ok()) {
       auto file_src_ptr = std::make_shared<store::loader::FilePartitionSource>(*disk_opts_or);
       auto mux = std::make_unique<store::loader::MuxSeekableSource>(remote_src, file_src_ptr);
       return mux;
-    } else {
-      LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
     }
+    LOG(WARNING) << "P2PLoader: fallback dir set but invalid: " << disk_opts_or.status();
   }
 
   // Default: return remote source (unique_ptr wrapper around shared)
@@ -136,6 +135,8 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
     absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {
       return inner_->read_into(dest_va_offset, bytes, token);
     }
+
+   private:
     std::shared_ptr<loader::SeekableSource> inner_;
   };
   return std::make_unique<Wrapper>(remote_src);

@@ -22,6 +22,7 @@ dependencies = [
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
     "opentelemetry-sdk>=1.36.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.36.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.36.0",
     "opentelemetry-instrumentation-grpc>=0.57b0",
 ]

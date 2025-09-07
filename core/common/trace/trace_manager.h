@@ -109,6 +109,16 @@ class TraceManager {
   std::shared_ptr<ReplicaTrace> get_or_create_artifact_trace(const std::string& artifact_id);
 
   // -----------------------------------------------------------------
+  // Chrome trace output configuration (unified config driven)
+  // -----------------------------------------------------------------
+  // Set directory to write chrome trace JSON files. Empty = disabled.
+  static void set_chrome_trace_dir(const std::string& dir);
+  // Returns currently configured directory (may be empty when disabled).
+  static std::string chrome_trace_dir();
+  // Write chrome trace to configured directory if enabled.
+  static void write_chrome_trace_if_configured(const std::string& artifact_id, const std::string& request_id);
+
+  // -----------------------------------------------------------------
   // artifact-id helpers (mirrors request-id helpers)
   // -----------------------------------------------------------------
   static void set_current_artifact_id(const std::string& artifact_id) {
@@ -177,44 +187,8 @@ class TraceSummaryGuard {
       LOG(INFO) << "[TraceSummary] " << oss.str();
     }
 
-    // Check if Chrome Trace output is enabled via environment variable
-    const char* trace_output_dir = std::getenv("SC_TRACE_OUTPUT_DIR");
-    if (trace_output_dir != nullptr && trace_output_dir[0] != '\0') {
-      try {
-        std::string chrome_trace_json = TraceManager::instance().generate_chrome_trace(artifact_id_, request_id_);
-
-        // Generate filename: artifact_id+request_id.json
-        std::string filename = artifact_id_;
-        if (!request_id_.empty()) {
-          filename += "+" + request_id_;
-        }
-
-        // Clean filename: replace path separators and other special chars with underscore
-        for (char& c : filename) {
-          if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' ||
-              c == '|') {
-            c = '_';
-          }
-        }
-
-        filename += ".json";
-
-        // Build full path
-        std::string full_path = std::string(trace_output_dir) + "/" + filename;
-
-        // Write to file
-        std::ofstream trace_file(full_path);
-        if (trace_file.is_open()) {
-          trace_file << chrome_trace_json;
-          trace_file.close();
-          LOG(INFO) << "[TraceSummary] Chrome trace saved to: " << full_path;
-        } else {
-          LOG(WARNING) << "[TraceSummary] Failed to open file for writing: " << full_path;
-        }
-      } catch (const std::exception& e) {
-        LOG(WARNING) << "[TraceSummary] Failed to save Chrome trace: " << e.what();
-      }
-    }
+    // Chrome Trace output via unified config: if configured, write it out.
+    TraceManager::write_chrome_trace_if_configured(artifact_id_, request_id_);
 
     // Clear the trace data for this (artifact_id, request_id) pair to avoid
     // holding unbounded history once the summary has been emitted.

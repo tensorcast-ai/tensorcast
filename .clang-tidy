@@ -128,6 +128,10 @@ readability-*,
 -readability-math-missing-parentheses,
 zircon-*,
 -zircon-temporary-objects,
+-abseil-string-find-startswith,
+-fuchsia-statically-constructed-objects,
+-misc-use-anonymous-namespace,
+-readability-braces-around-statements,
 '
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*/core/.*\.(h|hpp|hxx|cpp|cxx)$'
@@ -136,3 +140,46 @@ CheckOptions:
     value: 'true'
   - key: readability-redundant-member-init.IgnoreBaseInCopyConstructors
     value: 'true'
+  # Sync from .clangd Diagnostics.ClangTidy.CheckOptions
+  - key: readability-identifier-naming.VariableCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.FunctionCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.ClassCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.StructCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.EnumCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.NamespaceCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.MacroCase
+    value: 'UPPER_CASE'
+  - key: readability-identifier-naming.ParameterCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.MemberCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: '_'
+  - key: readability-identifier-naming.PrivateMethodCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.PrivateMethodIgnoredRegexp
+    value: '^[a-z][a-z0-9_]*_$'
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: 'k'
+  - key: readability-identifier-naming.StaticConstantCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.StaticConstantPrefix
+    value: 'k'
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: 'CamelCase'
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: 'k'
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: 'false'
+  - key: performance-unnecessary-value-param.IncludeStyle
+    value: 'google'
+  - key: abseil-string-find-str-contains.StringLikeClasses
+    value: 'std::string;std::string_view;absl::string_view'

@@ -83,10 +83,7 @@ When `use_streaming=True`, you can pass a `streaming_config` dict with:
 - `buffer_size_mb`: Size of each buffer in MB (default: 256)
 - `enable_async_write`: Enable asynchronous disk writing (default: True)
 
-Environment variables can also configure streaming behavior:
-- `STREAMING_CHUNK_SIZE_MB`: Buffer size for streaming operations
-- `STREAMING_POOL_SIZE_GB`: Total pinned memory pool size
-- `STREAMING_NUM_BUFFERS`: Number of buffers in the pool
+Environment variables are not supported. Streaming behavior is configured via explicit parameters only.
 
 ---
 

@@ -24,8 +24,8 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
   svc.set_worker_registered("worker-1");
 
   {
-    tensorcast::daemon::GetWorkerStatusRequest req;
-    tensorcast::daemon::GetWorkerStatusResponse resp;
+    tensorcast::daemon::v1::GetWorkerStatusRequest req;
+    tensorcast::daemon::v1::GetWorkerStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetWorkerStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());
@@ -35,8 +35,8 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
   }
 
   {
-    tensorcast::daemon::GetDetailedStatusRequest req;
-    tensorcast::daemon::GetDetailedStatusResponse resp;
+    tensorcast::daemon::v1::GetDetailedStatusRequest req;
+    tensorcast::daemon::v1::GetDetailedStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());

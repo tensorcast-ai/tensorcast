@@ -9,7 +9,7 @@
 #include "core/communicator/config_io.h"
 
 using tensorcast::communicator::LoadCommunicatorConfigFromFile;
-using tensorcast::communicator::NormalizeDefaults;
+using tensorcast::communicator::normalize_defaults;
 using tensorcast::communicator::v1::CommunicatorConfig;
 
 static std::string write_temp_file(const std::string& content, const std::string& suffix) {

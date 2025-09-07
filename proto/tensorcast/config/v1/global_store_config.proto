@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package tensorcast.config.v1;
+
+import "google/protobuf/duration.proto";
+import "tensorcast/config/v1/common.proto";
+
+message GlobalServer {
+  // Legacy host/port replaced by structured listen address.
+  reserved 1, 4; // port, host
+  reserved "port", "host";
+  tensorcast.config.v1.SocketAddress listen = 10;
+  uint32 max_workers = 2;
+  tensorcast.config.v1.GrpcServer grpc = 3;
+}
+
+message Database {
+  string db_file = 1;
+}
+
+message WorkerPolicy {
+  google.protobuf.Duration heartbeat_timeout = 1;
+  google.protobuf.Duration cleanup_interval = 2;
+  google.protobuf.Duration default_heartbeat_interval = 3;
+}
+
+message WebUi {
+  bool enabled = 1;
+  string host = 2;
+  uint32 port = 3;
+  repeated string cors_allowed_origins = 4;
+}
+
+message GlobalStoreConfig {
+  Database database = 1;
+  GlobalServer server = 2;
+  WorkerPolicy worker_policy = 3;
+  WebUi web_ui = 4;
+  tensorcast.config.v1.Observability observability = 5;
+  tensorcast.config.v1.ConfigMeta meta = 100; // Optional metadata
+}

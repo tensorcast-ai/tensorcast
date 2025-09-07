@@ -3,7 +3,6 @@
 """Simplified logging configuration for tensorcast."""
 
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -174,10 +173,8 @@ def init_logger(name: str) -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    # Auto-configure logging if not already done
+    # Auto-configure logging if not already done (default INFO, no env)
     if not logging.getLogger().handlers:
-        # Use environment variable for log level if available
-        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-        setup_logging(level=log_level)
+        setup_logging(level="INFO")
 
     return logging.getLogger(name)

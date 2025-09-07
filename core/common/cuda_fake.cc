@@ -416,6 +416,10 @@ bool is_available() {
   return true; // Fake backend is always available
 }
 
+void configure_same_process_ipc_fallback(bool /*enabled*/) {
+  // No-op for fake backend; semantics already allow same-process opens
+}
+
 // IPC handle operations (native CUDA handle type)
 absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
   auto& state = get_state();

@@ -199,6 +199,10 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 ### C++ Guidelines (Simplified)
 
+#### Includes vs. Forward Declarations
+- Avoid forward declarations; include the correct headers for any types used in headers and translation units.
+- Follow include-what-you-use: include the minimal header that directly provides the symbols you reference.
+
 #### C++ Naming Conventions
 - **Variables/Functions**: `snake_case`
 - **Classes/Structs**: `PascalCase`
@@ -271,6 +275,10 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - `uv run mypy ./tensorcast`
   - `uv run ruff check .` and `uv run ruff format .`
 - **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
+
+#### Protobuf Imports
+- Import generated protobuf modules using the canonical package path `tensorcast.proto.<pkg>.v1`.
+- Example: `from tensorcast.proto.config.v1 import client_config_pb2`
 
 #### Best Practices
 - Prefer decomposition and iteration over duplication

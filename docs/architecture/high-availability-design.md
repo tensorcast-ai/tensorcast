@@ -134,16 +134,9 @@ message StateChange { enum ChangeType { CHANGE_TYPE_UNSPECIFIED = 0; CHANGE_TYPE
 
 ## Configuration
 
-### Global Store
+### Global Store (Unified Config)
 
-```bash
-GLOBAL_STORE_PORT=50051
-GLOBAL_STORE_MAX_WORKERS=10
-GLOBAL_STORE_DB_PATH=/path/to/models.db
-GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS=30000
-GLOBAL_STORE_CLEANUP_INTERVAL_MS=60000
-GLOBAL_STORE_HEARTBEAT_INTERVAL_MS=5000
-```
+请在 Global Store 配置文件中设置 `server.listen.port`、`server.max_workers`、`database.db_file`、`worker_policy.{heartbeat_timeout,cleanup_interval,default_heartbeat_interval}` 等字段。
 
 ### Store Daemon
 

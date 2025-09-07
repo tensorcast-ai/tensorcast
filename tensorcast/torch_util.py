@@ -29,6 +29,23 @@ logger = init_logger(__name__)
 # Global daemon address configuration
 _global_daemon_address = "127.0.0.1:8073"
 
+# ---------------------------------------------------------------------------
+# Module-level constants and type aliases to improve readability
+# ---------------------------------------------------------------------------
+
+# Alignment used for coalesced layouts (bytes)
+DEFAULT_ALIGN: int = 8
+
+# Client defaults
+DEFAULT_PINNED_TIMEOUT_MS: int = 30000
+DEFAULT_DVMP_CHUNK_SIZE: int = 4 * 1024 * 1024
+
+# Type aliases for index structures
+TensorMetaIndex = dict[str, tuple[list[int], list[int], str, int]]
+TensorDataIndex = dict[str, tuple[int, int]]
+TensorDeviceOffsets = dict[int | torch.device, dict[str, int]]
+CopyChunk = tuple[int, int, int, int]  # (src_offset, size, dst_offset, stream_idx)
+
 
 def resolve_device(device: int | torch.device) -> int:
     """Convert device specification to device ID.
@@ -215,7 +232,7 @@ def calculate_tensor_device_offsets(
     }
 
     current_offset: int = 0
-    ALIGN: int = 8  # bytes – writer guarantees 64-bit alignment
+    ALIGN: int = DEFAULT_ALIGN  # writer guarantees 64-bit alignment
     seen: dict[tuple[int, int], int] = {}
 
     # Enforce deterministic iteration order to stabilize coalesced layout
@@ -245,9 +262,7 @@ def calculate_tensor_device_offsets(
 
 def build_indices_from_safetensors(
     artifact_dir: os.PathLike | Path,
-) -> tuple[
-    dict[str, tuple[list[int], list[int], str, int]], dict[str, tuple[int, int]]
-]:
+) -> tuple[TensorMetaIndex, TensorDataIndex]:
     """Build unified indices using C++ canonical safetensors index builder.
 
     Returns (tensor_meta_index, tensor_data_index).
@@ -260,8 +275,8 @@ def build_indices_from_safetensors(
     except Exception as e:  # noqa: BLE001
         raise ValueError(f"Failed to parse canonical index bytes: {e}") from e
 
-    tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
-    tensor_data_index: dict[str, tuple[int, int]] = {}
+    tensor_meta_index: TensorMetaIndex = {}
+    tensor_data_index: TensorDataIndex = {}
     for name, meta in index_obj.items():
         offset, size, shape, stride, dtype, storage_offset = meta
         tensor_meta_index[name] = (
@@ -272,6 +287,246 @@ def build_indices_from_safetensors(
         )
         tensor_data_index[name] = (int(offset), int(size))
     return tensor_meta_index, tensor_data_index
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers to reduce duplication and clarify control flow
+# ---------------------------------------------------------------------------
+
+
+def _build_tensor_meta_and_source_indices(
+    artifact: dict[str, torch.Tensor],
+) -> tuple[TensorMetaIndex, TensorDataIndex]:
+    """Build canonical meta and source storage indices from an artifact dict."""
+    tensor_meta_index: TensorMetaIndex = {}
+    tensor_source_index: TensorDataIndex = {}
+    for name, t in artifact.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("All artifact keys must be non-empty strings")
+        storage = t.untyped_storage()
+        data_ptr = int(storage.data_ptr())
+        size_bytes = int(storage.size())
+        tensor_source_index[name] = (data_ptr, size_bytes)
+        tensor_meta_index[name] = (
+            list(map(int, t.shape)),
+            list(map(int, t.stride())),
+            str(t.dtype),
+            int(t.storage_offset()),
+        )
+    return tensor_meta_index, tensor_source_index
+
+
+def _compute_coalesced_layout(
+    tensor_source_index: TensorDataIndex,
+    device_id: int,
+) -> tuple[TensorDeviceOffsets, list[CopyChunk], int]:
+    """Compute coalesced offsets, unique copy chunks and total size."""
+    tensor_device_offsets, tensor_copy_chunks = calculate_tensor_device_offsets(
+        tensor_source_index, device_id
+    )
+    unique_chunks = tensor_copy_chunks.get(device_id, [])
+    if not unique_chunks:
+        raise ValueError("Failed to compute coalesced layout for artifact")
+    total_size_bytes = max(dst + sz for _, sz, dst, _ in unique_chunks)
+    return tensor_device_offsets, unique_chunks, total_size_bytes
+
+
+def _build_v2_index_bytes(
+    tensor_meta_index: TensorMetaIndex,
+    tensor_source_index: TensorDataIndex,
+    tensor_device_offsets: TensorDeviceOffsets,
+    device_id: int,
+) -> bytes:
+    """Build canonical v2 index JSON bytes using destination offsets."""
+    tensor_index_v2: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+    for name in sorted(tensor_meta_index.keys()):
+        shape, stride, dtype, storage_offset = tensor_meta_index[name]
+        _, storage_size = tensor_source_index[name]
+        dst_off = int(tensor_device_offsets[device_id][name])
+        tensor_index_v2[name] = (
+            dst_off,
+            int(storage_size),
+            list(shape),
+            list(stride),
+            dtype,
+            int(storage_offset),
+        )
+    return json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+
+
+def _compose_artifact_dir(
+    raw_disk_path: Path, storage_path: str | os.PathLike | None
+) -> Path:
+    """Compose the artifact directory from the storage root and relative path.
+
+    Rules:
+    - storage_path is None or "": use raw_disk_path as-is
+    - otherwise: join storage_path/raw_disk_path
+    """
+    if storage_path is None:
+        return raw_disk_path
+    s = str(storage_path)
+    if s == "":
+        return raw_disk_path
+    return Path(s) / raw_disk_path
+
+
+def _load_tensor_indices(
+    artifact_dir: Path,
+) -> tuple[
+    TensorMetaIndex,
+    TensorDataIndex,
+]:
+    """Load tensor meta and data indices from artifact directory.
+
+    Prefers `tensor_index.json` when present; otherwise builds from safetensors.
+    Handles legacy v1 format (5-tuple without storage_offset).
+    """
+    index_path = artifact_dir / "tensor_index.json"
+    safetensors_files: list[Path] = sorted(artifact_dir.glob("*.safetensors"))
+
+    if safetensors_files and not index_path.exists():
+        return build_indices_from_safetensors(artifact_dir)
+
+    with open(index_path, "r") as f:
+        tensor_index = json.load(f)
+
+    tensor_meta_index: TensorMetaIndex = {}
+    tensor_data_index: TensorDataIndex = {}
+    for name, meta in tensor_index.items():
+        if len(meta) == 5:
+            offset, size, shape, stride, dtype = meta
+            storage_offset = 0
+        else:
+            offset, size, shape, stride, dtype, storage_offset = meta
+
+        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
+        tensor_data_index[name] = (offset, size)
+
+    return tensor_meta_index, tensor_data_index
+
+
+def _apply_client_defaults_if_present(
+    pinned_allocation_timeout_ms: int,
+    enable_verification: bool,
+    wait_for_completion: bool,
+) -> tuple[int, bool, bool]:
+    """Apply client defaults when available from runtime config.
+
+    Also updates daemon address if a default target is configured.
+    """
+    try:
+        from tensorcast.client_runtime import client_defaults, daemon_target_default
+
+        cfg_timeout_ms, cfg_enable_ver, cfg_wait = client_defaults()
+        cfg_target = daemon_target_default()
+        if cfg_target:
+            from tensorcast.torch_util import set_daemon_address as _set_addr
+
+            _set_addr(cfg_target)
+    except Exception:
+        cfg_timeout_ms, cfg_enable_ver, cfg_wait = (None, None, None)
+
+    if (
+        pinned_allocation_timeout_ms == DEFAULT_PINNED_TIMEOUT_MS
+        and cfg_timeout_ms is not None
+    ):
+        pinned_allocation_timeout_ms = int(cfg_timeout_ms)
+    if enable_verification is True and cfg_enable_ver is not None:
+        enable_verification = bool(cfg_enable_ver)
+    if wait_for_completion is True and cfg_wait is not None:
+        wait_for_completion = bool(cfg_wait)
+
+    return pinned_allocation_timeout_ms, enable_verification, wait_for_completion
+
+
+def _ensure_artifact_descriptor_safe(artifact_dir: Path) -> None:
+    """Ensure `artifact_descriptor.json` exists without raising to caller."""
+    try:
+        _ = inspect_or_generate_descriptor(str(artifact_dir))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to ensure artifact_descriptor.json: %s", e)
+
+
+def _load_from_disk_with_tracing(
+    tracer: trace.Tracer,
+    disk_path: str | os.PathLike,
+    device_id_int: int,
+    artifact_dir: Path,
+    *,
+    span_name: str,
+    is_fallback: bool = False,
+) -> dict[str, torch.Tensor]:
+    """Helper for local disk load with span attributes and fallback flag."""
+    with tracer.start_as_current_span(span_name, kind=SpanKind.INTERNAL):
+        set_span_attributes(
+            {
+                "tc.disk.path": str(disk_path),
+                "tc.device.id": int(device_id_int),
+                "tc.source": "disk",
+                **({"tc.fallback": True} if is_fallback else {}),
+            }
+        )
+        return load_dict_from_disk(
+            artifact_dir,
+            device_id=device_id_int,
+            storage_path="",
+        )
+
+
+def _monitor_verification(
+    ctl: DaemonCtl,
+    identifier: str,
+    replica: str,
+    timeout: int,
+) -> None:  # pragma: no cover – simple helper
+    """Background monitor that checks artifact verification status and exits on failure."""
+    try:
+        resp = ctl.wait_artifact_verification(
+            artifact_identifier=identifier,
+            replica_uuid=replica,
+            timeout_ms=timeout,
+        )
+
+        # If RPC itself failed, proceed optimistically – already logged
+        if resp is None:
+            return
+
+        if (
+            resp.status
+            == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED
+        ):
+            logger.fatal(
+                "Artifact verification failed (identifier=%s, replica=%s): %s",
+                identifier,
+                replica,
+                resp.err_msg or "no details",
+            )
+            # Abort the entire process to avoid serving corrupted artifact
+            os._exit(1)
+        elif (
+            resp.status
+            == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_PASSED
+        ):
+            logger.info(
+                "Artifact verification passed (identifier=%s, replica=%s)",
+                identifier,
+                replica,
+            )
+        else:
+            # UNKNOWN / IN_PROGRESS after timeout – treat as pass but warn
+            logger.warning(
+                "Artifact verification not complete (status=%s, id=%s, replica=%s): %s",
+                resp.status,
+                identifier,
+                replica,
+                resp.err_msg,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # Any unexpected error – log and continue optimistically
+        logger.exception("Verification monitor encountered error: %s", exc)
 
 
 def save_dict(
@@ -313,37 +568,10 @@ def load_dict_from_disk(
     - Uses tensor_index.json (or safetensors headers) and partition files under artifact directory.
     - Loads to CUDA device if available; falls back to CPU when CUDA is not available.
     """
-    # Resolve artifact directory
+    # Resolve artifact directory and indices
     raw_disk_path = Path(str(disk_path))
-    if storage_path and str(storage_path) != "":
-        artifact_dir = Path(str(storage_path)) / raw_disk_path
-    else:
-        artifact_dir = raw_disk_path
-
-    index_path = artifact_dir / "tensor_index.json"
-    safetensors_files: list[Path] = sorted(artifact_dir.glob("*.safetensors"))
-
-    # If safetensors present and no tensor_index.json, build indices from safetensors headers
-    if safetensors_files and not index_path.exists():
-        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(
-            artifact_dir
-        )
-    else:
-        with open(index_path, "r") as f:
-            tensor_index = json.load(f)
-
-        tensor_meta_index = {}
-        tensor_data_index = {}
-        for name, meta in tensor_index.items():
-            # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
-            if len(meta) == 5:
-                offset, size, shape, stride, dtype = meta
-                storage_offset = 0
-            else:
-                offset, size, shape, stride, dtype, storage_offset = meta
-
-            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-            tensor_data_index[name] = (offset, size)
+    artifact_dir = _compose_artifact_dir(raw_disk_path, storage_path)
+    tensor_meta_index, tensor_data_index = _load_tensor_indices(artifact_dir)
 
     device_id_int: int = resolve_device(device_id)
     # Compute coalesced offsets and adapt to the flat mapping API expected by restore_tensors_from_disk
@@ -398,9 +626,19 @@ def load_dict(
     client = DaemonCtl(get_daemon_address())
 
     # Respect explicit empty string ("") to mean "use disk_path as-is".
-    # Only fallback to env default when storage_path is None.
+    # In unified config mode: storage_path must be provided or present in ClientConfig.
     if storage_path is None:
-        storage_path = os.getenv("STORAGE_PATH", "./models")
+        try:
+            from tensorcast.client_runtime import storage_root_default
+
+            cfg_root = storage_root_default()
+        except Exception:
+            cfg_root = None
+        if cfg_root is None:
+            raise ValueError(
+                "storage_path must be provided or set via ClientConfig.storage.default_root"
+            )
+        storage_path = cfg_root
 
     # Normalize device_id early to avoid runtime type checks
     device_id_int: int = resolve_device(device_id)
@@ -409,35 +647,8 @@ def load_dict(
         raise ValueError("disk_path and storage_path must be provided")
 
     raw_disk_path = Path(str(disk_path))
-    if isinstance(storage_path, (str, os.PathLike)) and str(storage_path) == "":
-        artifact_dir = raw_disk_path
-    else:
-        artifact_dir = Path(str(storage_path)) / str(raw_disk_path)
-
-    index_path = artifact_dir / "tensor_index.json"
-    safetensors_files: list[Path] = sorted(artifact_dir.glob("*.safetensors"))
-
-    # If safetensors present and no tensor_index.json, build indices from safetensors headers
-    if safetensors_files and not index_path.exists():
-        tensor_meta_index, tensor_data_index = build_indices_from_safetensors(
-            artifact_dir
-        )
-    else:
-        with open(index_path, "r") as f:
-            tensor_index = json.load(f)
-
-        tensor_meta_index = {}
-        tensor_data_index = {}
-        for name, meta in tensor_index.items():
-            # Legacy checkpoints (<= v1) store a 5-tuple without the storage_offset.
-            if len(meta) == 5:
-                offset, size, shape, stride, dtype = meta
-                storage_offset = 0
-            else:
-                offset, size, shape, stride, dtype, storage_offset = meta
-
-            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-            tensor_data_index[name] = (offset, size)
+    artifact_dir = _compose_artifact_dir(raw_disk_path, storage_path)
+    tensor_meta_index, tensor_data_index = _load_tensor_indices(artifact_dir)
 
     # tensor_device_offsets: tensor_name to offset on device
     # tensor_copy_chunks: (offset, size, device_offset[device], 0)
@@ -452,21 +663,23 @@ def load_dict(
 
     # If CUDA is not available, or daemon is unavailable at runtime, fall back to local disk loading.
     if not torch.cuda.is_available():
-        with tracer.start_as_current_span(
-            "Client/LoadDictLocal", kind=SpanKind.INTERNAL
-        ):
-            set_span_attributes(
-                {
-                    "tc.disk.path": str(disk_path),
-                    "tc.device.id": int(device_id_int),
-                    "tc.source": "disk",
-                }
-            )
-            return load_dict_from_disk(
-                artifact_dir,
-                device_id=device_id_int,
-                storage_path="",
-            )
+        return _load_from_disk_with_tracing(
+            tracer,
+            str(disk_path),
+            device_id_int,
+            artifact_dir,
+            span_name="Client/LoadDictLocal",
+            is_fallback=False,
+        )
+
+    # Apply ClientConfig defaults when caller used function defaults
+    (
+        pinned_allocation_timeout_ms,
+        enable_verification,
+        wait_for_completion,
+    ) = _apply_client_defaults_if_present(
+        pinned_allocation_timeout_ms, enable_verification, wait_for_completion
+    )
 
     with tracer.start_as_current_span("Client/LoadDictDaemon", kind=SpanKind.INTERNAL):
         set_span_attributes(
@@ -489,22 +702,14 @@ def load_dict(
         except RuntimeError as e:
             # Gracefully degrade to local load when daemon is not running
             if "Local StoreDaemon" in str(e) or "not available" in str(e):
-                with tracer.start_as_current_span(
-                    "Client/LoadDictLocalFallback", kind=SpanKind.INTERNAL
-                ):
-                    set_span_attributes(
-                        {
-                            "tc.disk.path": str(disk_path),
-                            "tc.device.id": int(device_id_int),
-                            "tc.source": "disk",
-                            "tc.fallback": True,
-                        }
-                    )
-                    return load_dict_from_disk(
-                        artifact_dir,
-                        device_id=device_id_int,
-                        storage_path="",
-                    )
+                return _load_from_disk_with_tracing(
+                    tracer,
+                    str(disk_path),
+                    device_id_int,
+                    artifact_dir,
+                    span_name="Client/LoadDictLocalFallback",
+                    is_fallback=True,
+                )
             raise
 
     if wait_for_completion:
@@ -533,57 +738,6 @@ def load_dict(
     # treated as fatal and will terminate the process.
     # ------------------------------------------------------------------
 
-    def _monitor_verification(
-        ctl: DaemonCtl,
-        identifier: str,
-        replica: str,
-        timeout: int,
-    ) -> None:  # pragma: no cover – simple helper
-        try:
-            resp = ctl.wait_artifact_verification(
-                artifact_identifier=identifier,
-                replica_uuid=replica,
-                timeout_ms=timeout,
-            )
-
-            # If RPC itself failed, proceed optimistically – already logged
-            if resp is None:
-                return
-
-            if (
-                resp.status
-                == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED
-            ):
-                logger.fatal(
-                    "Artifact verification failed (identifier=%s, replica=%s): %s",
-                    identifier,
-                    replica,
-                    resp.err_msg or "no details",
-                )
-                # Abort the entire process to avoid serving corrupted artifact
-                os._exit(1)
-            elif (
-                resp.status
-                == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_PASSED
-            ):
-                logger.info(
-                    "Artifact verification passed (identifier=%s, replica=%s)",
-                    identifier,
-                    replica,
-                )
-            else:
-                # UNKNOWN / IN_PROGRESS after timeout – treat as pass but warn
-                logger.warning(
-                    "Artifact verification not complete (status=%s, id=%s, replica=%s): %s",
-                    resp.status,
-                    identifier,
-                    replica,
-                    resp.err_msg,
-                )
-        except Exception as exc:  # noqa: BLE001
-            # Any unexpected error – log and continue optimistically
-            logger.exception("Verification monitor encountered error: %s", exc)
-
     if enable_verification:
         verification_timeout_ms = pinned_allocation_timeout_ms + 30000
         t = threading.Thread(
@@ -595,10 +749,7 @@ def load_dict(
         t.start()
 
     # Per RFC-0007: after load completes, ensure artifact_descriptor.json exists.
-    try:
-        _ = inspect_or_generate_descriptor(str(artifact_dir))
-    except Exception as e:
-        logger.warning("Failed to ensure artifact_descriptor.json: %s", e)
+    _ensure_artifact_descriptor_safe(artifact_dir)
 
     # Return based on mode
     if wait_for_completion:
@@ -689,51 +840,19 @@ def register_artifact(
         input_mode = "cpu"
 
     # Build canonical meta index and source storage info
-    tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
-    tensor_source_index: dict[str, tuple[int, int]] = {}
-    for name, t in artifact.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError("All artifact keys must be non-empty strings")
-        storage = t.untyped_storage()
-        data_ptr = int(storage.data_ptr())
-        size_bytes = int(storage.size())
-        tensor_source_index[name] = (data_ptr, size_bytes)
-        tensor_meta_index[name] = (
-            list(map(int, t.shape)),
-            list(map(int, t.stride())),
-            str(t.dtype),
-            int(t.storage_offset()),
-        )
+    tensor_meta_index, tensor_source_index = _build_tensor_meta_and_source_indices(
+        artifact
+    )
 
     # Plan coalesced layout (8B aligned) and compute total size
-    tensor_device_offsets, tensor_copy_chunks = calculate_tensor_device_offsets(
+    tensor_device_offsets, unique_chunks, total_size_bytes = _compute_coalesced_layout(
         tensor_source_index, target_device_id
     )
-    unique_chunks = tensor_copy_chunks.get(target_device_id, [])
-    if not unique_chunks:
-        raise ValueError("Failed to compute coalesced layout for artifact")
-    total_size_bytes = max(dst + sz for _, sz, dst, _ in unique_chunks)
 
     # Build v2-equivalent index JSON using destination offsets
-    tensor_index_v2: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
-    for name in sorted(tensor_meta_index.keys()):
-        shape, stride, dtype, storage_offset = tensor_meta_index[name]
-        # Use canonical storage size per name from source index
-        _, storage_size = tensor_source_index[name]
-        dst_off = int(tensor_device_offsets[target_device_id][name])
-        tensor_index_v2[name] = (
-            dst_off,
-            int(storage_size),
-            list(shape),
-            list(stride),
-            dtype,
-            int(storage_offset),
-        )
-
-    # Serialize with sorted keys to enforce canonical outer key order
-    index_bytes = json.dumps(
-        tensor_index_v2, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    index_bytes = _build_v2_index_bytes(
+        tensor_meta_index, tensor_source_index, tensor_device_offsets, target_device_id
+    )
 
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
@@ -811,8 +930,10 @@ def register_artifact(
             # Stream in daemon-preferred chunk size without assembling a giant buffer
             # Build generator that yields contiguous slices mapped to their destination offsets
             frames: list[tuple[int, bytes]] = []
+            # Reconstruct offsets and sizes from our inputs to avoid keeping a second dict
             for name in sorted(tensor_meta_index.keys()):
-                dst_off, storage_size, *_ = tensor_index_v2[name]
+                dst_off = int(tensor_device_offsets[target_device_id][name])
+                _ptr, storage_size = tensor_source_index[name]
                 src = artifact[name]
                 b = src.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
                 if len(b) != int(storage_size):
@@ -824,13 +945,10 @@ def register_artifact(
             # Concatenate frames into one bytes is suboptimal for memory; stream each frame with proper offset
             ok_all = True
             # Determine chunk size from daemon
-            try:
-                cfg = ctl.get_server_config()
-                chunk_size = int(cfg.chunk_size)
-                if chunk_size <= 0:
-                    chunk_size = 4 * 1024 * 1024
-            except Exception:
-                chunk_size = 4 * 1024 * 1024
+            cfg = ctl.get_server_config()
+            chunk_size = int(cfg.chunk_size)
+            if chunk_size <= 0:
+                chunk_size = DEFAULT_DVMP_CHUNK_SIZE
 
             # Send each frame, possibly split by chunk_size
             for off, data_bytes in frames:

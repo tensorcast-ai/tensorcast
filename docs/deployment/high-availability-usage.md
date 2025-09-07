@@ -72,20 +72,8 @@ global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 
 ### Starting Store Daemon with HA
 
-```python
-# C++ daemon is now the implementation; use the Python manager to launch it
-from tensorcast.daemon_config import StoreDaemonConfig
-from tensorcast.daemon_manager import DaemonManager
-
-# Configure with HA enabled (HA settings are read from config/file/env)
-config = StoreDaemonConfig(
-    storage_path="/path/to/storage",
-    global_store_address="global-store:50051",
-    enable_p2p_engine=True,
-)
-
-mgr = DaemonManager(config, auto_start=True)
-mgr.ensure_daemon_running()
+```bash
+uv run -q python -m tensorcast.cli start --config=/etc/tensorcast/store_daemon.yaml
 ```
 
 ### Worker Recovery Registration

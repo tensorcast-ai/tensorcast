@@ -9,12 +9,12 @@ import sys
 import threading
 import time
 from concurrent import futures
-from pathlib import Path
 from typing import IO
 
 import grpc
 
 from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import set_config
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
 
 # Prometheus metrics
@@ -23,7 +23,8 @@ from tensorcast.global_store.metrics import (
     start_metrics_http_server,
 )
 from tensorcast.logger import init_logger
-from tensorcast.observability.otel import setup_otel
+
+# setup_otel_from_observability is imported lazily to avoid hard dependency here
 from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 
 logger = init_logger(__name__)
@@ -35,69 +36,27 @@ def main():
         description="Global Store Server - Centralized artifact registry"
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to listen on (default: from config or 50051)",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="Number of worker threads (default: from config or 10)",
-    )
-    parser.add_argument(
-        "--db-file",
+        "--config",
         type=str,
-        default=None,
-        help="Path to DuckDB file for persistent storage (default: in-memory)",
-    )
-    parser.add_argument(
-        "--metrics-port",
-        type=int,
-        default=8001,
-        help="Port to expose Prometheus metrics (default: 8001)",
-    )
-    parser.add_argument(
-        "--webui-log-file",
-        type=str,
-        default=None,
-        help="Path to log file for Web UI process (default: /tmp/global-store-webui.log)",
+        required=True,
+        help="Path to Global Store config (YAML/JSON)",
     )
     args = parser.parse_args()
 
-    # Load configuration
-    config = GlobalStoreConfig.from_env()
+    # Load configuration (strict via proto)
+    config = GlobalStoreConfig.from_file(args.config)
+    pb_cfg = GlobalStoreConfig.load_proto_from_file(args.config)
+    set_config(config)
 
-    # Override with command line arguments by creating a new config instance
-    if any(
-        arg is not None
-        for arg in [
-            args.port,
-            args.workers,
-            args.db_file,
-            args.metrics_port,
-            args.webui_log_file,
-        ]
-    ):
-        # Build update dictionary with only non-None values
-        updates = {}
-        if args.port is not None:
-            updates["port"] = args.port
-        if args.workers is not None:
-            updates["max_workers"] = args.workers
-        if args.db_file is not None:
-            updates["db_file"] = args.db_file
-        if args.metrics_port is not None:
-            updates["metrics_port"] = args.metrics_port
-        if args.webui_log_file is not None:
-            updates["ui_log_file"] = Path(args.webui_log_file).expanduser()
+    # Initialize OpenTelemetry from config (no env bridging)
+    try:
+        from tensorcast.observability.otel import (
+            setup_otel_from_observability as _setup_otel_from_observability,
+        )
 
-        # Create new config instance with updates using Pydantic's model_copy
-        config = config.model_copy(update=updates)
-
-    # Initialize OpenTelemetry (required; no automatic downgrade)
-    setup_otel("tensorcast-global-store", role="global-store")
+        _setup_otel_from_observability(pb_cfg.observability, role="global-store")
+    except Exception as _exc:  # noqa: BLE001
+        logger.exception("Failed to initialize OpenTelemetry from config: %s", _exc)
     logger.info("OpenTelemetry tracing enabled for Global Store")
 
     # Initialize the service

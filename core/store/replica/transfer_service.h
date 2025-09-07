@@ -20,12 +20,9 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica_memory_coordinator.h"
 #include "core/store/replica/transfer_constants.h"
-
-// Forward declarations to avoid heavy includes
-namespace tensorcast::store::loader {
-class SeekableSource;
-class PositionedSink;
-} // namespace tensorcast::store::loader
+// Prefer explicit includes over forward declarations
+#include "core/store/loader/sink.h"
+#include "core/store/loader/source.h"
 
 namespace tensorcast::store::replica {
 

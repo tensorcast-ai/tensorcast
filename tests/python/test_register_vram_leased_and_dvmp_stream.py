@@ -42,17 +42,38 @@ def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Pop
     if torch_libdir.exists():
         ld_path = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{torch_libdir}:{ld_path}" if ld_path else str(torch_libdir)
-    args = [
-        str(bin_path),
-        f"--listen_addr={listen_addr}",
-        f"--storage_path={str(storage_path)}",
-        "--p2p_port=9090",
-        "--mem_pool_size=268435456",  # 256MB
-        "--chunk_size=8388608",       # 8MB
-        "--io_threads=2",
-        "--enable_p2p_access=true",
-    ]
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    # Build unified DaemonConfig YAML and pass via --config
+    import tempfile, yaml
+    host, port_s = listen_addr.split(":", 1)
+    port = int(port_s)
+    storage_path.mkdir(parents=True, exist_ok=True)
+    log_path = storage_path.parent / "daemon.log"
+    cfg = {
+        "server": {
+            "listen": {"host": host, "port": port},
+            "p2p_listen": {"host": host, "port": 9090},
+            "storage_path": str(storage_path),
+            "num_threads": 2,
+            "grpc": {"max_message_size_mb": 128, "tcp_nodelay": True, "so_reuseport": False},
+        },
+        "engine": {
+            "mem_pool_size_bytes": 268435456,
+            "chunk_bytes": 8388608,
+            "dvmp_chunk_size_bytes": 8388608,
+            "streaming_buffer_max_concurrent_sessions": 1,
+        },
+        "communicator": {"enable_rdma": False},
+        "observability": {
+            "otel": {"enabled": False},
+            "logging": {"level": "INFO", "otel_context_enabled": False, "file": str(log_path)},
+            "tracing": {"chrome_trace_dir": ""},
+        },
+        "debug": {"cuda": {"enable_same_process_ipc_fallback": True}},
+    }
+    with tempfile.NamedTemporaryFile(prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False) as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+        cfg_path = Path(f.name)
+    proc = subprocess.Popen([str(bin_path), f"--config={cfg_path}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     # Wait for readiness
     deadline = time.time() + 10
     ok = False

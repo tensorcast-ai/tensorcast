@@ -14,6 +14,7 @@ from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
     ReplicaRepository,
@@ -180,8 +181,34 @@ def repositories(db_connection):
 
 
 @pytest.fixture
-def services(repositories):
-    """Create service instances."""
+def services(tmp_path, repositories):
+    """Create service instances with a file-based test config."""
+    # Initialize from a minimal YAML config to avoid env reliance
+    cfg_path = tmp_path / "global_store_test.yaml"
+    cfg_path.write_text(
+        """
+database:
+  db_file: ""  # use in-memory
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 50051
+  max_workers: 10
+worker_policy:
+  heartbeat_timeout: "30s"
+  cleanup_interval: "60s"
+  default_heartbeat_interval: "5s"
+web_ui:
+  enabled: false
+observability:
+  logging:
+    level: LOG_LEVEL_INFO
+  otel:
+    enabled: false
+        """,
+        encoding="utf-8",
+    )
+    set_config(GlobalStoreConfig.from_file(str(cfg_path)))
     return {
         "artifact": ArtifactService(repositories["replica"]),
         "transport": TransportService(

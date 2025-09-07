@@ -10,19 +10,11 @@ This document describes the internals of the Store Daemon as implemented under `
 
 Binary target: `//daemon:tensorcast_daemon`
 
-Quick run example:
+Quick run example (unified config):
 
 ```bash
 bazel build //daemon:tensorcast_daemon
-bazel-bin/daemon/tensorcast_daemon \
-  --listen_addr=0.0.0.0:50051 \
-  --storage_path=/data/models \
-  --p2p_port=9090 \
-  --mem_pool_size=$((8<<30)) \
-  --chunk_size=$((128<<20)) \
-  --io_threads=10 \
-  --global_store_addr=host:50051 \
-  --comm_config_path=/path/to/communicator.yaml
+bazel-bin/daemon/tensorcast_daemon --config=examples/config/store_daemon_config.yaml
 ```
 
 ## System Context (Where this daemon fits)
@@ -74,10 +66,10 @@ graph TD
 ```
 
 Startup flow (`server_main.cc`):
-- Parse Abseil flags; optionally initialize the communication engine (RDMA/TCP) and pass it via `StoreEngineOptions`.
-- Construct `StoreEngine` and `StoreDaemonServiceImpl`, register the gRPC service and start listening.
-- If `--global_store_addr` is set, start `WorkerLifecycleManager`: register the worker, send heartbeats, and (optionally) sync chunk states.
-- Install signal handling (a `sigwait` thread); on SIGINT/SIGTERM initiate graceful shutdown (reject new loads, stop gRPC).
+- Load unified config (`--config=...`) and map to `StoreEngineOptions` & service options (sweepers/TTL/eviction).
+- Initialize OTel/log sink from `observability.*`; initialize communicator (`communicator.*`) and gRPC/TLS (`server.grpc.*`); register service and start listening.
+- When `high_availability.enabled=true` with `global_store_endpoints` configured, start `WorkerLifecycleManager` for registration/heartbeats/optional state sync.
+- Install signal handling (`sigwait` thread); on SIGINT/SIGTERM perform graceful shutdown (reject new loads and stop gRPC).
 
 ## Components and Responsibilities
 

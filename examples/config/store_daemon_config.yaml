@@ -1,36 +1,55 @@
-# Basic server settings
 server:
-  host: "0.0.0.0"
-  port: 61052
-  storage_path: "/mnt/stepcloud/prod/"
+  listen:
+    host: 0.0.0.0
+    port: 50052
+  p2p_listen:
+    host: 0.0.0.0
+    port: 65090
+  storage_path: /data/models
   num_threads: 16
-  chunk_size: 64MiB
-  mem_pool_size: 2GiB
-  enable_p2p_engine: true
-  enable_p2p_access: true
-  pinned_memory_timeout_ms: 30000
-
-global_store_address: "10.148.40.11:50051"
-
-# High-availability behaviour
+engine:
+  mem_pool_size_bytes: 8GB
+  chunk_bytes: 256MB
+  dvmp_chunk_size_bytes: 256MB
+  streaming_buffer_max_concurrent_sessions: 1
+  pinned_allocation_timeout: 30s
+  p2p_fallback_disk_dir: ""
 high_availability:
-  enabled: true
-  heartbeat_interval_ms: 30000
-  registration_retry_delay_ms: 5000
-  max_retries: -1
-
-# Network ports
-network:
-  p2p_port: 65090
-  health_check_port: 62080
-
-# Lifecycle & eviction
+  enabled: false
+  global_store_endpoints:
+    - host: 127.0.0.1
+      port: 50051
 lifecycle:
-  gpu_memory_limit_fraction: 0.1
-  global_cache_fraction: 0.1
-  proc_check_interval_s: 5.0
-  eviction_check_interval_s: 15.0
-
-# Graceful shutdown window
-shutdown:
-  grace_period_ms: 30000
+  gpu_memory_limit_fraction: 0.75
+  enable_periodic_eviction: false
+  eviction_loop_interval: 1s
+  proc_check_interval: 5s
+  sessions_sweep_interval: 10s
+  locks_sweep_interval: 10s
+  verification_sweep_interval: 500ms
+  sessions_ttl: 60s
+  locks_ttl: 120s
+communicator:
+  enable_rdma: false
+observability:
+  logging:
+    level: INFO
+  otel:
+    enabled: false
+    exporter_otlp_endpoint: http://127.0.0.1:4317
+    exporter_protocol: grpc
+    service_name: tensorcast-store-daemon
+compatibility:
+  confirm_requires_disk_path: false
+  verification_timeout_status: ok
+  evict_on_dead_pid: false
+  auto_register_disk_loads: false
+  force_full_digest_on_load: false
+checkpoint:
+  streaming:
+    num_buffers: 4
+    io_chunk_bytes: 256MB
+    pinned_pool_bytes: 2GB
+debug:
+  cuda:
+    enable_same_process_ipc_fallback: false

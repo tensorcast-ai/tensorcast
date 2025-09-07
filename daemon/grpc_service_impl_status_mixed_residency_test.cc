@@ -31,13 +31,13 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
   fs::path dir = fs::temp_directory_path() / fs::path("tc_mixed_residency_" + std::to_string(::getpid()));
   fs::create_directories(dir);
   // Create a small data file and RFC-0007 descriptors for DiskLoader
-  REQUIRE(tensorcast::tests::create_dummy_file(dir / "tensor.data", 1ULL * 1024 * 1024));
-  auto st_desc = tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
+  REQUIRE(tensorcast::testing::create_dummy_file(dir / "tensor.data", 1ULL * 1024 * 1024));
+  auto st_desc = tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
   REQUIRE(st_desc.ok());
 
   // Load CPU replica from disk
   {
-    tensorcast::store::MaterializeHints hints;
+    tensorcast::store::loading::MaterializeHints hints;
     hints.disk_path = dir.string();
     auto h = engine->materialize_replica(
         tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""},
@@ -49,7 +49,7 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Load GPU replica (device 0) from the same disk artifact
   {
-    tensorcast::store::MaterializeHints hints;
+    tensorcast::store::loading::MaterializeHints hints;
     hints.disk_path = dir.string();
     auto h = engine->materialize_replica(
         tensorcast::store::DeviceKey{tensorcast::DeviceType::GPU, 0, ""},
@@ -61,8 +61,8 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Query detailed status
   {
-    tensorcast::daemon::GetDetailedStatusRequest req;
-    tensorcast::daemon::GetDetailedStatusResponse resp;
+    tensorcast::daemon::v1::GetDetailedStatusRequest req;
+    tensorcast::daemon::v1::GetDetailedStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());
@@ -90,10 +90,10 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
 
   // Query loaded replicas list and ensure both CPU(-1) and GPU(0) are present
   {
-    tensorcast::daemon::GetLoadedReplicasRequest req;
-    tensorcast::daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Request req;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Response resp;
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
     REQUIRE(st.ok());
     bool seen_cpu = false, seen_gpu0 = false;
     for (const auto& r : resp.replicas()) {
@@ -115,13 +115,13 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
   // Create another minimal artifact on disk
   fs::path dir = fs::temp_directory_path() / fs::path("tc_filters_" + std::to_string(::getpid()));
   fs::create_directories(dir);
-  REQUIRE(tensorcast::tests::create_dummy_file(dir / "tensor.data", 512ULL * 1024));
-  auto st_desc = tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
+  REQUIRE(tensorcast::testing::create_dummy_file(dir / "tensor.data", 512ULL * 1024));
+  auto st_desc = tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
   REQUIRE(st_desc.ok());
 
   // Load both CPU and GPU replicas from the same artifact
   for (int i = 0; i < 2; ++i) {
-    tensorcast::store::MaterializeHints hints;
+    tensorcast::store::loading::MaterializeHints hints;
     hints.disk_path = dir.string();
     auto dev = (i == 0) ? tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""}
                         : tensorcast::store::DeviceKey{tensorcast::DeviceType::GPU, 0, ""};
@@ -133,11 +133,11 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
   // Filter by artifact_id substring (directory basename)
   const std::string filter = dir.filename().string();
   {
-    tensorcast::daemon::GetLoadedReplicasRequest req;
-    tensorcast::daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Request req;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Response resp;
     req.set_artifact_id_filter(filter);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
     REQUIRE(st.ok());
     // Expect two entries (CPU -1, GPU 0)
     REQUIRE(resp.replicas_size() >= 2);
@@ -154,11 +154,11 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Filter by device_id only (GPU 0)
   {
-    tensorcast::daemon::GetLoadedReplicasRequest req;
-    tensorcast::daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Request req;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Response resp;
     req.set_device_id_filter(0);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
     REQUIRE(st.ok());
     // Only GPU entries should remain
     REQUIRE(resp.replicas_size() >= 1);
@@ -169,12 +169,12 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
 
   // Combined filter (artifact_id + device_id = CPU should return only CPU replica)
   {
-    tensorcast::daemon::GetLoadedReplicasRequest req;
-    tensorcast::daemon::GetLoadedReplicasResponse resp;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Request req;
+    tensorcast::daemon::v1::GetLoadedReplicasV2Response resp;
     req.set_artifact_id_filter(filter);
     req.set_device_id_filter(-1);
     grpc::ServerContext ctx;
-    auto st = svc.GetLoadedReplicas(&ctx, &req, &resp);
+    auto st = svc.GetLoadedReplicasV2(&ctx, &req, &resp);
     REQUIRE(st.ok());
     REQUIRE(resp.replicas_size() >= 1);
     for (const auto& r : resp.replicas()) {

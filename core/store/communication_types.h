@@ -39,6 +39,11 @@ struct P2PSource {
   bool enable_checksum = true;
   Location location;
 
+  // Optional on-disk fallback directory containing partition files
+  // (e.g., tensor.data_0, tensor.data_1, ...). When non-empty, P2PLoader
+  // will mux remote source with this disk source for resilience.
+  std::string fallback_disk_dir;
+
   std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine;
 };
 

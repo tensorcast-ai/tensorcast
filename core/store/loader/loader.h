@@ -6,11 +6,8 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-
-// Forward declare SeekableSource in the loader namespace to avoid heavy includes here
-namespace tensorcast::store::loader {
-class SeekableSource;
-} // namespace tensorcast::store::loader
+// Prefer explicit includes over forward declarations
+#include "core/store/loader/source.h"
 
 namespace tensorcast::store {
 

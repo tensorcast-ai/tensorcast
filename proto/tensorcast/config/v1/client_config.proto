@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package tensorcast.config.v1;
+
+import "google/protobuf/duration.proto";
+import "tensorcast/config/v1/common.proto";
+
+message DaemonLauncher {
+  reserved 1; // address (host:port string)
+  tensorcast.config.v1.SocketAddress target = 10; // default daemon target
+  string bin_path = 2;            // path to store daemon binary (optional)
+  string python_interpreter = 3;  // python interpreter for wrappers (optional)
+}
+
+message ClientDefaults {
+  google.protobuf.Duration pinned_allocation_timeout = 1;
+  bool enable_verification = 2;
+  bool wait_for_completion = 3;
+}
+
+message ClientStorage {
+  string default_root = 1;
+}
+
+message ClientConfig {
+  DaemonLauncher daemon = 1;
+  ClientStorage storage = 2;
+  bool use_host_pid = 3;
+  bool connect_only = 4;
+  ClientDefaults defaults = 5;
+  tensorcast.config.v1.Observability observability = 6;
+  tensorcast.config.v1.ConfigMeta meta = 100; // Optional metadata
+}

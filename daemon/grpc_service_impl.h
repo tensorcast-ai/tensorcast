@@ -23,8 +23,29 @@ namespace tensorcast::daemon {
 
 class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
  public:
+  struct Options {
+    // Sweep/TTL configuration
+    std::chrono::seconds sessions_ttl{std::chrono::seconds(60)};
+    std::chrono::seconds locks_ttl{std::chrono::seconds(120)};
+    std::chrono::milliseconds sessions_sweep_interval{std::chrono::milliseconds(10000)};
+    std::chrono::milliseconds locks_sweep_interval{std::chrono::milliseconds(10000)};
+    std::chrono::milliseconds verification_sweep_interval{std::chrono::milliseconds(500)};
+    std::chrono::milliseconds proc_check_interval{std::chrono::milliseconds(5000)};
+
+    // Eviction policy
+    bool enable_periodic_eviction{false};
+    double gpu_memory_limit_fraction{0.90};
+    std::chrono::milliseconds eviction_check_interval{std::chrono::milliseconds(1000)};
+
+    // Observability
+    bool allow_high_card_attrs{false};
+  };
+
   explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
-      : engine_(std::move(engine)), sessions_(std::chrono::seconds(60)) {
+      : StoreDaemonServiceImpl(std::move(engine), Options{}) {}
+
+  explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine, Options opts)
+      : engine_(std::move(engine)), sessions_(opts.sessions_ttl), locks_(opts.locks_ttl), opts_(opts) {
     start_sweepers();
   }
 
@@ -114,7 +135,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       v1::FeedRegisterArtifactStreamResponse* resp) override;
 
   // Testing/helper overload: process a vector of streaming requests without standing up a gRPC server
-  grpc::Status FeedRegisterArtifactStreamVector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
+  grpc::Status feed_register_artifact_stream_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
 
   grpc::Status KeepAliveRegisterArtifact(
       grpc::ServerContext* ctx,
@@ -152,7 +173,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
  private:
   std::shared_ptr<tensorcast::store::StoreEngine> engine_;
   ReplicaSessionManager sessions_;
-  TransportLockManager locks_{std::chrono::seconds(120)};
+  TransportLockManager locks_;
   RefTracker refs_;
 
   // Background sweepers
@@ -231,6 +252,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     uint64_t dst_offset{0}; // destination offset in coalesced buffer
   };
   absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(reg_mu_);
+
+  Options opts_;
 };
 
 } // namespace tensorcast::daemon

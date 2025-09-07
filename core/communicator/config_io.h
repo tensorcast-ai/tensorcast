@@ -16,6 +16,6 @@ absl::StatusOr<tensorcast::communicator::v1::CommunicatorConfig> LoadCommunicato
 // Apply runtime defaults to a partially-filled proto (proto3 has no field defaults).
 // Note: Only non-boolean numeric/time fields are defaulted here to avoid
 // overriding explicit false booleans (proto3 lacks presence for scalars).
-void NormalizeDefaults(tensorcast::communicator::v1::CommunicatorConfig* cfg);
+void normalize_defaults(tensorcast::communicator::v1::CommunicatorConfig* cfg);
 
 } // namespace tensorcast::communicator

@@ -49,7 +49,7 @@
     - Detect `.yaml/.yml` or `.json`.
     - YAML: parse via `yaml-cpp` to a generic tree, serialize to JSON text (using `nlohmann::json`), then `google::protobuf::util::JsonStringToMessage(...)` to fill the proto.
     - JSON: directly `JsonStringToMessage`.
-  - `void NormalizeDefaults(tensorcast::communicator::CommunicatorConfig* cfg);` centralizes defaults.
+  - `void normalize_defaults(tensorcast::communicator::CommunicatorConfig* cfg);` centralizes defaults.
 - Bazel deps: add `yaml-cpp`, `nlohmann_json`, and Protobuf util to the new library.
 
 4) Operational model: file‑only configuration for communicator
@@ -82,7 +82,7 @@ flowchart LR
     B[config_io: yaml-cpp / nlohmann]
     C[Proto util: JsonStringToMessage]
     D[CommunicatorConfig (proto)]
-    E[NormalizeDefaults]
+    E[normalize_defaults]
     F[Engine / CommManager]
   end
   A --> B --> C --> D --> E --> F
@@ -98,7 +98,7 @@ flowchart LR
 - Regenerate Python and add C++ proto targets.
 
 2. Adapter + loader (P1)
-- Replace `core/communicator/engine/communicator_config.h` with pb aliases + `NormalizeDefaults`.
+- Replace `core/communicator/engine/communicator_config.h` with pb aliases + `normalize_defaults`.
 - Add `core/communicator/config_io.{h,cc}` and BUILD rules; vendor/enable `yaml-cpp`.
 
 3. Engine integration (P2)
@@ -125,7 +125,7 @@ flowchart LR
 | `proto/BUILD` | Update | Add C++ proto targets for communicator config.
 | `tools/build_proto_python.sh` | Verify | Ensure regeneration covers communicator; no changes expected beyond package.
 | `core/communicator/engine/communicator_config.h` | Replace | Thin adapter over generated pb + helpers; remove duplicate structs.
-| `core/communicator/config_io.h, .cc` | Add | YAML/JSON loader + `NormalizeDefaults`.
+| `core/communicator/config_io.h, .cc` | Add | YAML/JSON loader + `normalize_defaults`.
 | `core/communicator/BUILD` | Update | New targets and deps (`yaml-cpp`, `nlohmann_json`, proto util).
 | `core/communicator/engine/engine.h/.cc` | Update | Store `CommunicatorConfig` (proto) and use fields directly; remove env/flag fallbacks.
 | `core/store/components/communication_manager.h/.cc` | Update | Ensure signatures use the proto type; keep convenience overloads.
@@ -138,7 +138,7 @@ flowchart LR
 
 - C++
   - Internal: `CommunicatorConfig` now refers to the proto message; include path changes to `communicator_config.pb.h`.
-  - New: `LoadCommunicatorConfigFromFile(path)`, `NormalizeDefaults(CommunicatorConfig*)`.
+  - New: `LoadCommunicatorConfigFromFile(path)`, `normalize_defaults(CommunicatorConfig*)`.
   - Removed: direct use of C++ struct fields from the old header (migrate call sites).
 - Python
   - New: `CommunicationManager.from_yaml(listen_addr, port, path)`.

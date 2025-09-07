@@ -3,11 +3,15 @@
 #include <memory>
 #include <string>
 
+#include <grpc/grpc.h>
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/log/log.h"
+#include "core/common/config/daemon_config_io.h"
+#include "core/common/cuda_api.h"
 #include "core/common/otel/init.h"
 #include "core/common/otel/logging_sink.h"
+#include "core/common/trace/trace_manager.h"
 #include "core/communicator/config_io.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
@@ -19,87 +23,206 @@
 
 #include <pthread.h>
 #include <csignal>
+#include <fstream>
+#include <sstream>
 
-ABSL_FLAG(std::string, listen_addr, "0.0.0.0:50051", "gRPC listen address");
-ABSL_FLAG(std::string, storage_path, "", "Optional storage path for local artifacts");
-ABSL_FLAG(uint16_t, p2p_port, 9090, "P2P communication port for engine");
-ABSL_FLAG(size_t, mem_pool_size, 8ULL << 30, "Pinned memory pool size (bytes)");
-ABSL_FLAG(size_t, chunk_size, 128ULL << 20, "Streaming chunk size (bytes)");
-ABSL_FLAG(int, io_threads, 10, "I/O worker threads for engine");
-ABSL_FLAG(bool, auto_register_disk_loads, false, "Automatically register disk loads with Global Store");
-ABSL_FLAG(std::string, global_store_addr, "", "Global Store address host:port");
-ABSL_FLAG(std::string, comm_config_path, "", "Path to communicator config (YAML/JSON). Enables P2P when provided.");
-ABSL_FLAG(bool, force_full_digest_on_load, false, "Compute full digest during load for verification");
-// RFC-0012 compatibility and lifecycle flags
-ABSL_FLAG(int, heartbeat_interval_ms, 5000, "Worker heartbeat interval to Global Store (ms)");
-ABSL_FLAG(int, chunk_sync_interval_ms, 10000, "Chunk state sync interval (ms), 0 to disable");
-ABSL_FLAG(bool, confirm_requires_disk_path, false, "Require disk_path on ConfirmReplica (compat)");
-ABSL_FLAG(bool, enable_p2p_access, true, "Global toggle for P2P access; overrides per-registration enable_p2p");
-ABSL_FLAG(bool, evict_on_dead_pid, false, "Evict replica when all PID refs drop due to dead PIDs");
-ABSL_FLAG(std::string, verification_timeout_status, "ok", "Map verification timeout to 'ok' or 'deadline'");
-ABSL_FLAG(bool, enable_periodic_eviction, false, "Enable periodic eviction loop (LRU on high GPU usage)");
-ABSL_FLAG(int, eviction_check_interval_ms, 30000, "Interval for eviction checks (ms)");
-ABSL_FLAG(double, gpu_memory_limit_fraction, 0.75, "GPU memory usage threshold to trigger eviction (0-1)");
+ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
 
   using namespace tensorcast;
-  // Initialize OpenTelemetry C++ SDK from environment (optional, idempotent)
-  (void)common::otel::init_from_env("tensorcast-store-daemon", "store-daemon");
-  // Optionally install log sink that enriches logs with trace_id/span_id
-  common::otel::install_otel_log_sink_from_env();
+  // Note: config loading happens below; defer OTel/log-sink init until then.
+  // Load unified config
+  const std::string cfg_path = absl::GetFlag(FLAGS_config);
+  if (cfg_path.empty()) {
+    LOG(ERROR) << "--config is required (path to daemon YAML/JSON). See examples/config/store_daemon_config.yaml";
+    return 2;
+  }
+  auto cfg_or = common::config::load_daemon_config_from_file(cfg_path);
+  if (!cfg_or.ok()) {
+    LOG(ERROR) << "Failed to load config: " << cfg_or.status();
+    return 2;
+  }
+  const auto cfg = *cfg_or;
 
+  // Configure CUDA debug toggles
+  cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
+
+  // Map config to StoreEngineOptions
   tensorcast::store::StoreEngineOptions opts;
-  opts.storage_path = absl::GetFlag(FLAGS_storage_path);
-  opts.p2p_port = absl::GetFlag(FLAGS_p2p_port);
-  opts.memory_pool_size = absl::GetFlag(FLAGS_mem_pool_size);
-  opts.chunk_size = absl::GetFlag(FLAGS_chunk_size);
-  opts.num_thread = absl::GetFlag(FLAGS_io_threads);
-  opts.global_store_address = absl::GetFlag(FLAGS_global_store_addr);
-  opts.force_full_digest_on_load = absl::GetFlag(FLAGS_force_full_digest_on_load);
+  opts.storage_path = cfg.server().storage_path();
+  opts.num_thread = static_cast<int>(cfg.server().num_threads());
+  opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
+  opts.chunk_size = static_cast<size_t>(cfg.engine().chunk_bytes());
+  opts.dvmp_chunk_size = static_cast<size_t>(cfg.engine().dvmp_chunk_size_bytes());
+  opts.streaming_buffer_max_concurrent_sessions =
+      static_cast<int>(cfg.engine().streaming_buffer_max_concurrent_sessions());
+  if (cfg.engine().has_pinned_allocation_timeout()) {
+    opts.pinned_memory_timeout = std::chrono::milliseconds(
+        cfg.engine().pinned_allocation_timeout().seconds() * 1000 +
+        cfg.engine().pinned_allocation_timeout().nanos() / 1000000);
+  }
+  opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
 
+  // Communicator setup (optional)
   std::shared_ptr<store::components::CommunicationManager> comm_mgr;
-  if (!absl::GetFlag(FLAGS_comm_config_path).empty()) {
-    auto cfg_or = tensorcast::communicator::LoadCommunicatorConfigFromFile(absl::GetFlag(FLAGS_comm_config_path));
-    if (!cfg_or.ok()) {
-      LOG(WARNING) << "Failed to load communicator config: " << cfg_or.status();
+  const bool enable_rdma = cfg.communicator().enable_rdma();
+  uint16_t p2p_port = 0;
+  std::string p2p_host = cfg.server().listen().host();
+  if (cfg.server().has_p2p_listen()) {
+    p2p_host = cfg.server().p2p_listen().host().empty() ? p2p_host : cfg.server().p2p_listen().host();
+    p2p_port = static_cast<uint16_t>(cfg.server().p2p_listen().port());
+  }
+  if (enable_rdma) {
+    comm_mgr = std::make_shared<store::components::CommunicationManager>();
+    auto st = comm_mgr->initialize_with_config(p2p_host, p2p_port, cfg.communicator());
+    if (!st.ok()) {
+      LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
     } else {
-      comm_mgr = std::make_shared<store::components::CommunicationManager>();
-      auto st = comm_mgr->initialize_with_config("0.0.0.0", absl::GetFlag(FLAGS_p2p_port), cfg_or.value());
-      if (!st.ok()) {
-        LOG(WARNING) << "Failed to initialize communication engine (config): " << st.message();
-      } else {
-        opts.comm_manager = comm_mgr;
-      }
+      opts.comm_manager = comm_mgr;
     }
+  }
+  opts.p2p_port = p2p_port;
+
+  // Global Store HA - pick first endpoint if enabled
+  std::string gs_addr;
+  if (cfg.high_availability().enabled() && !cfg.high_availability().global_store_endpoints().empty()) {
+    const auto& ep = cfg.high_availability().global_store_endpoints(0);
+    gs_addr = absl::StrCat(ep.host(), ":", ep.port());
+  }
+  opts.global_store_address = gs_addr;
+  opts.force_full_digest_on_load = cfg.compatibility().force_full_digest_on_load();
+
+  // Apply logging level/VLOG, install optional sinks, then initialize OTel
+  common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
+  common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
+  (void)common::otel::init_from_config(cfg.observability(), "store-daemon");
+  common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
+  // Configure Chrome trace directory (optional)
+  if (!cfg.observability().tracing().chrome_trace_dir().empty()) {
+    tensorcast::common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
   }
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(opts);
 
-  tensorcast::daemon::StoreDaemonServiceImpl service(engine);
+  // Map lifecycle options into service options
+  tensorcast::daemon::StoreDaemonServiceImpl::Options svc_opts;
+  if (cfg.lifecycle().has_sessions_ttl()) {
+    const auto& d = cfg.lifecycle().sessions_ttl();
+    svc_opts.sessions_ttl = std::chrono::seconds(d.seconds());
+  }
+  if (cfg.lifecycle().has_locks_ttl()) {
+    const auto& d = cfg.lifecycle().locks_ttl();
+    svc_opts.locks_ttl = std::chrono::seconds(d.seconds());
+  }
+  if (cfg.lifecycle().has_sessions_sweep_interval()) {
+    const auto& d = cfg.lifecycle().sessions_sweep_interval();
+    svc_opts.sessions_sweep_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  }
+  if (cfg.lifecycle().has_locks_sweep_interval()) {
+    const auto& d = cfg.lifecycle().locks_sweep_interval();
+    svc_opts.locks_sweep_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  }
+  if (cfg.lifecycle().has_verification_sweep_interval()) {
+    const auto& d = cfg.lifecycle().verification_sweep_interval();
+    svc_opts.verification_sweep_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  }
+  if (cfg.lifecycle().has_proc_check_interval()) {
+    const auto& d = cfg.lifecycle().proc_check_interval();
+    svc_opts.proc_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  }
+  svc_opts.enable_periodic_eviction = cfg.lifecycle().enable_periodic_eviction();
+  svc_opts.gpu_memory_limit_fraction = cfg.lifecycle().gpu_memory_limit_fraction();
+  if (cfg.lifecycle().has_eviction_loop_interval()) {
+    const auto& d = cfg.lifecycle().eviction_loop_interval();
+    svc_opts.eviction_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  }
+  // Observability high-cardinality attributes: default off (config hook TBD)
+  svc_opts.allow_high_card_attrs = false;
 
+  tensorcast::daemon::StoreDaemonServiceImpl service(engine, svc_opts);
+
+  // gRPC server
+  const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
   grpc::ServerBuilder builder;
-  builder.AddListeningPort(absl::GetFlag(FLAGS_listen_addr), grpc::InsecureServerCredentials());
+  builder.SetMaxReceiveMessageSize(static_cast<int>(cfg.server().grpc().max_message_size_mb()) * 1024 * 1024);
+  if (cfg.server().grpc().max_concurrent_streams() > 0) {
+    builder.AddChannelArgument("grpc.max_concurrent_streams", cfg.server().grpc().max_concurrent_streams());
+  }
+  std::shared_ptr<grpc::ServerCredentials> creds;
+  if (cfg.server().grpc().tls().enabled()) {
+    std::string cert;
+    std::string key;
+    std::string ca;
+    auto read_all = [](const std::string& path) -> std::string {
+      std::ifstream f(path);
+      if (!f.is_open())
+        return std::string();
+      std::stringstream ss;
+      ss << f.rdbuf();
+      return ss.str();
+    };
+    cert = read_all(cfg.server().grpc().tls().cert_file());
+    key = read_all(cfg.server().grpc().tls().key_file());
+    if (!cfg.server().grpc().tls().client_ca_file().empty()) {
+      ca = read_all(cfg.server().grpc().tls().client_ca_file());
+    }
+    grpc::SslServerCredentialsOptions ssl_opts;
+    if (!ca.empty()) {
+      ssl_opts.pem_root_certs = ca;
+    }
+    grpc::SslServerCredentialsOptions::PemKeyCertPair pkcp{.private_key = key, .cert_chain = cert};
+    ssl_opts.pem_key_cert_pairs.push_back(pkcp);
+    creds = grpc::SslServerCredentials(ssl_opts);
+  } else {
+    creds = grpc::InsecureServerCredentials();
+  }
+  builder.AddListeningPort(listen_addr, creds);
+
+  // Apply channel/server args for keepalive and connection lifetimes
+  auto to_ms = [](const google::protobuf::Duration& d) -> int {
+    return static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+  };
+  if (cfg.server().grpc().has_keepalive_time()) {
+    builder.AddChannelArgument("grpc.keepalive_time_ms", to_ms(cfg.server().grpc().keepalive_time()));
+  }
+  if (cfg.server().grpc().has_keepalive_timeout()) {
+    builder.AddChannelArgument("grpc.keepalive_timeout_ms", to_ms(cfg.server().grpc().keepalive_timeout()));
+  }
+  if (cfg.server().grpc().has_max_connection_idle()) {
+    builder.AddChannelArgument("grpc.max_connection_idle_ms", to_ms(cfg.server().grpc().max_connection_idle()));
+  }
+  if (cfg.server().grpc().has_max_connection_age()) {
+    builder.AddChannelArgument("grpc.max_connection_age_ms", to_ms(cfg.server().grpc().max_connection_age()));
+  }
+  // tcp_nodelay / so_reuseport toggles
+  builder.AddChannelArgument("grpc.tcp_nodelay", cfg.server().grpc().tcp_nodelay() ? 1 : 0);
+  builder.AddChannelArgument("grpc.so_reuseport", cfg.server().grpc().so_reuseport() ? 1 : 0);
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-  LOG(INFO) << "tensorcast-daemon listening on " << absl::GetFlag(FLAGS_listen_addr);
+  LOG(INFO) << "tensorcast-daemon listening on " << listen_addr;
 
   // Start worker lifecycle if configured
   std::unique_ptr<tensorcast::daemon::WorkerLifecycleManager> lifecycle;
-  if (!absl::GetFlag(FLAGS_global_store_addr).empty()) {
+  if (!gs_addr.empty() && cfg.high_availability().enabled()) {
     tensorcast::daemon::WorkerLifecycleManager::Options lopts;
-    lopts.global_store_addr = absl::GetFlag(FLAGS_global_store_addr);
-    lopts.listen_addr = absl::GetFlag(FLAGS_listen_addr);
-    lopts.p2p_port = absl::GetFlag(FLAGS_p2p_port);
-    lopts.heartbeat_interval_ms = absl::GetFlag(FLAGS_heartbeat_interval_ms);
-    lopts.chunk_sync_interval_ms = absl::GetFlag(FLAGS_chunk_sync_interval_ms);
+    lopts.global_store_addr = gs_addr;
+    lopts.listen_addr = listen_addr;
+    lopts.p2p_port = p2p_port;
+    if (cfg.high_availability().has_heartbeat_interval()) {
+      const auto& d = cfg.high_availability().heartbeat_interval();
+      lopts.heartbeat_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
+    if (cfg.high_availability().has_periodic_sync_interval()) {
+      const auto& d = cfg.high_availability().periodic_sync_interval();
+      lopts.chunk_sync_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
     lifecycle = std::make_unique<tensorcast::daemon::WorkerLifecycleManager>(engine, &service, lopts);
     auto st = lifecycle->start();
     if (!st.ok()) {
       LOG(WARNING) << "Worker lifecycle start failed: " << st.message();
     }
-    // Metrics are exported via a unified system; no HTTP server.
   }
   // Install signal handling using sigwait in a dedicated thread.
   // Block SIGINT/SIGTERM in this thread (will be inherited by worker threads)
