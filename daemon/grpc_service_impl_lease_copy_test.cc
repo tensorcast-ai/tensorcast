@@ -98,8 +98,8 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   st = svc.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   INFO("Commit status: " << st.error_message());
   REQUIRE(st.ok());
-  REQUIRE(cresp.has_descriptor_());
-  const auto& desc = cresp.descriptor_();
+  REQUIRE(cresp.has_artifact_descriptor());
+  const auto& desc = cresp.artifact_descriptor();
   REQUIRE(desc.total_size() == 48);
 
   // Compute expected multihash from CPU memory: [0..15]=0x11, [16..31]=0, [32..47]=0x22

@@ -445,7 +445,8 @@ message CommitRegisteredArtifactRequest {
 // Artifact descriptor conveying content-addressed identity and related metadata
 // Commit registration response
 message CommitRegisteredArtifactResponse {
-  tensorcast.common.v1.ArtifactDescriptor descriptor = 1; // Content-addressed descriptor (RFC-0007)
+  // Content-addressed artifact descriptor (RFC-0007)
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 1;
 }
 
 // Abort registration request
@@ -480,7 +481,8 @@ message MaterializeByKeyResponse {
 
 message PublishReplicaKeyRequest {
   string key = 1;
-  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
+  // Content-addressed artifact descriptor (RFC-0007)
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 2;
   string replica_uuid = 3;
   string disk_path = 4; // optional
   bool fail_if_exists = 5; // default semantics: true

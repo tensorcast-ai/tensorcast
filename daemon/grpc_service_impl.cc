@@ -12,13 +12,11 @@
 #include <optional>
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "core/common/artifact_hash.h"
 #include "core/common/otel/grpc_propagation.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/loader/segment_plan_source.h"
-#include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/context/runtime_context.h"
@@ -217,15 +215,8 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
     return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
   }
 
-  // Resolve key via a transient GlobalStoreClient (avoids exposing engine internals).
-  store::components::GlobalStoreClientConfig cfg;
-  auto gs = std::make_unique<store::components::GlobalStoreClient>(cfg);
-  auto st = gs->initialize();
-  if (!st.ok()) {
-    resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(st);
-  }
-  auto mapping_or = gs->resolve_key_mapping(req->key());
+  // Resolve key via engine's configured Global Store client to honor daemon config.
+  auto mapping_or = engine_->resolve_key_mapping(req->key());
   if (!mapping_or.ok()) {
     resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return to_grpc_status(mapping_or.status());
@@ -233,7 +224,7 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
   auto mapping = *mapping_or;
   span->SetAttribute("tc.artifact.id", mapping.artifact_id);
 
-  const auto device = store::DeviceKey{.type = store::DeviceType::GPU, .ordinal = req->device_id(), .uuid = ""};
+  const auto device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = req->device_id(), .uuid = ""};
   store::loading::MaterializeHints hints;
   if (req->pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req->pinned_allocation_timeout_ms());
@@ -287,21 +278,15 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
   span->SetAttribute("rpc.method", "PublishReplicaKey");
   span->SetAttribute("tc.key", req->key());
 
-  if (req->key().empty() || !req->has_descriptor() || req->descriptor().artifact_id().empty()) {
+  if (req->key().empty() || !req->has_artifact_descriptor() || req->artifact_descriptor().artifact_id().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "key and descriptor.artifact_id are required"};
   }
   if (is_shutting_down_.load()) {
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  store::components::GlobalStoreClientConfig cfg;
-  auto gs = std::make_unique<store::components::GlobalStoreClient>(cfg);
-  auto st = gs->initialize();
-  if (!st.ok()) {
-    resp->set_ok(false);
-    return to_grpc_status(st);
-  }
-  auto up = gs->upsert_key_mapping(req->key(), req->descriptor().artifact_id(), req->disk_path());
+  // Use engine's configured Global Store client for upsert.
+  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), req->disk_path());
   if (!up.ok()) {
     resp->set_ok(false);
     resp->set_conflict_reason(std::string(up.message()));
@@ -824,7 +809,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     if (!commit_or.ok())
       return to_grpc_status(commit_or.status());
     const auto& out = commit_or.value();
-    auto* desc = resp->mutable_descriptor_();
+    auto* desc = resp->mutable_artifact_descriptor();
     desc->set_artifact_id(out.artifact_id);
     desc->set_index_multihash(out.index_multihash);
     desc->set_data_multihash(out.data_multihash);
@@ -991,7 +976,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     // Successful commit; prevent abort on scope exit
     abort_guard.release();
     const auto& d = commit2_or.value();
-    auto* desc = resp->mutable_descriptor_();
+    auto* desc = resp->mutable_artifact_descriptor();
     desc->set_artifact_id(d.artifact_id);
     desc->set_index_multihash(d.index_multihash);
     desc->set_data_multihash(d.data_multihash);
@@ -1017,7 +1002,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     if (!commit_or.ok())
       return to_grpc_status(commit_or.status());
     const auto& out = commit_or.value();
-    auto* desc = resp->mutable_descriptor_();
+    auto* desc = resp->mutable_artifact_descriptor();
     desc->set_artifact_id(out.artifact_id);
     desc->set_index_multihash(out.index_multihash);
     desc->set_data_multihash(out.data_multihash);
