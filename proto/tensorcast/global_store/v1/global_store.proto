@@ -26,6 +26,9 @@ service GlobalStoreService {
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
 
+  // Get canonical tensor index by content-addressed artifact_id
+  rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+
   // Worker management
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
   rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse) {}
@@ -45,6 +48,14 @@ service GlobalStoreService {
 
   // Update chunk states (called by StoreDaemon periodically)
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
+
+  // ========== Key Mapping (RFC-0014) ==========
+  // Map a human-readable key to a single artifact_id, with optional replica hints
+  rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
+  // Resolve a key to its artifact_id and optional hints
+  rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  // Revoke an existing key mapping
+  rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
 }
 
 enum Status {
@@ -226,6 +237,17 @@ message GetArtifactIndexResponse {
   string schema_version = 4; // Schema version (e.g., "v2")
 }
 
+// Get canonical index by artifact_id
+message GetArtifactIndexByIdRequest {
+  string artifact_id = 1;
+}
+message GetArtifactIndexByIdResponse {
+  Status status = 1;
+  bytes tensor_index_data = 2;
+  string encoding = 3;
+  string schema_version = 4;
+}
+
 // Legacy ListReplicas removed in favor of V2
 
 message RegisterReplicaRequest {
@@ -388,4 +410,41 @@ message ListReplicasV2Request {
 message ListReplicasV2Response {
   repeated ArtifactReplicaRecord replicas = 1;
   tensorcast.common.v1.PageInfo page_info = 2;
+}
+
+// ========== RFC-0014 Key Mapping Messages ==========
+// Upsert/resolve a mapping from a human-friendly key to a content-addressed artifact_id.
+// The mapping is unique: one key must point to exactly one artifact_id.
+// Optional fields provide hints (e.g., a known disk_path) for client fallbacks.
+
+message UpsertKeyMappingRequest {
+  string key = 1;
+  string artifact_id = 2;
+  // Optional hints (opaque to server logic except for persistence)
+  string replica_uuid = 3;
+  string daemon_address = 4;
+  string disk_path = 5;
+  google.protobuf.Duration ttl = 6; // Optional TTL for the mapping
+}
+message UpsertKeyMappingResponse {
+  Status status = 1;
+  string conflict_reason = 2;
+}
+
+message ResolveKeyMappingRequest {
+  string key = 1;
+}
+message ResolveKeyMappingResponse {
+  Status status = 1;
+  string artifact_id = 2;
+  string replica_uuid = 3;
+  string daemon_address = 4;
+  string disk_path = 5;
+}
+
+message RevokeKeyMappingRequest {
+  string key = 1;
+}
+message RevokeKeyMappingResponse {
+  Status status = 1;
 }

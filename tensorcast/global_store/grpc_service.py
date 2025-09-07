@@ -32,6 +32,9 @@ from tensorcast.global_store.repositories.artifact_index_repository import (
     ArtifactIndexRepository,
 )
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
+from tensorcast.global_store.repositories.key_mapping_repository import (
+    KeyMappingRepository,
+)
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
@@ -88,6 +91,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
+        self.key_mapping_repository = KeyMappingRepository(self.connection)
 
         # Initialize services
         self.artifact_service = ArtifactService(self.replica_repository)
@@ -485,6 +489,55 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
+    def GetArtifactIndexById(
+        self,
+        request: global_store_pb2.GetArtifactIndexByIdRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetArtifactIndexByIdResponse:
+        """Fetch canonical tensor index bytes by artifact_id.
+
+        Looks up the artifacts table to get index_multihash, then returns the
+        canonical index bytes from artifact_indices. Returns NOT_FOUND if
+        either artifact or index is missing.
+        """
+        try:
+            artifact_id = request.artifact_id
+            if not artifact_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("artifact_id is required")
+                return global_store_pb2.GetArtifactIndexByIdResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
+            row = self.artifacts_repo.get(artifact_id)
+            if not row:
+                return global_store_pb2.GetArtifactIndexByIdResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            index_key = row.get("index_multihash")
+            if not index_key:
+                return global_store_pb2.GetArtifactIndexByIdResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            data = self.artifact_indices.get(index_key)
+            if data is None:
+                return global_store_pb2.GetArtifactIndexByIdResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            return global_store_pb2.GetArtifactIndexByIdResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                tensor_index_data=data,
+                encoding=str(row.get("encoding") or "json"),
+                schema_version=str(row.get("schema_version") or "v2"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error getting artifact index by id")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.GetArtifactIndexByIdResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
     # ========== Transport Methods ==========
 
     def RequestReplicaTransport(
@@ -577,6 +630,122 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.CompleteReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    # ========== RFC-0014: Key Mapping ==========
+
+    def UpsertKeyMapping(
+        self,
+        request: global_store_pb2.UpsertKeyMappingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpsertKeyMappingResponse:
+        """Create or update a key → artifact mapping with uniqueness check.
+
+        Conflict when the key already exists but points to a different artifact_id.
+        """
+        try:
+            key = request.key.strip()
+            artifact_id = request.artifact_id.strip()
+            if not key or not artifact_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("key and artifact_id are required")
+                return global_store_pb2.UpsertKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
+            existing = self.key_mapping_repository.get(key)
+            if existing and existing.get("artifact_id") != artifact_id:
+                return global_store_pb2.UpsertKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR,
+                    conflict_reason=(
+                        f"key already mapped to {existing.get('artifact_id')}"
+                    ),
+                )
+
+            ttl_seconds = None
+            if request.HasField("ttl"):
+                d = request.ttl
+                ttl_seconds = int(d.seconds + (d.nanos // 1_000_000_000))
+
+            self.key_mapping_repository.upsert(
+                key=key,
+                artifact_id=artifact_id,
+                replica_uuid=(request.replica_uuid or None),
+                daemon_address=(request.daemon_address or None),
+                disk_path=(request.disk_path or None),
+                ttl_seconds=ttl_seconds,
+            )
+            return global_store_pb2.UpsertKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_OK
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in UpsertKeyMapping")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.UpsertKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ResolveKeyMapping(
+        self,
+        request: global_store_pb2.ResolveKeyMappingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ResolveKeyMappingResponse:
+        try:
+            key = request.key.strip()
+            if not key:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("key is required")
+                return global_store_pb2.ResolveKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            row = self.key_mapping_repository.get(key)
+            if not row:
+                return global_store_pb2.ResolveKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            return global_store_pb2.ResolveKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                artifact_id=row.get("artifact_id", ""),
+                replica_uuid=row.get("replica_uuid", "") or "",
+                daemon_address=row.get("daemon_address", "") or "",
+                disk_path=row.get("disk_path", "") or "",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in ResolveKeyMapping")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.ResolveKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def RevokeKeyMapping(
+        self,
+        request: global_store_pb2.RevokeKeyMappingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.RevokeKeyMappingResponse:
+        try:
+            key = request.key.strip()
+            if not key:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("key is required")
+                return global_store_pb2.RevokeKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            ok = self.key_mapping_repository.delete(key)
+            return global_store_pb2.RevokeKeyMappingResponse(
+                status=(
+                    global_store_pb2.Status.STATUS_OK
+                    if ok
+                    else global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in RevokeKeyMapping")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.RevokeKeyMappingResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 

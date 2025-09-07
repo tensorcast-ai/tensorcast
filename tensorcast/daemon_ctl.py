@@ -209,6 +209,152 @@ class DaemonCtl:
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
+    def materialize_by_artifact_id(
+        self,
+        artifact_id: str,
+        replica_uuid: str,
+        device_uuid: str,
+        pinned_allocation_timeout_ms: int = int(30e3),
+        wait_for_completion: bool = True,
+    ):
+        """Materialize a replica by content-addressed artifact_id via daemon.
+
+        Mirrors load_into_gpu but sets artifact_id instead of disk_path.
+        Returns CUDA IPC handle bytes (or (handle, status) when async).
+        """
+        logger.debug(
+            f"materialize_by_artifact_id: {artifact_id}, {replica_uuid}, wait_for_completion={wait_for_completion}"
+        )
+
+        pid = self._get_effective_pid()
+        with self._client_span("Client/MaterializeReplica") as span:
+            request = store_daemon_pb2.MaterializeReplicaRequest(
+                pid=pid,
+                artifact_id=artifact_id,
+                replica_uuid=replica_uuid,
+                device_uuid=device_uuid,
+                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
+                keep_for_global=False,
+            )
+            try:
+                response = self.stub.MaterializeReplica(request, timeout=60)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.CANCELLED:
+                    raise RuntimeError(f"Artifact not loaded {e}") from e
+                elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                else:
+                    raise RuntimeError(f"Error: {e}") from e
+
+        load_status = response.status
+        if (
+            load_status
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+        ):
+            raise RuntimeError(f"Artifact allocation failed for {artifact_id}")
+
+        if not wait_for_completion:
+            logger.info(
+                f"Artifact allocation initiated (async): {artifact_id}, {replica_uuid}"
+            )
+            assert response.mem_handle is not None
+            return response.mem_handle.cuda_ipc_handle, load_status
+
+        logger.info(f"Artifact loaded: {artifact_id}, {replica_uuid}")
+
+        if (
+            response.status
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+        ):
+            # Confirm using empty disk_path (daemon ignores it for P2P sessions)
+            success = self.confirm_replica_loaded("", replica_uuid)
+            if not success:
+                raise RuntimeError(
+                    f"Failed to confirm artifact loading for {artifact_id}"
+                )
+
+        assert response.mem_handle is not None
+        return response.mem_handle.cuda_ipc_handle
+
+    def materialize_by_key(
+        self,
+        key: str,
+        replica_uuid: str,
+        device_id: int,
+        pinned_allocation_timeout_ms: int = int(30e3),
+        wait_for_completion: bool = True,
+    ):
+        """Materialize a replica by RFC-0014 key via daemon.
+
+        Returns
+            If wait_for_completion=True: (cuda_ipc_handle_bytes, used_disk_path, artifact_id)
+            If wait_for_completion=False: (cuda_ipc_handle_bytes, load_status, used_disk_path, artifact_id)
+        """
+        logger.debug(
+            f"materialize_by_key: {key}, {replica_uuid}, wait_for_completion={wait_for_completion}"
+        )
+
+        pid = self._get_effective_pid()
+        with self._client_span("Client/MaterializeByKey") as span:
+            request = store_daemon_pb2.MaterializeByKeyRequest(
+                key=key,
+                device_id=int(device_id),
+                pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
+                pid=pid,
+                replica_uuid=replica_uuid,
+            )
+            try:
+                response = self.stub.MaterializeByKey(request, timeout=60)
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                else:
+                    raise RuntimeError(f"Error: {e}") from e
+
+        load_status = response.status
+        if (
+            load_status
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+        ):
+            raise RuntimeError(f"Artifact allocation failed for key={key}")
+
+        used_disk_path = (
+            response.used_disk_path if hasattr(response, "used_disk_path") else ""
+        )
+        artifact_id = response.artifact_id if hasattr(response, "artifact_id") else ""
+
+        if not wait_for_completion:
+            assert response.mem_handle is not None
+            return (
+                response.mem_handle.cuda_ipc_handle,
+                load_status,
+                used_disk_path,
+                artifact_id,
+            )
+
+        # Synchronous path: confirm completion using the session created with replica_uuid
+        if (
+            load_status
+            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+        ):
+            success = self.confirm_replica_loaded("", replica_uuid)
+            if not success:
+                raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
+
+        assert response.mem_handle is not None
+        return (
+            response.mem_handle.cuda_ipc_handle,
+            used_disk_path,
+            artifact_id,
+        )
+
     def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
         with self._client_span("Client/ConfirmReplica") as span:
             request = store_daemon_pb2.ConfirmReplicaRequest(
@@ -585,3 +731,42 @@ class DaemonCtl:
                 span.record_exception(e)
                 logger.error(f"wait_artifact_verification RPC failed: {e}")
                 return None
+
+    # ------------------------------------------------------------------
+    # RFC-0014: Key mapping publish via daemon
+    # ------------------------------------------------------------------
+
+    def publish_replica_key(
+        self,
+        *,
+        key: str,
+        descriptor: "ArtifactDescriptor",
+        disk_path: str = "",
+        fail_if_exists: bool = True,
+        timeout_s: float = 5.0,
+    ) -> bool:
+        from tensorcast.proto.common.v1 import common_pb2 as common_pb2
+
+        req = store_daemon_pb2.PublishReplicaKeyRequest(
+            key=key,
+            disk_path=disk_path,
+            fail_if_exists=bool(fail_if_exists),
+        )
+        # Map our typed descriptor into proto
+        pb = common_pb2.ArtifactDescriptor(
+            artifact_id=descriptor.artifact_id,
+            index_multihash=descriptor.index_multihash,
+            data_multihash=descriptor.data_multihash,
+            schema_version=descriptor.schema_version,
+            encoding=descriptor.encoding,
+            total_size=int(descriptor.total_size),
+        )
+        req.descriptor.CopyFrom(pb)
+
+        with self._client_span("Client/PublishReplicaKey"):
+            try:
+                resp = self.stub.PublishReplicaKey(req, timeout=timeout_s)
+                return bool(resp.ok)
+            except grpc.RpcError as e:
+                logger.error(f"PublishReplicaKey failed: {e}")
+                return False

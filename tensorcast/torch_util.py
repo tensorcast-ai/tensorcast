@@ -6,7 +6,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Callable, cast
 
+import grpc
 import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
@@ -15,6 +17,8 @@ from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as store_daemon_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2 as gs_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2_grpc as gs_pb2_grpc
 from tensorcast.types import (
     ArtifactDescriptor,
     CoalescedHandshake,
@@ -28,6 +32,7 @@ from tensorcast.types import (
 logger = init_logger(__name__)
 # Global daemon address configuration
 _global_daemon_address = "127.0.0.1:8073"
+_global_store_address = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
 
 # ---------------------------------------------------------------------------
 # Module-level constants and type aliases to improve readability
@@ -82,6 +87,15 @@ def get_daemon_address() -> str:
     return _global_daemon_address
 
 
+def set_global_store_address(address: str) -> None:
+    global _global_store_address
+    _global_store_address = address
+
+
+def get_global_store_address() -> str:
+    return _global_store_address
+
+
 from tensorcast._C import (  # noqa: E402
     build_canonical_index_from_safetensors,
     get_cuda_memory_handle,
@@ -114,6 +128,9 @@ class RegisterArtifactOptions:
         min_tensor_bytes: int = 64 * 1024,
         max_tensor_count: int = 8192,
         lease_bytes_limit: int = 0,
+        # RFC-0014 additions
+        key: str | None = None,
+        disk_path: str | None = None,
     ) -> None:
         self.plan = plan
         self.p2p_prefer = p2p_prefer
@@ -122,6 +139,24 @@ class RegisterArtifactOptions:
         self.min_tensor_bytes = int(min_tensor_bytes)
         self.max_tensor_count = int(max_tensor_count)
         self.lease_bytes_limit = int(lease_bytes_limit)
+        # RFC-0014 additions
+        self.key = key
+        self.disk_path = disk_path
+
+
+class GetArtifactOptions:
+    def __init__(
+        self,
+        *,
+        prefer: str = "p2p",  # "p2p" or "disk"
+        pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS,
+        wait_for_completion: bool = True,
+        enable_verification: bool = True,
+    ) -> None:
+        self.prefer = prefer
+        self.pinned_allocation_timeout_ms = int(pinned_allocation_timeout_ms)
+        self.wait_for_completion = bool(wait_for_completion)
+        self.enable_verification = bool(enable_verification)
 
 
 class RegisteredArtifact:
@@ -200,6 +235,65 @@ def begin_register_artifact_sdk(
     )
     handle = RegisteredArtifact(out.registration_id, daemon_address, ttl_ms=ttl_ms or 0)
     return handle, out.handshake
+
+
+def _gs_stub(addr: str | None = None) -> gs_pb2_grpc.GlobalStoreServiceStub:
+    target = addr or get_global_store_address()
+    channel = grpc.insecure_channel(target)
+    return gs_pb2_grpc.GlobalStoreServiceStub(channel)
+
+
+def _validate_disk_index_matches(index_bytes: bytes, disk_path: str) -> None:
+    """Validate that disk_path/tensor_index.json canonicalized matches index_bytes.
+
+    Raises ValueError if mismatch or file missing.
+    """
+    p = Path(disk_path)
+    index_file = p / "tensor_index.json"
+    if not index_file.exists():
+        raise ValueError(f"Disk index not found at {index_file}")
+    try:
+        disk_raw = index_file.read_bytes()
+        disk_obj = json.loads(disk_raw)
+        disk_canon = json.dumps(disk_obj, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"Failed to parse disk index at {index_file}: {e}") from e
+    if disk_canon != index_bytes:
+        # Provide short diff hint (length and head)
+        raise ValueError(
+            "Disk index does not match registration index (canonical JSON mismatch)"
+        )
+
+
+def _upsert_key_mapping_if_needed(
+    *,
+    key: str | None,
+    artifact_id: str,
+    disk_path: str | None,
+    descriptor: ArtifactDescriptor | None = None,
+) -> None:
+    if not key:
+        return
+    try:
+        # Prefer daemon-assisted publish; fallback to Global Store direct
+        if descriptor is not None:
+            ctl = DaemonCtl(get_daemon_address())
+            ok = ctl.publish_replica_key(
+                key=key, descriptor=descriptor, disk_path=disk_path or ""
+            )
+            if ok:
+                return
+        stub = _gs_stub()
+        _ = stub.UpsertKeyMapping(
+            gs_pb2.UpsertKeyMappingRequest(
+                key=key, artifact_id=artifact_id, disk_path=disk_path or ""
+            ),
+            timeout=5.0,
+        )
+    except Exception:
+        logger.exception("Failed to upsert key mapping to Global Store")
 
 
 def calculate_tensor_device_offsets(
@@ -854,6 +948,12 @@ def register_artifact(
         tensor_meta_index, tensor_source_index, tensor_device_offsets, target_device_id
     )
 
+    # RFC-0014: Validate existing disk_path metadata when provided (strict equality)
+    if options.disk_path is not None and options.disk_path.strip() != "":
+        cand = Path(options.disk_path)
+        if cand.exists() and cand.is_dir():
+            _validate_disk_index_matches(index_bytes, str(cand))
+
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
     ctl = DaemonCtl(daemon_address or get_daemon_address())
@@ -909,6 +1009,33 @@ def register_artifact(
                 dst.copy_(local, non_blocking=True)
             torch.cuda.synchronize(target_device_id)
             desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            # RFC-0014: persist+publish when disk_path == "", else publish with provided path
+            if options.disk_path is not None and options.disk_path.strip() == "":
+                try:
+                    from tensorcast.client_runtime import storage_root_default
+
+                    root = storage_root_default()
+                    if not root:
+                        raise RuntimeError(
+                            "ClientConfig.storage.default_root is required when disk_path==''"
+                        )
+                    out_dir = Path(root) / desc.artifact_id
+                    save_dict(dest_state_dict, str(out_dir))
+                    _upsert_key_mapping_if_needed(
+                        key=options.key,
+                        artifact_id=desc.artifact_id,
+                        disk_path=str(out_dir),
+                        descriptor=desc,
+                    )
+                except Exception:
+                    logger.exception("Persist+publish failed for key mapping")
+            else:
+                _upsert_key_mapping_if_needed(
+                    key=options.key,
+                    artifact_id=desc.artifact_id,
+                    disk_path=options.disk_path,
+                    descriptor=desc,
+                )
             return dest_state_dict, desc
 
     elif kind == "dvmp":
@@ -966,6 +1093,32 @@ def register_artifact(
             if not ok:
                 raise RuntimeError("DVMP feed failed")
             desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            if options.disk_path is not None and options.disk_path.strip() == "":
+                try:
+                    from tensorcast.client_runtime import storage_root_default
+
+                    root = storage_root_default()
+                    if not root:
+                        raise RuntimeError(
+                            "ClientConfig.storage.default_root is required when disk_path==''"
+                        )
+                    out_dir = Path(root) / desc.artifact_id
+                    save_dict(artifact, str(out_dir))
+                    _upsert_key_mapping_if_needed(
+                        key=options.key,
+                        artifact_id=desc.artifact_id,
+                        disk_path=str(out_dir),
+                        descriptor=desc,
+                    )
+                except Exception:
+                    logger.exception("Persist+publish failed for key mapping")
+            else:
+                _upsert_key_mapping_if_needed(
+                    key=options.key,
+                    artifact_id=desc.artifact_id,
+                    disk_path=options.disk_path,
+                    descriptor=desc,
+                )
             return artifact, desc
 
     elif kind == "vram_leased":
@@ -1021,7 +1174,197 @@ def register_artifact(
             if not ok:
                 raise RuntimeError("Lease segments feed failed")
             desc = ctl.commit_registered_artifact(begin.registration_id, timeout_s=60.0)
+            if options.disk_path is not None and options.disk_path.strip() == "":
+                try:
+                    from tensorcast.client_runtime import storage_root_default
+
+                    root = storage_root_default()
+                    if not root:
+                        raise RuntimeError(
+                            "ClientConfig.storage.default_root is required when disk_path==''"
+                        )
+                    out_dir = Path(root) / desc.artifact_id
+                    save_dict(artifact, str(out_dir))
+                    _upsert_key_mapping_if_needed(
+                        key=options.key,
+                        artifact_id=desc.artifact_id,
+                        disk_path=str(out_dir),
+                        descriptor=desc,
+                    )
+                except Exception:
+                    logger.exception("Persist+publish failed for key mapping")
+            else:
+                _upsert_key_mapping_if_needed(
+                    key=options.key,
+                    artifact_id=desc.artifact_id,
+                    disk_path=options.disk_path,
+                    descriptor=desc,
+                )
             return artifact, desc
 
     else:
         raise ValueError(f"Unknown plan: {kind}")
+
+
+def get_artifact(
+    *,
+    key: str,
+    device_id: int | torch.device = 0,
+    options: GetArtifactOptions | None = None,
+) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], Callable[[], bool]]:
+    """Fetch an artifact by RFC-0014 key using the daemon's MaterializeByKey.
+
+    Behavior:
+    - prefer == 'p2p' (default): call daemon MaterializeByKey; reconstruct from
+      GPU memory using indices loaded from `used_disk_path` returned by daemon; on
+      daemon failure, optionally fall back to disk by resolving key mapping.
+    - prefer == 'disk': resolve key mapping and load from disk.
+
+    Returns a state_dict; in async mode returns (state_dict, confirm_fn).
+    """
+    if not key or not isinstance(key, str):
+        raise ValueError("key must be a non-empty string")
+
+    opts = options or GetArtifactOptions()
+    ensure_client_otel("tensorcast-client", role="client")
+    tracer = trace.get_tracer(__name__)
+
+    # Helper: Resolve key mapping for disk fallback
+    def _resolve_mapping():
+        stub = _gs_stub()
+        return stub.ResolveKeyMapping(
+            gs_pb2.ResolveKeyMappingRequest(key=key), timeout=5.0
+        )
+
+    dev_id = resolve_device(device_id)
+    # device_uuid unused with MaterializeByKey path
+    replica_uuid = _get_uuid()
+
+    # Disk-preferred path
+    if opts.prefer == "disk":
+        res = _resolve_mapping()
+        if res.status != gs_pb2.Status.STATUS_OK or not res.disk_path:
+            raise RuntimeError("Key resolved without disk_path; disk load not possible")
+        return load_dict(
+            disk_path=res.disk_path,
+            device_id=dev_id,
+            storage_path=None,
+            enable_verification=opts.enable_verification,
+            pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+            wait_for_completion=opts.wait_for_completion,
+        )
+
+    # Prefer P2P via daemon MaterializeByKey
+    client = DaemonCtl(get_daemon_address())
+    (
+        pinned_ms,
+        enable_ver,
+        wait_comp,
+    ) = _apply_client_defaults_if_present(
+        opts.pinned_allocation_timeout_ms,
+        opts.enable_verification,
+        opts.wait_for_completion,
+    )
+    if pinned_ms is not None:
+        opts.pinned_allocation_timeout_ms = pinned_ms
+    if enable_ver is not None:
+        opts.enable_verification = enable_ver
+    if wait_comp is not None:
+        opts.wait_for_completion = wait_comp
+
+    try:
+        with tracer.start_as_current_span(
+            "Client/GetArtifactByKey.P2P", kind=SpanKind.INTERNAL
+        ):
+            if opts.wait_for_completion:
+                _res_sync = client.materialize_by_key(
+                    key,
+                    replica_uuid,
+                    dev_id,
+                    pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                    wait_for_completion=True,
+                )
+                handle_bytes, _used_disk_path, artifact_id = cast(
+                    tuple[bytes, str, str], _res_sync
+                )
+                load_status = None
+            else:
+                _res_async = client.materialize_by_key(
+                    key,
+                    replica_uuid,
+                    dev_id,
+                    pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                    wait_for_completion=False,
+                )
+                handle_bytes, load_status, _used_disk_path, artifact_id = cast(
+                    tuple[bytes, object, str, str], _res_async
+                )
+
+        # Reconstruct indices via Global Store by artifact_id
+        gs = _gs_stub()
+        idx_resp = gs.GetArtifactIndexById(
+            gs_pb2.GetArtifactIndexByIdRequest(artifact_id=artifact_id), timeout=5.0
+        )
+        if idx_resp.status != gs_pb2.Status.STATUS_OK or not idx_resp.tensor_index_data:
+            raise RuntimeError(
+                f"Failed to fetch canonical index for artifact_id={artifact_id}"
+            )
+        # Parse canonical index JSON -> meta/data indices
+        try:
+            index_obj = json.loads(idx_resp.tensor_index_data)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError("Invalid canonical index JSON from Global Store") from e
+        tensor_meta_index: TensorMetaIndex = {}
+        tensor_data_index: TensorDataIndex = {}
+        for name, meta in index_obj.items():
+            if len(meta) == 5:
+                offset, size, shape, stride, dtype = meta
+                storage_offset = 0
+            else:
+                offset, size, shape, stride, dtype, storage_offset = meta
+            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
+            tensor_data_index[name] = (int(offset), int(size))
+        tensor_device_offsets, _ = calculate_tensor_device_offsets(
+            tensor_data_index, dev_id
+        )
+
+        cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
+        state_dict = restore_tensors(
+            tensor_meta_index,
+            {dev_id: cuda_memory_ptr},
+            tensor_device_offsets,
+            True,
+        )
+
+        # Optional background verification (daemon-side)
+        if opts.enable_verification:
+            verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
+            t = threading.Thread(
+                target=_monitor_verification,
+                args=(client, artifact_id, replica_uuid, verification_timeout_ms),
+                daemon=True,
+            )
+            t.start()
+
+        if opts.wait_for_completion:
+            return state_dict
+
+        def confirm_load() -> bool:
+            try:
+                if (
+                    load_status
+                    and load_status
+                    == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+                ):
+                    logger.error(f"Artifact allocation failed (key) for key={key}")
+                    return False
+                return client.confirm_replica_loaded("", replica_uuid)
+            except Exception:
+                logger.exception("Error confirming key-based artifact load")
+                return False
+
+        return state_dict, confirm_load
+
+    except Exception:  # noqa: BLE001
+        # No compatibility fallback: rely on daemon orchestrator; propagate error
+        raise

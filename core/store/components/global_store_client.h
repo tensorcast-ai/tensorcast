@@ -165,6 +165,27 @@ class GlobalStoreClient {
       std::string_view node_id,
       const std::vector<ChunkStateUpdate>& updates);
 
+  // ========== RFC-0014: Key Mapping ==========
+  struct KeyMapping {
+    std::string artifact_id;
+    std::string replica_uuid;
+    std::string daemon_address;
+    std::string disk_path;
+  };
+
+  // Resolve a human-friendly key to artifact identity and optional hints.
+  absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key);
+
+  // Upsert a key mapping (conflict if mapping points to a different artifact).
+  absl::Status upsert_key_mapping(
+      std::string_view key,
+      std::string_view artifact_id,
+      std::string_view disk_path = {},
+      absl::Duration ttl = absl::ZeroDuration());
+
+  // Revoke an existing key mapping.
+  absl::Status revoke_key_mapping(std::string_view key);
+
  private:
   // Helper for RPC retries
   template <typename Request, typename Response, typename RpcMethod>

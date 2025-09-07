@@ -68,8 +68,8 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   // Descriptor presence and consistency (only field in new response)
-  REQUIRE(cresp.has_descriptor_());
-  const auto& desc = cresp.descriptor_();
+  REQUIRE(cresp.has_artifact_descriptor());
+  const auto& desc = cresp.artifact_descriptor();
   REQUIRE(desc.artifact_id().rfind("mi2:", 0) == 0); // starts with "mi2:"
   REQUIRE(!desc.index_multihash().empty());
   REQUIRE(!desc.data_multihash().empty());

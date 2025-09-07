@@ -68,7 +68,7 @@ graph TD
 ### 3. User Process Worker
 **Role**: PyTorch client process accessing artifacts
 
-- **Interface**: Uses `tensorcast.torch_util.py` (`load_dict()`) to request artifacts
+- **Interface**: Uses `tensorcast.torch_util.get_artifact(key, ...)` to request artifacts via daemon `MaterializeByKey` (RFC‑0017)
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 
@@ -95,35 +95,34 @@ graph TD
 - System designed for eventual consistency
 - **Documentation**: [High Availability Design](./high-availability-design.md)
 
-## Artifact Load Paths
+## Artifact Load Paths (Key‑based)
 
 ### P2P‑first Loading (Preferred)
 ```
-Store Daemon                        Global Store
-     |                                   |
-     |-------- Query Artifact ---------->|
-     |<------- Candidate Replicas -------|
-     |                                   |
-     |-- Request Transport  ------------>|
-     |<------ Transport Grant -----------|
-     |                                   |
-     |   (RDMA/TCP transfer from peer)   |
-     |                                   |
-     |-- Complete Transport ------------>|
-     |<------ Confirmation --------------|
-     |                                   |
-     |-- Register Local Replica -------->|
-     |<------ Replica ID ----------------|
+Client                                 Store Daemon                        Global Store
+   |                                         |                                   |
+   |-- MaterializeByKey(key, device, uuid) ->|                                   |
+   |                                          |-- ResolveKeyMapping(key) ------->|
+   |                                          |<----------- artifact_id ---------|
+   |                                          |-- Request Transport ------------>|
+   |                                          |<------ Transport Grant ----------|
+   |                                          |   (RDMA/TCP transfer from peer) |
+   |                                          |-- Complete Transport ----------->|
+   |                                          |<------ Confirmation -------------|
+   |<- ALLOCATED + CUDA IPC handle -----------|                                   |
 ```
 
 ### Disk Fallback
 ```
-Store Daemon                        Global Store
-     |                                   |
-     |   (Load from local disk)          |
-     |                                   |
-     |-- Register Local Replica -------->|
-     |<------ Replica ID ----------------|
+Client                                 Store Daemon                        Global Store
+   |                                         |                                   |
+   |-- MaterializeByKey(key, device, uuid) ->|                                   |
+   |                                          |-- ResolveKeyMapping(key) ------->|
+   |                                          |<-- artifact_id (+ disk_path) ----|
+   |                                          |   (Load from local disk)         |
+   |                                          |-- Register Local Replica ------->|
+   |                                          |<------ Replica ID ---------------|
+   |<- ALLOCATED + CUDA IPC handle -----------|                                   |
 ```
 
 ## Load Balancing & Concurrency
@@ -131,4 +130,3 @@ Store Daemon                        Global Store
 - Each replica tracks `max_concurrency` and `current_requests`; selection is atomic
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
-

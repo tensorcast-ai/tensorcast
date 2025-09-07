@@ -27,11 +27,11 @@ graph TB
         SD3[Store Daemon 3<br/>DISK Artifacts: A, C<br/>Load: 0/4]
     end
 
-    Client[Client Request<br/>Artifact: A, Target: GPU]
+    Client[Client Request<br/>Key: k(A), Target: GPU]
 
-    Client -->|1. MaterializeReplica| SD1
-    SD1 -->|2. GetArtifactInfoById| GS
-    GS -->|3. Available replicas| SD1
+    Client -->|1. MaterializeByKey| SD1
+    SD1 -->|2. ResolveKeyMapping| GS
+    GS -->|3. artifact_id| SD1
     SD1 -->|4. RequestTransport| TR
     TR -->|5. Optimal replica| SD1
     SD1 -.->|6. RDMA Transfer| SD3
@@ -169,24 +169,26 @@ cursor.execute("""
 - **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
 
 
-## P2P Transfer Workflow
+## P2P Transfer Workflow (Key-based)
 
 ### Complete Transfer Sequence
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Python as Python ArtifactLoader
+    participant RPC as Daemon RPC (MaterializeByKey)
     participant CS as C++ StoreEngine
     participant PO as C++ MaterializeOrchestrator
     participant GSC as C++ GlobalStoreClient
     participant GS as Global Store (Python)
     participant SD_Source as Store Daemon (Source)
 
-    Client->>Python: LoadArtifact(disk_path, device_uuid)
-    Python->>CS: materialize_replica(disk_path, "gpu:0", MaterializeMode::AUTO)
+    Client->>RPC: MaterializeByKey(key, device_id, replica_uuid)
+    RPC->>GS: ResolveKeyMapping(key)
+    GS-->>RPC: artifact_id (+ optional disk_path hint)
 
-    Note over CS: When mode == AUTO
+    Note over CS: AUTO mode via orchestrator
+    RPC->>CS: materialize_replica(target, AUTO, hints{artifact_id[, disk_path]})
     CS->>PO: MaterializeOrchestrator::run(artifact_id, device_key, hints)
 
     %% --- P2P transfer attempt ------------------------------------------------
@@ -221,7 +223,7 @@ sequenceDiagram
 
     PO-->>CS: ReplicaHandle
     CS-->>Python: ReplicaHandle (with IPC handle)
-    Python-->>Client: MaterializeReplicaResponse(status=ALLOCATED, handle_bytes)
+    RPC-->>Client: MaterializeByKeyResponse(status=ALLOCATED, handle_bytes, artifact_id)
 ```
 
 ### Key Components and File Locations

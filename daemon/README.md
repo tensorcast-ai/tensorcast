@@ -79,6 +79,7 @@ Startup flow (`server_main.cc`):
   - Transport locking: `LockTransportChunks` / `UnlockTransportChunks`
   - Status: `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`
   - In‑memory registration: `BeginRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`
+  - Key mapping (RFC‑0017): `PublishReplicaKey`, `MaterializeByKey` (resolve key→artifact_id, prefer P2P, fallback to disk if mapping contains `disk_path`)
 
 - Sessions and references
   - `ReplicaSessionManager`: maps `replica_uuid` to `ReplicaKey` and a readiness `future` with TTL (default 60s); used by Confirm/Wait paths
@@ -101,7 +102,44 @@ Startup flow (`server_main.cc`):
 
 ## Core Flows
 
-### Asynchronous loading (Materialize → Confirm → Wait)
+### Key‑based loading (MaterializeByKey → Confirm → Wait)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant D as Daemon RPC
+    participant GS as Global Store
+    participant E as StoreEngine
+
+    C->>D: MaterializeByKey(key, device_id, replica_uuid, pid)
+    D->>GS: ResolveKeyMapping(key)
+    GS-->>D: artifact_id (+ optional disk_path hint)
+    D->>E: materialize_replica(device, AUTO, hints{artifact_id[,disk_path]})
+    note right of E: Allocate target memory and start background transfer (P2P first, daemon orchestrator fallback to disk)
+    E-->>D: {replica_key, ready_future, cuda_ipc_handle}
+    D->>D: Record sessions[replica_uuid] and PID ref
+    D-->>C: status=ALLOCATED, return CUDA IPC handle + artifact_id
+
+    C->>D: ConfirmReplica(replica_uuid)
+    D->>D: Wait on ready_future within deadline
+    alt Success
+      D-->>C: code=0 (OK)
+    else Failure or timeout
+      D-->>C: code=1 + gRPC error
+    end
+
+    C->>D: WaitReplicaVerification(replica_uuid)
+    D->>D: Consult verification table (updated by background sweeper)
+    D-->>C: {status: IN_PROGRESS|PASSED|FAILED|UNSPECIFIED}
+```
+
+Notes:
+- `MaterializeByKey` is the preferred path (RFC‑0017). Daemon resolves key internally and orchestrates P2P/disk fallback; client does not handle fallback logic.
+- Return semantics: return ALLOCATED when allocation is complete; client completes verification with `ConfirmReplica`/`WaitReplicaVerification`.
+- Device resolution: use `device_id` (or default from config), target GPU.
+
+### Asynchronous loading (MaterializeReplica → Confirm → Wait)
 
 ```mermaid
 sequenceDiagram
@@ -202,7 +240,7 @@ Eviction strategy: per‑device LRU of GPU‑resident replicas that have no PID 
 
 ## Reference and unload semantics
 
-- Add refs: `MaterializeReplica` with `pid` adds a PID ref to the `ReplicaKey`; `keep_for_global` can pin as global cache
+- Add refs: `MaterializeByKey`/`MaterializeReplica` with `pid` adds a PID ref to the `ReplicaKey`; `keep_for_global` can pin as global cache
 - Drop refs:
   - `UnloadReplica(..., pid=...)` removes that PID ref; if other refs remain, unload is skipped and success is returned (idempotent)
   - The PID watcher drops refs for dead PIDs automatically

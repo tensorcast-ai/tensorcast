@@ -12,6 +12,7 @@
 #include <string_view>
 #include <unordered_map>
 #include "absl/status/statusor.h"
+#include "absl/time/time.h"
 #include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/pinned_memory_pool.h"
 #include "core/store/components/communication_manager.h"
@@ -199,6 +200,17 @@ class StoreEngine {
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override = {});
+
+  // RFC-0014: Key-mapping wrappers delegating to Global Store client. These
+  // avoid exposing the client to callers and ensure we always use the Engine's
+  // configured Global Store connection.
+  absl::StatusOr<components::GlobalStoreClient::KeyMapping> resolve_key_mapping(std::string_view key);
+  absl::Status upsert_key_mapping(
+      std::string_view key,
+      std::string_view artifact_id,
+      std::string_view disk_path = {},
+      absl::Duration ttl = absl::ZeroDuration());
+  absl::Status revoke_key_mapping(std::string_view key);
 
   // --------------------------------------------------------------------
   // Memory & Registration helpers

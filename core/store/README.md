@@ -95,6 +95,8 @@ graph TB
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle }`.
 
+  Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (derived from key mapping). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
+
 - In-memory registration (RFC-0006/0007):
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
     - Allocates target GPU memory via a temporary `Replica` and returns a CUDA IPC handle so the caller can write directly.

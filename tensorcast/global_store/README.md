@@ -209,9 +209,11 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - HA: `SynchronizeWorkerState`, `RequestFullStateSync`.
   - Chunk directory: `QueryChunkLocations`, `BatchUpdateChunkStates`.
   - Utility: `HealthCheck`.
+  - RFC-0014 Key Mapping: `UpsertKeyMapping`, `ResolveKeyMapping`, `RevokeKeyMapping` (persisted in `key_mappings`).
 - Content-addressed identity (RFC-0007):
   - `RegisterReplica` persists `artifacts` rows when `artifact_id` follows the `mi2:<index_mh>:<data_mh>` scheme.
   - Optional `tensor_index_data` is stored in `artifact_indices` (deduplicated by SHA-256 `index_key`).
+  - New: `GetArtifactIndexById(artifact_id)` returns canonical tensor index bytes (`artifact_indices[index_key]`) using the descriptor in `artifacts` to resolve the index key.
 - Test helper: `GlobalStoreServicer.reset_state()` truncates mutable tables and rebuilds services for clean-slate integration tests.
 
 ## Key Flows (Sequence)

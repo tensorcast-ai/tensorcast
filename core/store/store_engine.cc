@@ -20,7 +20,6 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
-#include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
@@ -1485,6 +1484,35 @@ absl::Status StoreEngine::register_replica_with_global_store(
   const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
   return ReplicaRegistrationHelper::register_local_replica(
       global_store_client_.get(), wid, artifact_id, key.device, loc, size);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC-0014: Key-mapping wrappers
+// ═══════════════════════════════════════════════════════════════════════════
+
+absl::StatusOr<components::GlobalStoreClient::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return global_store_client_->resolve_key_mapping(key);
+}
+
+absl::Status StoreEngine::upsert_key_mapping(
+    std::string_view key,
+    std::string_view artifact_id,
+    std::string_view disk_path,
+    absl::Duration ttl) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return global_store_client_->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+}
+
+absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return global_store_client_->revoke_key_mapping(key);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

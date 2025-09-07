@@ -755,4 +755,81 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
   return std::make_pair(response.new_state_version(), response.new_state_checksum());
 }
 
+// ========== RFC-0014: Key Mapping ==========
+
+absl::StatusOr<GlobalStoreClient::KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_view key) {
+  global_store::ResolveKeyMappingRequest request;
+  request.set_key(std::string(key));
+
+  global_store::ResolveKeyMappingResponse response;
+
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ResolveKeyMapping(ctx, req, resp); },
+      "ResolveKeyMapping");
+
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::NotFoundError("key not found");
+  }
+
+  KeyMapping out{
+      .artifact_id = response.artifact_id(),
+      .replica_uuid = response.replica_uuid(),
+      .daemon_address = response.daemon_address(),
+      .disk_path = response.disk_path(),
+  };
+  return out;
+}
+
+absl::Status GlobalStoreClient::upsert_key_mapping(
+    std::string_view key,
+    std::string_view artifact_id,
+    std::string_view disk_path,
+    absl::Duration ttl) {
+  global_store::UpsertKeyMappingRequest request;
+  request.set_key(std::string(key));
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_disk_path(std::string(disk_path));
+  if (ttl > absl::ZeroDuration()) {
+    auto* d = request.mutable_ttl();
+    d->set_seconds(absl::ToInt64Seconds(ttl));
+    d->set_nanos(0);
+  }
+
+  global_store::UpsertKeyMappingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpsertKeyMapping(ctx, req, resp); },
+      "UpsertKeyMapping");
+  if (!status.ok())
+    return status;
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::AlreadyExistsError("key mapping conflict or error");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
+  global_store::RevokeKeyMappingRequest request;
+  request.set_key(std::string(key));
+
+  global_store::RevokeKeyMappingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RevokeKeyMapping(ctx, req, resp); },
+      "RevokeKeyMapping");
+  if (!status.ok())
+    return status;
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::NotFoundError("key not found");
+  }
+  return absl::OkStatus();
+}
+
 } // namespace tensorcast::store::components
