@@ -3,7 +3,7 @@
 #ifndef CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_
 #define CORE_COMMUNICATOR_MISC_EPOLL_WRAP_H_
 
-#include "misc/epoll_wrap.h"
+#include "core/communicator/misc/epoll_wrap.h"
 
 namespace tensorcast::communicator::misc {
 

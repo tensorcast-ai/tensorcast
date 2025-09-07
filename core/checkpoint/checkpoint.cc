@@ -349,7 +349,7 @@ tensorcast::common::ArtifactVerificationInfo generate_verification_info_from_dis
     // Open file read-only
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
-      LOG(FATAL) << "Failed to open file: " << path.string() << ": " << std::strerror(errno);
+      PLOG(FATAL) << "Failed to open file: " << path.string();
     }
 
     void* addr = ::mmap(nullptr, bytes_to_map, PROT_READ, MAP_PRIVATE, fd, 0 /*offset*/);

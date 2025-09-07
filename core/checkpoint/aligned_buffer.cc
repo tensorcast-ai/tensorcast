@@ -54,11 +54,10 @@ AlignedBuffer::AlignedBuffer(const std::string& filename)
       errno = direct_errno; // Ensure PLOG reports the original errno value.
       PLOG(WARNING) << "Opening file " << filename << " with O_DIRECT failed; fallback without O_DIRECT succeeded.";
     } else {
-      // Both attempts failed – use PLOG to report the fallback errno (the
-      // current `errno`) and embed the first errno in the message.
+      // Both attempts failed – report the fallback errno via PLOG and include
+      // the first attempt's errno code for context.
       PLOG(ERROR) << "Failed to open file " << filename
-                  << " even without O_DIRECT. First attempt errno=" << direct_errno << " ("
-                  << std::strerror(direct_errno) << ")";
+                  << " even without O_DIRECT. First attempt errno=" << direct_errno;
     }
   }
 
@@ -93,15 +92,8 @@ size_t AlignedBuffer::write_data(const void* data, size_t size) {
       // allocate aligned memory
       void* direct_write_buf = aligned_alloc(kAlignment, direct_write_size);
       if (!direct_write_buf) {
-        char err_msg[256];
-        auto* result = strerror_r(errno, err_msg, sizeof(err_msg));
-        if (result == nullptr) {
-          LOG(ERROR) << "Failed to get error message: " << errno;
-          exit(1);
-        }
-
-        LOG(ERROR) << "Failed to allocate aligned memory: " << err_msg << ", kAlignment: " << kAlignment
-                   << " direct_write_size: " << direct_write_size;
+        PLOG(ERROR) << "Failed to allocate aligned memory: kAlignment=" << kAlignment
+                    << " direct_write_size=" << direct_write_size;
         exit(1);
       }
       memcpy(direct_write_buf, (char*)data + written, direct_write_size);

@@ -6,8 +6,15 @@
 #include <string>
 #include <utility>
 
-#include "core/communicator/engine/protocol.h"
-#include "core/communicator/misc/epoll_wrap.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <mutex>
+
+#include "absl/log/log.h"
+
+#include "core/communicator/misc/epoll_wrap.h" // IWYU pragma: keep
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/base_transport.h"
 #include "core/communicator/transport/tcp_context.h"
@@ -50,11 +57,14 @@ static std::string decode_epoll_events(uint32_t events) {
 }
 
 TcpTransport::TcpTransport(TcpContext* context, int fd, struct sockaddr_in remote_addr)
-    : context_(context), fd_(fd), local_addr_(), remote_addr_(remote_addr), recv_func_(nullptr), close_func_() {
+    : context_(context), fd_(fd), local_addr_(), remote_addr_(remote_addr), recv_func_(nullptr) {
   misc::ASSERT(fd_ != 0, "failed to init tcp transport");
   misc::CLEAR(local_addr_);
   socklen_t len = sizeof(local_addr_);
-  getsockname(fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), &len);
+  if (getsockname(fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), &len) < 0) {
+    PLOG(WARNING) << "[TcpTransport::TcpTransport] getsockname failed for fd=" << fd_;
+    misc::CLEAR(local_addr_);
+  }
 
   CHECK_WARN(context_->register_transport(this), "failed to register transport");
 }
@@ -66,6 +76,9 @@ TcpTransport::~TcpTransport() {
 }
 
 misc::result_t TcpTransport::close() {
+  if (context_ == nullptr) {
+    return misc::SUCCESS;
+  }
   LOG(INFO) << "[TcpTransport::close] Closing transport " << get_remote_url();
   context_->unregister_transport(this);
   recv_func_ = nullptr;
@@ -92,11 +105,11 @@ misc::result_t TcpTransport::recv(uint8_t* buf, uint32_t buf_size) {
 }
 
 void TcpTransport::set_recv_func(on_recv_func_t recv_func) {
-  recv_func_ = recv_func;
+  recv_func_ = std::move(recv_func);
 }
 
-void TcpTransport::set_close_func(on_close_func_t close_func) {
-  close_func_ = close_func;
+void TcpTransport::set_close_func(on_close_func_t recv_func) {
+  close_func_ = std::move(recv_func);
 }
 
 misc::result_t TcpTransport::process_event(uint32_t event) {
@@ -106,9 +119,8 @@ misc::result_t TcpTransport::process_event(uint32_t event) {
 
   // Handle combined events by checking individual flags
   if (event & EPOLLERR) {
-    LOG(ERROR) << "[TcpTransport::process_event] EPOLLERR detected for "
-               << "peer=" << get_remote_url() << ", local=" << get_local_url() << " - socket error occurrered "
-               << strerror(errno);
+    PLOG(ERROR) << "[TcpTransport::process_event] EPOLLERR detected for "
+                << "peer=" << get_remote_url() << ", local=" << get_local_url() << " - socket error occurred";
     return do_close();
   }
 
@@ -134,10 +146,20 @@ misc::result_t TcpTransport::process_event(uint32_t event) {
     return do_close();
   }
 
+  if (event & EPOLLOUT) {
+    VLOG(1) << "[TcpTransport::process_event] EPOLLOUT for " << get_remote_url() << " - no pending writes; ignored";
+    return misc::IN_PROGRESS;
+  }
+
+  if (event & EPOLLPRI) {
+    VLOG(1) << "[TcpTransport::process_event] EPOLLPRI (OOB data) for " << get_remote_url() << " - ignored";
+    return misc::IN_PROGRESS;
+  }
+
   // Unexpected event
-  LOG(FATAL) << "[TcpTransport::process_event] Unexpected event for " << get_remote_url() << " - "
-             << decode_epoll_events(event);
-  return do_close();
+  LOG(WARNING) << "[TcpTransport::process_event] Unexpected event for " << get_remote_url() << " - "
+               << decode_epoll_events(event) << "; ignoring";
+  return misc::IN_PROGRESS;
 }
 
 int TcpTransport::get_fd() const {
@@ -145,14 +167,18 @@ int TcpTransport::get_fd() const {
 }
 
 std::string TcpTransport::get_remote_url() const {
+  char addr_buf[INET_ADDRSTRLEN] = {0};
+  const char* res = inet_ntop(AF_INET, &remote_addr_.sin_addr, addr_buf, sizeof(addr_buf));
   std::stringstream url;
-  url << inet_ntoa(remote_addr_.sin_addr) << ":" << ntohs(remote_addr_.sin_port);
+  url << (res ? addr_buf : "0.0.0.0") << ":" << ntohs(remote_addr_.sin_port);
   return url.str();
 }
 
 std::string TcpTransport::get_local_url() const {
+  char addr_buf[INET_ADDRSTRLEN] = {0};
+  const char* res = inet_ntop(AF_INET, &local_addr_.sin_addr, addr_buf, sizeof(addr_buf));
   std::stringstream url;
-  url << inet_ntoa(local_addr_.sin_addr) << ":" << ntohs(local_addr_.sin_port);
+  url << (res ? addr_buf : "0.0.0.0") << ":" << ntohs(local_addr_.sin_port);
   return url.str();
 }
 

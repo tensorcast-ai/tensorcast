@@ -15,7 +15,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
-#include "absl/strings/str_format.h"
+#include "absl/strings/str_cat.h"
 #include "core/common/artifact_verification.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/multi_safetensors_source.h"
@@ -50,7 +50,7 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> load_verification_i
   try {
     std::ifstream file(verification_path);
     if (!file.is_open()) {
-      return absl::InternalError(absl::StrFormat("Failed to open verification file: %s", verification_path.string()));
+      return absl::InternalError(absl::StrCat("Failed to open verification file: ", verification_path.string()));
     }
 
     std::string json_content;
@@ -68,8 +68,8 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> load_verification_i
         tensorcast::common::ArtifactVerificationInfo::from_json(json_content);
     if (!result.ok()) {
       return absl::InvalidArgumentError(
-          absl::StrFormat(
-              "Failed to parse verification file %s: %s", verification_path.string(), result.status().message()));
+          absl::StrCat(
+              "Failed to parse verification file ", verification_path.string(), ": ", result.status().message()));
     }
 
     LOG(INFO) << "Successfully loaded verification info from " << verification_path.string()
@@ -79,7 +79,7 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> load_verification_i
     return result.value();
   } catch (const std::exception& e) {
     return absl::InternalError(
-        absl::StrFormat("Exception while loading verification file %s: %s", verification_path.string(), e.what()));
+        absl::StrCat("Exception while loading verification file ", verification_path.string(), ": ", e.what()));
   }
 }
 
@@ -98,11 +98,11 @@ absl::Status DiskLoader::initialize() {
 
   // Check if the directory exists
   if (!std::filesystem::exists(artifact_dir)) {
-    return absl::NotFoundError(absl::StrFormat("Replica directory not found: %s", artifact_dir.string()));
+    return absl::NotFoundError(absl::StrCat("Replica directory not found: ", artifact_dir.string()));
   }
 
   if (!std::filesystem::is_directory(artifact_dir)) {
-    return absl::InvalidArgumentError(absl::StrFormat("Path is not a directory: %s", artifact_dir.string()));
+    return absl::InvalidArgumentError(absl::StrCat("Path is not a directory: ", artifact_dir.string()));
   }
 
   // Find all partition files
@@ -152,22 +152,20 @@ absl::Status DiskLoader::initialize() {
       if (entry.is_regular_file()) {
         const std::string filename = entry.path().filename().string();
         const std::string ext = ".safetensors";
-        if (filename.size() >= ext.size() && filename.rfind(ext) == filename.size() - ext.size()) {
+        if (filename.ends_with(ext)) {
           safetensors_paths.push_back(entry.path());
         }
       }
     }
     if (safetensors_paths.empty()) {
       return absl::NotFoundError(
-          absl::StrFormat("No replica partition files found in: %s (also no .safetensors)", artifact_dir.string()));
+          absl::StrCat("No replica partition files found in: ", artifact_dir.string(), " (also no .safetensors)"));
     }
-    std::sort(safetensors_paths.begin(), safetensors_paths.end(), [](const auto& a, const auto& b) {
-      return a.filename() < b.filename();
-    });
+    std::ranges::sort(safetensors_paths, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
     for (const auto& p : safetensors_paths) {
       int fd = ::open(p.c_str(), O_RDONLY);
       if (fd < 0) {
-        return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", p.string(), std::strerror(errno)));
+        return absl::ErrnoToStatus(errno, absl::StrCat("Failed to open ", p.string()));
       }
       // Use the shared utility function to parse the header
       auto header_info = loader::ParseSafetensorsHeader(fd);
@@ -203,8 +201,7 @@ absl::Status DiskLoader::initialize() {
   if (!partition_paths_.empty()) {
     const auto first_name = partition_paths_[0].filename().string();
     const std::string st_ext = ".safetensors";
-    const bool is_safetensors =
-        first_name.size() >= st_ext.size() && first_name.rfind(st_ext) == first_name.size() - st_ext.size();
+    const bool is_safetensors = first_name.ends_with(st_ext);
     if (!is_safetensors) {
       const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
       const auto index_json_path = artifact_dir / "tensor_index.json";
@@ -232,11 +229,11 @@ absl::Status DiskLoader::initialize() {
           return absl::InvalidArgumentError("Invalid artifact_descriptor.json: fields must be strings");
         }
         const std::string artifact_id = j["artifact_id"].get<std::string>();
-        if (artifact_id.rfind("mi2:", 0) != 0) {
+        if (!absl::StartsWith(artifact_id, "mi2:")) {
           return absl::InvalidArgumentError("Invalid artifact_descriptor.json: artifact_id must start with 'mi2:'");
         }
       } catch (const std::exception& e) {
-        return absl::InvalidArgumentError(absl::StrFormat("Failed to parse artifact_descriptor.json: %s", e.what()));
+        return absl::InvalidArgumentError(absl::StrCat("Failed to parse artifact_descriptor.json: ", e.what()));
       }
     }
   }
@@ -269,7 +266,7 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> DiskLoader::open_source(
     if (!partition_paths_.empty()) {
       const auto first_name = partition_paths_[0].filename().string();
       const std::string ext = ".safetensors";
-      if (first_name.size() >= ext.size() && first_name.rfind(ext) == first_name.size() - ext.size()) {
+      if (first_name.ends_with(ext)) {
         if (partition_paths_.size() == 1) {
           return std::make_unique<loader::SafetensorsSource>(partition_paths_[0]);
         }

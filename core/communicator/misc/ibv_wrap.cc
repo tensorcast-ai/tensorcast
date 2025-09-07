@@ -20,13 +20,13 @@ namespace tensorcast::communicator::misc {
     return NULL_ERROR;                              \
   }
 
-#define IBV_PTR_CHECK_ERRNO(internal, call, retval, error_retval, name)      \
-  CHECK_NULL(internal);                                                      \
-  retval = g_symbols.call;                                                   \
-  if (retval == error_retval) {                                              \
-    LOG(WARNING) << "Call to " name " failed with error" << strerror(errno); \
-    return SYS_ERROR;                                                        \
-  }                                                                          \
+#define IBV_PTR_CHECK_ERRNO(internal, call, retval, error_retval, name) \
+  CHECK_NULL(internal);                                                 \
+  retval = g_symbols.call;                                              \
+  if (retval == error_retval) {                                         \
+    PLOG(WARNING) << "Call to " name " failed";                         \
+    return SYS_ERROR;                                                   \
+  }                                                                     \
   return SUCCESS;
 
 #define IBV_PTR_CHECK(internal_name, call, retval, error_retval, name) \
@@ -38,13 +38,14 @@ namespace tensorcast::communicator::misc {
   }                                                                    \
   return SUCCESS;
 
-#define IBV_INT_CHECK_RET_ERRNO(internal, call, success_retval, name)       \
-  CHECK_NULL(internal);                                                     \
-  int ret = g_symbols.call;                                                 \
-  if (ret != success_retval) {                                              \
-    LOG(WARNING) << "Call to " name " failed with error " << strerror(ret); \
-    return SYS_ERROR;                                                       \
-  }                                                                         \
+#define IBV_INT_CHECK_RET_ERRNO(internal, call, success_retval, name) \
+  CHECK_NULL(internal);                                               \
+  int ret = g_symbols.call;                                           \
+  if (ret != success_retval) {                                        \
+    errno = ret;                                                      \
+    PLOG(WARNING) << "Call to " name " failed";                       \
+    return SYS_ERROR;                                                 \
+  }                                                                   \
   return SUCCESS;
 
 #define IBV_INT_CHECK(internal_name, call, error_retval, name) \
@@ -153,7 +154,7 @@ result_t wrap_ibv_fork_init() {
 
 result_t wrap_ibv_get_device_list(struct ibv_device*** ret, int* num_devices) {
   *ret = g_symbols.get_device_list(num_devices);
-  if (*ret == NULL) {
+  if (*ret == nullptr) {
     *num_devices = 0;
   }
   return SUCCESS;
@@ -166,7 +167,7 @@ result_t wrap_ibv_free_device_list(struct ibv_device** list) {
 }
 
 const char* wrap_ibv_get_device_name(struct ibv_device* device) {
-  if (g_symbols.get_device_name == NULL) {
+  if (g_symbols.get_device_name == nullptr) {
     LOG(FATAL) << "lib wrapper not initialized.";
     exit(-1);
   }
@@ -229,7 +230,7 @@ result_t wrap_ibv_dealloc_pd(struct ibv_pd* pd) {
 }
 
 result_t wrap_ibv_reg_mr(struct ibv_mr** ret, struct ibv_pd* pd, void* addr, size_t length, int access) {
-  IBV_PTR_CHECK_ERRNO(reg_mr, reg_mr(pd, addr, length, access), *ret, NULL, "ibv_reg_mr");
+  IBV_PTR_CHECK_ERRNO(reg_mr, reg_mr(pd, addr, length, access), *ret, nullptr, "ibv_reg_mr");
 }
 
 struct ibv_mr* wrap_direct_ibv_reg_mr(struct ibv_pd* pd, void* addr, size_t length, int access) {
@@ -254,7 +255,7 @@ result_t wrap_ibv_create_cq(
     struct ibv_comp_channel* channel,
     int comp_vector) {
   IBV_PTR_CHECK_ERRNO(
-      create_cq, create_cq(context, cqe, cq_context, channel, comp_vector), *ret, NULL, "ibv_create_cq");
+      create_cq, create_cq(context, cqe, cq_context, channel, comp_vector), *ret, nullptr, "ibv_create_cq");
 }
 
 result_t wrap_ibv_destroy_cq(struct ibv_cq* cq) {
@@ -266,7 +267,7 @@ result_t wrap_ibv_destroy_qp(struct ibv_qp* qp) {
 }
 
 result_t wrap_ibv_create_qp(struct ibv_qp** ret, struct ibv_pd* pd, struct ibv_qp_init_attr* qp_init_attr) {
-  IBV_PTR_CHECK_ERRNO(create_qp, create_qp(pd, qp_init_attr), *ret, NULL, "ibv_create_qp");
+  IBV_PTR_CHECK_ERRNO(create_qp, create_qp(pd, qp_init_attr), *ret, nullptr, "ibv_create_qp");
 }
 
 result_t wrap_ibv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr, int attr_mask) {

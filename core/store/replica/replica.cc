@@ -9,7 +9,6 @@
 #include "absl/functional/overload.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/inline_buffer_loader.h"
@@ -64,7 +63,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
         config.source);
   } catch (const std::exception& e) {
     return absl::InternalError(
-        absl::StrFormat("Failed to create loader for %s: %s", config.artifact_identifier, e.what()));
+        absl::StrCat("Failed to create loader for ", config.artifact_identifier, ": ", e.what()));
   }
 
   // Check the status returned by the visitor lambda
@@ -96,7 +95,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   }
   uint64_t artifact_size = *size_status;
   if (artifact_size == 0) {
-    return absl::FailedPreconditionError(absl::StrFormat("Replica %s resolved size is 0.", config.artifact_identifier));
+    return absl::FailedPreconditionError(absl::StrCat("Replica ", config.artifact_identifier, " resolved size is 0."));
   }
 
   // Also check against optional expected size in config
@@ -357,7 +356,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
       // State is now at least ALLOCATED – subsequent concurrent callers will
       // enter the ALLOCATED/LOADING fast-path above and wait rather than
       // launching a duplicate load.
-      need_allocation = false; // Prevent duplicate allocation outside lock.
+      // Allocation completed under lock
     }
 
     src_status = find_best_source_for_target(target_location);
@@ -526,9 +525,10 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> Replica::generate_v
   MemoryState state = memory_manager_->get_state(location);
   if (state != MemoryState::LOADED) {
     return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "Replica data must be loaded at %s before generating verification info. Current state: %s",
+        absl::StrCat(
+            "Replica data must be loaded at ",
             location_to_string(location),
+            " before generating verification info. Current state: ",
             state_to_string(state)));
   }
 
@@ -563,9 +563,10 @@ absl::Status Replica::verify_artifact_data(
   MemoryState state = memory_manager_->get_state(location);
   if (state != MemoryState::LOADED) {
     return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "Replica data must be loaded at %s before verification. Current state: %s",
+        absl::StrCat(
+            "Replica data must be loaded at ",
             location_to_string(location),
+            " before verification. Current state: ",
             state_to_string(state)));
   }
 
@@ -599,9 +600,10 @@ absl::Status Replica::verify_key_points(
   MemoryState state = memory_manager_->get_state(location);
   if (state != MemoryState::LOADED) {
     return absl::FailedPreconditionError(
-        absl::StrFormat(
-            "Replica data must be loaded at %s before verification. Current state: %s",
+        absl::StrCat(
+            "Replica data must be loaded at ",
             location_to_string(location),
+            " before verification. Current state: ",
             state_to_string(state)));
   }
 

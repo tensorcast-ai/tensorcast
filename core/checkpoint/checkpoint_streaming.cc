@@ -96,8 +96,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
       // Detect whether the pointer is device (CUDA) memory or host
       bool is_device_ptr = false;
       cudaPointerAttributes attr;
-      auto attr_status =
-          cuda::pointer_get_attributes_full(const_cast<void*>(reinterpret_cast<const void*>(data_ptr)), &attr);
+      auto attr_status = cuda::pointer_get_attributes_full(static_cast<const void*>(data_ptr), &attr);
       if (attr_status.ok()) {
         is_device_ptr = (attr.type == cudaMemoryTypeDevice);
       } else {

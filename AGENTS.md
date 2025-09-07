@@ -232,6 +232,23 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 #### Best Practices
 - **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`; `absl::ErrnoToStatus` to convert errno to status
+- **Errno handling policy**: Avoid direct use of `errno`, `strerror`, and `perror`. Prefer `absl::ErrnoToStatus` for converting OS errors to statuses and `PLOG(...)` for logging errors that include `errno` safely.
+
+```cpp
+// Bad
+int fd = open(path.c_str(), O_RDONLY);
+if (fd < 0) {
+  LOG(ERROR) << "open failed: " << strerror(errno);
+  return absl::ErrnoToStatus(errno, "open failed");
+}
+
+// Good
+int fd = open(path.c_str(), O_RDONLY);
+if (fd < 0) {
+  PLOG(ERROR) << "open failed";            // logs message with errno string
+  return absl::ErrnoToStatus(errno, "open failed");
+}
+```
 - **Testing**: Catch2 framework with Arrange-Act-Assert pattern
 - **Concurrency**: Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
 - **Documentation**: Doxygen style for public APIs

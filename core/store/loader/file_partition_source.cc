@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "absl/log/log.h"
-#include "absl/strings/str_format.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 
 namespace tensorcast::store::loader {
 
@@ -92,7 +94,7 @@ absl::Status FilePartitionSource::OpenFiles() {
 
     // Handle fallback from O_DIRECT if unsupported
     if (using_direct_io_ && !attempted_fallback &&
-        (open_errno == EINVAL || open_errno == EOPNOTSUPP || open_errno == ENOTSUP || open_errno == EPERM)) {
+        (open_errno == EINVAL || open_errno == EOPNOTSUPP || open_errno == EPERM)) {
       LOG(INFO) << "FilePartitionSource::OpenFiles falling back from O_DIRECT due to errno=" << open_errno;
       // Close any partially opened file descriptors before retrying
       CloseFilesNoLock();
@@ -104,8 +106,7 @@ absl::Status FilePartitionSource::OpenFiles() {
 
     // If we reach here, opening failed and fallback (if any) either not applicable or already attempted
     CloseFilesNoLock();
-    return absl::InternalError(
-        absl::StrFormat("Failed to open partition(s) (errno=%d): %s", open_errno, strerror(open_errno)));
+    return absl::ErrnoToStatus(open_errno, "Failed to open partition(s)");
   }
 }
 
@@ -152,9 +153,8 @@ absl::StatusOr<size_t> FilePartitionSource::read(void* dst, size_t max_bytes) {
     LOG(INFO) << "FilePartitionSource::read successfully read " << bytes_read << " bytes, new offset "
               << current_offset_;
     return bytes_read;
-  } else {
-    LOG(ERROR) << "FilePartitionSource::read failed: " << result.status();
   }
+  LOG(ERROR) << "FilePartitionSource::read failed: " << result.status();
 
   return result;
 }
@@ -236,7 +236,7 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
       size_t remaining = bytes - total_copied;
 
       uint64_t aligned_offset = (cur_off / kDirectIOAlignment) * kDirectIOAlignment;
-      size_t offset_diff = static_cast<size_t>(cur_off - aligned_offset);
+      auto offset_diff = static_cast<size_t>(cur_off - aligned_offset);
 
       // Limit each iteration's payload to chunk_size
       size_t payload = std::min(remaining, options_.chunk_size);
@@ -255,9 +255,9 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
 
       ssize_t n = ::pread(handle.fd, aligned_ptr, aligned_size, aligned_offset);
       if (n < 0) {
-        return absl::InternalError(absl::StrFormat("Failed to read partition: %s", strerror(errno)));
+        return absl::ErrnoToStatus(errno, "Failed to read partition");
       }
-      if (static_cast<size_t>(n) <= offset_diff) {
+      if (std::cmp_less_equal(n, static_cast<ssize_t>(offset_diff))) {
         // Nothing useful read
         break;
       }
@@ -271,15 +271,13 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
       }
     }
     return total_copied;
-
-  } else {
-    // Regular read
-    ssize_t n = ::pread(handle.fd, dst, bytes, partition_offset);
-    if (n < 0) {
-      return absl::InternalError(absl::StrFormat("Failed to read partition: %s", strerror(errno)));
-    }
-    return static_cast<size_t>(n);
   }
+  // Regular read
+  ssize_t n = ::pread(handle.fd, dst, bytes, partition_offset);
+  if (n < 0) {
+    return absl::ErrnoToStatus(errno, "Failed to read partition");
+  }
+  return static_cast<size_t>(n);
 }
 
 } // namespace tensorcast::store::loader

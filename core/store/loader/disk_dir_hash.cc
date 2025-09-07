@@ -53,11 +53,11 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
       continue;
     }
     const auto name = entry.path().filename().string();
-    if (name.rfind("tensor.data_", 0) == 0) {
+    if (name.starts_with("tensor.data_")) {
       parts.push_back(entry.path());
     }
   }
-  std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+  std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
   if (parts.empty()) {
     fs::path single = dir / "tensor.data";
     if (fs::exists(single)) {

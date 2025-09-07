@@ -3,17 +3,18 @@
 #include "core/common/config/daemon_config_io.h"
 
 #include <cctype>
-#include <charconv>
 #include <cerrno>
+#include <charconv>
+#include <cstdlib>
 #include <fstream>
 #include <optional>
 #include <sstream>
-#include <cstdlib>
 
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "google/protobuf/util/json_util.h"
 #include "nlohmann/json.hpp"
@@ -40,7 +41,7 @@ nlohmann::json yaml_node_to_json(const YAML::Node& node) {
       if (s == "false" || s == "False")
         return json(false);
       // Only treat as number if the entire scalar parses as an integer or a floating value.
-      // This avoids mis-parsing strings like IPv4 addresses (e.g., "127.0.0.1").
+      // This avoids misparsing strings like IPv4 addresses (e.g., "127.0.0.1").
       if (!s.empty() && (std::isdigit(s[0]) || s[0] == '-' || s[0] == '+')) {
         // Try integer via from_chars with full consumption
         int64_t iv = 0;
@@ -107,6 +108,41 @@ std::optional<uint64_t> parse_size_bytes(const std::string& s) {
   if (ec != std::errc() || ptr != t.data() + t.size())
     return std::nullopt;
   return base * mul;
+}
+
+std::optional<std::string> parse_duration_proto(const std::string& s) {
+  // Accept plain integer or number with ms/s/m/h suffix and return canonical
+  // protobuf JSON duration string (e.g., "0.5s").
+  std::string t = absl::AsciiStrToLower(absl::StripAsciiWhitespace(s));
+  t = absl::StrReplaceAll(t, {{"_", ""}, {" ", ""}});
+  double mul = 1.0;
+  if (absl::EndsWith(t, "ms")) {
+    mul = 1.0 / 1000.0;
+    t.resize(t.size() - 2);
+  } else if (absl::EndsWith(t, "s")) {
+    mul = 1.0;
+    t.resize(t.size() - 1);
+  } else if (absl::EndsWith(t, "m")) {
+    mul = 60.0;
+    t.resize(t.size() - 1);
+  } else if (absl::EndsWith(t, "h")) {
+    mul = 3600.0;
+    t.resize(t.size() - 1);
+  } else {
+    return std::nullopt;
+  }
+  errno = 0;
+  char* endptr = nullptr;
+  double base = std::strtod(t.c_str(), &endptr);
+  if (errno != 0 || endptr != t.c_str() + t.size())
+    return std::nullopt;
+  double seconds = base * mul;
+  std::string formatted = absl::StrFormat("%.9f", seconds);
+  while (formatted.find('.') != std::string::npos && formatted.back() == '0')
+    formatted.pop_back();
+  if (!formatted.empty() && formatted.back() == '.')
+    formatted.pop_back();
+  return absl::StrCat(formatted, "s");
 }
 
 // Map convenient strings to fULLy-qualified enum names expected by Protobuf JSON.
@@ -186,6 +222,65 @@ void normalize_size_fields(nlohmann::json& root) {
   }
 }
 
+// Convert duration-like string fields (e.g., "500ms", "2m") into canonical
+// protobuf JSON duration strings before parsing.
+void normalize_duration_fields(nlohmann::json& root) {
+  auto to_duration = [](nlohmann::json& n) {
+    if (n.is_string()) {
+      if (auto v = parse_duration_proto(n.get<std::string>()); v.has_value()) {
+        n = *v;
+      }
+    }
+  };
+
+  if (root.contains("engine") && root["engine"].is_object()) {
+    auto& e = root["engine"];
+    if (e.contains("pinned_allocation_timeout"))
+      to_duration(e["pinned_allocation_timeout"]);
+  }
+
+  if (root.contains("server") && root["server"].is_object()) {
+    auto& srv = root["server"];
+    if (srv.contains("grpc") && srv["grpc"].is_object()) {
+      auto& g = srv["grpc"];
+      if (g.contains("keepalive_time"))
+        to_duration(g["keepalive_time"]);
+      if (g.contains("keepalive_timeout"))
+        to_duration(g["keepalive_timeout"]);
+      if (g.contains("max_connection_idle"))
+        to_duration(g["max_connection_idle"]);
+      if (g.contains("max_connection_age"))
+        to_duration(g["max_connection_age"]);
+    }
+  }
+
+  if (root.contains("lifecycle") && root["lifecycle"].is_object()) {
+    auto& lf = root["lifecycle"];
+    const char* fields[] = {
+        "eviction_check_interval",
+        "proc_check_interval",
+        "sessions_sweep_interval",
+        "locks_sweep_interval",
+        "verification_sweep_interval",
+        "sessions_ttl",
+        "locks_ttl",
+        "eviction_loop_interval"};
+    for (const char* f : fields) {
+      if (lf.contains(f))
+        to_duration(lf[f]);
+    }
+  }
+
+  if (root.contains("high_availability") && root["high_availability"].is_object()) {
+    auto& ha = root["high_availability"];
+    const char* ha_fields[] = {"heartbeat_interval", "periodic_sync_interval", "registration_retry_delay"};
+    for (const char* f : ha_fields) {
+      if (ha.contains(f))
+        to_duration(ha[f]);
+    }
+  }
+}
+
 } // namespace
 
 void normalize_defaults(tcfg::DaemonConfig* cfg) {
@@ -250,6 +345,7 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_file(const std::strin
   // Normalize before protobuf parsing
   normalize_enum_aliases(root_json);
   normalize_size_fields(root_json);
+  normalize_duration_fields(root_json);
 
   const std::string json_text = root_json.dump();
 

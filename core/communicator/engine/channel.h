@@ -34,7 +34,7 @@ class Channel {
 
   void record_expire(uint64_t now);
 
-  bool is_expired(uint64_t now);
+  bool is_expired(uint64_t now) const;
 
  private:
   int type_;

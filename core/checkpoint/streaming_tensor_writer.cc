@@ -12,10 +12,12 @@
 namespace tensorcast::checkpoint {
 
 StreamingTensorWriter::StreamingTensorWriter(
-    const std::string& filename,
-    const Config& config,
+    std::string filename,
+    Config config,
     std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool)
-    : filename_(filename), config_(config), buffer_size_(config.buffer_size_mb << 20) { // Convert MB to bytes
+    : filename_(std::move(filename)),
+      config_(std::move(config)),
+      buffer_size_(config_.buffer_size_mb << 20) { // Convert MB to bytes
 
   streaming_buffer_ = std::make_unique<tensorcast::common::memory::StreamingPinnedBuffer>(
       config_.num_buffers, buffer_size_, std::move(pool));
@@ -189,7 +191,7 @@ void StreamingTensorWriter::disk_writer_thread() {
     uint64_t written_offset = tensor_writer_->write_record(ready_chunk.data_ptr, ready_chunk.bytes_in_chunk);
 
     // Update chunk offset mapping
-    if (chunk_offsets_.find(ready_chunk.global_chunk_id) != chunk_offsets_.end()) {
+    if (chunk_offsets_.contains(ready_chunk.global_chunk_id)) {
       // Verify offset matches expected
       uint64_t expected_offset = chunk_offsets_[ready_chunk.global_chunk_id];
       if (written_offset != expected_offset) {

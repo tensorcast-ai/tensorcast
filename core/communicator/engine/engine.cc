@@ -44,15 +44,15 @@ using transport::tcp_transport_t;
 
 // No legacy constructors; typed CommunicatorConfig is required.
 
-CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& cfg, uint32_t channel_expire_sec)
+CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
     : stop_(false),
       inited_(false),
       server_context_(new transport::TcpContext()),
       client_context_(new transport::TcpContext()),
-      enable_rdma_(cfg.enable_rdma()),
-      mtcp_conn_count_(cfg.transport().tcp_conn_count()),
-      ack_ttl_ms_(cfg.rdma().ack_ttl_ms()),
-      config_(cfg),
+      enable_rdma_(config.enable_rdma()),
+      mtcp_conn_count_(config.transport().tcp_conn_count()),
+      ack_ttl_ms_(config.rdma().ack_ttl_ms()),
+      config_(config),
       channel_expire_(channel_expire_sec) {
   common::SystemCapabilities::instance().record_rdma_available(enable_rdma_);
   request_thread_ = std::thread([this]() { this->do_read_request_loop(); });
@@ -66,9 +66,9 @@ CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& cfg, uint32_t
 
   // Staging resources sized from config
   const size_t gpu_chunk_size =
-      (config_.stager().stage_chunk_mb_gpu() > 0 ? config_.stager().stage_chunk_mb_gpu() : 16) * 1024ull * 1024ull;
+      (config_.stager().stage_chunk_mb_gpu() > 0 ? config_.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
   const size_t cpu_chunk_size =
-      (config_.stager().stage_chunk_mb_cpu() > 0 ? config_.stager().stage_chunk_mb_cpu() : 4) * 1024ull * 1024ull;
+      (config_.stager().stage_chunk_mb_cpu() > 0 ? config_.stager().stage_chunk_mb_cpu() : 4) * 1024ULL * 1024ULL;
   const size_t num_buffers = (config_.stager().buffers_per_flow() > 0 ? config_.stager().buffers_per_flow() : 4);
   const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
   const size_t total_pool_size = config_.pool().pool_size_bytes() > 0
@@ -164,7 +164,7 @@ void CommunicateEngine::set_dram_lease_provider(std::shared_ptr<DRAMStager::Leas
   if (!memory_stager_)
     return;
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
-    ds->set_lease_provider(std::move(provider));
+    ds->set_lease_provider(provider);
   }
   // Also propagate to NUMA CPU stagers if present
   for (auto& kv : nic_cpu_stagers_) {
@@ -555,7 +555,7 @@ misc::result_t CommunicateEngine::on_receive_request(
 
           // Enforce staged RDMA responses (EX only): always stage
           bool do_stage = true;
-          size_t max_seg_bytes = static_cast<size_t>(req->bytes);
+          auto max_seg_bytes = static_cast<size_t>(req->bytes);
           std::shared_ptr<MemoryStager> cpu_stager_sptr;
           std::shared_ptr<MemoryStager> gpu_stager_sptr;
           if (do_stage) {
@@ -576,7 +576,7 @@ misc::result_t CommunicateEngine::on_receive_request(
 
           const uint64_t total = req->bytes;
           const uint64_t start_off = req->offset;
-          uint32_t num_segments = static_cast<uint32_t>((total + max_seg_bytes - 1) / max_seg_bytes);
+          auto num_segments = static_cast<uint32_t>((total + max_seg_bytes - 1) / max_seg_bytes);
 
           // Allocate EX message with all segments
           auto rsp = std::make_shared<EngineMessage>(
@@ -594,7 +594,7 @@ misc::result_t CommunicateEngine::on_receive_request(
           for (uint32_t i = 0; i < num_segments; ++i) {
             uint64_t off = start_off + static_cast<uint64_t>(i) * max_seg_bytes;
             uint64_t remain = total - (off - start_off);
-            uint32_t seg_bytes = static_cast<uint32_t>(std::min<uint64_t>(remain, max_seg_bytes));
+            auto seg_bytes = static_cast<uint32_t>(std::min<uint64_t>(remain, max_seg_bytes));
             auto* seg_pl = reinterpret_cast<ProtoReadResponseExSeg*>(
                 reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) +
                 i * sizeof(ProtoReadResponseExSeg));
@@ -916,7 +916,7 @@ misc::result_t CommunicateEngine::on_receive_response(
                   i * sizeof(ProtoRdmaReadDoneExSeg));
               s->offset = (*offsets)[i];
             }
-            COMM_CHECK(ctrl->send(ack));
+            CHECK_WARN(ctrl->send(ack), "ack send failed");
           });
         }
         CHECK_WARN(transport->read_multi(read_request, rdma_segs), "failed to read (multi)");

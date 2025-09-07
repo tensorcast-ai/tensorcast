@@ -27,15 +27,6 @@
 
 namespace tensorcast::daemon {
 
-static inline bool tc_otel_truthy(const char* v) {
-  if (!v)
-    return false;
-  std::string s(v);
-  for (auto& c : s)
-    c = static_cast<char>(::tolower(c));
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
@@ -119,7 +110,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     set_verif_status(req->replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS);
     {
       absl::MutexLock l(&bg_tasks_mu_);
-      verif_tasks_.push_back(VerifTask{req->replica_uuid(), handle.ready_future});
+      verif_tasks_.push_back(VerifTask{.uuid = req->replica_uuid(), .ready = handle.ready_future});
     }
   }
   // Track initial PID reference and keep_for_global if provided
@@ -229,20 +220,19 @@ Status StoreDaemonServiceImpl::UnloadReplica(
   // 1) If replica_uuid present and known -> use session key
   // 2) Else, fall back to disk_path + target device to form a ReplicaKey for idempotent unload
   store::loading::ReplicaKey key;
-  bool have_key = false;
   if (!req->replica_uuid().empty()) {
     auto entry = sessions_.get(req->replica_uuid());
     if (entry.has_value()) {
       key = entry->key;
-      have_key = true;
+    } else {
+      // Fall through to alternate identification methods
     }
   }
-  if (!have_key) {
+  if (key.artifact_id.empty()) {
     if (!req->disk_path().empty()) {
       key.artifact_id = req->disk_path();
       key.device = resolve_device(*req);
       key.replica = 0;
-      have_key = true;
     } else {
       // Idempotent success when no identification provided
       resp->set_code(0);
@@ -327,17 +317,16 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::Ma
   using tensorcast::DeviceType;
   using tensorcast::store::DeviceKey;
   if (!req.device_uuid().empty()) {
-    DeviceKey key{DeviceType::GPU, 0, req.device_uuid()};
+    DeviceKey key{.type = DeviceType::GPU, .ordinal = 0, .uuid = req.device_uuid()};
     return tensorcast::store::DeviceRegistry::instance().normalize(key);
   }
   switch (req.target_device_type()) {
     case v1::DeviceType::DEVICE_TYPE_CPU:
-      return DeviceKey{DeviceType::CPU, -1, ""};
+      return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
     case v1::DeviceType::DEVICE_TYPE_DISK:
-      // Treat as ingest-from-disk to default GPU for v1 parity
-      return default_gpu_key();
     case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
+      // Treat DISK as ingest-to-default GPU for v1 parity
       return default_gpu_key();
   }
 }
@@ -349,7 +338,6 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::Co
     case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
     case v1::DeviceType::DEVICE_TYPE_DISK:
-      return default_gpu_key();
     case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
       return default_gpu_key();
@@ -363,7 +351,6 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::Un
     case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
     case v1::DeviceType::DEVICE_TYPE_DISK:
-      return default_gpu_key();
     case v1::DeviceType::DEVICE_TYPE_GPU:
     default:
       return default_gpu_key();
@@ -474,7 +461,8 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
   auto key = make_replica_key(req->artifact_id());
   if (req->has_device_id()) {
     key.device = tensorcast::store::DeviceRegistry::instance().gpu_key(req->device_id());
-  } else {
+  }
+  {
     int unique_gpu_device = -2; // -2=unknown, -1=none, >=0=single device
     for (const auto& info : engine_->get_all_replicas_info()) {
       if (info.artifact_id == req->artifact_id() && info.gpu_state == common::memory::MemoryLocation::GPU) {
@@ -646,7 +634,8 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
       absl::MutexLock l(&reg_mu_);
       reg_meta_[out.registration_id] = meta;
     }
-  } else {
+  }
+  {
     // Lease plan stub: return empty lease handshake
     std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
     resp->set_registration_id(reg_id);
@@ -731,7 +720,8 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     absl::MutexLock l(&reg_mu_);
     reg_meta_.erase(req->registration_id());
     return Status::OK;
-  } else if (meta.plan == RegPlan::LEASE) {
+  }
+  if (meta.plan == RegPlan::LEASE) {
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
       absl::MutexLock l(&reg_mu_);
       reg_meta_.erase(req->registration_id());
@@ -787,7 +777,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
           (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
         return to_grpc_status(st);
       }
-      opened.push_back(Opened{seg.device_id, dev_ptr, seg.base_offset, seg.length});
+      opened.push_back(Opened{.device_id = seg.device_id, .ptr = dev_ptr, .base = seg.base_offset, .len = seg.length});
     }
     // Begin coalesced VRAM registration in engine (internal-only)
     store::StoreEngine::ArtifactRegistration areg;
@@ -899,7 +889,8 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     reg_meta_.erase(req->registration_id());
     reg_leases_.erase(req->registration_id());
     return Status::OK;
-  } else {
+  }
+  {
     auto commit_or = engine_->commit_registered_artifact(req->registration_id());
     if (!commit_or.ok())
       return to_grpc_status(commit_or.status());
@@ -929,7 +920,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
 Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
     grpc::ServerContext* ctx,
     const v1::AbortRegisteredArtifactRequest* req,
-    v1::AbortRegisteredArtifactResponse* resp) {
+    v1::AbortRegisteredArtifactResponse* /*resp*/) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
   auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
@@ -966,7 +957,7 @@ Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
     v1::FeedRegisterArtifactStreamResponse* /*resp*/) {
   v1::FeedRegisterArtifactStreamRequest req;
   std::string reg_id;
-  bool saw_last = false;
+  // Track final frame if needed in future; currently unused
   while (reader->Read(&req)) {
     if (reg_id.empty()) {
       reg_id = req.registration_id();
@@ -1016,9 +1007,7 @@ Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
       auto st = engine_->feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
       if (!st.ok())
         return to_grpc_status(st);
-      if (ck.last()) {
-        saw_last = true;
-      }
+      // No-op on last frame: commit performed explicitly via CommitRegisteredArtifact
     } else if (req.has_lease_segments()) {
       absl::MutexLock l(&reg_mu_);
       auto& vec = reg_leases_[reg_id];
@@ -1086,8 +1075,7 @@ grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
       auto st = engine_->feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
       if (!st.ok())
         return to_grpc_status(st);
-      if (ck.last())
-        saw_last = true;
+      // No-op on last frame: commit performed explicitly via CommitRegisteredArtifact
     } else if (req.has_lease_segments()) {
       absl::MutexLock l(&reg_mu_);
       auto& vec = reg_leases_[reg_id];
@@ -1242,6 +1230,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
           }
         } catch (...) {
           // Ignore descriptor parsing errors; fall back to key.artifact_id
+          VLOG(1) << "descriptor parse error (ignored)";
         }
         auto st = engine_->register_replica_with_global_store(task.key, mi2_id);
         if (!st.ok()) {
@@ -1328,7 +1317,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
             auto f2 = engine_->get_device_free_memory(dev);
             if (!f2.ok())
               break;
-            const double used2 = static_cast<double>(*tot_or - *f2);
+            const auto used2 = static_cast<double>(*tot_or - *f2);
             ratio = used2 / total;
           }
         }
@@ -1423,7 +1412,7 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
         auto* gpu = resp->add_gpu_devices();
         gpu->set_device_id(info.gpu_device_id);
         gpu->set_device_uuid(info.gpu_device_uuid);
-        it = gpu_map.emplace(info.gpu_device_id, GpuAgg{gpu, false}).first;
+        it = gpu_map.emplace(info.gpu_device_id, GpuAgg{.out = gpu, .mem_filled = false}).first;
       }
       // Populate GPU memory totals once per device
       if (!it->second.mem_filled) {
@@ -1533,8 +1522,9 @@ Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
 
     store::loading::ReplicaKey key;
     key.artifact_id = info.artifact_id;
-    key.device = (device_id >= 0) ? tensorcast::store::DeviceRegistry::instance().gpu_key(device_id)
-                                  : tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""};
+    key.device = (device_id >= 0)
+        ? tensorcast::store::DeviceRegistry::instance().gpu_key(device_id)
+        : tensorcast::store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
     key.replica = 0;
 
     Entry e;

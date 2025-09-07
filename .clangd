@@ -74,14 +74,16 @@ Diagnostics:
     CheckOptions:
       readability-identifier-naming.VariableCase: lower_case
       readability-identifier-naming.FunctionCase: lower_case
-      readability-identifier-naming.ClassCase: PascalCase
-      readability-identifier-naming.StructCase: PascalCase
-      readability-identifier-naming.EnumCase: PascalCase
+      readability-identifier-naming.ClassCase: CamelCase
+      readability-identifier-naming.StructCase: CamelCase
+      readability-identifier-naming.EnumCase: CamelCase
       readability-identifier-naming.NamespaceCase: lower_case
       readability-identifier-naming.MacroCase: UPPER_CASE
       readability-identifier-naming.ParameterCase: lower_case
       readability-identifier-naming.MemberCase: lower_case
+      readability-identifier-naming.ProtectedMemberCase: lower_case
       readability-identifier-naming.PrivateMemberSuffix: _
+      readability-identifier-naming.ProtectedMemberSuffix: _
       readability-identifier-naming.PrivateMethodCase: lower_case
       readability-identifier-naming.PrivateMethodIgnoredRegexp: "^[a-z][a-z0-9_]*_$"
       readability-identifier-naming.ConstexprVariableCase: CamelCase

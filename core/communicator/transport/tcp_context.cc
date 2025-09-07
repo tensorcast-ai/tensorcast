@@ -14,6 +14,7 @@ extern "C" {
 #include <utility>
 
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 
 #include "core/communicator/misc/epoll_wrap.h"
@@ -98,7 +99,7 @@ misc::result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_
 
   ret = wrap_epoll_ctl(listen_epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &ev);
   if (ret != 0) {
-    LOG(WARNING) << "failed to add epoll: ret=" << ret << " error" << strerror(errno);
+    PLOG(WARNING) << "failed to add epoll: ret=" << ret;
     return ret;
   }
 
@@ -113,8 +114,7 @@ absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint1
   int addr_len = sizeof(remote_addr);
   auto sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd == -1) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("failed to connect to %s:%d, return=%d, error=%s", ip, port, sock_fd, strerror(errno)));
+    return absl::ErrnoToStatus(errno, absl::StrFormat("failed to create socket for %s:%d", ip, port));
   }
 
   struct timeval timeo;
@@ -122,12 +122,13 @@ absl::StatusOr<tcp_transport_t> TcpContext::connect(const std::string& ip, uint1
   timeo.tv_usec = 0;
 
   int ret = setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &timeo, sizeof(timeo));
-  CHECK_EQ(ret, 0) << "Failed to send connect timeout: error=" << strerror(errno);
+  if (ret != 0) {
+    PLOG(FATAL) << "Failed to set connect timeout";
+  }
 
   ret = ::connect(sock_fd, reinterpret_cast<struct sockaddr*>(&remote_addr), (socklen_t)addr_len);
   if (ret < 0) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("failed to connect to %s:%d, return=%d, error=%s", ip, port, ret, strerror(errno)));
+    return absl::ErrnoToStatus(errno, absl::StrFormat("failed to connect to %s:%d, return=%d", ip, port, ret));
   }
 
   return std::make_shared<TcpTransport>(this, sock_fd, remote_addr);
@@ -148,7 +149,7 @@ misc::result_t TcpContext::register_transport(TcpTransport* t) {
 
   auto ret = wrap_epoll_ctl(recv_epoll_fd_, EPOLL_CTL_ADD, t->get_fd(), &ev);
   if (ret != 0) {
-    LOG(WARNING) << "failed to add epoll: ret=" << ret << " " << strerror(errno);
+    PLOG(WARNING) << "failed to add epoll: ret=" << ret;
     return ret;
   }
 
@@ -158,7 +159,7 @@ misc::result_t TcpContext::register_transport(TcpTransport* t) {
 misc::result_t TcpContext::unregister_transport(TcpTransport* t) {
   int ret = wrap_epoll_ctl(recv_epoll_fd_, EPOLL_CTL_DEL, t->get_fd(), nullptr);
   if (ret != 0) {
-    LOG(WARNING) << "failed to delete listen epoll: ret=" << ret << " " << strerror(errno);
+    PLOG(WARNING) << "failed to delete listen epoll: ret=" << ret;
     return ret;
   }
 
@@ -172,19 +173,19 @@ void TcpContext::listen_event_loop() {
   while (!stop_.load()) {
     num_fd = wrap_epoll_wait(listen_epoll_fd_, events, kTcpContextBatchSize, 1000);
     for (int i = 0; i < num_fd; i++) {
-      auto ev = &events[i];
+      auto* ev = &events[i];
       switch (ev->events) {
         case EPOLLIN:
           do_accept();
           continue;
         case EPOLLERR:
-          LOG(ERROR) << "[listen_event_loop] " << "EPOLLERR err " << strerror(errno);
+          PLOG(ERROR) << "[listen_event_loop] EPOLLERR";
           continue;
         case EPOLLHUP:
-          LOG(ERROR) << "[listen_event_loop] " << "EPOLLHUP err " << strerror(errno);
+          PLOG(ERROR) << "[listen_event_loop] EPOLLHUP";
           continue;
         default:
-          LOG(ERROR) << "[listen_event_loop] " << "default err " << strerror(errno) << " " << ev->events;
+          PLOG(ERROR) << "[listen_event_loop] default err, events=" << ev->events;
           continue;
       }
     }
@@ -207,7 +208,7 @@ void TcpContext::do_accept() {
 
   // accept failed
   if (sock_fd <= 0) {
-    LOG(ERROR) << "[do_accept] " << "failed to do accept " << strerror(errno);
+    PLOG(ERROR) << "[do_accept] failed to do accept";
     return;
   }
 
@@ -221,9 +222,9 @@ void TcpContext::recv_event_loop() {
   while (!stop_.load()) {
     num_fd = wrap_epoll_wait(recv_epoll_fd_, events, kTcpContextBatchSize, 10);
     for (int i = 0; i < num_fd; i++) {
-      auto ev = &events[i];
+      auto* ev = &events[i];
       if (ev->data.ptr != nullptr) {
-        auto t = reinterpret_cast<TcpTransport*>(ev->data.ptr);
+        auto* t = reinterpret_cast<TcpTransport*>(ev->data.ptr);
         t->process_event(ev->events);
       } else {
         LOG(WARNING) << "failed to process event due to nil user data";

@@ -31,7 +31,7 @@ ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
 
-  using namespace tensorcast;
+  // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
   // Load unified config
   const std::string cfg_path = absl::GetFlag(FLAGS_config);
@@ -39,15 +39,15 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "--config is required (path to daemon YAML/JSON). See examples/config/store_daemon_config.yaml";
     return 2;
   }
-  auto cfg_or = common::config::load_daemon_config_from_file(cfg_path);
+  auto cfg_or = tensorcast::common::config::load_daemon_config_from_file(cfg_path);
   if (!cfg_or.ok()) {
     LOG(ERROR) << "Failed to load config: " << cfg_or.status();
     return 2;
   }
-  const auto cfg = *cfg_or;
+  const auto& cfg = *cfg_or;
 
   // Configure CUDA debug toggles
-  cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
+  tensorcast::cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
 
   // Map config to StoreEngineOptions
   tensorcast::store::StoreEngineOptions opts;
@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
   opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
 
   // Communicator setup (optional)
-  std::shared_ptr<store::components::CommunicationManager> comm_mgr;
+  std::shared_ptr<tensorcast::store::components::CommunicationManager> comm_mgr;
   const bool enable_rdma = cfg.communicator().enable_rdma();
   uint16_t p2p_port = 0;
   std::string p2p_host = cfg.server().listen().host();
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     p2p_port = static_cast<uint16_t>(cfg.server().p2p_listen().port());
   }
   if (enable_rdma) {
-    comm_mgr = std::make_shared<store::components::CommunicationManager>();
+    comm_mgr = std::make_shared<tensorcast::store::components::CommunicationManager>();
     auto st = comm_mgr->initialize_with_config(p2p_host, p2p_port, cfg.communicator());
     if (!st.ok()) {
       LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
@@ -95,10 +95,10 @@ int main(int argc, char** argv) {
   opts.force_full_digest_on_load = cfg.compatibility().force_full_digest_on_load();
 
   // Apply logging level/VLOG, install optional sinks, then initialize OTel
-  common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
-  common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
-  (void)common::otel::init_from_config(cfg.observability(), "store-daemon");
-  common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
+  tensorcast::common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
+  tensorcast::common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
+  (void)tensorcast::common::otel::init_from_config(cfg.observability(), "store-daemon");
+  tensorcast::common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
   // Configure Chrome trace directory (optional)
   if (!cfg.observability().tracing().chrome_trace_dir().empty()) {
     tensorcast::common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
@@ -146,7 +146,9 @@ int main(int argc, char** argv) {
   // gRPC server
   const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
   grpc::ServerBuilder builder;
-  builder.SetMaxReceiveMessageSize(static_cast<int>(cfg.server().grpc().max_message_size_mb()) * 1024 * 1024);
+  if (cfg.server().grpc().max_message_size_mb() > 0) {
+    builder.SetMaxReceiveMessageSize(static_cast<int>(cfg.server().grpc().max_message_size_mb()) * 1024 * 1024);
+  }
   if (cfg.server().grpc().max_concurrent_streams() > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", cfg.server().grpc().max_concurrent_streams());
   }
@@ -158,7 +160,7 @@ int main(int argc, char** argv) {
     auto read_all = [](const std::string& path) -> std::string {
       std::ifstream f(path);
       if (!f.is_open())
-        return std::string();
+        return {};
       std::stringstream ss;
       ss << f.rdbuf();
       return ss.str();

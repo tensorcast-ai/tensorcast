@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 // Use nlohmann/json for header parsing and canonical index serialization
 #include <nlohmann/json.hpp>
@@ -40,7 +41,7 @@ absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd) {
   // Get file size to calculate data size
   struct stat stbuf{};
   if (::fstat(fd, &stbuf) != 0) {
-    return absl::InternalError(absl::StrFormat("fstat failed: %s", std::strerror(errno)));
+    return absl::ErrnoToStatus(errno, "fstat failed");
   }
   uint64_t file_size = static_cast<uint64_t>(stbuf.st_size);
 
@@ -119,7 +120,7 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
   for (const auto& p : paths) {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0) {
-      return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", p.string(), std::strerror(errno)));
+      return absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open %s", p.string()));
     }
     auto header_info = ParseSafetensorsHeader(fd);
     if (!header_info.ok()) {

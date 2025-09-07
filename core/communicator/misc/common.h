@@ -39,13 +39,13 @@ constexpr size_t KB = (1ull << 10);
 constexpr size_t MB = (1ull << 20);
 constexpr size_t GB = (1ull << 30);
 
-#define COMM_CHECK(call)                                                         \
-  do {                                                                           \
-    misc::result_t res = (call);                                                 \
-    if (res != misc::SUCCESS) {                                                  \
-      LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " " << errno; \
-      return res;                                                                \
-    }                                                                            \
+#define COMM_CHECK(call)                                              \
+  do {                                                                \
+    misc::result_t res = (call);                                      \
+    if (res != misc::SUCCESS) {                                       \
+      PLOG(WARNING) << __FILE__ << ":" << __LINE__ << " res=" << res; \
+      return res;                                                     \
+    }                                                                 \
   } while (0)
 
 #define CHECK_WARN(call, msg)                                                  \

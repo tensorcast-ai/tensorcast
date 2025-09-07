@@ -10,13 +10,12 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
-#include "absl/strings/escaping.h"
 #include "core/store/device_registry.h"
 
 namespace tensorcast::daemon {
 
-namespace global_store = ::tensorcast::global_store::v1;
-namespace commonpb = ::tensorcast::common::v1;
+namespace global_store = tensorcast::global_store::v1;
+namespace commonpb = common::v1;
 
 using namespace std::chrono_literals;
 
@@ -92,7 +91,7 @@ void WorkerLifecycleManager::stop() {
   for (const auto& info : engine_->get_all_replicas_info()) {
     if (!info.is_registered_for_comm)
       continue;
-    tensorcast::store::DeviceKey dev = tensorcast::store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
+    store::DeviceKey dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
     store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
     (void)engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
   }
@@ -180,8 +179,8 @@ void WorkerLifecycleManager::heartbeat_loop() {
             store::loading::ReplicaKey rkey{
                 .artifact_id = i.artifact_id,
                 .device = (i.gpu_state != common::memory::MemoryLocation::NONE)
-                    ? tensorcast::store::DeviceRegistry::instance().gpu_key(i.gpu_device_id)
-                    : tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""},
+                    ? store::DeviceRegistry::instance().gpu_key(i.gpu_device_id)
+                    : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
                 .replica = 0};
             rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
             rep->mutable_stats()->set_is_available(true);
@@ -206,12 +205,11 @@ void WorkerLifecycleManager::heartbeat_loop() {
                 case global_store::StateChange::CHANGE_TYPE_ADD_REPLICA: {
                   // Proactively materialize the replica locally on the indicated memory
                   const auto& ri = ch.replica_info();
-                  tensorcast::store::DeviceKey dev{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
+                  store::DeviceKey dev{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
                   if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_GPU) {
-                    dev = tensorcast::store::DeviceRegistry::instance().gpu_key(
-                        static_cast<int>(ri.memory_info().device_id()));
+                    dev = store::DeviceRegistry::instance().gpu_key(static_cast<int>(ri.memory_info().device_id()));
                   } else if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_RAM) {
-                    dev = tensorcast::store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
+                    dev = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
                   } else {
                     // Ignore DISK-only add in daemon prefetch
                     break;
@@ -221,8 +219,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   std::thread([engine, dev, artifact_id]() {
                     store::loading::MaterializeHints hints;
                     hints.artifact_id = artifact_id;
-                    (void)engine->materialize_replica(
-                        dev, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+                    (void)engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
                   }).detach();
                   break;
                 }
@@ -236,7 +233,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
                       continue;
                     if (li.gpu_state == common::memory::MemoryLocation::NONE)
                       continue;
-                    auto dev = tensorcast::store::DeviceRegistry::instance().gpu_key(li.gpu_device_id);
+                    auto dev = store::DeviceRegistry::instance().gpu_key(li.gpu_device_id);
                     store::loading::ReplicaKey key{.artifact_id = li.artifact_id, .device = dev, .replica = 0};
                     if (!ri.stats().is_available() && li.is_registered_for_comm) {
                       (void)engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
@@ -374,12 +371,12 @@ void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::stri
         continue;
       // Unload both GPU and CPU replicas with id-match
       if (info.gpu_state != common::memory::MemoryLocation::NONE) {
-        auto dev = tensorcast::store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
+        auto dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
         store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
         (void)engine_->unload_replica(key);
       }
       if (info.cpu_state != common::memory::MemoryLocation::NONE) {
-        tensorcast::store::DeviceKey cpu{tensorcast::DeviceType::CPU, -1, ""};
+        store::DeviceKey cpu{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
         store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = cpu, .replica = 0};
         (void)engine_->unload_replica(key);
       }
@@ -414,7 +411,7 @@ std::string WorkerLifecycleManager::compute_state_checksum(const std::vector<sto
   out.resize(sizeof(size_t) * 2);
   static const char* hex = "0123456789abcdef";
   for (size_t i = 0; i < sizeof(size_t); ++i) {
-    uint8_t byte = static_cast<uint8_t>((h >> ((sizeof(size_t) - 1 - i) * 8)) & 0xFF);
+    auto byte = static_cast<uint8_t>((h >> ((sizeof(size_t) - 1 - i) * 8)) & 0xFF);
     out[i * 2] = hex[(byte >> 4) & 0xF];
     out[i * 2 + 1] = hex[byte & 0xF];
   }

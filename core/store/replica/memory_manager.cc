@@ -319,13 +319,16 @@ void MemoryManager::release_gpu_resources_locked() noexcept {
 
 MemoryState MemoryManager::get_state(MemoryLocation location) const {
   absl::MutexLock lock(&mutex_);
-  auto state_cond_or = const_cast<MemoryManager*>(this)->get_state_cond_locked(location);
-  if (!state_cond_or.ok()) {
-    LOG(WARNING) << "MemoryManager(" << replica_key_.artifact_id
-                 << "): get_state called with invalid location: " << static_cast<int>(location);
-    return MemoryState::UNINITIALIZED;
+  switch (location) {
+    case MemoryLocation::PAGEABLE_CPU:
+      return cpu_.state;
+    case MemoryLocation::GPU:
+      return gpu_.state;
+    default:
+      LOG(WARNING) << "MemoryManager(" << replica_key_.artifact_id
+                   << "): get_state called with invalid location: " << static_cast<int>(location);
+      return MemoryState::UNINITIALIZED;
   }
-  return *state_cond_or->state;
 }
 
 std::vector<void*> MemoryManager::get_pointer(MemoryLocation location) const {
@@ -867,8 +870,8 @@ std::vector<std::pair<uint32_t, uint32_t>> coalesce_indices_to_ranges(absl::Span
 
   // Make a local copy for sorting & dedup in-place to avoid mutating caller data.
   std::vector<uint32_t> sorted(indices.begin(), indices.end());
-  std::sort(sorted.begin(), sorted.end());
-  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::ranges::sort(sorted);
+  sorted.erase(std::ranges::unique(sorted).begin(), sorted.end());
 
   uint32_t range_start = sorted.front();
   uint32_t range_end = range_start;

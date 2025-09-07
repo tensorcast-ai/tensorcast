@@ -14,7 +14,7 @@
 #include "absl/log/log.h"
 #include "absl/log/log_sink.h"
 #include "absl/log/log_sink_registry.h"
-#include "absl/strings/str_format.h"
+#include "absl/strings/str_cat.h"
 
 #include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/context.h"
@@ -36,7 +36,7 @@ class OtelLogSink : public absl::LogSink {
   }
 
   ~OtelLogSink() override {
-    std::lock_guard<std::mutex> _lk(mu_);
+    std::lock_guard<std::mutex> lk(mu_);
     if (file_.is_open()) {
       file_.flush();
     }
@@ -66,7 +66,7 @@ class OtelLogSink : public absl::LogSink {
         span_hex.assign(sbuf, sizeof(sbuf));
       }
     } catch (...) {
-      // Best-effort only
+      VLOG(1) << "OTel context unavailable; skipping trace fields"; // Best-effort only
     }
 
     // Format: time severity thread file:line trace_id=... span_id=... message
@@ -86,18 +86,25 @@ class OtelLogSink : public absl::LogSink {
       return 'I';
     }();
 
-    std::string line = absl::StrFormat(
-        "%s %c tid=%d %s:%d trace_id=%s span_id=%s %s\n",
+    std::string line = absl::StrCat(
         ts,
-        sev,
+        " ",
+        absl::string_view(&sev, 1),
+        " tid=",
         static_cast<int>(entry.tid()),
+        " ",
         entry.source_basename(),
+        ":",
         entry.source_line(),
+        " trace_id=",
         trace_hex,
+        " span_id=",
         span_hex,
-        entry.text_message());
+        " ",
+        entry.text_message(),
+        "\n");
 
-    std::lock_guard<std::mutex> _lk(mu_);
+    std::lock_guard<std::mutex> lk(mu_);
     if (file_.is_open()) {
       file_ << line;
       file_.flush();
@@ -157,7 +164,7 @@ class PlainFileLogSink : public absl::LogSink {
     }
   }
   ~PlainFileLogSink() override {
-    std::lock_guard<std::mutex> _lk(mu_);
+    std::lock_guard<std::mutex> lk(mu_);
     if (file_.is_open())
       file_.flush();
     file_.close();
@@ -177,15 +184,20 @@ class PlainFileLogSink : public absl::LogSink {
       }
       return 'I';
     }();
-    std::string line = absl::StrFormat(
-        "%s %c tid=%d %s:%d %s\n",
+    std::string line = absl::StrCat(
         ts,
-        sev,
+        " ",
+        absl::string_view(&sev, 1),
+        " tid=",
         static_cast<int>(entry.tid()),
+        " ",
         entry.source_basename(),
+        ":",
         entry.source_line(),
-        entry.text_message());
-    std::lock_guard<std::mutex> _lk(mu_);
+        " ",
+        entry.text_message(),
+        "\n");
+    std::lock_guard<std::mutex> lk(mu_);
     if (file_.is_open()) {
       file_ << line;
       file_.flush();
@@ -206,9 +218,7 @@ void apply_absl_log_level_from_config(const Observability_Logging& log_cfg) {
   absl::InitializeLog();
   absl::LogSeverityAtLeast min_level = absl::LogSeverityAtLeast::kInfo;
   switch (log_cfg.level()) {
-    case tensorcast::config::v1::Observability::LOG_LEVEL_DEBUG:
-      min_level = absl::LogSeverityAtLeast::kInfo; // DEBUG via VLOG
-      break;
+    case tensorcast::config::v1::Observability::LOG_LEVEL_DEBUG: // DEBUG via VLOG
     case tensorcast::config::v1::Observability::LOG_LEVEL_INFO:
       min_level = absl::LogSeverityAtLeast::kInfo;
       break;

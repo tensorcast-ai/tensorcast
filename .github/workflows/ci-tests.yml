@@ -163,6 +163,7 @@ jobs:
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+      CUDA_HOME: /usr/local/cuda
     permissions:
       contents: read
       pull-requests: read

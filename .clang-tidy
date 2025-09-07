@@ -183,3 +183,7 @@ CheckOptions:
     value: 'google'
   - key: abseil-string-find-str-contains.StringLikeClasses
     value: 'std::string;std::string_view;absl::string_view'
+  - key: readability-identifier-naming.ProtectedMemberCase
+    value: 'lower_case'
+  - key: readability-identifier-naming.ProtectedMemberSuffix
+    value: '_'

@@ -174,8 +174,8 @@ std::vector<std::pair<uint64_t, size_t>> TransferService::build_ranges_(
 
   // Remove duplicates and sort in one pass
   std::vector<uint32_t> sorted(chunk_indices->begin(), chunk_indices->end());
-  std::sort(sorted.begin(), sorted.end());
-  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::ranges::sort(sorted);
+  sorted.erase(std::ranges::unique(sorted).begin(), sorted.end());
   uint32_t run_start = sorted.front();
   uint32_t prev = run_start;
   for (size_t i = 1; i < sorted.size(); ++i) {
@@ -187,7 +187,7 @@ std::vector<std::pair<uint64_t, size_t>> TransferService::build_ranges_(
     const uint64_t off = static_cast<uint64_t>(run_start) * chunk_size;
     const uint64_t end = static_cast<uint64_t>(prev + 1) * chunk_size;
     const uint64_t len64 = (end > total_bytes) ? (total_bytes - off) : (end - off);
-    const size_t len = static_cast<size_t>(len64);
+    const auto len = static_cast<size_t>(len64);
     ranges.emplace_back(off, len);
     run_start = prev = idx;
   }

@@ -22,7 +22,8 @@ TEST_CASE("TransportLockManager token lifecycle", "[daemon][locks]") {
 
   auto entry = mgr.get(token);
   REQUIRE(entry.has_value());
-  REQUIRE(entry->chunk_indices.size() == 3);
+  const auto& entry_ref = *entry; // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(entry_ref.chunk_indices.size() == 3);
 
   REQUIRE(mgr.erase(token));
   REQUIRE_FALSE(mgr.get(token).has_value());

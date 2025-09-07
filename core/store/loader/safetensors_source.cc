@@ -11,7 +11,8 @@
 #include <cstring>
 #include <string>
 
-#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/store/loader/safetensors_util.h"
 
@@ -19,7 +20,7 @@ namespace tensorcast::store::loader {
 
 namespace {
 // Helper to pread fully in a loop
-static absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
+absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes) {
   size_t total = 0;
   char* ptr = static_cast<char*>(dst);
   while (total < bytes) {
@@ -27,7 +28,7 @@ static absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_
     if (got < 0) {
       if (errno == EINTR)
         continue;
-      return absl::InternalError(absl::StrFormat("pread failed: %s", std::strerror(errno)));
+      return absl::ErrnoToStatus(errno, "pread failed");
     }
     if (got == 0)
       break; // EOF
@@ -53,7 +54,7 @@ absl::Status SafetensorsSource::OpenFile() {
     return absl::OkStatus();
   fd_ = ::open(file_path_.c_str(), O_RDONLY);
   if (fd_ < 0) {
-    return absl::NotFoundError(absl::StrFormat("Failed to open %s: %s", file_path_.string(), std::strerror(errno)));
+    return absl::ErrnoToStatus(errno, absl::StrCat("Failed to open ", file_path_.string()));
   }
   auto st = ParseHeaderLocked();
   if (!st.ok()) {

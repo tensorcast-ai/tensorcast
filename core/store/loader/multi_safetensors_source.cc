@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/store/loader/safetensors_util.h"
 
@@ -26,7 +27,7 @@ absl::StatusOr<size_t> pread_fully(int fd, uint64_t off, void* dst, size_t bytes
       if (errno == EINTR) {
         continue;
       }
-      return absl::InternalError(absl::StrCat("pread failed: ", std::strerror(errno)));
+      return absl::ErrnoToStatus(errno, "pread failed");
     }
     if (got == 0) {
       break;
@@ -65,7 +66,7 @@ absl::Status MultiSafetensorsSource::OpenFiles() {
   for (const auto& p : file_paths_) {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0) {
-      return absl::NotFoundError(absl::StrCat("Failed to open ", p.string(), ": ", std::strerror(errno)));
+      return absl::ErrnoToStatus(errno, absl::StrCat("Failed to open ", p.string()));
     }
     segments_.push_back(Segment{.fd = fd});
   }

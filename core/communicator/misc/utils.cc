@@ -67,7 +67,7 @@ std::string get_default_ip() {
 
   std::string ip;
 
-  for (auto ifa = if_addr; ifa != nullptr; ifa = ifa->ifa_next) {
+  for (auto* ifa = if_addr; ifa != nullptr; ifa = ifa->ifa_next) {
     if (ifa->ifa_addr == nullptr)
       continue;
     if (ifa->ifa_addr->sa_family == AF_INET) {

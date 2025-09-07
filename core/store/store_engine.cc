@@ -50,7 +50,7 @@ using common::memory::MemoryLocation;
 using components::DeviceManager;
 using components::MetricsCollector;
 using components::ReplicaRegistry;
-using loading::DiskSource;
+// using loading::DiskSource; // unused
 using loading::InlineBufferSource;
 using loading::MaterializeHints;
 using loading::ReplicaHandle;
@@ -420,7 +420,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
       if (entry.is_regular_file()) {
         const auto name = entry.path().filename().string();
-        if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+        if (name.ends_with(".safetensors")) {
           is_safetensors = true;
           break;
         }
@@ -488,7 +488,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
         if (entry.is_regular_file()) {
           const auto name = entry.path().filename().string();
-          if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+          if (name.ends_with(".safetensors")) {
             st_files.push_back(entry.path());
           }
         }
@@ -732,7 +732,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
             if (entry.is_regular_file()) {
               const auto name = entry.path().filename().string();
-              if (name.size() >= 12 && name.rfind(".safetensors") == name.size() - 12) {
+              if (name.ends_with(".safetensors")) {
                 st_files.push_back(entry.path());
               }
             }

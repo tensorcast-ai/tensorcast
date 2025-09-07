@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 
 #include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
@@ -76,13 +77,13 @@ void MTcpTransportTask::stop() {
   }
 }
 
-void MTcpTransportTask::push_send(const chunk_t& data) {
-  send_queue_.push(data);
+void MTcpTransportTask::push_send(const chunk_t& chunk) {
+  send_queue_.push(chunk);
 }
 
-void MTcpTransportTask::push_recv(const chunk_t& data) {
-  VLOG(2) << "[MTcpTransportTask::push_recv] Pushing chunk, sock_fd=" << sock_fd_ << " len=" << data->len();
-  recv_queue_.push(data);
+void MTcpTransportTask::push_recv(const chunk_t& chunk) {
+  VLOG(2) << "[MTcpTransportTask::push_recv] Pushing chunk, sock_fd=" << sock_fd_ << " len=" << chunk->len();
+  recv_queue_.push(chunk);
 }
 
 void MTcpTransportTask::send_loop() {
@@ -127,7 +128,7 @@ misc::result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
   while (remain_bytes > 0) {
     bytes = ::recv(sock_fd_, buf + offset, remain_bytes, 0);
     if (bytes <= 0) {
-      LOG(WARNING) << "MTcpTransportTask recv error " << strerror(errno) << " remain_bytes=" << remain_bytes;
+      PLOG(WARNING) << "MTcpTransportTask recv error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
     } else if (bytes < remain_bytes) {
       remain_bytes -= bytes;
@@ -146,7 +147,7 @@ misc::result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
   while (remain_bytes > 0) {
     bytes = ::send(sock_fd_, buf + offset, remain_bytes, 0);
     if (bytes <= 0) {
-      LOG(WARNING) << "MTcpTransportTask send error " << strerror(errno) << " remain_bytes=" << remain_bytes;
+      PLOG(WARNING) << "MTcpTransportTask send error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
     } else if (bytes < remain_bytes) {
       remain_bytes -= bytes;
@@ -328,8 +329,7 @@ void MTcpTransport::server_loop() {
 
       if (sock_fds_[i] <= 0) {
         // Accept failed (e.g., due to transient EINTR/EAGAIN). Retry this slot instead of aborting
-        int saved_errno = errno;
-        LOG(WARNING) << "tcp transport accept failed (" << strerror(saved_errno) << ") – retrying";
+        PLOG(WARNING) << "tcp transport accept failed — retrying";
         // Step back one index so that the for-loop retries the same connection index
         i--;
         // Briefly yield to avoid tight loop under persistent failures
@@ -374,8 +374,8 @@ void MTcpTransport::client_loop() {
     }
 
     if (ret == -1) {
-      LOG(ERROR) << "[MTcpTransport::client_loop] socket index=" << i << " connect failed after " << retry_count_
-                 << " retries: " << strerror(errno);
+      PLOG(ERROR) << "[MTcpTransport::client_loop] socket index=" << i << " connect failed after " << retry_count_
+                  << " retries";
       closed_.store(true);
       ready_.store(true);
       return;
@@ -891,18 +891,18 @@ misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {
   int ret;
   ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&opt), sizeof(int));
   if (ret != 0) {
-    LOG(WARNING) << "failed to setup tcp no-delay: err=" << errno << " " << strerror(errno);
+    PLOG(WARNING) << "failed to setup tcp no-delay";
   }
   opt = 1;
   ret = setsockopt(sock_fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(int));
   if (ret != 0) {
-    LOG(WARNING) << "failed to setup tcp keepalive: err=" << errno << " " << strerror(errno);
+    PLOG(WARNING) << "failed to setup tcp keepalive";
   }
 
-  struct linger l = {0, 0};
+  struct linger l = {.l_onoff = 0, .l_linger = 0};
   ret = setsockopt(sock_fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
   if (ret != 0) {
-    LOG(WARNING) << "failed to setup tcp linger: err=" << errno << " " << strerror(errno);
+    PLOG(WARNING) << "failed to setup tcp linger";
   }
 
   if (tcp_tos_ > 0) {
@@ -911,7 +911,7 @@ misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {
     socklen_t optlen = sizeof(tos);
     ret = setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, optlen);
     if (ret != 0) {
-      LOG(WARNING) << "failed to setup tcp tos: err=" << errno << " " << strerror(errno);
+      PLOG(WARNING) << "failed to setup tcp tos";
     }
   }
 
@@ -923,7 +923,7 @@ misc::result_t MTcpTransport::init_socket_fd(int sock_fd) {
   opt = 1;
   ret = setsockopt(sock_fd, SOL_SOCKET, SO_ZEROCOPY, &opt, sizeof(opt));
   if (ret != 0) {
-    LOG(WARNING) << "failed to set zero copy" << errno << " " << strerror(errno);
+    PLOG(WARNING) << "failed to set zero copy";
   }
 
   return misc::SUCCESS;

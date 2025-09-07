@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/rdma_transport.h"
@@ -60,7 +62,7 @@ misc::result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
   info->psn = 0;
   info->qpn = qp_->qp_num;
   info->lid = 0;
-  memcpy(info->gid, local_gid_.raw, 16);
+  std::memcpy(info->gid, local_gid_.raw, 16);
   return misc::SUCCESS;
 }
 
@@ -106,7 +108,7 @@ misc::result_t RdmaTransport::do_modify_qp_rtr() {
   qp_attr.min_rnr_timer = 12;
   qp_attr.ah_attr.is_global = 1;
 
-  memcpy(qp_attr.ah_attr.grh.dgid.raw, peer_info_.gid, 16);
+  std::memcpy(qp_attr.ah_attr.grh.dgid.raw, peer_info_.gid, 16);
   qp_attr.ah_attr.grh.flow_label = 0;
   qp_attr.ah_attr.grh.sgid_index = gid_idx_;
   qp_attr.ah_attr.grh.hop_limit = 255;
@@ -181,7 +183,7 @@ misc::result_t RdmaTransport::do_post_send() {
   read_wr.next = nullptr;
   read_wr.num_sge = 1;
 
-  auto mr = local_tensor->get_mr();
+  auto* mr = local_tensor->get_mr();
 
   req->record_rdma_regmr();
 
@@ -193,8 +195,7 @@ misc::result_t RdmaTransport::do_post_send() {
   inflight_queue_.push(req);
   auto res = misc::wrap_ibv_post_send(qp_, &read_wr, &read_bad_wr);
   if (res) {
-    req->set_result(
-        absl::InternalError(absl::StrFormat("rdma post_send failed: return=%d, error=%s", res, strerror(errno))));
+    req->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send failed: return=", res)));
     return misc::FAILED;
   }
   return misc::SUCCESS;
@@ -217,7 +218,7 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
   std::vector<ibv_sge> sges(segs.size());
   struct ibv_send_wr* bad_wr = nullptr;
 
-  auto mr = request->get_local_tensor()->get_mr();
+  auto* mr = request->get_local_tensor()->get_mr();
   request->record_rdma_queue_done();
   request->set_expected_completions(static_cast<int>(segs.size()));
 
@@ -246,9 +247,7 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   auto res = misc::wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
   if (res) {
-    request->set_result(
-        absl::InternalError(
-            absl::StrFormat("rdma post_send (multi) failed: return=%d, error=%s", res, strerror(errno))));
+    request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
     return misc::FAILED;
   }
   return misc::SUCCESS;
@@ -269,8 +268,7 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
       }
     } else {
       LOG(WARNING) << "process err wc: status=" << wc->status;
-      req->set_result(
-          absl::InternalError(absl::StrFormat("failed to process work completion: wc_status=%d", wc->status)));
+      req->set_result(absl::InternalError(absl::StrCat("failed to process work completion: wc_status=", wc->status)));
     }
   }
   return misc::SUCCESS;

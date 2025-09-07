@@ -70,11 +70,11 @@ misc::result_t Channel::close() {
   return misc::SUCCESS;
 }
 
-void Channel::record_expire(uint64_t timeout) {
-  expired_time_ = misc::get_us() / 1000000 + timeout;
+void Channel::record_expire(uint64_t now) {
+  expired_time_ = misc::get_us() / 1000000 + now;
 }
 
-bool Channel::is_expired(uint64_t now) {
+bool Channel::is_expired(uint64_t now) const {
   if (expired_time_ == 0) {
     return false;
   }

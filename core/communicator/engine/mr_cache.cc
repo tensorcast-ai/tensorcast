@@ -21,7 +21,7 @@ MrCache::~MrCache() {
 }
 
 struct ibv_mr* MrCache::get_or_register(ibv_pd* pd, gsl::not_null<void*> ptr, size_t bytes, int access) {
-  Key key{pd, ptr};
+  Key key{.pd = pd, .ptr = ptr};
   {
     absl::MutexLock lk(&mu_);
     auto it = cache_.find(key);

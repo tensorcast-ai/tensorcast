@@ -27,8 +27,8 @@ class NetDev {
   int get_best_gid_index();
   misc::result_t get_best_gid(ibv_gid* gid, int* gid_idx);
 
-  int get_port();
-  int get_link();
+  int get_port() const;
+  int get_link() const;
   ibv_pd* get_pd() const;
   ibv_cq* get_cq() const;
   misc::result_t reg_async(const tensor_t& tensor);

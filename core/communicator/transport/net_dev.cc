@@ -53,11 +53,11 @@ NetDev::~NetDev() {
   }
 }
 
-int NetDev::get_port() {
+int NetDev::get_port() const {
   return port_;
 }
 
-int NetDev::get_link() {
+int NetDev::get_link() const {
   return link_;
 }
 
@@ -96,7 +96,7 @@ int NetDev::get_best_gid_index() {
   int gid_idx = -1;
   ibv_gid gid = {};
   for (int i = 1; i < gid_tbl_len_; i++) {
-    bzero(&gid, sizeof(gid));
+    std::memset(&gid, 0, sizeof(gid));
     misc::wrap_ibv_query_gid(context_, port_, i, &gid);
     if ((gid.raw[10] == 0xFF) && (gid.raw[11] == 0xFF)) {
       gid_idx = i;
@@ -119,7 +119,7 @@ misc::result_t NetDev::get_best_gid(ibv_gid* gid, int* gid_idx) {
   ibv_gid tmp_gid = {};
 
   for (int i = 1; i < gid_tbl_len_; i++) {
-    bzero(&tmp_gid, sizeof(tmp_gid));
+    std::memset(&tmp_gid, 0, sizeof(tmp_gid));
     misc::wrap_ibv_query_gid(context_, port_, i, &tmp_gid);
     if ((tmp_gid.raw[10] == 0xFF) && (tmp_gid.raw[11] == 0xFF)) {
       *gid_idx = i;

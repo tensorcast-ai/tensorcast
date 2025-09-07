@@ -61,7 +61,7 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
   for (const auto& entry : fs::directory_iterator(artifact_dir_path)) {
     if (entry.is_regular_file()) {
       const std::string filename = entry.path().filename().string();
-      if (filename.rfind("tensor.data", 0) == 0) {
+      if (filename.starts_with("tensor.data")) {
         paths.push_back(entry.path());
         size_t sz = fs::file_size(entry.path());
         sizes.push_back(sz);
@@ -76,8 +76,7 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
   pair.reserve(paths.size());
   for (size_t i = 0; i < paths.size(); ++i)
     pair.emplace_back(paths[i], sizes[i]);
-  std::sort(
-      pair.begin(), pair.end(), [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
+  std::ranges::sort(pair, [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
   loader::FilePartitionSource::Options opts;
   for (auto& p : pair) {
     opts.partition_paths.push_back(p.first);
@@ -129,7 +128,7 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
     absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
       return inner_->read_at(offset, dst, bytes);
     }
-    bool supports_direct_write() const override {
+    [[nodiscard]] bool supports_direct_write() const override {
       return inner_->supports_direct_write();
     }
     absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {

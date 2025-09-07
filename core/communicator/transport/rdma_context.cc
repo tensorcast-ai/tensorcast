@@ -56,9 +56,9 @@ misc::result_t RdmaContext::ibv_init() {
     }
 
     net_dev_t dev = nullptr;
-    for (int port = 1; port <= attr.phys_port_cnt; port++) {
+    for (int port = 1; std::cmp_less_equal(port, attr.phys_port_cnt); port++) {
       struct ibv_port_attr port_attr{};
-      bzero(&port_attr, sizeof(struct ibv_port_attr));
+      std::memset(&port_attr, 0, sizeof(struct ibv_port_attr));
       if (misc::SUCCESS != misc::wrap_ibv_query_port(context, port, &port_attr)) {
         LOG(WARNING) << "unable to query port attr " << devices[d]->name;
         continue;

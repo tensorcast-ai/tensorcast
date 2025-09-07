@@ -289,18 +289,18 @@ absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr) {
   return absl::OkStatus();
 }
 
-absl::Status pointer_get_attributes_full(void* ptr, cudaPointerAttributes* attrs) {
+absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes* attrs) {
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);
 
-  auto it = state.allocations.find(ptr);
+  auto it = state.allocations.find(const_cast<void*>(ptr));
   if (it == state.allocations.end()) {
     return absl::InvalidArgumentError("Pointer not found in allocations");
   }
 
   // Fill in attributes for fake backend
-  attrs->devicePointer = ptr;
-  attrs->hostPointer = ptr;
+  attrs->devicePointer = const_cast<void*>(ptr);
+  attrs->hostPointer = const_cast<void*>(ptr);
   attrs->device = it->second.device_id;
   attrs->type = cudaMemoryTypeDevice;
 #ifdef USE_FAKE_CUDA

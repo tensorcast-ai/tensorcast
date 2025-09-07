@@ -87,10 +87,10 @@ std::vector<loading::ReplicaKey> ReplicaRegistry::get_lru_instances() const {
   std::vector<TimedKey> tmp;
   tmp.reserve(entries_.size());
   for (const auto& e : entries_) {
-    tmp.push_back(TimedKey{e.key, e.last_access});
+    tmp.push_back(TimedKey{.key = e.key, .ts = e.last_access});
   }
 
-  std::sort(tmp.begin(), tmp.end(), [](const TimedKey& a, const TimedKey& b) { return a.ts < b.ts; });
+  std::ranges::sort(tmp, [](const TimedKey& a, const TimedKey& b) { return a.ts < b.ts; });
 
   std::vector<loading::ReplicaKey> ordered;
   ordered.reserve(tmp.size());

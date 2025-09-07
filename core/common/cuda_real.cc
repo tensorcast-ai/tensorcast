@@ -125,7 +125,9 @@ absl::StatusOr<std::string> get_device_name(int device_id) {
 
 absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
   cudaIpcMemHandle_t cuda_handle;
-  SC_RETURN_IF_CUDA_ERROR(cudaIpcGetMemHandle(&cuda_handle, const_cast<void*>(ptr)));
+  // CUDA API requires non-const pointer here; we do not modify the memory.
+  SC_RETURN_IF_CUDA_ERROR(
+      cudaIpcGetMemHandle(&cuda_handle, const_cast<void*>(ptr))); // NOLINT(cppcoreguidelines-pro-type-const-cast)
 
   // Convert handle to string representation
   std::stringstream ss;
@@ -140,9 +142,11 @@ absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
     absl::MutexLock lock(&g_ipc_map_mu);
     int current_device = -1;
     (void)get_device(&current_device);
-    g_exported_ipc_map[*handle] =
-        ExportedIpcInfo{.ptr = const_cast<void*>(ptr), .device_id = current_device, .pid = getpid()};
-    g_exported_ptrs.insert(const_cast<void*>(ptr));
+    g_exported_ipc_map[*handle] = ExportedIpcInfo{
+        .ptr = const_cast<void*>(ptr), // NOLINT(cppcoreguidelines-pro-type-const-cast)
+        .device_id = current_device,
+        .pid = getpid()};
+    g_exported_ptrs.insert(const_cast<void*>(ptr)); // NOLINT(cppcoreguidelines-pro-type-const-cast)
   }
   return absl::OkStatus();
 }
@@ -246,8 +250,8 @@ absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr) {
   return absl::OkStatus();
 }
 
-absl::Status pointer_get_attributes_full(void* ptr, cudaPointerAttributes* attrs) {
-  SC_RETURN_IF_CUDA_ERROR(cudaPointerGetAttributes(attrs, ptr));
+absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes* attrs) {
+  SC_RETURN_IF_CUDA_ERROR(cudaPointerGetAttributes(attrs, const_cast<void*>(ptr))); // NOLINT
   return absl::OkStatus();
 }
 
