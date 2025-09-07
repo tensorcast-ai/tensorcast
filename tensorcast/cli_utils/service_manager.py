@@ -15,12 +15,7 @@ from typing import Any
 import click
 import grpc
 
-from tensorcast.cli_utils.config_loader import (
-    ConfigError,
-    load_config,
-    print_config_summary,
-    validate_config,
-)
+from tensorcast.cli_utils.config_loader import load_config
 from tensorcast.cli_utils.pid_manager import (
     cleanup_pid_file,
     get_process_info,
@@ -81,21 +76,16 @@ def start_service(
         log_file=log_file,
     )
 
-    # Load and validate configuration
-    try:
-        if config_file:
-            click.echo(f"Loading configuration from {config_file}")
-        config = load_config(config_file, cli_args)
-        validate_config(config)
-    except ConfigError as e:
-        raise ServiceError(f"Configuration error: {e}") from e
+    # Unified config is required in the final scheme (no legacy flags)
+    if config_file is None:
+        raise ServiceError("--config is required")
+    config = None
 
     # Check for existing daemon
     _check_existing_daemon(pid_file)
 
     # Print configuration summary
-    _print_startup_info(config, blocking, pid_file, log_file)
-    print_config_summary(config)
+    click.echo(f"Starting StoreDaemon with unified config: {config_file}")
 
     # Setup signal handlers
     _setup_signal_handlers(pid_file)
@@ -103,6 +93,7 @@ def start_service(
     # Start the C++ daemon service
     _start_cpp_daemon_service(
         config=config,
+        config_path=config_file,
         pid_file=pid_file,
         log_file=log_file,
         blocking=blocking,
@@ -515,7 +506,8 @@ def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:
 
 def _start_cpp_daemon_service(
     *,
-    config: StoreDaemonConfig,
+    config: StoreDaemonConfig | None,
+    config_path: Path | None,
     pid_file: Path,
     log_file: Path,
     blocking: bool,
@@ -523,7 +515,8 @@ def _start_cpp_daemon_service(
 ) -> None:
     """Start the C++ daemon binary in foreground or background without waiting for readiness."""
     bin_path = _ensure_cpp_daemon_binary()
-    args = [str(bin_path), *_cpp_daemon_args(config)]
+    assert config_path is not None
+    args = [str(bin_path), f"--config={config_path}"]
 
     if blocking:
         # Foreground: run binary attached to this terminal, write child PID, wait, cleanup.

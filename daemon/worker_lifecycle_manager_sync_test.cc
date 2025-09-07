@@ -23,7 +23,7 @@ using tensorcast::daemon::WorkerLifecycleManager;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
-namespace global = tensorcast::global;
+namespace global_store = tensorcast::global_store::v1;
 
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
@@ -106,10 +106,10 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
     resp->set_new_state_checksum("v1");
     for (const auto& id : expected_ids_) {
       auto* rep = resp->add_expected_replicas();
-      rep->set_artifact_id(id);
+      rep->mutable_ref()->set_artifact_id(id);
       // Minimal MemoryInfo; the daemon only inspects artifact_id in apply_full_state()
       auto* mi = rep->mutable_memory_info();
-      mi->set_memory_type(global_store::MEMORY_TYPE_GPU);
+      mi->set_memory_type(tensorcast::common::v1::MEMORY_TYPE_GPU);
       mi->set_device_id(0);
       mi->set_memory_size(0);
     }
@@ -131,7 +131,7 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
     for (const auto& id : sync_remove_ids_) {
       auto* ch = resp->add_state_changes();
       ch->set_type(global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA);
-      ch->mutable_replica_info()->set_artifact_id(id);
+      ch->mutable_replica_info()->mutable_ref()->set_artifact_id(id);
     }
     return ::grpc::Status::OK;
   }
@@ -197,7 +197,7 @@ static StoreEngine make_store(const fs::path& storage_root) {
 }
 
 static void load_artifact_gpu(StoreEngine& store, const std::string& artifact_id) {
-  tensorcast::store::MaterializeHints hints;
+  tensorcast::store::loading::MaterializeHints hints;
   hints.disk_path = artifact_id;
   auto handle_or =
       store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -207,7 +207,7 @@ static void load_artifact_gpu(StoreEngine& store, const std::string& artifact_id
 }
 
 TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daemon][ha][sync]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA sync test.");
     return;
   }
@@ -220,10 +220,10 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   fs::create_directories(temp_root);
   fs::create_directories(temp_root / keep_id);
   fs::create_directories(temp_root / remove_id);
-  REQUIRE(tensorcast::tests::create_dummy_file(temp_root / keep_id / "tensor.data_0", 1 * 1024 * 1024));
-  REQUIRE(tensorcast::tests::create_dummy_file(temp_root / remove_id / "tensor.data_0", 1 * 1024 * 1024));
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / keep_id).ok());
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / remove_id).ok());
+  REQUIRE(tensorcast::testing::create_dummy_file(temp_root / keep_id / "tensor.data_0", 1 * 1024 * 1024));
+  REQUIRE(tensorcast::testing::create_dummy_file(temp_root / remove_id / "tensor.data_0", 1 * 1024 * 1024));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / keep_id).ok());
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / remove_id).ok());
 
   // Start fake GS server
   auto test_server = start_fake_server({keep_id}, /*obsolete_id=*/"");
@@ -304,7 +304,7 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
 }
 
 TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon][ha][heartbeat]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA heartbeat test.");
     return;
   }
@@ -317,10 +317,10 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   fs::create_directories(temp_root);
   fs::create_directories(temp_root / keep_id);
   fs::create_directories(temp_root / remove_id);
-  REQUIRE(tensorcast::tests::create_dummy_file(temp_root / keep_id / "tensor.data_0", 1 * 1024 * 1024));
-  REQUIRE(tensorcast::tests::create_dummy_file(temp_root / remove_id / "tensor.data_0", 1 * 1024 * 1024));
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / keep_id).ok());
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / remove_id).ok());
+  REQUIRE(tensorcast::testing::create_dummy_file(temp_root / keep_id / "tensor.data_0", 1 * 1024 * 1024));
+  REQUIRE(tensorcast::testing::create_dummy_file(temp_root / remove_id / "tensor.data_0", 1 * 1024 * 1024));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / keep_id).ok());
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / remove_id).ok());
 
   // Start fake GS server: expected replicas include both (so initial full sync keeps both),
   // but heartbeat will advise 'remove_id' as obsolete to trigger removal.
@@ -386,7 +386,7 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
 }
 
 TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[daemon][ha][delta]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA delta test.");
     return;
   }
@@ -399,8 +399,8 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   fs::create_directories(temp_root);
   for (const auto& id : {keep_id, remove_id}) {
     fs::create_directories(temp_root / id);
-    REQUIRE(tensorcast::tests::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
-    REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
+    REQUIRE(tensorcast::testing::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
+    REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
   }
 
   // Start fake GS server: full-state expects both; heartbeat demands a sync and SynchronizeWorkerState returns REMOVE
@@ -467,7 +467,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
 }
 
 TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure", "[daemon][ha][fallback]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA fallback test.");
     return;
   }
@@ -480,8 +480,8 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   fs::create_directories(temp_root);
   for (const auto& id : {keep_id, remove_id}) {
     fs::create_directories(temp_root / id);
-    REQUIRE(tensorcast::tests::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
-    REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
+    REQUIRE(tensorcast::testing::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
+    REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
   }
 
   // Start fake GS server: heartbeat demands sync, but SynchronizeWorkerState fails; RequestFullStateSync expects only
@@ -551,8 +551,8 @@ TEST_CASE("WorkerLifecycleManager sends batch chunk state updates", "[daemon][ha
   fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_chunks";
   fs::create_directories(temp_root);
   fs::create_directories(temp_root / art_id);
-  REQUIRE(tensorcast::tests::create_dummy_file(temp_root / art_id / "tensor.data_0", 1 * 1024 * 1024));
-  REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / art_id).ok());
+  REQUIRE(tensorcast::testing::create_dummy_file(temp_root / art_id / "tensor.data_0", 1 * 1024 * 1024));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / art_id).ok());
 
   // Start fake GS: expect same artifact to keep; no heartbeat removals needed
   auto test_server = start_fake_server({art_id}, /*obsolete_id=*/"");
@@ -598,7 +598,7 @@ TEST_CASE("WorkerLifecycleManager sends batch chunk state updates", "[daemon][ha
 }
 
 TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", "[daemon][ha][version_mismatch]") {
-  if (!tensorcast::tests::is_cuda_available()) {
+  if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA version mismatch test.");
     return;
   }
@@ -611,8 +611,8 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   fs::create_directories(temp_root);
   for (const auto& id : {keep_id, remove_id}) {
     fs::create_directories(temp_root / id);
-    REQUIRE(tensorcast::tests::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
-    REQUIRE(tensorcast::tests::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
+    REQUIRE(tensorcast::testing::create_dummy_file(temp_root / id / "tensor.data_0", 1 * 1024 * 1024));
+    REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(temp_root / id).ok());
   }
 
   // Start fake GS server: full-state expects both; heartbeat indicates expected_version=2 (mismatch) but

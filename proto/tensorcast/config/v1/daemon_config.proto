@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package tensorcast.config.v1;
+
+import "google/protobuf/duration.proto";
+import "tensorcast/communicator/v1/communicator_config.proto";
+import "tensorcast/config/v1/common.proto";
+
+// Verification timeout behavior when confirming replicas.
+enum VerificationTimeoutStatus {
+  VERIFICATION_TIMEOUT_STATUS_UNSPECIFIED = 0;
+  VERIFICATION_TIMEOUT_STATUS_OK = 1;
+  VERIFICATION_TIMEOUT_STATUS_DEADLINE = 2;
+}
+
+// Explicit daemon server config to avoid ambiguity with other servers.
+message DaemonServer {
+  // Legacy fields replaced by listen/p2p_listen for structure.
+  reserved 1, 2, 5; // host, port, p2p_port
+  reserved "host", "port", "p2p_port";
+  tensorcast.config.v1.SocketAddress listen = 10;
+  string storage_path = 3;
+  uint32 num_threads = 4;
+  // Field 6 was enable_p2p_access; removed to avoid duplication with communicator.enable_rdma
+  reserved 6;
+  // Optional dedicated P2P listen address. If unset, defaults to listen.host with a configured port.
+  tensorcast.config.v1.SocketAddress p2p_listen = 11;
+  tensorcast.config.v1.GrpcServer grpc = 7;
+}
+
+message Lifecycle {
+  double gpu_memory_limit_fraction = 1;
+  google.protobuf.Duration eviction_check_interval = 2;
+  google.protobuf.Duration proc_check_interval = 3;
+  google.protobuf.Duration sessions_sweep_interval = 4;
+  google.protobuf.Duration locks_sweep_interval = 5;
+  google.protobuf.Duration verification_sweep_interval = 6;
+  // Replaced by proc_check_interval to avoid duplicate process scanning intervals.
+  reserved 7; // pid_watch_interval
+  google.protobuf.Duration sessions_ttl = 8;
+  google.protobuf.Duration locks_ttl = 9;
+  bool enable_periodic_eviction = 10;
+  // If unset, service uses a conservative default (1s).
+  google.protobuf.Duration eviction_loop_interval = 11;
+}
+
+message HighAvailability {
+  bool enabled = 1;
+  reserved 2; // global_store_address (host:port string)
+  // One or more control-plane endpoints for the Global Store.
+  repeated tensorcast.config.v1.SocketAddress global_store_endpoints = 10;
+  google.protobuf.Duration heartbeat_interval = 3;
+  google.protobuf.Duration periodic_sync_interval = 4;
+  int32 max_retries = 5;
+  google.protobuf.Duration registration_retry_delay = 6;
+}
+
+message Engine {
+  uint64 mem_pool_size_bytes = 1;
+  uint64 chunk_bytes = 2;
+  uint64 dvmp_chunk_size_bytes = 3;
+  uint32 streaming_buffer_max_concurrent_sessions = 4;
+  google.protobuf.Duration pinned_allocation_timeout = 5;
+  string p2p_fallback_disk_dir = 6;
+}
+
+message CheckpointStreaming {
+  uint32 num_buffers = 1;
+  uint64 io_chunk_bytes = 2; // Renamed to avoid confusion with engine.chunk_bytes
+  uint64 pinned_pool_bytes = 3; // Clarify this is a streaming pinned pool
+}
+
+message DaemonConfig {
+  DaemonServer server = 1;
+  Lifecycle lifecycle = 2;
+  HighAvailability high_availability = 3;
+  tensorcast.communicator.v1.CommunicatorConfig communicator = 4;
+  Engine engine = 5;
+  tensorcast.config.v1.Observability observability = 6;
+
+  message Compatibility {
+    bool confirm_requires_disk_path = 1;
+    VerificationTimeoutStatus verification_timeout_status = 2;
+    bool evict_on_dead_pid = 3;
+    bool auto_register_disk_loads = 4;
+    bool force_full_digest_on_load = 5;
+  }
+  Compatibility compatibility = 7;
+
+  message Checkpoint {
+    CheckpointStreaming streaming = 1;
+  }
+  Checkpoint checkpoint = 8;
+
+  message Debug {
+    message Cuda {
+      bool enable_same_process_ipc_fallback = 1;
+    }
+    Cuda cuda = 1;
+  }
+  Debug debug = 9;
+
+  // Optional metadata for auditing/versioning
+  tensorcast.config.v1.ConfigMeta meta = 100;
+}

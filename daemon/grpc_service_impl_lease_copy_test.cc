@@ -88,7 +88,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   // Use helper to feed streaming vector without spinning up gRPC server
   std::vector<tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest> reqs;
   reqs.push_back(freq);
-  st = svc.FeedRegisterArtifactStreamVector(reqs);
+  st = svc.feed_register_artifact_stream_vector(reqs);
   REQUIRE(st.ok());
 
   // Commit

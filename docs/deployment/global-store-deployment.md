@@ -18,85 +18,25 @@ The Global Store provides:
 - **Web UI**: Built-in monitoring and management interface
 - **Metrics**: Prometheus-compatible metrics endpoint
 
-## Configuration Parameters
+## Configuration
 
-### Required Parameters
-
-The Global Store can run with default settings, but for production deployments, consider these key parameters:
-
-| Parameter | Default | Description | CLI Flag | Environment Variable |
-|-----------|---------|-------------|----------|---------------------|
-| **Port** | 50051 | gRPC service port | `--port` | `GLOBAL_STORE_PORT` |
-| **Database File** | In-memory | DuckDB persistence path | `--db-file` | `GLOBAL_STORE_DB_PATH` |
-| **Max Workers** | 10 | Thread pool size | `--workers` | `GLOBAL_STORE_MAX_WORKERS` |
-
-### Advanced Configuration
-
-#### Performance Settings
-| Parameter | Default | Environment Variable | Description |
-|-----------|---------|---------------------|-------------|
-| Optimize Interval | 1 hour | `GLOBAL_STORE_OPTIMIZE_INTERVAL_MS` | Database optimization frequency (ms) |
-
-#### Worker Management
-| Parameter | Default | Environment Variable | Description |
-|-----------|---------|---------------------|-------------|
-| Heartbeat Timeout | 30s | `GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS` | Worker heartbeat timeout (ms) |
-| Cleanup Interval | 60s | `GLOBAL_STORE_CLEANUP_INTERVAL_MS` | Dead worker cleanup frequency (ms) |
-| Default Heartbeat Interval | 5s | `GLOBAL_STORE_HEARTBEAT_INTERVAL_MS` | Expected worker heartbeat frequency (ms) |
-
-#### Monitoring & UI
-| Parameter | Default | Environment Variable | Description |
-|-----------|---------|---------------------|-------------|
-| Metrics Port | 8000 | `GLOBAL_STORE_METRICS_PORT` | Prometheus metrics endpoint |
-| UI Port | 9000 | `GLOBAL_STORE_UI_PORT` | Web UI port |
-| UI Host | 0.0.0.0 | `GLOBAL_STORE_UI_HOST` | Web UI bind address |
-| UI Enabled | true | `GLOBAL_STORE_UI_ENABLED` | Enable/disable Web UI |
-| UI Log File | /tmp/global-store-webui.log | `GLOBAL_STORE_UI_LOG_FILE` | Web UI process log path |
+Use a unified file-based configuration (YAML/JSON → Proto with strict validation); CLI flags and environment variables are not supported. See `examples/config/global_store_config.yaml` and pass it via `--config`.
 
 ## Deployment Methods
 
-### 1. Direct Python Module Execution
+### 1. Direct Python Module Execution (Unified Config)
 
 #### Development/Testing
 ```bash
-# In-memory database (ephemeral)
-python -m tensorcast.global_store
-
-# With all monitoring features
-python -m tensorcast.global_store \
-  --metrics-port 8001 \
-  --webui-log-file /var/log/global-store-webui.log
+# Use the configuration file (strictly validated)
+uv run -m tensorcast.global_store --config=examples/config/global_store_config.yaml
 ```
 
 #### Production with Persistence
-```bash
-# Create data directory
-mkdir -p /var/lib/global_store
+Set the persistent database path, thread counts, and other parameters in the configuration file, and start with `--config`.
 
-# Run with persistent database
-python -m tensorcast.global_store \
-  --db-file /var/lib/global_store/models.db \
-  --port 50051 \
-  --workers 20 \
-  --metrics-port 8001
-```
-
-### 2. Environment Variable Configuration
-
-```bash
-# Set configuration via environment
-export GLOBAL_STORE_PORT=50051
-export GLOBAL_STORE_DB_PATH=/var/lib/global_store/models.db
-export GLOBAL_STORE_MAX_WORKERS=20
-export GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS=30000
-export GLOBAL_STORE_CLEANUP_INTERVAL_MS=60000
-export GLOBAL_STORE_METRICS_PORT=8001
-export GLOBAL_STORE_UI_PORT=9000
-export GLOBAL_STORE_UI_ENABLED=true
-
-# Start the service
-python -m tensorcast.global_store
-```
+### 2. Environment Variable Configuration (Deprecated)
+Environment variables are no longer supported. Please use the unified configuration file.
 
 ### 3. Docker Deployment
 
@@ -104,16 +44,16 @@ python -m tensorcast.global_store
 # Build the image
 ./docker/build.sh
 
-# Run with persistent storage
+# Run with persistent storage (mount config)
 docker run -d \
   --name global-store \
   -p 50051:50051 \
   -p 8001:8001 \
   -p 9000:9000 \
   -v /var/lib/global_store:/data \
-  -e GLOBAL_STORE_DB_PATH=/data/models.db \
-  -e GLOBAL_STORE_MAX_WORKERS=20 \
-  hub.i.basemind.com/tensorcast/global-store:latest
+  -v $(pwd)/examples/config/global_store_config.yaml:/etc/tensorcast/global_store.yaml:ro \
+  hub.i.basemind.com/tensorcast/global-store:latest \
+  uv run -m tensorcast.global_store --config=/etc/tensorcast/global_store.yaml
 ```
 
 ### 4. Kubernetes Deployment (High Availability)
@@ -131,8 +71,8 @@ For production deployments, **always use persistent storage**:
 mkdir -p /var/lib/global_store
 chown -R app:app /var/lib/global_store
 
-# Start with persistent database
-python -m tensorcast.global_store --db-file /var/lib/global_store/models.db
+# Start with persistent database via unified config
+uv run -m tensorcast.global_store --config=/etc/tensorcast/global_store.yaml
 ```
 
 Benefits:

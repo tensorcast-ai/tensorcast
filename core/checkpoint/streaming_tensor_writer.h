@@ -32,6 +32,7 @@ class StreamingTensorWriter {
     size_t num_buffers = 4; // Number of buffers in the circular buffer
     size_t buffer_size_mb = 256; // Size of each buffer in MB
     bool enable_async_write = true; // Enable asynchronous disk writing
+    size_t pool_size_gb = 10; // Total pinned pool size in GB
   } __attribute__((aligned(32))) __attribute__((packed));
 
   /**

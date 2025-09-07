@@ -30,77 +30,9 @@ def cli():
 @click.option(
     "--config",
     "-c",
+    required=True,
     type=click.Path(exists=True, path_type=Path),
-    help="Path to YAML configuration file",
-)
-@click.option(
-    "--host",
-    default="0.0.0.0",
-    help="Host address to bind (default: 0.0.0.0)",
-)
-@click.option(
-    "--port",
-    default=8073,
-    type=int,
-    help="gRPC port to bind (default: 8073)",
-)
-@click.option(
-    "--storage-path",
-    default="",
-    help="Path to artifact storage directory (default: '')",
-)
-@click.option(
-    "--mem-pool-size",
-    default="8GB",
-    help="Memory pool size, e.g., 8GB",
-)
-@click.option(
-    "--num-thread",
-    default=10,
-    type=int,
-    help="Number of worker threads (default: 10)",
-)
-@click.option(
-    "--chunk-size",
-    default="32MB",
-    help="Chunk size, e.g., 32MB",
-)
-@click.option(
-    "--enable-p2p-engine",
-    is_flag=True,
-    help="Whether communication engine is enabled (default: True)",
-)
-@click.option(
-    "--enable-p2p-access",
-    is_flag=True,
-    help="Whether artifact registration is required (default: True)",
-)
-@click.option(
-    "--enable-rdma",
-    is_flag=True,
-    help="Enable RDMA layer within communication engine (default: False)",
-)
-@click.option(
-    "--global-store-address",
-    help="Global store address (e.g., localhost:50051)",
-)
-@click.option(
-    "--p2p-port",
-    default=9090,
-    type=int,
-    help="p2p data transfer port (default: 9090)",
-)
-@click.option(
-    "--health-check-port",
-    default=8080,
-    type=int,
-    help="Health check HTTP port (default: 8080)",
-)
-@click.option(
-    "--pinned-memory-timeout-ms",
-    default=30000,
-    type=int,
-    help="Timeout for pinned memory allocation in milliseconds (default: 30000)",
+    help="Path to unified daemon config (YAML/JSON)",
 )
 @click.option(
     "--verbose",
@@ -130,7 +62,7 @@ def start(**kwargs):
     """Start the StoreDaemon service."""
     try:
         # Extract config file if provided
-        config_file = kwargs.pop("config", None)
+        config_file = kwargs.pop("config")
 
         # Extract service management options
         pid_file = kwargs.pop("pid_file")
@@ -141,7 +73,7 @@ def start(**kwargs):
         # Start the service
         start_service(
             config_file=config_file,
-            cli_args=kwargs,
+            cli_args={},
             pid_file=pid_file,
             log_file=log_file,
             blocking=blocking,

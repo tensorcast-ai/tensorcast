@@ -6,16 +6,13 @@
 namespace tensorcast::common {
 
 /**
- * @brief Ensure absl logging is initialized exactly once across all modules
+ * Ensure absl logging is initialized exactly once across all modules.
  *
- * This function configures logging based on environment variables:
- * - TENSORCAST_LOG_LEVEL: Set minimum log level (INFO, WARNING, ERROR, FATAL). Default: INFO
- * - TENSORCAST_VLOG_LEVEL: Set verbose log level (integer). Only used if TENSORCAST_VLOG_MODULE is also set
- * - TENSORCAST_VLOG_MODULE: Module pattern for verbose logging. Must be set with TENSORCAST_VLOG_LEVEL
- *
- * Example usage:
- *   export TENSORCAST_LOG_LEVEL=WARNING
- *   export TENSORCAST_VLOG_LEVEL=2
+ * Defaults to INFO level. For configuration-driven severity/VLOG and file
+ * sinks, entry points should call:
+ *  - tensorcast::common::otel::apply_absl_log_level_from_config
+ *  - tensorcast::common::otel::install_plain_log_sink_from_config
+ *  - tensorcast::common::otel::install_otel_log_sink_from_config
  */
 void ensure_logging_initialized();
 

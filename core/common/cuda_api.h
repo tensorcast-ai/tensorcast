@@ -22,7 +22,7 @@ enum cudaMemcpyKind {
   cudaMemcpyDefault = 4
 };
 
-// Forward declare opaque types for fake backend
+// Define opaque types for fake backend
 struct CUstream_st;
 typedef struct CUstream_st* cudaStream_t;
 
@@ -170,6 +170,13 @@ absl::Status peek_last_error();
 // Runtime checks
 bool is_fake();
 bool is_available();
+
+// Debug/testing controls
+// Enable or disable same-process CUDA IPC fallback behavior in the real backend.
+// When enabled, if an IPC handle exported and opened in the same process fails
+// via the CUDA path, we will return the original pointer as a fallback.
+// Default is disabled. No-op in the fake backend (always behaves like same-process).
+void configure_same_process_ipc_fallback(bool enabled);
 
 // Helper macro for operations not supported by fake backend
 #ifdef USE_FAKE_CUDA

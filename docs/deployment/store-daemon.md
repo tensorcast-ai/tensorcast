@@ -1,12 +1,12 @@
 ---
 title: Store Daemon Deployment
-description: Running the C++ StoreDaemon and configuring compatibility flags
+description: Running the C++ StoreDaemon with unified runtime config
 sidebar_position: 4
 ---
 
 # Store Daemon Deployment
 
-This page describes how to run the C++ StoreDaemon (`daemon/tensorcast_daemon`) in development and production, and how to configure compatibility flags for parity with the legacy Python daemon.
+This page describes how to run the C++ StoreDaemon (`daemon/tensorcast_daemon`) in development and production using the unified runtime configuration.
 
 ## Binary
 
@@ -20,64 +20,22 @@ bazel build //daemon:tensorcast_daemon
 
 ## Launch via Python CLI
 
-Use the typed YAML config (`tensorcast.store_daemon.config`) and the CLI translates it into C++ flags.
+Use the unified YAML config and start via CLI:
 
 ```
-uv run -q python -m tensorcast.cli start --non-blocking --host 127.0.0.1 --port 8073
+uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml
 ```
 
-The CLI locates the binary in this order:
-
-- `TENSORCAST_DAEMON_BIN` env var
-- Installed package `tensorcast/bin/tensorcast_daemon`
-- Development path `bazel-bin/daemon/tensorcast_daemon`
+The CLI locates the binary from the wheel or development path automatically.
 
 ## Observability
 
 Metrics are exposed via the unified system; the daemon no longer provides an HTTP metrics endpoint.
 
-## Global Store Mode
+## Configuration
 
-When `--global_store_addr` is set, the daemon registers as a worker and sends periodic heartbeats. It can also optionally synchronize DVMP chunk states.
-
-Recommended flags:
-
-- `--global_store_addr=HOST:PORT`
-- `--heartbeat_interval_ms=5000`
-- `--chunk_sync_interval_ms=10000` (set `0` to disable)
-
-## Compatibility Flags
-
-These flags align the C++ daemon’s external behavior to the Python daemon where needed:
-
-- `--enable_p2p_access` (default `true`): Global toggle for remote memory registration
-- `--confirm_requires_disk_path` (binary default `false`; Python launcher defaults to `true`): Strict ConfirmReplica; reject empty `disk_path` and non‑GPU targets
-- `--verification_timeout_status=ok|deadline` (default `ok`): Map verification timeouts
-- `--auto_register_disk_loads` (default `false`): Auto register local disk loads after ready
-- `--force_full_digest_on_load` (default `false`): Strong verification via content addressing
-- `--evict_on_dead_pid` (default `false`): Unload replicas when all PID refs are gone
-
-## Lifecycle & Eviction Flags
-
-Daemon-level periodic eviction mirrors the Python `LifecycleWorker` policy and is disabled by default.
-
-- `--enable_periodic_eviction` (default `false`): Enable periodic eviction loop
-- `--eviction_check_interval_ms` (default `30000`): Eviction evaluation interval
-- `--gpu_memory_limit_fraction` (default `0.75`): Per‑GPU usage threshold to trigger LRU eviction
-
-When enabled, the daemon will evict least‑recently‑used GPU replicas on devices whose used/total exceeds the threshold, skipping replicas that have active PID refs or are marked keep_for_global.
-
-All flags are available via the Python config:
-
+All runtime parameters are configured via the unified config. See `examples/config/store_daemon_config.yaml`.
 ```yaml
-server:
-  enable_p2p_engine: true
-  enable_rdma: false
-  enable_p2p_access: true
-  confirm_requires_disk_path: false
-  verification_timeout_status: ok   # or: deadline
-  auto_register_disk_loads: false
-  force_full_digest_on_load: false
 network:
 high_availability:
   heartbeat_interval_ms: 5000
@@ -117,23 +75,17 @@ transport:
   tcp_tos: 0
 ```
 
-Save it as `communicator.yaml` and pass the path using `--comm_config_path`.
+Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`.
 
-## Example Direct Launch
+## Launch Example (Unified Config)
 
 ```
-bazel-bin/daemon/tensorcast_daemon \
-  --listen_addr=0.0.0.0:50051 \
-  --global_store_addr=127.0.0.1:6000 \
-  --heartbeat_interval_ms=5000 \
-  --chunk_sync_interval_ms=10000 \
-  --enable_p2p_access=true \
-  --comm_config_path=$(pwd)/communicator.yaml
+bazel-bin/daemon/tensorcast_daemon --config=examples/config/store_daemon_config.yaml
 ```
 
 ### Metrics Exposure (Unified)
 
-- The daemon no longer serves metrics directly. Use the lightweight sidecar to expose `tc_*` metrics via `/metrics`:
+- The daemon no longer serves metrics directly. Use the central observability pipeline for `tc_*` metrics:
 
 ```
 # Metrics HTTP sidecar has been removed. Use central observability pipeline.

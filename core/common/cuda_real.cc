@@ -4,6 +4,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <atomic>
 #include <iomanip>
 #include <sstream>
 
@@ -30,7 +31,11 @@ struct ExportedIpcInfo {
 absl::Mutex g_ipc_map_mu;
 absl::flat_hash_map<std::string, ExportedIpcInfo> g_exported_ipc_map ABSL_GUARDED_BY(g_ipc_map_mu);
 absl::flat_hash_set<void*> g_exported_ptrs ABSL_GUARDED_BY(g_ipc_map_mu);
+std::atomic<bool> g_enable_same_process_ipc_fallback{false};
 } // namespace
+void configure_same_process_ipc_fallback(bool enabled) {
+  g_enable_same_process_ipc_fallback.store(enabled, std::memory_order_relaxed);
+}
 
 absl::Status set_device(int device_id) {
   SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(device_id));
@@ -130,14 +135,13 @@ absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
   }
   *handle = ss.str();
 
-  // Record mapping for same-process fallback (unit tests) only when enabled
-  // via explicit env var TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK=1
-  if (const char* en = std::getenv("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK");
-      en && (en[0] == '1' || en[0] == 'T' || en[0] == 't' || en[0] == 'Y' || en[0] == 'y')) {
+  // Record mapping for same-process fallback when enabled
+  if (g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
     absl::MutexLock lock(&g_ipc_map_mu);
     int current_device = -1;
     (void)get_device(&current_device);
-    g_exported_ipc_map[*handle] = ExportedIpcInfo{const_cast<void*>(ptr), current_device, getpid()};
+    g_exported_ipc_map[*handle] =
+        ExportedIpcInfo{.ptr = const_cast<void*>(ptr), .device_id = current_device, .pid = getpid()};
     g_exported_ptrs.insert(const_cast<void*>(ptr));
   }
   return absl::OkStatus();
@@ -161,43 +165,41 @@ absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
     return absl::OkStatus();
   }
 
+  // If not enabled, return the CUDA error
+  if (!g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
+    return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
+  }
+
   // Fallback: if export and open happen in the same process (unit tests),
   // return the original pointer that created the handle.
   {
     absl::MutexLock lock(&g_ipc_map_mu);
     auto it = g_exported_ipc_map.find(handle);
-    if (it != g_exported_ipc_map.end()) {
-      // Only allow fallback when explicitly enabled via env var
-      const char* enable_env = std::getenv("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK");
-      if (!enable_env ||
-          (enable_env[0] != '1' && enable_env[0] != 'T' && enable_env[0] != 't' && enable_env[0] != 'Y' &&
-           enable_env[0] != 'y')) {
-        return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
-      }
-      const ExportedIpcInfo& info = it->second;
-      // Ensure same process
-      if (info.pid != getpid()) {
-        return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
-      }
-      // Ensure device consistency when possible
-      int cur_dev = -1;
-      (void)get_device(&cur_dev);
-      cudaPointerAttributes attrs;
-      if (cudaPointerGetAttributes(&attrs, info.ptr) == cudaSuccess) {
-        if (cur_dev >= 0 && attrs.device != cur_dev) {
-          return absl::FailedPreconditionError("IPC fallback rejected: device mismatch with current device");
-        }
-      } else {
-        // If we cannot inspect attributes, require device match with recorded export device
-        if (cur_dev >= 0 && info.device_id >= 0 && info.device_id != cur_dev) {
-          return absl::FailedPreconditionError("IPC fallback rejected: recorded device mismatch");
-        }
-      }
-      *ptr = info.ptr;
-      return absl::OkStatus();
+    if (it == g_exported_ipc_map.end()) {
+      return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
     }
+    const ExportedIpcInfo& info = it->second;
+    // Ensure same process
+    if (info.pid != getpid()) {
+      return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
+    }
+    // Ensure device consistency when possible
+    int cur_dev = -1;
+    (void)get_device(&cur_dev);
+    cudaPointerAttributes attrs;
+    if (cudaPointerGetAttributes(&attrs, info.ptr) == cudaSuccess) {
+      if (cur_dev >= 0 && attrs.device != cur_dev) {
+        return absl::FailedPreconditionError("IPC fallback rejected: device mismatch with current device");
+      }
+    } else {
+      // If we cannot inspect attributes, require device match with recorded export device
+      if (cur_dev >= 0 && info.device_id >= 0 && info.device_id != cur_dev) {
+        return absl::FailedPreconditionError("IPC fallback rejected: recorded device mismatch");
+      }
+    }
+    *ptr = info.ptr;
+    return absl::OkStatus();
   }
-  return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
 }
 
 absl::Status close_ipc_handle(void* ptr) {
@@ -206,9 +208,9 @@ absl::Status close_ipc_handle(void* ptr) {
   if (err == cudaSuccess) {
     return absl::OkStatus();
   }
-  // If this pointer corresponds to an exported original (same-process fallback),
+  // If enabled and this pointer corresponds to an exported original (same-process fallback),
   // treat close as a no-op.
-  {
+  if (g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
     absl::MutexLock lock(&g_ipc_map_mu);
     if (g_exported_ptrs.contains(ptr)) {
       return absl::OkStatus();

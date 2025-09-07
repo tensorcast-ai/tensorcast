@@ -56,20 +56,67 @@ using loading::MaterializeHints;
 using loading::ReplicaHandle;
 using loading::ReplicaKey;
 using loading::ReplicaRegistrationHelper;
-using loading::ReplicaTarget;
-using replica::ChunkMeta;
-using replica::ChunkState;
 using replica::MemoryState;
 using replica::Replica;
 
 // (hashing utilities moved to core/common/artifact_hash.*)
-// Forward declaration for GPU eviction helper defined later in this file.
+// GPU eviction helper kept internal to this translation unit.
 absl::Status try_evict_gpu_memory_impl(
-    components::ReplicaRegistry& registry,
-    components::DeviceManager& device_manager,
-    components::MetricsCollector& metrics,
+    ReplicaRegistry& registry,
+    DeviceManager& device_manager,
+    MetricsCollector& metrics,
     int device_id,
-    size_t required_bytes);
+    size_t required_bytes) {
+  // Query initial free memory so we can track progress.
+  auto free_before_or = device_manager.get_free_memory(device_id);
+  if (!free_before_or.ok()) {
+    return free_before_or.status();
+  }
+  size_t free_before = free_before_or.value();
+
+  // Helper to check whether we have reclaimed enough GPU memory.
+  auto has_freed_enough = [&](size_t free_now) { return (free_now - free_before) >= required_bytes; };
+
+  // Iterate LRU instances – GPU only.
+  auto lru_instances = registry.get_lru_instances();
+  for (const auto& key : lru_instances) {
+    if (key.device.type != DeviceType::GPU || key.device.ordinal != device_id) {
+      continue; // Different device or CPU instance.
+    }
+
+    auto replica_or = registry.find(key);
+    if (!replica_or.ok()) {
+      continue;
+    }
+    const auto& replica = replica_or.value();
+
+    if (replica->get_memory_state(MemoryLocation::GPU) != MemoryState::LOADED) {
+      continue; // Nothing to free.
+    }
+
+    // Attempt to release GPU memory (safe mode to avoid mid-transfer memory).
+    auto st = replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    if (!st.ok()) {
+      continue; // Couldn't free – maybe busy.
+    }
+
+    metrics.record_memory_eviction();
+
+    // Update free memory reading.
+    auto free_now_or = device_manager.get_free_memory(device_id);
+    if (!free_now_or.ok()) {
+      // Non-fatal – continue trying.
+      continue;
+    }
+    size_t free_now = free_now_or.value();
+
+    if (has_freed_enough(free_now)) {
+      return absl::OkStatus();
+    }
+  }
+
+  return absl::ResourceExhaustedError("Could not free enough GPU memory for device " + std::to_string(device_id));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Construction and Destruction
@@ -787,6 +834,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   // Create replica with P2P source
   auto p2p_source = source;
   p2p_source.comm_engine = comm_manager_->get_shared_engine();
+  // Provide optional disk fallback directory from engine options
+  p2p_source.fallback_disk_dir = options_.p2p_fallback_disk_dir;
   replica::ReplicaConfig config{
       .source = p2p_source,
       .artifact_identifier = artifact_identifier,
@@ -1275,65 +1324,6 @@ std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& devic
 // ---------------------------------------------------------------------------
 // Multi-Device Binding – GPU-aware memory eviction (NEW in Phase 3.2)
 // ---------------------------------------------------------------------------
-
-// NOTE: This helper is intentionally kept internal to this translation unit;
-// once the call-sites migrate we can promote it to the public header.
-absl::Status try_evict_gpu_memory_impl(
-    ReplicaRegistry& registry,
-    DeviceManager& device_manager,
-    MetricsCollector& metrics,
-    int device_id,
-    size_t required_bytes) {
-  // Query initial free memory so we can track progress.
-  auto free_before_or = device_manager.get_free_memory(device_id);
-  if (!free_before_or.ok()) {
-    return free_before_or.status();
-  }
-  size_t free_before = free_before_or.value();
-
-  // Helper to check whether we have reclaimed enough GPU memory.
-  auto has_freed_enough = [&](size_t free_now) { return (free_now - free_before) >= required_bytes; };
-
-  // Iterate LRU instances – GPU only.
-  auto lru_instances = registry.get_lru_instances();
-  for (const auto& key : lru_instances) {
-    if (key.device.type != DeviceType::GPU || key.device.ordinal != device_id) {
-      continue; // Different device or CPU instance.
-    }
-
-    auto replica_or = registry.find(key);
-    if (!replica_or.ok()) {
-      continue;
-    }
-    const auto& replica = replica_or.value();
-
-    if (replica->get_memory_state(MemoryLocation::GPU) != MemoryState::LOADED) {
-      continue; // Nothing to free.
-    }
-
-    // Attempt to release GPU memory (safe mode to avoid mid-transfer memory).
-    auto st = replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
-    if (!st.ok()) {
-      continue; // Couldn't free – maybe busy.
-    }
-
-    metrics.record_memory_eviction();
-
-    // Update free memory reading.
-    auto free_now_or = device_manager.get_free_memory(device_id);
-    if (!free_now_or.ok()) {
-      // Non-fatal – continue trying.
-      continue;
-    }
-    size_t free_now = free_now_or.value();
-
-    if (has_freed_enough(free_now)) {
-      return absl::OkStatus();
-    }
-  }
-
-  return absl::ResourceExhaustedError("Could not free enough GPU memory for device " + std::to_string(device_id));
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // New ReplicaKey-centric API wrappers

@@ -8,12 +8,12 @@
 #include "core/common/memory/pinned_memory_pool.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
+// Prefer explicit includes over forward declarations
+#include "core/store/components/device_manager.h"
+#include "core/store/components/replica_registry.h"
 
 namespace tensorcast::store::components {
 
-// Forward declarations
-class ReplicaRegistry;
-class DeviceManager;
 // Note: PinnedMemoryPool lives under tensorcast::common::memory
 
 /**

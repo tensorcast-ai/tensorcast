@@ -7,7 +7,6 @@ This module handles the centralized configuration and initialization
 of the tensorcast system, including daemon management.
 """
 
-import os
 from pathlib import Path
 
 from pydantic import ByteSize
@@ -67,15 +66,7 @@ def init(
 
     logger = init_logger(__name__)
 
-    if os.environ.get("TENSORCAST_FORCE_CONNECT_ONLY", "false").lower() in [
-        "true",
-        "1",
-        "yes",
-        "y",
-    ]:
-        logger.info("TENSORCAST_FORCE_CONNECT_ONLY is set, forcing connect_only=True")
-        connect_only = True
-        auto_start = False
+    # No environment overrides in final scheme
 
     # Create StoreDaemonConfig from parameters
 
@@ -138,3 +129,37 @@ def init(
 
 def is_initialized() -> bool:
     return initialized
+
+
+def init_from_client_config(config_path: str) -> None:
+    """Initialize client behavior from ClientConfig file (YAML/JSON).
+
+    Sets default storage root, daemon target, and client load defaults.
+    Also applies logging level from config if provided.
+    """
+    from tensorcast.client_config_loader import load_client_config
+    from tensorcast.client_runtime import daemon_target_default, set_client_config
+    from tensorcast.logger import setup_logging
+    from tensorcast.torch_util import set_daemon_address
+
+    cfg = load_client_config(config_path)
+    set_client_config(cfg)
+
+    # Apply daemon target default if present
+    target = daemon_target_default()
+    if target:
+        set_daemon_address(target)
+
+    # Apply logging level if provided in config
+    try:
+        level_map = {
+            1: "DEBUG",
+            2: "INFO",
+            3: "WARN",
+            4: "ERROR",
+        }
+        lvl_num = cfg.observability.logging.level
+        if lvl_num in level_map:
+            setup_logging(level_map[lvl_num])
+    except Exception:
+        pass

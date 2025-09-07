@@ -14,11 +14,8 @@
 #include "core/common/artifact_verification.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loading/loading_spec.h" // For DiskSource
-// Forward declaration instead of including memory manager to avoid heavy deps
-
-namespace tensorcast::store::loader {
-class SeekableSource;
-}
+// Prefer explicit includes over forward declarations
+#include "core/store/loader/source.h"
 
 namespace tensorcast::store {
 

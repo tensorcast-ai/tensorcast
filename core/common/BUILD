@@ -228,6 +228,7 @@ sc_cc_library(
     hdrs = ["otel/init.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//proto/tensorcast/config/v1:config_cc",
         "@opentelemetry-cpp//api:api",
         # Explicitly depend on SDK trace/resource to avoid relying on exporter transitive deps
         "@opentelemetry-cpp//sdk/src/trace:trace",
@@ -248,6 +249,10 @@ sc_cc_library(
     hdrs = ["otel/logging_sink.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//proto/tensorcast/config/v1:config_cc",
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/log:initialize",
+        "@abseil-cpp//absl/log:vlog_is_on",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
@@ -285,6 +290,7 @@ sc_cc_library(
     deps = [
         ":trace_ctx_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@nlohmann_json//:json",
@@ -392,5 +398,21 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@abseil-cpp//absl/log:absl_log",
+    ],
+)
+
+# Unified runtime config loader for DaemonConfig
+sc_cc_library(
+    name = "daemon_config_io_lib",
+    srcs = ["config/daemon_config_io.cc"],
+    hdrs = ["config/daemon_config_io.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/communicator:config_io_lib",
+        "//proto/tensorcast/config/v1:config_cc",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+        "@protobuf",
+        "@yaml-cpp//:yaml-cpp",
     ],
 )

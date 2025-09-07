@@ -37,12 +37,16 @@ cc_binary(
     deps = [
         ":grpc_service_impl",
         ":worker_lifecycle",
+        "//core/common:daemon_config_io_lib",
         "//core/common:otel_init_lib",
         "//core/common:otel_log_sink_lib",
+        "//core/common:trace_manager_lib",
         "//core/communicator:config_io_lib",
+        "//proto/tensorcast/config/v1:config_cc",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
     ],
 )
 

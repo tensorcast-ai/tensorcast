@@ -21,28 +21,15 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
 
   const std::string tensor_filename = std::filesystem::path(path) / "tensor.data";
 
-  // Read configuration from environment variables with defaults
-  const char* chunk_size_env = std::getenv("STREAMING_CHUNK_SIZE_MB");
-  const char* pool_size_env = std::getenv("STREAMING_POOL_SIZE_GB");
-  const char* num_buffers_env = std::getenv("STREAMING_NUM_BUFFERS");
-
-  // Override config with environment variables if set
+  // Use provided config exclusively; unified runtime config provides values.
   StreamingTensorWriter::Config final_config = config;
-  if (chunk_size_env) {
-    final_config.buffer_size_mb = std::stoull(chunk_size_env);
-  }
-  if (num_buffers_env) {
-    final_config.num_buffers = std::stoull(num_buffers_env);
-  }
-
-  const size_t pool_size_gb = pool_size_env ? std::stoull(pool_size_env) : 10; // Default: 10 GB
-  const size_t pool_size = pool_size_gb << 30; // Convert GB to bytes
-  const size_t chunk_size = final_config.buffer_size_mb << 20; // Convert MB to bytes
+  const size_t pool_size = final_config.pool_size_gb << 30; // bytes
+  const size_t chunk_size = final_config.buffer_size_mb << 20; // bytes
 
   LOG(INFO) << "Streaming tensor save configuration: "
             << "num_buffers=" << final_config.num_buffers << ", "
             << "buffer_size=" << final_config.buffer_size_mb << "MB, "
-            << "pool_size=" << pool_size_gb << "GB, "
+            << "pool_size=" << final_config.pool_size_gb << "GB, "
             << "async_write=" << (final_config.enable_async_write ? "enabled" : "disabled");
 
   // Create pinned memory pool

@@ -2,22 +2,17 @@
 
 #pragma once
 
-#include <future>
 #include <memory>
-#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
-#include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
 #include "core/store/loader/loader.h"
-
-namespace tensorcast::store::loader {
-class SeekableSource;
-}
+// Prefer explicit includes over forward declarations
+#include "core/store/loader/source.h"
 
 namespace tensorcast::store {
 

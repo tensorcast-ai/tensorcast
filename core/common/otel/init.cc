@@ -2,10 +2,10 @@
 
 #include "core/common/otel/init.h"
 
-#include <cstdlib>
 #include <string>
 
 #include "absl/log/log.h"
+#include "tensorcast/config/v1/common.pb.h"
 
 #include "opentelemetry/context/propagation/global_propagator.h"
 #include "opentelemetry/trace/propagation/http_trace_context.h"
@@ -28,22 +28,6 @@ namespace resource = opentelemetry::sdk::resource;
 
 namespace tensorcast::common::otel {
 
-static bool truthy(const char* v) {
-  if (!v) {
-    return false;
-  }
-  std::string s(v);
-  for (auto& c : s) {
-    c = static_cast<char>(::tolower(c));
-  }
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
-static std::string get_env(const char* k, const std::string& def = {}) {
-  const char* v = std::getenv(k);
-  return v ? std::string(v) : def;
-}
-
 static void strip_scheme(std::string& s) {
   if (s.rfind("http://", 0) == 0) {
     s = s.substr(7);
@@ -52,90 +36,62 @@ static void strip_scheme(std::string& s) {
   }
 }
 
-bool init_from_env(const std::string& service_default, const std::string& role) {
-  if (truthy(std::getenv("OTEL_SDK_DISABLED"))) {
-    LOG(INFO) << "OTel C++ SDK disabled via OTEL_SDK_DISABLED";
+// Env-based initialization removed in final scheme.
+
+bool init_from_config(const tensorcast::config::v1::Observability& obs, const std::string& role) {
+  // Honor top-level enable switch
+  if (!obs.otel().enabled()) {
+    LOG(INFO) << "OpenTelemetry disabled via config";
     return false;
   }
 
   try {
     // Resource attributes
-    const std::string service_name = get_env("OTEL_SERVICE_NAME", service_default);
+    std::string service_name =
+        obs.otel().service_name().empty() ? std::string("tensorcast") : obs.otel().service_name();
     resource::ResourceAttributes attrs{
-        {"service.name", service_name},
-        {"service.namespace", std::string("tensorcast")},
-        {"tc.node.role", role},
-    };
+        {"service.name", service_name}, {"service.namespace", std::string("tensorcast")}, {"tc.node.role", role}};
     auto res = resource::Resource::Create(attrs);
 
     // Choose exporter based on protocol
     std::unique_ptr<sdktrace::SpanExporter> exporter;
-    std::string protocol = get_env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc");
-    // Trim spaces & lowercase
-    for (auto& c : protocol) {
-      c = static_cast<char>(::tolower(c));
-    }
-
-    if (protocol == "http/protobuf" || protocol == "http") {
+    const auto proto = obs.otel().exporter_protocol();
+    if (proto == tensorcast::config::v1::Observability_OTelProtocol_O_TEL_PROTOCOL_HTTP_PROTOBUF) {
       opentelemetry::exporter::otlp::OtlpHttpExporterOptions opts;
-      std::string url = get_env(
-          "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-          get_env("OTEL_EXPORTER_OTLP_ENDPOINT", std::string("http://127.0.0.1:4318/v1/traces")));
+      std::string url = obs.otel().exporter_otlp_endpoint();
+      if (url.empty()) {
+        url = "http://127.0.0.1:4318/v1/traces";
+      }
       opts.url = url;
       exporter = opentelemetry::exporter::otlp::OtlpHttpExporterFactory::Create(opts);
-    } else { // grpc
+    } else {
       opentelemetry::exporter::otlp::OtlpGrpcExporterOptions opts;
-      std::string ep = get_env(
-          "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", get_env("OTEL_EXPORTER_OTLP_ENDPOINT", std::string("127.0.0.1:4317")));
-      // Allow ep like http://host:4317
+      std::string ep = obs.otel().exporter_otlp_endpoint().empty() ? std::string("127.0.0.1:4317")
+                                                                   : obs.otel().exporter_otlp_endpoint();
       strip_scheme(ep);
       opts.endpoint = ep;
-      opts.use_ssl_credentials = !truthy(std::getenv("OTEL_EXPORTER_OTLP_INSECURE"));
-      // Metadata headers
-      std::string headers = get_env("OTEL_EXPORTER_OTLP_HEADERS");
-      if (!headers.empty()) {
-        // Parse k=v,k2=v2
-        size_t start = 0;
-        while (start < headers.size()) {
-          size_t comma = headers.find(',', start);
-          std::string_view kv = (comma == std::string::npos) ? std::string_view(headers).substr(start)
-                                                             : std::string_view(headers).substr(start, comma - start);
-          size_t eq = kv.find('=');
-          if (eq != std::string::npos) {
-            std::string key(kv.substr(0, eq));
-            std::string val(kv.substr(eq + 1));
-            opts.metadata.emplace(std::move(key), std::move(val));
-          }
-          if (comma == std::string::npos) {
-            break;
-          }
-          start = comma + 1;
-        }
+      // C++ specific options from otel_cxx
+      opts.use_ssl_credentials = !obs.otel_cxx().exporter_insecure();
+      for (const auto& [k, v] : obs.otel_cxx().exporter_headers()) {
+        opts.metadata.emplace(k, v);
       }
       exporter = opentelemetry::exporter::otlp::OtlpGrpcExporterFactory::Create(opts);
     }
 
-    // Batch span processor with default options
     sdktrace::BatchSpanProcessorOptions bsp_opts;
     auto processor = sdktrace::BatchSpanProcessorFactory::Create(std::move(exporter), bsp_opts);
     auto provider_up = sdktrace::TracerProviderFactory::Create(std::move(processor), res);
-
-    // Optional console exporter omitted (not available via Bazel package)
-
-    // Convert unique_ptr -> shared_ptr for Provider API
     std::shared_ptr<opentelemetry::trace::TracerProvider> provider_sp(std::move(provider_up));
     opentelemetry::trace::Provider::SetTracerProvider(provider_sp);
-    // Set W3C propagator
     opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
         opentelemetry::nostd::shared_ptr<opentelemetry::context::propagation::TextMapPropagator>(
             new opentelemetry::trace::propagation::HttpTraceContext()));
-
-    LOG(INFO) << "OpenTelemetry C++ SDK initialized for service: " << service_name;
+    LOG(INFO) << "OpenTelemetry C++ SDK initialized from config for service: " << service_name;
     return true;
   } catch (const std::exception& e) {
-    LOG(WARNING) << "OTel C++ SDK init failed: " << e.what();
+    LOG(WARNING) << "OTel C++ SDK init (config) failed: " << e.what();
   } catch (...) {
-    LOG(WARNING) << "OTel C++ SDK init failed: unknown error";
+    LOG(WARNING) << "OTel C++ SDK init (config) failed: unknown error";
   }
   return false;
 }

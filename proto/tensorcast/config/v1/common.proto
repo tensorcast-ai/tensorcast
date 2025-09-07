@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package tensorcast.config.v1;
+
+import "google/protobuf/duration.proto";
+
+// Canonical host/port pair used across config.
+message SocketAddress {
+  string host = 1; // e.g., 0.0.0.0 or a DNS name
+  uint32 port = 2; // TCP port
+}
+
+// Common gRPC server knobs used by Daemon and Global Store.
+message GrpcServer {
+  int32 max_message_size_mb = 1;
+  int32 max_concurrent_streams = 2; // 0 = gRPC default
+  google.protobuf.Duration keepalive_time = 3;
+  google.protobuf.Duration keepalive_timeout = 4;
+  google.protobuf.Duration max_connection_idle = 5; // 0s = disabled
+  google.protobuf.Duration max_connection_age = 6; // 0s = disabled
+  bool tcp_nodelay = 7;
+  bool so_reuseport = 8;
+  message Tls {
+    bool enabled = 1;
+    string cert_file = 2;
+    string key_file = 3;
+    string client_ca_file = 4;
+  }
+  Tls tls = 9;
+}
+
+// Common observability configuration across components.
+message Observability {
+  // Canonical logging level enumeration to avoid typos in string values.
+  enum LogLevel {
+    LOG_LEVEL_UNSPECIFIED = 0;
+    LOG_LEVEL_DEBUG = 1;
+    LOG_LEVEL_INFO = 2;
+    LOG_LEVEL_WARN = 3;
+    LOG_LEVEL_ERROR = 4;
+  }
+
+  // Protocol for OTLP exporter.
+  enum OTelProtocol {
+    O_TEL_PROTOCOL_UNSPECIFIED = 0;
+    O_TEL_PROTOCOL_GRPC = 1;
+    O_TEL_PROTOCOL_HTTP_PROTOBUF = 2;
+  }
+
+  message Logging {
+    LogLevel level = 1; // Canonical log level
+    string file = 2; // Optional logfile path
+    bool otel_context_enabled = 3; // Whether to enrich logs with OTel context
+    string sink_file = 4; // Optional enriched sink file
+    int32 vlog_level = 5; // Verbosity level for VLOG
+  }
+
+  message OTel {
+    bool enabled = 1;
+    string exporter_otlp_endpoint = 2;
+    OTelProtocol exporter_protocol = 3; // grpc or http/protobuf
+    string service_name = 4;
+    string sampler = 5; // e.g., parentbased_traceidratio
+    string sampler_arg = 6; // e.g., 1.0
+  }
+
+  message OTelCxx {
+    bool sdk_disabled = 1; // OTEL_SDK_DISABLED
+    // Endpoint/protocol inherit from Observability.OTel; only C++-specific
+    // knobs remain here to avoid duplication and ensure single source of truth.
+    bool exporter_insecure = 2; // OTEL_EXPORTER_OTLP_INSECURE
+    map<string, string> exporter_headers = 3; // OTEL_EXPORTER_OTLP_HEADERS
+    bool console_exporter = 4; // Optional console exporter for debugging
+  }
+
+  message Tracing {
+    string chrome_trace_dir = 1; // Directory for chrome trace output (empty = disabled)
+  }
+
+  Logging logging = 1;
+  OTel otel = 2;
+  OTelCxx otel_cxx = 3;
+  Tracing tracing = 4;
+}
+
+// Optional metadata block for auditing/versioning config files.
+message ConfigMeta {
+  string schema_version = 1; // e.g., "v1"
+  string description = 2; // free-form description for operators
+}

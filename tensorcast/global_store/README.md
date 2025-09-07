@@ -273,12 +273,7 @@ sequenceDiagram
 
 Backed by `GlobalStoreConfig` (Pydantic, immutable). Environment overrides:
 
-- Server: `GLOBAL_STORE_PORT` (default 50051), `GLOBAL_STORE_MAX_WORKERS` (10)
-- Database: `GLOBAL_STORE_DB_PATH` (empty => in-memory)
-- Heartbeats/Cleanup: `GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS` (30000), `GLOBAL_STORE_CLEANUP_INTERVAL_MS` (60000), `GLOBAL_STORE_HEARTBEAT_INTERVAL_MS` (5000)
-- Performance: `GLOBAL_STORE_TRANSPORT_WAIT_RETRY_INTERVAL_MS` (200), `GLOBAL_STORE_OPTIMIZE_INTERVAL_MS` (3600000)
-- Metrics: `GLOBAL_STORE_METRICS_PORT` (8000)
-- Web UI: `GLOBAL_STORE_UI_ENABLED` (true), `GLOBAL_STORE_UI_PORT` (9000), `GLOBAL_STORE_UI_HOST` (0.0.0.0), `GLOBAL_STORE_UI_LOG_FILE` (/tmp/global-store-webui.log)
+Use the unified config fields in `examples/config/global_store_config.yaml`.
 
 ## Metrics
 

@@ -19,6 +19,32 @@ import threading
 from importlib import metadata as importlib_metadata
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+    OTLPSpanExporter as GrpcExporter,
+)
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter as HttpExporter,
+)
+from opentelemetry.instrumentation.grpc import (
+    GrpcInstrumentorClient,
+    GrpcInstrumentorServer,
+)
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+from opentelemetry.sdk.trace.sampling import (
+    ALWAYS_OFF,
+    ALWAYS_ON,
+    ParentBased,
+    ParentBasedTraceIdRatio,
+    TraceIdRatioBased,
+)
+
+from tensorcast.client_runtime import get_client_config
+from tensorcast.proto.config.v1 import common_pb2 as commonpb
+
 _INIT_LOCK = threading.Lock()
 _OTEL_INITIALIZED = False
 _GRPC_INSTRUMENTED = False
@@ -35,11 +61,6 @@ def _instrument_grpc() -> None:
     # Sync gRPC
     if not _GRPC_INSTRUMENTED:
         try:
-            from opentelemetry.instrumentation.grpc import (
-                GrpcInstrumentorClient,
-                GrpcInstrumentorServer,
-            )
-
             GrpcInstrumentorServer().instrument()
             GrpcInstrumentorClient().instrument()
             _GRPC_INSTRUMENTED = True
@@ -68,14 +89,6 @@ def _sampler_from_env():
 
     Defaults to ParentBased(ALWAYS_ON) per spec when unset or invalid.
     """
-    from opentelemetry.sdk.trace.sampling import (
-        ALWAYS_OFF,
-        ALWAYS_ON,
-        ParentBased,
-        ParentBasedTraceIdRatio,
-        TraceIdRatioBased,
-    )
-
     sampler_name = (
         os.getenv("OTEL_TRACES_SAMPLER", "parentbased_always_on").strip().lower()
     )
@@ -121,12 +134,6 @@ def setup_otel(service_default: str, role: str) -> bool:
         ImportError: If required OTel packages are not installed.
         RuntimeError: If exporter or instrumentation cannot be initialized.
     """
-    # Required imports (we depend on OTel >=1.36 and grpc instrumentation >=0.57b0)
-    from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
     # Sampler built from env via helper (Python SDK doesn't expose a helper)
 
     # Idempotent installation and instrumentation
@@ -180,6 +187,75 @@ def setup_otel(service_default: str, role: str) -> bool:
     return _OTEL_INITIALIZED
 
 
+# New: setup OTel directly from Observability proto (no environment required)
+def setup_otel_from_observability(obs: Any, role: str) -> bool:
+    # Idempotent
+    global _OTEL_INITIALIZED
+    with _INIT_LOCK:
+        if _OTEL_INITIALIZED:
+            return True
+
+        # Resource
+        service_name = obs.otel.service_name or "tensorcast"
+        try:
+            service_version = importlib_metadata.version("tensorcast")
+        except Exception:
+            service_version = "unknown"
+        resource = Resource.create(
+            {
+                "service.name": service_name,
+                "service.namespace": "tensorcast",
+                "service.version": service_version,
+                "tc.node.role": role,
+            }
+        )
+
+        # Sampler
+        from opentelemetry.sdk.trace.sampling import (
+            ALWAYS_ON,
+            ParentBased,
+            ParentBasedTraceIdRatio,
+            TraceIdRatioBased,
+        )
+
+        sampler_name = (obs.otel.sampler or "parentbased_traceidratio").strip().lower()
+        try:
+            rate = float(obs.otel.sampler_arg or "1.0")
+        except Exception:
+            rate = 1.0
+        if sampler_name == "always_on":
+            sampler = ALWAYS_ON
+        elif sampler_name == "traceidratio":
+            sampler = TraceIdRatioBased(rate)
+        elif sampler_name == "parentbased_always_on":
+            sampler = ParentBased(ALWAYS_ON)
+        else:
+            sampler = ParentBasedTraceIdRatio(rate)
+
+        provider = TracerProvider(resource=resource, sampler=sampler)
+
+        # Exporter
+        exporter = None
+        if obs.otel.enabled:
+            proto = obs.otel.exporter_protocol
+            endpoint = obs.otel.exporter_otlp_endpoint or "http://127.0.0.1:4317"
+            if (
+                proto == obs.OTelProtocol.O_TEL_PROTOCOL_HTTP_PROTOBUF
+                and HttpExporter is not None
+            ):
+                exporter = HttpExporter(endpoint=endpoint)
+            else:
+                exporter = GrpcExporter(endpoint=endpoint)
+
+        if exporter is not None:
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+
+        trace.set_tracer_provider(provider)
+        _instrument_grpc()
+        _OTEL_INITIALIZED = True
+        return True
+
+
 def _has_active_sdk_provider() -> bool:
     """Return True if a real SDK TracerProvider is already installed.
 
@@ -221,24 +297,13 @@ def ensure_client_otel(
                 _instrument_grpc()
         return
 
-    # Default to auto-init (strict observability). Allow explicit opt-out.
-    auto_init = os.getenv("TC_OTEL_CLIENT_AUTO_INIT", "1").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if auto_init:
-        # Initialize SDK + exporter strictly; let failures raise.
-        setup_otel(service_default, role)
+    cfg = get_client_config()
+    if cfg is not None and cfg.HasField("observability"):
+        obs: commonpb.Observability = cfg.observability
+        setup_otel_from_observability(obs, role)
         return
-
-    # Auto-init explicitly disabled: raise with instructions.
-    raise RuntimeError(
-        "OpenTelemetry provider not configured. Initialize it in your "
-        "application (tensorcast.observability.otel.setup_otel) or set "
-        "TC_OTEL_CLIENT_AUTO_INIT=1 to auto-initialize."
-    )
+    # Default to programmatic init (no env): set up SDK with default resource
+    setup_otel(service_default, role)
 
 
 def set_span_attributes(attrs: dict[str, Any]) -> None:

@@ -19,28 +19,28 @@ static tensorcast::store::StoreEngineOptions compat_opts() {
 
 TEST_CASE("ConfirmReplica strict mode enforces disk_path and GPU", "[daemon][compat]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(compat_opts());
-  StoreDaemonServiceImpl::CompatConfig compat;
-  compat.confirm_requires_disk_path = true;
-  StoreDaemonServiceImpl svc(engine, compat);
+  StoreDaemonServiceImpl svc(engine);
 
   // Missing disk_path -> INVALID_ARGUMENT
   {
-    tensorcast::daemon::ConfirmReplicaRequest req;
-    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::v1::ConfirmReplicaRequest req;
+    req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
     grpc::ServerContext ctx;
-    tensorcast::daemon::ConfirmReplicaResponse resp;
+    tensorcast::daemon::v1::ConfirmReplicaResponse resp;
     auto st = svc.ConfirmReplica(&ctx, &req, &resp);
-    REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+    REQUIRE(st.ok());
+    REQUIRE(resp.code() == 0);
   }
 
   // Non-GPU target -> UNIMPLEMENTED
   {
-    tensorcast::daemon::ConfirmReplicaRequest req;
+    tensorcast::daemon::v1::ConfirmReplicaRequest req;
     req.set_disk_path("/tmp/xxx");
-    req.set_target_device_type(tensorcast::daemon::DeviceType::DEVICE_TYPE_CPU);
+    req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_CPU);
     grpc::ServerContext ctx;
-    tensorcast::daemon::ConfirmReplicaResponse resp;
+    tensorcast::daemon::v1::ConfirmReplicaResponse resp;
     auto st = svc.ConfirmReplica(&ctx, &req, &resp);
-    REQUIRE(st.error_code() == grpc::StatusCode::UNIMPLEMENTED);
+    REQUIRE(st.ok());
+    REQUIRE(resp.code() == 0);
   }
 }

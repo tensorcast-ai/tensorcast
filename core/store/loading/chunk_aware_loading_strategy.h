@@ -14,16 +14,10 @@
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/memory_manager.h"
 #include "core/store/replica/replica_memory_coordinator.h"
-
-// Forward declare components type used in signatures to avoid heavy includes here.
-namespace tensorcast::store::components {
-class GlobalStoreClient;
-}
+// Prefer explicit includes over forward declarations
+#include "core/store/components/global_store_client.h"
 
 namespace tensorcast::store::loading {
-
-// Forward declarations
-class IArtifactLoader;
 
 /**
  * @brief Strategy for determining optimal chunk loading plan across multiple sources.

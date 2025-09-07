@@ -60,7 +60,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     span->SetAttribute("tc.artifact.id", req->artifact_id());
   }
   // Avoid other high-cardinality attributes unless explicitly enabled
-  const bool allow_hc = tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"));
+  const bool allow_hc = opts_.allow_high_card_attrs;
   if (allow_hc) {
     if (req->has_disk_path() && !req->disk_path().empty()) {
       span->SetAttribute("tc.disk.path", req->disk_path());
@@ -155,7 +155,7 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "ConfirmReplica");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     span->SetAttribute("tc.disk.path", req->disk_path());
   }
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req->target_device_type()));
@@ -213,7 +213,7 @@ Status StoreDaemonServiceImpl::UnloadReplica(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "UnloadReplica");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     if (!req->disk_path().empty())
       span->SetAttribute("tc.disk.path", req->disk_path());
     if (req->has_pid())
@@ -393,7 +393,7 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "WaitReplicaVerification");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     if (!req->replica_uuid().empty())
       span->SetAttribute("tc.replica.id", req->replica_uuid());
   }
@@ -517,7 +517,7 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "UnlockTransportChunks");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     span->SetAttribute("tc.lock.token", req->lock_token());
   }
   auto entry = locks_.get(req->lock_token());
@@ -682,7 +682,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "CommitRegisteredArtifact");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     span->SetAttribute("tc.registration.id", req->registration_id());
   }
   // Decide path by plan
@@ -941,7 +941,7 @@ Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "AbortRegisteredArtifact");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     span->SetAttribute("tc.registration.id", req->registration_id());
   }
   auto st = engine_->abort_registered_artifact(req->registration_id());
@@ -1041,7 +1041,7 @@ Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
   return Status::OK;
 }
 
-grpc::Status StoreDaemonServiceImpl::FeedRegisterArtifactStreamVector(
+grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
     const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
   bool saw_last = false;
@@ -1163,7 +1163,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
       for (const auto& k : sessions_.keys()) {
         sessions_.remove_if_expired(k);
       }
-      std::this_thread::sleep_for(std::chrono::seconds(10));
+      std::this_thread::sleep_for(opts_.sessions_sweep_interval);
     }
   });
   sweep_locks_th_ = std::thread([this]() {
@@ -1174,7 +1174,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
           (void)engine_->unlock_chunks(expired->key, absl::MakeSpan(expired->chunk_indices), /*copied_gpu=*/false);
         }
       }
-      std::this_thread::sleep_for(std::chrono::seconds(10));
+      std::this_thread::sleep_for(opts_.locks_sweep_interval);
     }
   });
   // Verification and auto-registration sweeper: updates verification status and
@@ -1249,7 +1249,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
         }
       }
 
-      std::this_thread::sleep_for(500ms);
+      std::this_thread::sleep_for(opts_.verification_sweep_interval);
     }
   });
   // PID watcher: drop dead PID refs to avoid leaked references pinning memory
@@ -1266,7 +1266,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
           }
         }
       }
-      std::this_thread::sleep_for(std::chrono::seconds(5));
+      std::this_thread::sleep_for(opts_.proc_check_interval);
     }
   });
   // Optional periodic eviction policy: unload least-recently-used GPU replicas
@@ -1275,29 +1275,10 @@ void StoreDaemonServiceImpl::start_sweepers() {
   //  - TC_DAEMON_ENABLE_PERIODIC_EVICTION: truthy to enable (default: false)
   //  - TC_DAEMON_GPU_MEMORY_LIMIT_FRACTION: threshold fraction (default: 0.90)
   //  - TC_DAEMON_EVICTION_CHECK_INTERVAL_MS: check interval in ms (default: 1000)
-  const bool enable_periodic_eviction = tc_otel_truthy(std::getenv("TC_DAEMON_ENABLE_PERIODIC_EVICTION"));
-  if (enable_periodic_eviction) {
-    auto env_double = [](const char* name, double defval) -> double {
-      if (const char* v = std::getenv(name)) {
-        char* end = nullptr;
-        double d = std::strtod(v, &end);
-        if (end != v)
-          return d;
-      }
-      return defval;
-    };
-    auto env_int = [](const char* name, int defval) -> int {
-      if (const char* v = std::getenv(name)) {
-        char* end = nullptr;
-        int64_t x = std::strtol(v, &end, 10);
-        if (end != v)
-          return static_cast<int>(x);
-      }
-      return defval;
-    };
-    const double gpu_memory_limit_fraction = env_double("TC_DAEMON_GPU_MEMORY_LIMIT_FRACTION", 0.90);
-    const int eviction_check_interval_ms = env_int("TC_DAEMON_EVICTION_CHECK_INTERVAL_MS", 1000);
-    eviction_th_ = std::thread([this, gpu_memory_limit_fraction, eviction_check_interval_ms]() {
+  if (opts_.enable_periodic_eviction) {
+    const double gpu_memory_limit_fraction = opts_.gpu_memory_limit_fraction;
+    const auto eviction_check_interval = opts_.eviction_check_interval;
+    eviction_th_ = std::thread([this, gpu_memory_limit_fraction, eviction_check_interval]() {
       using namespace std::chrono_literals;
       while (!stop_.load()) {
         // Iterate all GPU devices; if usage exceeds threshold, evict LRU replicas with no refs and not keep_for_global
@@ -1351,7 +1332,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
             ratio = used2 / total;
           }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(eviction_check_interval_ms));
+        std::this_thread::sleep_for(eviction_check_interval);
       }
     });
   }
@@ -1523,7 +1504,7 @@ Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
   span->SetAttribute("rpc.method", "GetLoadedReplicasV2");
-  if (tc_otel_truthy(std::getenv("TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS"))) {
+  if (opts_.allow_high_card_attrs) {
     if (req->has_artifact_id_filter())
       span->SetAttribute("tc.artifact.filter", req->artifact_id_filter());
   }

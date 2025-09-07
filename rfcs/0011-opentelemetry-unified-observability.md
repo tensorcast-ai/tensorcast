@@ -15,7 +15,7 @@ This document is a high-level guide to TensorCast's OpenTelemetry (OTel) adoptio
   - Python logs auto-inject `trace_id`/`span_id` (when an active span exists).
   - C++ optionally installs an absl::LogSink that writes `trace_id`/`span_id` to a file for the Collector to ingest.
 
-All features are environment-driven. With no exporter configured or with sampling at 0, overhead is near-zero.
+All features are configuration-driven via unified Observability. With no exporter configured or with sampling at 0, overhead is near-zero.
 
 ### Design principles (when adding/modifying instrumentation)
 
@@ -31,8 +31,8 @@ All features are environment-driven. With no exporter configured or with samplin
 
 - **Entry & initialization**
   - Unified init: `tensorcast/observability/otel.py` (shared by server and client contexts).
-  - Global Store: set Provider + gRPC server instrumentation before server startup (`tensorcast/global_store/__main__.py`).
-  - Client SDK: `tensorcast/daemon_ctl.py`, `tensorcast/torch_util.py` ensure Provider + gRPC client instrumentation via `ensure_client_otel()` (supports `TC_OTEL_CLIENT_AUTO_INIT=1`).
+  - Global Store: set Provider + gRPC server instrumentation from config before startup (`tensorcast/global_store/__main__.py`).
+  - Client SDK: `tensorcast/daemon_ctl.py`, `tensorcast/torch_util.py` ensure Provider + gRPC client instrumentation via `ensure_client_otel()` (reads ClientConfig Observability; no env required).
 - **Where to add spans**
   - gRPC server handlers: `tensorcast/global_store/grpc_service.py` (set standard `rpc.*` and necessary `tc.*` attributes per RPC).
   - High-level APIs: `tensorcast/torch_util.py` (wrap user-facing operations with parent spans and add business attributes).
@@ -45,7 +45,7 @@ Practical tips: set `service.name` explicitly; attach low-cardinality `tc.*` att
 #### C++ (StoreDaemon / Core)
 
 - **Entry & common wrappers**
-  - SDK init: `core/common/otel/init.h/.cc` provides `init_from_env(service, role)`; call early in `daemon/server_main.cc`.
+  - SDK init: `core/common/otel/init.h/.cc` provides `init_from_config(obs, role)`; call early in `daemon/server_main.cc`.
   - gRPC propagation: `core/common/otel/grpc_propagation.h` extracts/injects Trace Context on `grpc::{Server,Client}Context`.
   - Trace bridge: `core/common/otel/trace_scope_bridge.h` bridges `SC_TRACE_*` to OTel spans (no business code changes needed).
 - **Where to add spans/events**
@@ -64,18 +64,12 @@ Practical tips: aggregate hot-path work into stage spans; rely on existing init/
   - Standard: `rpc.system=grpc`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code`.
   - Business (low-cardinality): `tc.artifact.id`, `tc.replica.id`, `tc.device.id`, `tc.size.bytes`, `tc.source.type=remote|disk`, `tc.location=gpu|cpu`.
 
-### Run & verify (minimal)
-
-- **Key environment variables**
-  - `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g., `http://127.0.0.1:4317` or `http://127.0.0.1:4318`)
-  - `OTEL_EXPORTER_OTLP_PROTOCOL=grpc|http/protobuf`
-  - `OTEL_SERVICE_NAME` (e.g., `tensorcast-global-store`, `tensorcast-store-daemon`, `tensorcast-client`)
-  - `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and `OTEL_TRACES_SAMPLER_ARG`
-  - Client optional: `TC_OTEL_CLIENT_AUTO_INIT=1`
-- **Local verification (recommended)**
-  - Start Collector via `tools/otel/collector-dev.yaml`.
-  - Start Global Store and Daemon (Fake CUDA is supported).
-  - Use `tools/otel_smoke.py` or any gRPC call to verify cross-service traces/logs/metrics visibility.
+- **Run & verify (minimal)**
+  - Configure `observability.otel.*` in your config (Daemon/Global Store/ClientConfig).
+  - Local verification (recommended):
+    - Start Collector via `tools/otel/collector-dev.yaml`.
+    - Start Global Store and Daemon (Fake CUDA is supported).
+    - Use `tools/otel_smoke.py` or any gRPC call to verify cross-service traces/logs/metrics visibility.
 
 ### Code map (quick index)
 
@@ -104,6 +98,5 @@ Practical tips: aggregate hot-path work into stage spans; rely on existing init/
 
 - Lower sampling to 0 or remove exporters to “turn off” signal export; C++ runs in API-only (no-op) mode without SDK init.
 - The in-house trace remains bridged; macro scope semantics are preserved.
-
 
 

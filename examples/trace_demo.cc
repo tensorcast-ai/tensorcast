@@ -16,14 +16,8 @@ void simulate_work(int ms) {
 }
 
 int main() {
-  // Set output directory for Chrome traces
-  const char* trace_dir = std::getenv("SC_TRACE_OUTPUT_DIR");
-  if (!trace_dir) {
-    std::cout << "Hint: Set SC_TRACE_OUTPUT_DIR environment variable to save Chrome traces\n";
-    std::cout << "Example: export SC_TRACE_OUTPUT_DIR=/tmp/traces\n\n";
-  } else {
-    std::cout << "Chrome traces will be saved to: " << trace_dir << "\n\n";
-  }
+  // Chrome trace output via environment is disabled in the unified scheme.
+  std::cout << "Chrome trace output is disabled by default in this demo.\n\n";
 
   // Simulate loading a artifact
   const std::string artifact_id = "llama-7b";
@@ -72,10 +66,7 @@ int main() {
   }
 
   std::cout << "\nDemo completed!\n";
-  if (trace_dir) {
-    std::cout << "Check " << trace_dir << "/" << artifact_id << "+" << request_id << ".json\n";
-    std::cout << "Open chrome://tracing and load the JSON file to visualize\n";
-  }
+  std::cout << "Use in-process logs or integrate with your observability pipeline to visualize traces.\n";
 
   return 0;
 }

@@ -13,8 +13,8 @@ Example
         --grpc-host 127.0.0.1 --grpc-port 50051 \
         --ui-host 0.0.0.0 --ui-port 9000
 
-Environment variables understood by :pyclass:`tensorcast.global_store.config.GlobalStoreConfig`
-are still respected – command-line arguments take precedence.
+This entry no longer reads environment variables; pass necessary options
+via CLI arguments or the Global Store process configuration.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def cli(argv: list[str] | None = None) -> None:  # noqa: D401
     # usual config loader still handles them.
     # ------------------------------------------------------------------
 
-    base_cfg = GlobalStoreConfig.from_env()
+    base_cfg = GlobalStoreConfig()
     ui_config = base_cfg.model_copy(
         update={
             "ui_host": args.ui_host,

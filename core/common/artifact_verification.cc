@@ -9,7 +9,7 @@
 
 #include <nlohmann/json.hpp>
 #include "absl/log/log.h"
-#include "absl/strings/str_format.h"
+#include "absl/strings/str_cat.h"
 #include "core/common/cuda_api.h"
 #include "core/common/error_handling.h"
 
@@ -19,11 +19,11 @@ using json = nlohmann::json;
 namespace tensorcast::common {
 
 // xxHash64 constants
-static constexpr uint64_t PRIME64_1 = 11400714785074694791ULL;
-static constexpr uint64_t PRIME64_2 = 14029467366897019727ULL;
-static constexpr uint64_t PRIME64_3 = 1609587929392839161ULL;
-static constexpr uint64_t PRIME64_4 = 9650029242287828579ULL;
-static constexpr uint64_t PRIME64_5 = 2870177450012600261ULL;
+static constexpr uint64_t kPrimE641 = 11400714785074694791ULL;
+static constexpr uint64_t kPrimE642 = 14029467366897019727ULL;
+static constexpr uint64_t kPrimE643 = 1609587929392839161ULL;
+static constexpr uint64_t kPrimE644 = 9650029242287828579ULL;
+static constexpr uint64_t kPrimE645 = 2870177450012600261ULL;
 
 // JSON serialization using nlohmann/json
 std::string ArtifactVerificationInfo::to_json() const {
@@ -88,11 +88,11 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerificationInfo::from_json(con
     return info;
 
   } catch (const json::parse_error& e) {
-    return absl::InvalidArgumentError(absl::StrFormat("JSON parse error: %s", e.what()));
+    return absl::InvalidArgumentError(absl::StrCat("JSON parse error: ", e.what()));
   } catch (const json::type_error& e) {
-    return absl::InvalidArgumentError(absl::StrFormat("JSON type error: %s", e.what()));
+    return absl::InvalidArgumentError(absl::StrCat("JSON type error: ", e.what()));
   } catch (const std::exception& e) {
-    return absl::InvalidArgumentError(absl::StrFormat("JSON processing error: %s", e.what()));
+    return absl::InvalidArgumentError(absl::StrCat("JSON processing error: ", e.what()));
   }
 }
 
@@ -103,60 +103,60 @@ static inline uint64_t rotl64(uint64_t x, int r) {
 
 // xxHash64 implementation
 uint64_t ArtifactVerifier::xxhash64(const void* data, size_t len, uint64_t seed) {
-  const uint8_t* p = static_cast<const uint8_t*>(data);
+  const auto* p = static_cast<const uint8_t*>(data);
   const uint8_t* const end = p + len;
   uint64_t h64;
 
   if (len >= 32) {
     const uint8_t* const limit = end - 32;
-    uint64_t v1 = seed + PRIME64_1 + PRIME64_2;
-    uint64_t v2 = seed + PRIME64_2;
+    uint64_t v1 = seed + kPrimE641 + kPrimE642;
+    uint64_t v2 = seed + kPrimE642;
     uint64_t v3 = seed + 0;
-    uint64_t v4 = seed - PRIME64_1;
+    uint64_t v4 = seed - kPrimE641;
 
     do {
-      v1 = rotl64(v1 + (*reinterpret_cast<const uint64_t*>(p) * PRIME64_2), 31) * PRIME64_1;
+      v1 = rotl64(v1 + (*reinterpret_cast<const uint64_t*>(p) * kPrimE642), 31) * kPrimE641;
       p += 8;
-      v2 = rotl64(v2 + (*reinterpret_cast<const uint64_t*>(p) * PRIME64_2), 31) * PRIME64_1;
+      v2 = rotl64(v2 + (*reinterpret_cast<const uint64_t*>(p) * kPrimE642), 31) * kPrimE641;
       p += 8;
-      v3 = rotl64(v3 + (*reinterpret_cast<const uint64_t*>(p) * PRIME64_2), 31) * PRIME64_1;
+      v3 = rotl64(v3 + (*reinterpret_cast<const uint64_t*>(p) * kPrimE642), 31) * kPrimE641;
       p += 8;
-      v4 = rotl64(v4 + (*reinterpret_cast<const uint64_t*>(p) * PRIME64_2), 31) * PRIME64_1;
+      v4 = rotl64(v4 + (*reinterpret_cast<const uint64_t*>(p) * kPrimE642), 31) * kPrimE641;
       p += 8;
     } while (p <= limit);
 
     h64 = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18);
-    h64 = (h64 ^ (rotl64(v1 * PRIME64_2, 31) * PRIME64_1)) * PRIME64_1 + PRIME64_4;
-    h64 = (h64 ^ (rotl64(v2 * PRIME64_2, 31) * PRIME64_1)) * PRIME64_1 + PRIME64_4;
-    h64 = (h64 ^ (rotl64(v3 * PRIME64_2, 31) * PRIME64_1)) * PRIME64_1 + PRIME64_4;
-    h64 = (h64 ^ (rotl64(v4 * PRIME64_2, 31) * PRIME64_1)) * PRIME64_1 + PRIME64_4;
+    h64 = (h64 ^ (rotl64(v1 * kPrimE642, 31) * kPrimE641)) * kPrimE641 + kPrimE644;
+    h64 = (h64 ^ (rotl64(v2 * kPrimE642, 31) * kPrimE641)) * kPrimE641 + kPrimE644;
+    h64 = (h64 ^ (rotl64(v3 * kPrimE642, 31) * kPrimE641)) * kPrimE641 + kPrimE644;
+    h64 = (h64 ^ (rotl64(v4 * kPrimE642, 31) * kPrimE641)) * kPrimE641 + kPrimE644;
   } else {
-    h64 = seed + PRIME64_5;
+    h64 = seed + kPrimE645;
   }
 
   h64 += len;
 
   while (p + 8 <= end) {
-    h64 ^= rotl64(*reinterpret_cast<const uint64_t*>(p) * PRIME64_2, 31) * PRIME64_1;
-    h64 = rotl64(h64, 27) * PRIME64_1 + PRIME64_4;
+    h64 ^= rotl64(*reinterpret_cast<const uint64_t*>(p) * kPrimE642, 31) * kPrimE641;
+    h64 = rotl64(h64, 27) * kPrimE641 + kPrimE644;
     p += 8;
   }
 
   if (p + 4 <= end) {
-    h64 ^= *reinterpret_cast<const uint32_t*>(p) * PRIME64_1;
-    h64 = rotl64(h64, 23) * PRIME64_2 + PRIME64_3;
+    h64 ^= *reinterpret_cast<const uint32_t*>(p) * kPrimE641;
+    h64 = rotl64(h64, 23) * kPrimE642 + kPrimE643;
     p += 4;
   }
 
   while (p < end) {
-    h64 ^= (*p++) * PRIME64_5;
-    h64 = rotl64(h64, 11) * PRIME64_1;
+    h64 ^= (*p++) * kPrimE645;
+    h64 = rotl64(h64, 11) * kPrimE641;
   }
 
   h64 ^= h64 >> 33;
-  h64 *= PRIME64_2;
+  h64 *= kPrimE642;
   h64 ^= h64 >> 29;
-  h64 *= PRIME64_3;
+  h64 *= kPrimE643;
   h64 ^= h64 >> 32;
 
   return h64;
@@ -392,7 +392,7 @@ absl::Status ArtifactVerifier::verify_key_points(
   uint64_t total_size = std::accumulate(data_sizes.begin(), data_sizes.end(), 0UL);
   if (total_size != expected_info.artifact_size) {
     return absl::FailedPreconditionError(
-        absl::StrFormat("Size mismatch: got %lu, expected %lu", total_size, expected_info.artifact_size));
+        absl::StrCat("Size mismatch: got ", total_size, ", expected ", expected_info.artifact_size));
   }
 
   // Set CUDA device if needed
@@ -410,10 +410,11 @@ absl::Status ArtifactVerifier::verify_key_points(
   }
   if (*first_val != expected_info.key_values[0]) {
     return absl::DataLossError(
-        absl::StrFormat(
-            "Key point mismatch at start of replica: got 0x%lx, expected 0x%lx",
-            *first_val,
-            expected_info.key_values[0]));
+        absl::StrCat(
+            "Key point mismatch at start of replica: got 0x",
+            absl::Hex(*first_val),
+            ", expected 0x",
+            absl::Hex(expected_info.key_values[0])));
   }
 
   // Check middle value - only copy 8 bytes
@@ -423,8 +424,11 @@ absl::Status ArtifactVerifier::verify_key_points(
   }
   if (*mid_val != expected_info.key_values[1]) {
     return absl::DataLossError(
-        absl::StrFormat(
-            "Key point mismatch at middle: got 0x%lx, expected 0x%lx", *mid_val, expected_info.key_values[1]));
+        absl::StrCat(
+            "Key point mismatch at middle: got 0x",
+            absl::Hex(*mid_val),
+            ", expected 0x",
+            absl::Hex(expected_info.key_values[1])));
   }
 
   // Check last value - only copy 8 bytes
@@ -434,8 +438,11 @@ absl::Status ArtifactVerifier::verify_key_points(
   }
   if (*last_val != expected_info.key_values[2]) {
     return absl::DataLossError(
-        absl::StrFormat(
-            "Key point mismatch at end: got 0x%lx, expected 0x%lx", *last_val, expected_info.key_values[2]));
+        absl::StrCat(
+            "Key point mismatch at end: got 0x",
+            absl::Hex(*last_val),
+            ", expected 0x",
+            absl::Hex(expected_info.key_values[2])));
   }
 
   VLOG(1) << "Key-point verification passed for " << total_size << " bytes" << (device_id >= 0 ? " (GPU)" : " (CPU)")
@@ -471,7 +478,7 @@ absl::Status ArtifactVerifier::verify_artifact_data(
         return val.status();
       }
       if (*val != expected_info.sample_values.at(i)) {
-        return absl::DataLossError(absl::StrFormat("Sample value mismatch at offset %lu", offset));
+        return absl::DataLossError(absl::StrCat("Sample value mismatch at offset ", offset));
       }
     }
   }
@@ -501,7 +508,7 @@ absl::Status ArtifactVerifier::verify_artifact_data(
       }
 
       if (seg_hash != expected_info.segment_hashes.at(seg)) {
-        return absl::DataLossError(absl::StrFormat("Segment %lu hash mismatch", seg));
+        return absl::DataLossError(absl::StrCat("Segment ", seg, " hash mismatch"));
       }
     }
   }

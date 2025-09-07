@@ -78,7 +78,7 @@ static inline bool HasExt(const std::string& path, const char* ext) {
 
 } // namespace
 
-void NormalizeDefaults(tc::CommunicatorConfig* cfg) {
+void normalize_defaults(tc::CommunicatorConfig* cfg) {
   if (!cfg)
     return;
 
@@ -173,7 +173,7 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
     cfg.mutable_pool()->set_preregister_mr(true);
   }
 
-  NormalizeDefaults(&cfg);
+  normalize_defaults(&cfg);
   return cfg;
 }
 

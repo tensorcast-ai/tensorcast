@@ -274,7 +274,7 @@ Mid‑term:
 
 Security & policy:
 
-- Stricter same‑process CUDA IPC fallback controls (env‑gated).
+- Same‑process CUDA IPC fallback is disabled in the final scheme (no env gating).
 - Audit and revoke logs for Lease/DVMP access.
 - Budget/throttling for registration peak memory/bandwidth, integrated with eviction policies.
 

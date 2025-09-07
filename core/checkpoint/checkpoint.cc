@@ -579,15 +579,10 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
   // ------------------------------------------------------------------
 #ifndef USE_FAKE_CUDA
   if (device_id >= 0) {
-    // Resolve configuration from environment variables (reuse streaming writer envs)
-    const char* chunk_size_env = std::getenv("STREAMING_CHUNK_SIZE_MB");
-    const char* pool_size_env = std::getenv("STREAMING_POOL_SIZE_GB");
-    const char* num_buffers_env = std::getenv("STREAMING_NUM_BUFFERS");
-
-    size_t buffer_size_mb = chunk_size_env ? std::stoull(chunk_size_env) : 256; // default 256MB
-    size_t num_buffers = num_buffers_env ? std::stoull(num_buffers_env) : 4;
-    size_t pool_size_gb = pool_size_env ? std::stoull(pool_size_env) : 2; // default 2GB pool
-
+    // Use fixed defaults for streaming restore (no environment variables)
+    const size_t buffer_size_mb = 256; // 256MB
+    const size_t num_buffers = 4;
+    const size_t pool_size_gb = 2; // 2GB
     const size_t chunk_size = buffer_size_mb << 20; // bytes
     const size_t pool_size = pool_size_gb << 30; // bytes
 

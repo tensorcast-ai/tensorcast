@@ -7,7 +7,7 @@
 using tensorcast::DeviceType;
 using tensorcast::daemon::TransportLockManager;
 using tensorcast::store::DeviceKey;
-using tensorcast::store::ReplicaKey;
+using tensorcast::store::loading::ReplicaKey;
 
 static ReplicaKey make_key(const std::string& id) {
   return ReplicaKey{

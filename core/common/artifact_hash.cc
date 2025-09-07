@@ -30,12 +30,14 @@ constexpr size_t kMaxChunkSize = 64ULL * 1024 * 1024;
 constexpr size_t kDefaultChunkSize = 4ULL * 1024 * 1024;
 
 // Base32 RFC 4648 alphabet (lowercase without padding)
-constexpr char kBase32Alphabet[] = "abcdefghijklmnopqrstuvwxyz234567";
+constexpr std::array<char, 32> kBase32Alphabet{'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k',
+                                               'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                                               'w', 'x', 'y', 'z', '2', '3', '4', '5', '6', '7'};
 
 // Base32 (lowercase) without padding, RFC 4648 alphabet
 std::string base32_lower_encode(const std::vector<uint8_t>& data) {
   if (data.empty()) {
-    return std::string();
+    return {};
   }
 
   const size_t in_len = data.size();
@@ -58,7 +60,8 @@ std::string base32_lower_encode(const std::vector<uint8_t>& data) {
 
     // Extract 8 5-bit values
     for (int shift = 35; shift >= 0; shift -= 5) {
-      result.push_back(kBase32Alphabet[(buffer >> shift) & 0x1F]);
+      const auto idx = static_cast<size_t>((buffer >> shift) & 0x1F);
+      result.push_back(kBase32Alphabet.at(idx));
     }
 
     i += bytes_to_process;
@@ -89,7 +92,7 @@ class EvpMdCtxWrapper {
   EVP_MD_CTX* get() {
     return ctx_;
   }
-  bool valid() const {
+  [[nodiscard]] bool valid() const {
     return ctx_ != nullptr;
   }
 
@@ -340,7 +343,7 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint6
   std::vector<std::vector<uint8_t>> leaves;
   leaves.reserve(static_cast<size_t>((total_size + chunk_size_bytes - 1) / chunk_size_bytes));
 
-  uint8_t* src = static_cast<uint8_t*>(gpu_ptr);
+  auto* src = static_cast<uint8_t*>(gpu_ptr);
   std::vector<uint8_t> host_buf(chunk_size_bytes);
   uint64_t processed = 0;
 

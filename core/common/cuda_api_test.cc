@@ -49,7 +49,8 @@ TEST_CASE("CUDA API abstraction layer", "[cuda]") {
     REQUIRE(ptr != nullptr);
 
     // Get memory info
-    size_t free_before = 0, total = 0;
+    size_t free_before = 0;
+    size_t total = 0;
     status = cuda::get_memory_info(&free_before, &total, 0);
     REQUIRE(status.ok());
     REQUIRE(total > 0);
@@ -124,7 +125,7 @@ TEST_CASE("CUDA API abstraction layer", "[cuda]") {
     status = cuda::memcpy(host_ptr, gpu_ptr, size, cudaMemcpyDeviceToHost);
     REQUIRE(status.ok());
 
-    uint8_t* host_bytes = static_cast<uint8_t*>(host_ptr);
+    auto* host_bytes = static_cast<uint8_t*>(host_ptr);
     bool all_42 = true;
     for (size_t i = 0; i < size; ++i) {
       if (host_bytes[i] != 42) {

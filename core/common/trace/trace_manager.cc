@@ -11,6 +11,7 @@
 #include <sstream>
 #include <utility>
 
+#include <filesystem>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "nlohmann/json.hpp"
@@ -30,6 +31,11 @@ TraceManager& TraceManager::instance() {
 // Thread-local storage for current request id.
 thread_local std::string TraceManager::tls_request_id_;
 thread_local std::string TraceManager::tls_artifact_id_;
+
+namespace {
+absl::Mutex g_dir_mu;
+std::string g_chrome_trace_dir ABSL_GUARDED_BY(g_dir_mu);
+} // namespace
 
 // ---------------- Request-id helpers ------------------------------------
 
@@ -257,6 +263,60 @@ std::string TraceManager::generate_chrome_trace(const std::string& artifact_id, 
   }
 
   return events.dump(2); // Pretty print with 2-space indent
+}
+
+void TraceManager::set_chrome_trace_dir(const std::string& dir) {
+  absl::MutexLock l(&g_dir_mu);
+  g_chrome_trace_dir = dir;
+}
+
+std::string TraceManager::chrome_trace_dir() {
+  absl::MutexLock l(&g_dir_mu);
+  return g_chrome_trace_dir;
+}
+
+void TraceManager::write_chrome_trace_if_configured(const std::string& artifact_id, const std::string& request_id) {
+  std::string dir;
+  {
+    absl::MutexLock l(&g_dir_mu);
+    dir = g_chrome_trace_dir;
+  }
+  if (dir.empty())
+    return;
+  try {
+    namespace fs = std::filesystem;
+    fs::path dir_path(dir);
+    std::error_code ec;
+    fs::create_directories(dir_path, ec);
+    if (ec) {
+      LOG(WARNING) << "[TraceSummary] Failed to create chrome trace dir: " << dir << ", error: " << ec.message();
+      return;
+    }
+
+    std::string json = TraceManager::instance().generate_chrome_trace(artifact_id, request_id);
+    // filename: <artifact>+<request>.json (sanitized)
+    std::string filename = artifact_id;
+    if (!request_id.empty())
+      filename += "+" + request_id;
+    for (char& c : filename) {
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+        c = '_';
+      }
+    }
+    filename += ".json";
+
+    fs::path full = dir_path / filename;
+    std::ofstream f(full);
+    if (!f.is_open()) {
+      LOG(WARNING) << "[TraceSummary] Failed to open for writing: " << full.string();
+      return;
+    }
+    f << json;
+    f.close();
+    LOG(INFO) << "[TraceSummary] Chrome trace saved to: " << full.string();
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[TraceSummary] Failed to save Chrome trace: " << e.what();
+  }
 }
 
 void TraceManager::clear_trace(const std::string& artifact_id, const std::string& request_id) {
