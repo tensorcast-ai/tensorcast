@@ -238,7 +238,9 @@ message GetArtifactIndexResponse {
 }
 
 // Get canonical index by artifact_id
-message GetArtifactIndexByIdRequest { string artifact_id = 1; }
+message GetArtifactIndexByIdRequest {
+  string artifact_id = 1;
+}
 message GetArtifactIndexByIdResponse {
   Status status = 1;
   bytes tensor_index_data = 2;
@@ -424,9 +426,14 @@ message UpsertKeyMappingRequest {
   string disk_path = 5;
   google.protobuf.Duration ttl = 6; // Optional TTL for the mapping
 }
-message UpsertKeyMappingResponse { Status status = 1; string conflict_reason = 2; }
+message UpsertKeyMappingResponse {
+  Status status = 1;
+  string conflict_reason = 2;
+}
 
-message ResolveKeyMappingRequest { string key = 1; }
+message ResolveKeyMappingRequest {
+  string key = 1;
+}
 message ResolveKeyMappingResponse {
   Status status = 1;
   string artifact_id = 2;
@@ -435,5 +442,9 @@ message ResolveKeyMappingResponse {
   string disk_path = 5;
 }
 
-message RevokeKeyMappingRequest { string key = 1; }
-message RevokeKeyMappingResponse { Status status = 1; }
+message RevokeKeyMappingRequest {
+  string key = 1;
+}
+message RevokeKeyMappingResponse {
+  Status status = 1;
+}
