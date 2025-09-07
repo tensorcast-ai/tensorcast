@@ -279,7 +279,7 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
   span->SetAttribute("tc.key", req->key());
 
   if (req->key().empty() || !req->has_artifact_descriptor() || req->artifact_descriptor().artifact_id().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key and descriptor.artifact_id are required"};
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key and artifact_descriptor.artifact_id are required"};
   }
   if (is_shutting_down_.load()) {
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
