@@ -61,7 +61,7 @@ Conclusion: adopt a holistic design of “AVBS (content) + unified registration 
 This section reflects what is implemented today (code‑aligned), so this RFC can be used operationally.
 
 - Python SDK (unified entry)
-  - `tensorcast/torch_util.py` exposes:
+- `tensorcast/api` exposes:
     - `RegisterArtifactOptions` (simple class, not Pydantic): plan=`vram_coalesced|dvmp|vram_leased` and per‑plan options.
     - `register_artifact(state_dict, options, device_id?, ttl_ms?, daemon_address?)`: routes to unified RPC per plan:
       - vram_coalesced: Begin → IPC map → chunked writes → Commit.
@@ -265,7 +265,7 @@ Short‑term (target next iteration):
 
 5) Docs & tools
 - Migrate CLI/scripts to v1 proto path (e.g., `daemon_manager.py`).
-- Clarify plan aliases in `tensorcast/torch_util.py` (`vram_coalesced|coalesced` / `vram_leased|lease` / `dvmp|uma|cpu`).
+- Clarify plan aliases in `tensorcast/api` (`vram_coalesced|coalesced` / `vram_leased|lease` / `dvmp|uma|cpu`).
 
 Mid‑term:
 
@@ -450,7 +450,7 @@ This section integrates the capabilities originally proposed in RFC‑0017 into 
   - When `disk_path == ""` the daemon may choose an effective path under its configured `storage_root` and persist the checkpoint after Commit (Phase 2 rollout).
 - Client SDK:
   - `RegisterArtifactOptions` gains `key: str | None` and `disk_path: str | None`.
-  - `get_artifact(key, ...)` materializes by key, preferring P2P, with automatic disk fallback.
+  - `get_artifact_sync(key, ...)` materializes by key, preferring P2P, with automatic disk fallback.
 
 ### 14.2 Consistency & Validation (Why)
 
@@ -483,7 +483,7 @@ Client SDK (Python):
   - If `disk_path` is non‑empty and exists, validate metadata before Begin/Commit; on failure, abort without committing.
   - On successful Commit: if `key` is provided, publish key mapping; if `disk_path == ""`, daemon may persist and register a DISK replica (Phase 2).
 - Retrieval:
-  - `get_artifact(key, device_id=0, options=GetArtifactOptions)` prefers P2P; on failure, falls back to DISK if available. `GetArtifactOptions` includes `prefer`, `pinned_allocation_timeout_ms`, `wait_for_completion`, `enable_verification`.
+  - `get_artifact_sync(key, device_id=0, options=GetArtifactOptions)` prefers P2P; for async, use `get_artifact_async(...)`. On failure, falls back to DISK if available. `GetArtifactOptions` includes `prefer`, `pinned_allocation_timeout_ms`, `enable_verification`.
 
 Store Daemon (gRPC additions):
 
@@ -545,11 +545,10 @@ rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse)
 ### 14.8 Execution Status & Phasing
 
 - Phase 1 (SDK + control plane):
-  - SDK options `key/disk_path`, metadata validation, `get_artifact(key, ...)`.
+  - SDK options `key/disk_path`, metadata validation, `get_artifact_sync(key, ...)`.
   - Global Store RPCs and backing table(s) for key mappings, TTL, and idempotent upserts.
   - Daemon RPCs to publish keys and materialize by key; fallback hints wired to the orchestrator.
 - Phase 2 (daemon persistence):
   - Enable `disk_path == ""` behavior: daemon persists to `${storage_root}/${artifact_id}/${replica_uuid}/` atomically post‑Commit and registers a DISK replica.
 - Phase 3 (observability & hardening):
   - Emit metrics listed above and exercise failure drills (P2P failure, disk unreachable, mapping conflicts).
-

@@ -9,7 +9,8 @@ import os
 import pytest
 import torch
 
-from tensorcast.torch_util import save_dict, load_dict_from_disk
+from tensorcast.api import save_dict
+from tensorcast.api._io_disk import load_dict_from_disk
 
 
 @pytest.fixture
@@ -70,7 +71,7 @@ def test_streaming_save_basic(tmp_path, has_cuda):
     state_dict = create_test_artifact(num_tensors=5, tensor_size_mb=50, use_cuda=has_cuda)
 
     save_path = os.path.join(str(tmp_path), "streaming_test")
-    save_dict(state_dict, save_path, use_streaming=True)
+    save_dict(state_dict, save_path)
 
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
     assert os.path.exists(os.path.join(save_path, "tensor.data_0"))
@@ -87,17 +88,20 @@ def test_streaming_save_basic(tmp_path, has_cuda):
 
 
 def test_streaming_vs_traditional_equivalence(tmp_path, has_cuda):
-    """Test that streaming and traditional save produce equivalent results."""
+    """Test that two saves of the same artifact produce equivalent results.
+
+    This checks determinism of the unified writer.
+    """
     state_dict = create_test_artifact(num_tensors=3, tensor_size_mb=30, use_cuda=has_cuda)
 
-    traditional_path = os.path.join(str(tmp_path), "traditional")
-    save_dict(state_dict, traditional_path, use_streaming=False)
+    path_a = os.path.join(str(tmp_path), "save_a")
+    save_dict(state_dict, path_a)
 
-    streaming_path = os.path.join(str(tmp_path), "streaming")
-    save_dict(state_dict, streaming_path, use_streaming=True)
+    path_b = os.path.join(str(tmp_path), "save_b")
+    save_dict(state_dict, path_b)
 
-    traditional_loaded = load_dict_from_disk(traditional_path, device_id=0, storage_path="")
-    streaming_loaded = load_dict_from_disk(streaming_path, device_id=0, storage_path="")
+    traditional_loaded = load_dict_from_disk(path_a, device_id=0, storage_path="")
+    streaming_loaded = load_dict_from_disk(path_b, device_id=0, storage_path="")
 
     for name in state_dict.keys():
         trad_tensor = traditional_loaded[name].cpu()
@@ -118,7 +122,7 @@ def test_streaming_custom_config(tmp_path, has_cuda):
     }
 
     save_path = os.path.join(str(tmp_path), "custom_config")
-    save_dict(state_dict, save_path, use_streaming=True, streaming_config=custom_config)
+    save_dict(state_dict, save_path, streaming_config=custom_config)
 
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
 
@@ -131,7 +135,7 @@ def test_empty_artifact(tmp_path):
     state_dict = {}
 
     save_path = os.path.join(str(tmp_path), "empty")
-    save_dict(state_dict, save_path, use_streaming=True)
+    save_dict(state_dict, save_path)
 
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
 
@@ -150,7 +154,7 @@ def test_mixed_tensor_sizes(tmp_path):
     }
 
     save_path = os.path.join(str(tmp_path), "mixed_sizes")
-    save_dict(state_dict, save_path, use_streaming=True)
+    save_dict(state_dict, save_path)
 
     loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
 

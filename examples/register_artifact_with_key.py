@@ -5,11 +5,8 @@ from pathlib import Path
 
 import torch
 
-from tensorcast.torch_util import (
-    RegisterArtifactOptions,
-    register_artifact,
-    set_global_store_address,
-)
+from tensorcast.api._config import RegisterArtifactOptions, set_global_store_address
+from tensorcast.api._register import register_artifact
 
 
 def main() -> None:

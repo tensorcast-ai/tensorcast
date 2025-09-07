@@ -296,6 +296,72 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
   return grpc::Status::OK;
 }
 
+Status StoreDaemonServiceImpl::ResolveKeyMapping(
+    grpc::ServerContext* ctx,
+    const v1::ResolveKeyMappingRequest* req,
+    v1::ResolveKeyMappingResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/ResolveKeyMapping", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "ResolveKeyMapping");
+  span->SetAttribute("tc.key", req->key());
+
+  if (req->key().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+  if (is_shutting_down_.load()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto mapping_or = engine_->resolve_key_mapping(req->key());
+  if (!mapping_or.ok()) {
+    return to_grpc_status(mapping_or.status());
+  }
+  const auto& m = *mapping_or;
+  resp->set_artifact_id(m.artifact_id);
+  resp->set_used_disk_path(m.disk_path);
+  return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::GetArtifactIndexById(
+    grpc::ServerContext* ctx,
+    const v1::GetArtifactIndexByIdRequest* req,
+    v1::GetArtifactIndexByIdResponse* resp) {
+  namespace otel = opentelemetry;
+  auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
+  auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
+  auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
+  otel::trace::StartSpanOptions opts;
+  opts.kind = otel::trace::SpanKind::kServer;
+  auto span = tracer->StartSpan("StoreDaemon/GetArtifactIndexById", opts);
+  otel::trace::Scope scope(span);
+  span->SetAttribute("rpc.system", "grpc");
+  span->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
+  span->SetAttribute("rpc.method", "GetArtifactIndexById");
+  span->SetAttribute("tc.artifact.id", req->artifact_id());
+
+  if (req->artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (is_shutting_down_.load()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto bytes_or = engine_->get_canonical_index_by_id(req->artifact_id());
+  if (!bytes_or.ok()) {
+    return to_grpc_status(bytes_or.status());
+  }
+  resp->set_tensor_index_data(*bytes_or);
+  return grpc::Status::OK;
+}
+
 Status StoreDaemonServiceImpl::UnloadReplica(
     grpc::ServerContext* ctx,
     const v1::UnloadReplicaRequest* req,
@@ -704,6 +770,7 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
       absl::MutexLock l(&reg_mu_);
       reg_meta_[out.registration_id] = meta;
     }
+    return Status::OK;
   } else if (plan == RegPlan::DVMP) {
     // Engine-backed DVMP begin: allocate DVMP/UMA CPU region
     store::StoreEngine::ArtifactRegistration a;
@@ -741,8 +808,8 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
       absl::MutexLock l(&reg_mu_);
       reg_meta_[out.registration_id] = meta;
     }
-  }
-  {
+    return Status::OK;
+  } else if (plan == RegPlan::LEASE) {
     // Lease plan stub: return empty lease handshake
     std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
     resp->set_registration_id(reg_id);
@@ -759,6 +826,7 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     }
     absl::MutexLock l(&reg_mu_);
     reg_meta_[reg_id] = meta;
+    return Status::OK;
   }
   return Status::OK;
 }

@@ -27,16 +27,19 @@ bazel test //core/store/loader:disk_loader_streaming_buffer_test
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
-The project supports a fake CUDA backend for development and testing without GPU hardware:
+The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
 
 ```bash
-# Build with fake CUDA using environment variable
+# Build Python extension with fake CUDA
 USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
-# Example for specific component tests:
-bazel test //core/store:store_engine_test --define use_fake_cuda=true
-bazel test //core/communicator/engine:gpu_ce_test --define use_fake_cuda=true
+# Most tests already run with fake CUDA by default. You can also select explicitly with a single define:
+bazel test //core/store:store_engine_test --define=use_fake_cuda=true
+bazel test //core/communicator/engine:gpu_ce_test --define=use_fake_cuda=true
+
+# To run with real CUDA instead of the default fake backend, pass:
+bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=false
 ```
 
 **Fake CUDA Mode Features:**
@@ -100,7 +103,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
-- **User Process Worker**: Client process consuming artifacts via `tensorcast.torch_util.py` (`load_dict()`), mapping CUDA IPC handles for zero‑copy GPU access.
+- **User Process Worker**: Client process consuming artifacts via `tensorcast.api` (e.g., `load_dict_sync()`), mapping CUDA IPC handles for zero‑copy GPU access.
 
 ### Build Systems
 - **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
@@ -302,6 +305,7 @@ if (fd < 0) {
 - Keep functions small and focused
 - Use explicit, named imports for utilities
 - Use `dataclasses` or Pydantic models for complex data structures
+- Use absolute imports for in-repo modules: `from tensorcast.xxx.yyy import Z`; avoid relative imports like `from .xxx import Z`
 
 
 ## Development Principles
@@ -326,4 +330,4 @@ if (fd < 0) {
 - Avoid partial failures - operations should be atomic
 
 ### Code Fixing and Testing
-- When debugging or fixing tests, always first understand the actual functionality of the test and the code behind that functionality. Make the test match the functionality, rather than making the functionality match the original test (while also ensuring the functionality is reasonable)
+- When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.

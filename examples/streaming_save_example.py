@@ -13,7 +13,7 @@ import time
 
 import torch
 
-from tensorcast.torch_util import save_dict
+from tensorcast.api import save_dict
 
 
 def create_example_model(size_gb: float = 1.0) -> dict[str, torch.Tensor]:
@@ -53,54 +53,40 @@ def create_example_model(size_gb: float = 1.0) -> dict[str, torch.Tensor]:
 
 
 def compare_save_methods(state_dict: dict[str, torch.Tensor], output_dir: str):
-    """Compare traditional and streaming save methods."""
+    """Compare default vs custom writer configuration."""
 
-    # Traditional save
-    traditional_path = os.path.join(output_dir, "traditional_save")
-    print(f"\nSaving with traditional method to {traditional_path}...")
+    # Save with default config
+    default_path = os.path.join(output_dir, "save_default")
+    print(f"\nSaving with default writer config to {default_path}...")
     start_time = time.time()
-    save_dict(state_dict, traditional_path, use_streaming=False)
-    traditional_time = time.time() - start_time
-    print(f"Traditional save completed in {traditional_time:.2f} seconds")
+    save_dict(state_dict, default_path)
+    default_time = time.time() - start_time
+    print(f"Default save completed in {default_time:.2f} seconds")
 
-    # Streaming save with default config
-    streaming_path = os.path.join(output_dir, "streaming_save_default")
-    print(f"\nSaving with streaming method (default config) to {streaming_path}...")
-    start_time = time.time()
-    save_dict(state_dict, streaming_path, use_streaming=True)
-    streaming_default_time = time.time() - start_time
-    print(f"Streaming save (default) completed in {streaming_default_time:.2f} seconds")
-
-    # Streaming save with custom config
+    # Save with custom config
     streaming_custom_path = os.path.join(output_dir, "streaming_save_custom")
     custom_config = {
         "num_buffers": 8,  # More buffers for better pipelining
         "buffer_size_mb": 512,  # Larger buffers
         "enable_async_write": True,  # Async I/O
     }
-    print(
-        f"\nSaving with streaming method (custom config) to {streaming_custom_path}..."
-    )
+    print(f"\nSaving with custom writer config to {streaming_custom_path}...")
     print(f"Config: {custom_config}")
     start_time = time.time()
     save_dict(
         state_dict,
         streaming_custom_path,
-        use_streaming=True,
         streaming_config=custom_config,
     )
     streaming_custom_time = time.time() - start_time
-    print(f"Streaming save (custom) completed in {streaming_custom_time:.2f} seconds")
+    print(f"Custom-config save completed in {streaming_custom_time:.2f} seconds")
 
     # Summary
     print("\n" + "=" * 50)
     print("Performance Summary:")
-    print(f"Traditional save: {traditional_time:.2f}s")
+    print(f"Default save: {default_time:.2f}s")
     print(
-        f"Streaming save (default): {streaming_default_time:.2f}s ({traditional_time / streaming_default_time:.2f}x)"
-    )
-    print(
-        f"Streaming save (custom): {streaming_custom_time:.2f}s ({traditional_time / streaming_custom_time:.2f}x)"
+        f"Custom-config save: {streaming_custom_time:.2f}s ({default_time / streaming_custom_time:.2f}x)"
     )
 
 
@@ -133,13 +119,10 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     compare_save_methods(state_dict, output_dir)
 
-    # Environment variable configuration example
+    # Configuration notes
     print("\n" + "=" * 50)
-    print("Environment Variable Configuration:")
-    print("You can also configure streaming save via environment variables:")
-    print("  export STREAMING_CHUNK_SIZE_MB=512")
-    print("  export STREAMING_POOL_SIZE_GB=20")
-    print("  export STREAMING_NUM_BUFFERS=8")
+    print("Writer Configuration:")
+    print("Configure behavior via the `streaming_config` dict passed to save_dict().")
 
 
 if __name__ == "__main__":

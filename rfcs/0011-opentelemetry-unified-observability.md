@@ -32,10 +32,10 @@ All features are configuration-driven via unified Observability. With no exporte
 - **Entry & initialization**
   - Unified init: `tensorcast/observability/otel.py` (shared by server and client contexts).
   - Global Store: set Provider + gRPC server instrumentation from config before startup (`tensorcast/global_store/__main__.py`).
-  - Client SDK: `tensorcast/daemon_ctl.py`, `tensorcast/torch_util.py` ensure Provider + gRPC client instrumentation via `ensure_client_otel()` (reads ClientConfig Observability; no env required).
+  - Client SDK: `tensorcast/daemon_ctl.py`, `tensorcast/api` ensure Provider + gRPC client instrumentation via `ensure_client_otel()` (reads ClientConfig Observability; no env required).
 - **Where to add spans**
   - gRPC server handlers: `tensorcast/global_store/grpc_service.py` (set standard `rpc.*` and necessary `tc.*` attributes per RPC).
-  - High-level APIs: `tensorcast/torch_util.py` (wrap user-facing operations with parent spans and add business attributes).
+  - High-level APIs: `tensorcast/api` (wrap user-facing operations with parent spans and add business attributes).
 - **Logs & metrics**
   - Logs: `tensorcast/logger.py` injects `trace_id`/`span_id` into log records.
   - Metrics: extend `tensorcast/global_store/metrics.py` as needed, preserve `tc_*` naming and low-cardinality labels.
@@ -76,7 +76,7 @@ Practical tips: aggregate hot-path work into stage spans; rely on existing init/
 - **Python**
   - `tensorcast/observability/otel.py` (init & gRPC instrumentation)
   - `tensorcast/global_store/__main__.py`, `tensorcast/global_store/grpc_service.py` (server entry & RPCs)
-  - `tensorcast/daemon_ctl.py`, `tensorcast/torch_util.py` (client & higher-level APIs)
+  - `tensorcast/daemon_ctl.py`, `tensorcast/api` (client & higher-level APIs)
   - `tensorcast/logger.py`, `tensorcast/global_store/metrics.py`
 - **C++**
   - `core/common/otel/{init.h,grpc_propagation.h,trace_scope_bridge.h,logging_sink.*}`
@@ -98,5 +98,4 @@ Practical tips: aggregate hot-path work into stage spans; rely on existing init/
 
 - Lower sampling to 0 or remove exporters to “turn off” signal export; C++ runs in API-only (no-op) mode without SDK init.
 - The in-house trace remains bridged; macro scope semantics are preserved.
-
 

@@ -81,6 +81,13 @@ Startup flow (`server_main.cc`):
   - In‑memory registration: `BeginRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`
   - Key mapping (RFC‑0017): `PublishReplicaKey`, `MaterializeByKey` (resolve key→artifact_id, prefer P2P, fallback to disk if mapping contains `disk_path`)
 
+  API notes:
+  - `PublishReplicaKeyRequest`
+    - Fields: `key`, `artifact_descriptor` (RFC‑0007), optional `disk_path`, `fail_if_exists` (default true)
+    - Validation: both `key` and `artifact_descriptor.artifact_id` are required
+  - `CommitRegisteredArtifactResponse`
+    - Field renamed to `artifact_descriptor` to avoid collision with protobuf's static `descriptor()` method
+
 - Sessions and references
   - `ReplicaSessionManager`: maps `replica_uuid` to `ReplicaKey` and a readiness `future` with TTL (default 60s); used by Confirm/Wait paths
   - `RefTracker`: PID‑based reference tracking with `keep_for_global` cache hint

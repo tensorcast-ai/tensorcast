@@ -1497,6 +1497,13 @@ absl::StatusOr<components::GlobalStoreClient::KeyMapping> StoreEngine::resolve_k
   return global_store_client_->resolve_key_mapping(key);
 }
 
+absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  return global_store_client_->get_artifact_index_by_id(artifact_id);
+}
+
 absl::Status StoreEngine::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,

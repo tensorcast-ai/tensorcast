@@ -186,6 +186,9 @@ class GlobalStoreClient {
   // Revoke an existing key mapping.
   absl::Status revoke_key_mapping(std::string_view key);
 
+  // Fetch canonical tensor index bytes by artifact_id.
+  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id);
+
  private:
   // Helper for RPC retries
   template <typename Request, typename Response, typename RpcMethod>

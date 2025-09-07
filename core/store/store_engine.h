@@ -210,6 +210,7 @@ class StoreEngine {
       std::string_view artifact_id,
       std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration());
+  absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
   absl::Status revoke_key_mapping(std::string_view key);
 
   // --------------------------------------------------------------------

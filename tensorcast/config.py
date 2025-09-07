@@ -58,10 +58,10 @@ def init(
     """
 
     # Import here to avoid circular imports
+    from tensorcast.api import set_daemon_address
     from tensorcast.daemon_config import ServerConfig, StoreDaemonConfig
     from tensorcast.daemon_manager import ensure_daemon_running, get_daemon_manager
     from tensorcast.logger import init_logger
-    from tensorcast.torch_util import set_daemon_address
     from tensorcast.utils import to_num_bytes
 
     logger = init_logger(__name__)
@@ -137,10 +137,10 @@ def init_from_client_config(config_path: str) -> None:
     Sets default storage root, daemon target, and client load defaults.
     Also applies logging level from config if provided.
     """
+    from tensorcast.api import set_daemon_address
     from tensorcast.client_config_loader import load_client_config
     from tensorcast.client_runtime import daemon_target_default, set_client_config
     from tensorcast.logger import setup_logging
-    from tensorcast.torch_util import set_daemon_address
 
     cfg = load_client_config(config_path)
     set_client_config(cfg)
