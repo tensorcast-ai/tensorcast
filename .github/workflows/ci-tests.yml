@@ -103,7 +103,8 @@ jobs:
             external/grpc+/include \
             external/protobuf+/src \
             external/gsl+ \
-            external/nlohmann_json+/include
+            external/nlohmann_json+/include \
+            external/opentelemetry-cpp+
 
       - name: Upload Bazel external headers artifact
         uses: actions/upload-artifact@v4

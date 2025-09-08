@@ -645,7 +645,6 @@ if BUILD_EXTENSION:
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
-            dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/proto/gen/cc",
         ]
 
