@@ -114,7 +114,7 @@ Example (DVMP streaming, single CPU tensor):
 import json
 import numpy as np
 from tensorcast.api import begin_register_artifact_sdk
-from tensorcast.daemon_ctl import DaemonCtl
+from tensorcast.daemon_ctl import get_daemon_client
 from tensorcast.types import DVMPPlan
 
 # Prepare a tiny tensor and canonical v2 index JSON bytes
@@ -145,7 +145,7 @@ handle, handshake = begin_register_artifact_sdk(
     daemon_address=daemon_addr,
 )
 
-ctl = DaemonCtl(daemon_addr)
+ctl = get_daemon_client(daemon_addr)
 with handle as h:
     # Stream DVMP bytes in SegmentPlan order (here only one piece)
     ok = ctl.feed_register_artifact_dvmp_stream_data(h.registration_id, buf, offset=0)

@@ -143,9 +143,9 @@ def main() -> int:
         print("[info] issuing client RPCs")
         # Use in-repo imports; ensure client auto-init for OTel
         os.environ.setdefault("TC_OTEL_CLIENT_AUTO_INIT", "1")
-        from tensorcast.daemon_ctl import DaemonCtl
+        from tensorcast.daemon_ctl import get_daemon_client
 
-        ctl = DaemonCtl(args.daemon_addr)
+        ctl = get_daemon_client(args.daemon_addr)
         resp = ctl.get_server_config()
         print("GetServerConfig:", resp)
 
@@ -175,4 +175,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import grpc
 import torch
@@ -15,7 +15,10 @@ from tensorcast._C import (
     get_cuda_memory_ptr,
     restore_tensors,
 )
-from tensorcast.daemon_ctl import DaemonCtl
+from tensorcast.daemon_ctl import get_daemon_client
+
+if TYPE_CHECKING:  # for static type checkers only
+    from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.global_store.v1 import global_store_pb2 as gs_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2_grpc as gs_pb2_grpc
@@ -53,7 +56,12 @@ DEFAULT_ALIGN = 1
 
 class RegisteredArtifact:
     def __init__(
-        self, registration_id: str, daemon_address: str, *, ttl_ms: int | None = None
+        self,
+        registration_id: str,
+        daemon_address: str,
+        *,
+        ttl_ms: int | None = None,
+        client: "DaemonCtl" | None = None,
     ) -> None:
         import threading
 
@@ -63,6 +71,12 @@ class RegisteredArtifact:
         self._ka_thread: threading.Thread | None = None
         self._ka_stop = threading.Event()
         self._epoch: int = 0
+        # Cache client for this handle's lifetime
+        self._ctl = client or get_daemon_client(self._addr)
+
+    @property
+    def client(self) -> "DaemonCtl":
+        return self._ctl
 
     def __enter__(self) -> "RegisteredArtifact":
         import threading
@@ -70,7 +84,7 @@ class RegisteredArtifact:
         if self._ttl_ms > 0 and self._ka_thread is None:
 
             def _keepalive() -> None:
-                ctl = DaemonCtl(self._addr)
+                ctl = self.client
                 interval = max(1.0, self._ttl_ms / 2000.0)
                 while not self._ka_stop.wait(interval):
                     try:
@@ -92,20 +106,21 @@ class RegisteredArtifact:
             self._ka_thread.join(timeout=1.0)
 
     def commit(self, timeout_s: float = 60.0) -> ArtifactDescriptor:
-        ctl = DaemonCtl(self._addr)
-        desc = ctl.commit_registered_artifact(self.registration_id, timeout_s=timeout_s)
+        desc = self.client.commit_registered_artifact(
+            self.registration_id, timeout_s=timeout_s
+        )
         self.__exit__(None, None, None)
         return desc
 
     def abort(self, timeout_s: float = 15.0) -> bool:
         self.__exit__(None, None, None)
-        ctl = DaemonCtl(self._addr)
-        return ctl.abort_registered_artifact(self.registration_id, timeout_s=timeout_s)
+        return self.client.abort_registered_artifact(
+            self.registration_id, timeout_s=timeout_s
+        )
 
     def revoke(self, reason: str = "", timeout_s: float = 10.0) -> bool:
         self.__exit__(None, None, None)
-        ctl = DaemonCtl(self._addr)
-        return ctl.revoke_registered_artifact(self.registration_id, reason)
+        return self.client.revoke_registered_artifact(self.registration_id, reason)
 
 
 def begin_register_artifact_sdk(
@@ -117,7 +132,7 @@ def begin_register_artifact_sdk(
     plan: CoalescedPlan | DVMPPlan | LeasePlan,
     daemon_address: str,
 ) -> tuple[RegisteredArtifact, Handshake]:
-    ctl = DaemonCtl(daemon_address)
+    ctl = get_daemon_client(daemon_address)
     out = ctl.begin_register_artifact(
         device_id=device_id,
         total_size_bytes=total_size_bytes,
@@ -128,7 +143,9 @@ def begin_register_artifact_sdk(
         plan=plan,
         timeout_s=60.0,
     )
-    handle = RegisteredArtifact(out.registration_id, daemon_address, ttl_ms=ttl_ms or 0)
+    handle = RegisteredArtifact(
+        out.registration_id, daemon_address, ttl_ms=ttl_ms or 0, client=ctl
+    )
     return handle, out.handshake
 
 
@@ -149,7 +166,7 @@ def _upsert_key_mapping_if_needed(
         return
     try:
         if descriptor is not None:
-            ctl = DaemonCtl(get_daemon_address())
+            ctl = get_daemon_client(get_daemon_address())
             ok = ctl.publish_replica_key(
                 key=key, descriptor=descriptor, disk_path=disk_path or ""
             )
@@ -419,7 +436,7 @@ class _DVMPUploader:
                 )
             frames.append((int(dst_off), b))
 
-        ctl = DaemonCtl(daemon_address)
+        ctl = handle.client
         cfg = ctl.get_server_config()
         chunk_size = int(cfg.chunk_size) if int(cfg.chunk_size) > 0 else 8 * 1024 * 1024
 
@@ -468,7 +485,7 @@ class _LeaseUploader:
                     dst_offset=int(dst_off),
                 )
             )
-        ctl = DaemonCtl(daemon_address)
+        ctl = handle.client
         ok = ctl.feed_register_artifact_lease_segments(handle.registration_id, segments)
         if not ok:
             raise FeedFailed("Lease segments feed failed")

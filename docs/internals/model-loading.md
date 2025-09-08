@@ -147,3 +147,9 @@ The SDK is organized under `tensorcast/api`. New internal modules:
 - `tensorcast/api/_register.py` — RegisteredArtifact + plan registrars
 
 Public entry points are exported from `tensorcast/api/__init__.py` and should be imported via `tensorcast.api`.
+
+### Client Reuse & Resiliency
+
+- The Python SDK reuses a shared gRPC client per `(address, PID)` via `tensorcast.daemon_ctl.get_daemon_client(...)` to avoid reconnect overhead during functional calls.
+- The underlying client enables gRPC keepalive and performs a light retry with channel refresh on transient errors (`UNAVAILABLE`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`).
+- In registration flows, `RegisteredArtifact` holds a cached client for its lifetime (keepalive thread, commit/abort/revoke, and feed helpers reuse the same channel).

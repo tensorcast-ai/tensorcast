@@ -6,7 +6,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Callable, Protocol, cast
+from typing import TYPE_CHECKING, Callable, Protocol, cast
 
 import torch
 from opentelemetry import trace
@@ -17,7 +17,10 @@ from tensorcast._C import (
     restore_tensors,
 )
 from tensorcast.client_runtime import client_defaults, daemon_target_default
-from tensorcast.daemon_ctl import DaemonCtl
+from tensorcast.daemon_ctl import get_daemon_client
+
+if TYPE_CHECKING:  # for static type checkers only
+    from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -283,7 +286,7 @@ def load_dict_sync(
     """
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = DaemonCtl(get_daemon_address())
+    client = get_daemon_client(get_daemon_address())
 
     if storage_path is None:
         try:
@@ -365,7 +368,7 @@ def get_artifact_sync(
     opts = options or GetArtifactOptions()
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = DaemonCtl(get_daemon_address())
+    client = get_daemon_client(get_daemon_address())
 
     dev_id = resolve_device(device_id)
     replica_uuid = os.urandom(8).hex()
@@ -384,7 +387,7 @@ def get_artifact_sync(
             pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
         )
 
-    client = DaemonCtl(get_daemon_address())
+    client = get_daemon_client(get_daemon_address())
     (
         pinned_ms,
         enable_ver,
@@ -473,7 +476,7 @@ def load_dict_async(
 ) -> LoadHandle:
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = DaemonCtl(get_daemon_address())
+    client = get_daemon_client(get_daemon_address())
 
     if storage_path is None:
         try:
@@ -547,7 +550,7 @@ def get_artifact_async(
     opts = options or GetArtifactOptions()
     dev_id = resolve_device(device_id)
     replica_uuid = new_uuid()
-    client = DaemonCtl(get_daemon_address())
+    client = get_daemon_client(get_daemon_address())
     tracer = trace.get_tracer(__name__)
     with tracer.start_as_current_span(
         "Client/GetArtifactByKey.P2P", kind=SpanKind.INTERNAL

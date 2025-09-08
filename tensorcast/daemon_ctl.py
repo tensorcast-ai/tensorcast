@@ -1,8 +1,12 @@
 #  Copyright (c) 2025, TensorCast Team.
 
 
+import atexit
 import os
+import random
+import time
 from contextlib import contextmanager, suppress
+from threading import RLock
 from typing import Iterator, Tuple
 
 import grpc
@@ -33,6 +37,50 @@ from tensorcast.types import (
 )
 
 logger = init_logger(__name__)
+
+# -----------------------------------------------------------------------------
+# Client-side diagnostics (process-scoped)
+# -----------------------------------------------------------------------------
+_METRICS_LOCK: RLock = RLock()
+_METRIC_CHANNEL_REFRESHES: int = 0
+_METRIC_RPC_RETRIES: int = 0
+
+
+def _inc_channel_refresh(server_address: str) -> int:
+    global _METRIC_CHANNEL_REFRESHES
+    with _METRICS_LOCK:
+        _METRIC_CHANNEL_REFRESHES += 1
+        cur = _METRIC_CHANNEL_REFRESHES
+    logger.info(
+        "client_channel_refresh addr=%s pid=%s total=%d",
+        server_address,
+        os.getpid(),
+        cur,
+    )
+    return cur
+
+
+def _inc_rpc_retry(
+    server_address: str, method_name: str, attempt: int, code: "grpc.StatusCode"
+) -> int:
+    global _METRIC_RPC_RETRIES
+    with _METRICS_LOCK:
+        _METRIC_RPC_RETRIES += 1
+        cur = _METRIC_RPC_RETRIES
+    try:
+        code_name = code.name
+    except Exception:
+        code_name = str(code)
+    logger.info(
+        "client_rpc_retry method=%s attempt=%d code=%s addr=%s pid=%s total_retries=%d",
+        method_name,
+        int(attempt),
+        code_name,
+        server_address,
+        os.getpid(),
+        cur,
+    )
+    return cur
 
 
 def get_host_pid() -> int:
@@ -68,7 +116,8 @@ class DaemonCtl:
         ensure_client_otel("tensorcast-client", role="client")
 
         self.server_address = server_address
-        self.channel = grpc.insecure_channel(server_address)
+        self._ch_lock: RLock = RLock()
+        self.channel = self._create_channel(server_address)
         self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
         self.checkpoints_in_gpu = {}
 
@@ -78,6 +127,85 @@ class DaemonCtl:
 
         if self.use_host_pid:
             logger.info("DaemonCtl configured to use host PID")
+
+    # Channel helpers with sane keepalive defaults
+    @staticmethod
+    def _channel_options() -> list[tuple[str, int]]:
+        return [
+            ("grpc.keepalive_time_ms", 10_000),
+            ("grpc.keepalive_timeout_ms", 3_000),
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.http2.min_time_between_pings_ms", 10_000),
+            ("grpc.http2.max_pings_without_data", 0),
+            ("grpc.http2.min_ping_interval_without_data_ms", 10_000),
+        ]
+
+    def _create_channel(self, addr: str) -> grpc.Channel:
+        return grpc.insecure_channel(addr, options=self._channel_options())
+
+    def _refresh_channel(self) -> None:
+        with self._ch_lock:
+            with suppress(Exception):
+                self.channel.close()
+            self.channel = self._create_channel(self.server_address)
+            self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
+            _inc_channel_refresh(self.server_address)
+
+    def _unary_call(
+        self,
+        method,
+        request,
+        *,
+        timeout: float | int | None = None,
+        retries: int = 1,
+        span: trace.Span | None = None,
+    ):
+        # Determine the RPC method name so we can rebind against a fresh stub
+        # after channel refresh. Prefer the grpc MultiCallable "_method" path,
+        # fall back to Python __name__.
+        method_path = getattr(method, "_method", None)
+        resolved_name = (
+            method_path.rsplit("/", 1)[-1] if isinstance(method_path, str) else None
+        ) or getattr(method, "__name__", None)
+
+        cur_method = method
+        last_err: Exception | None = None
+        for attempt in range(retries + 1):
+            if attempt > 0 and resolved_name:
+                # Rebind the method on the (potentially) refreshed stub
+                reb = getattr(self.stub, resolved_name, None)
+                if reb is not None:
+                    cur_method = reb
+            try:
+                return cur_method(request, timeout=timeout)
+            except grpc.RpcError as e:  # noqa: BLE001
+                last_err = e
+                code = e.code()
+                if span is not None:
+                    with suppress(Exception):
+                        span.record_exception(e)
+                        span.set_attribute("rpc.grpc.status_code", str(code.name))
+                        span.set_attribute("retry.attempt", int(attempt))
+                # Retry on transient errors
+                if (
+                    code
+                    in (
+                        grpc.StatusCode.UNAVAILABLE,
+                        grpc.StatusCode.INTERNAL,
+                        grpc.StatusCode.UNKNOWN,
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                    )
+                    and attempt < retries
+                ):
+                    # best-effort method name for logging
+                    mname = method_path or resolved_name or "<callable>"
+                    _inc_rpc_retry(self.server_address, str(mname), attempt + 1, code)
+                    self._refresh_channel()
+                    time.sleep(0.05 + random.random() * 0.1)
+                    continue
+                break
+        assert last_err is not None
+        raise last_err
 
     def __del__(self):
         # Best-effort channel cleanup
@@ -124,7 +252,9 @@ class DaemonCtl:
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU,
             )
             try:
-                response = self.stub.UnloadReplica(request)
+                response = self._unary_call(
+                    self.stub.UnloadReplica, request, span=span, timeout=10.0, retries=1
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 span.set_attribute("rpc.grpc.status_code", str(e.code().value[0]))
@@ -163,7 +293,13 @@ class DaemonCtl:
                 keep_for_global=False,
             )
             try:
-                response = self.stub.MaterializeReplica(request, timeout=60)
+                response = self._unary_call(
+                    self.stub.MaterializeReplica,
+                    request,
+                    timeout=60,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.CANCELLED:
@@ -238,7 +374,13 @@ class DaemonCtl:
                 keep_for_global=False,
             )
             try:
-                response = self.stub.MaterializeReplica(request, timeout=60)
+                response = self._unary_call(
+                    self.stub.MaterializeReplica,
+                    request,
+                    timeout=60,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.CANCELLED:
@@ -308,7 +450,13 @@ class DaemonCtl:
                 replica_uuid=replica_uuid,
             )
             try:
-                response = self.stub.MaterializeByKey(request, timeout=60)
+                response = self._unary_call(
+                    self.stub.MaterializeByKey,
+                    request,
+                    timeout=60,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.UNAVAILABLE:
@@ -363,7 +511,13 @@ class DaemonCtl:
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
             )
             try:
-                _ = self.stub.ConfirmReplica(request)
+                _ = self._unary_call(
+                    self.stub.ConfirmReplica,
+                    request,
+                    timeout=10.0,
+                    span=span,
+                    retries=1,
+                )
                 logger.info("Artifact loaded")
                 return True
             except grpc.RpcError as e:
@@ -379,7 +533,13 @@ class DaemonCtl:
         with self._client_span("Client/GetServerConfig") as span:
             request = store_daemon_pb2.GetServerConfigRequest()
             try:
-                response = self.stub.GetServerConfig(request)
+                response = self._unary_call(
+                    self.stub.GetServerConfig,
+                    request,
+                    timeout=5.0,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 logger.error(f"Error: {e}")
@@ -465,7 +625,13 @@ class DaemonCtl:
                 }
             )
             try:
-                resp = self.stub.BeginRegisterArtifact(req, timeout=timeout_s)
+                resp = self._unary_call(
+                    self.stub.BeginRegisterArtifact,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 code = e.code()
@@ -525,7 +691,13 @@ class DaemonCtl:
         )
         with self._client_span("Client/CommitRegisteredArtifact") as span:
             try:
-                resp = self.stub.CommitRegisteredArtifact(req, timeout=timeout_s)
+                resp = self._unary_call(
+                    self.stub.CommitRegisteredArtifact,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 code = e.code()
@@ -563,7 +735,13 @@ class DaemonCtl:
         )
         with self._client_span("Client/AbortRegisteredArtifact") as span:
             try:
-                self.stub.AbortRegisteredArtifact(req, timeout=timeout_s)
+                self._unary_call(
+                    self.stub.AbortRegisteredArtifact,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
             except grpc.RpcError as e:
                 span.record_exception(e)
                 code = e.code()
@@ -599,7 +777,12 @@ class DaemonCtl:
         stream_req.dvmp_chunk.data = data
         stream_req.dvmp_chunk.last = bool(last)
         try:
-            self.stub.FeedRegisterArtifactStream(iter([stream_req]), timeout=30.0)
+            self._unary_call(
+                self.stub.FeedRegisterArtifactStream,
+                iter([stream_req]),
+                timeout=30.0,
+                retries=1,
+            )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
             logger.error(f"FeedRegisterArtifactStream(dvmp) failed: {e}")
@@ -641,7 +824,12 @@ class DaemonCtl:
                 yield req
 
         try:
-            self.stub.FeedRegisterArtifactStream(_iter(), timeout=timeout_s)
+            self._unary_call(
+                self.stub.FeedRegisterArtifactStream,
+                _iter(),
+                timeout=timeout_s,
+                retries=1,
+            )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
             logger.error(f"FeedRegisterArtifactStream(dvmp,data) failed: {e}")
@@ -665,7 +853,9 @@ class DaemonCtl:
             yield req
 
         try:
-            self.stub.FeedRegisterArtifactStream(_iter(), timeout=30.0)
+            self._unary_call(
+                self.stub.FeedRegisterArtifactStream, _iter(), timeout=30.0, retries=1
+            )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
             logger.error(f"FeedRegisterArtifactStream(lease) failed: {e}")
@@ -678,7 +868,12 @@ class DaemonCtl:
             registration_id=registration_id, ttl_ms=int(ttl_ms), epoch=int(epoch)
         )
         try:
-            self.stub.KeepAliveRegisterArtifact(req, timeout=10.0)
+            self._unary_call(
+                self.stub.KeepAliveRegisterArtifact,
+                req,
+                timeout=10.0,
+                retries=1,
+            )
             return True
         except grpc.RpcError as e:
             logger.error(f"KeepAliveRegisterArtifact failed: {e}")
@@ -691,7 +886,9 @@ class DaemonCtl:
             registration_id=registration_id, reason=reason
         )
         try:
-            self.stub.RevokeRegisteredArtifact(req, timeout=10.0)
+            self._unary_call(
+                self.stub.RevokeRegisteredArtifact, req, timeout=10.0, retries=1
+            )
             return True
         except grpc.RpcError as e:
             logger.error(f"RevokeRegisteredArtifact failed: {e}")
@@ -723,8 +920,12 @@ class DaemonCtl:
                 }
             )
             try:
-                response = self.stub.WaitReplicaVerification(
-                    request, timeout=timeout_ms / 1000 + 5
+                response = self._unary_call(
+                    self.stub.WaitReplicaVerification,
+                    request,
+                    timeout=timeout_ms / 1000 + 5,
+                    span=span,
+                    retries=1,
                 )
                 return response
             except grpc.RpcError as e:
@@ -763,9 +964,15 @@ class DaemonCtl:
         )
         req.artifact_descriptor.CopyFrom(pb)
 
-        with self._client_span("Client/PublishReplicaKey"):
+        with self._client_span("Client/PublishReplicaKey") as span:
             try:
-                resp = self.stub.PublishReplicaKey(req, timeout=timeout_s)
+                resp = self._unary_call(
+                    self.stub.PublishReplicaKey,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
                 return bool(resp.ok)
             except grpc.RpcError as e:
                 logger.error(f"PublishReplicaKey failed: {e}")
@@ -784,9 +991,15 @@ class DaemonCtl:
         """
         if not key:
             raise ValueError("key is required")
-        with self._client_span("Client/ResolveKeyMapping"):
+        with self._client_span("Client/ResolveKeyMapping") as span:
             request = store_daemon_pb2.ResolveKeyMappingRequest(key=key)
-            resp = self.stub.ResolveKeyMapping(request, timeout=timeout_s)
+            resp = self._unary_call(
+                self.stub.ResolveKeyMapping,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
             return resp.artifact_id, resp.used_disk_path
 
     def get_artifact_index_by_id(
@@ -795,9 +1008,60 @@ class DaemonCtl:
         """Fetch canonical tensor index bytes by artifact_id via daemon."""
         if not artifact_id:
             raise ValueError("artifact_id is required")
-        with self._client_span("Client/GetArtifactIndexById"):
+        with self._client_span("Client/GetArtifactIndexById") as span:
             request = store_daemon_pb2.GetArtifactIndexByIdRequest(
                 artifact_id=artifact_id
             )
-            resp = self.stub.GetArtifactIndexById(request, timeout=timeout_s)
+            resp = self._unary_call(
+                self.stub.GetArtifactIndexById,
+                request,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
             return resp.tensor_index_data
+
+    def ping(self, timeout_s: float = 2.0) -> bool:
+        try:
+            _ = self.get_server_config()
+            return True
+        except Exception:
+            return False
+
+
+# -----------------------------------------------------------------------------
+# Shared client cache
+# -----------------------------------------------------------------------------
+_CLIENT_CACHE_LOCK: RLock = RLock()
+_CLIENT_CACHE: dict[tuple[str, int], DaemonCtl] = {}
+
+
+def get_daemon_client(server_address: str = "127.0.0.1:8073") -> DaemonCtl:
+    """Get or create a shared DaemonCtl for the current PID and address.
+
+    Reuses a single gRPC channel per (address, PID) to avoid the overhead of
+    creating new channels on every functional API call. Safe for multi-threaded
+    use; gRPC channels/stubs are thread-safe.
+
+    Note: We key by PID to remain fork-safe. In a forked child process, calls
+    will create a new channel entry rather than reusing parent's channel.
+    """
+    pid = os.getpid()
+    key = (server_address, pid)
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(key)
+        if client is None:
+            client = DaemonCtl(server_address)
+            _CLIENT_CACHE[key] = client
+        return client
+
+
+def _shutdown_daemon_clients() -> None:
+    with _CLIENT_CACHE_LOCK:
+        for c in list(_CLIENT_CACHE.values()):
+            with suppress(Exception):
+                c.close()
+        _CLIENT_CACHE.clear()
+
+
+atexit.register(_shutdown_daemon_clients)
