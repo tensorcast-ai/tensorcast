@@ -9,8 +9,6 @@
 #include <memory>
 #include "absl/strings/str_format.h"
 #include "core/store/components/global_store_client.h"
-#include "daemon/grpc_metrics.h"
-#include "daemon/grpc_span.h"
 #include "daemon/status_utils.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/types.h"
@@ -133,11 +131,10 @@ Status StoreDaemonServiceImpl::ClearMem(
     grpc::ServerContext* ctx,
     const v1::ClearMemRequest* /*req*/,
     v1::ClearMemResponse* /*resp*/) {
-  metrics::RpcMethodMetricsTimer mt("ClearMem");
-  GrpcSpan gspan("ClearMem", *ctx);
+  RpcContext rctx{"ClearMem", *ctx, opts_.allow_high_card_attrs};
   const int rc = engine_->clear_mem();
   if (rc == 0) {
-    mt.mark_success();
+    rctx.mark_success();
     return Status::OK;
   }
   return {StatusCode::INTERNAL, absl::StrFormat("clear_mem() returned %d", rc)};

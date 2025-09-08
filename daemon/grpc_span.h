@@ -25,7 +25,7 @@ class GrpcSpan {
     scope_ = std::make_unique<opentelemetry::trace::Scope>(span_);
     // Standard attributes
     span_->SetAttribute("rpc.system", "grpc");
-    span_->SetAttribute("rpc.service", "tensorcast.daemon.StoreDaemon");
+    span_->SetAttribute("rpc.service", "tensorcast.daemon.v1.StoreDaemonService");
     span_->SetAttribute("rpc.method", method);
   }
 

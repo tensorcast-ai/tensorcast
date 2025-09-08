@@ -249,11 +249,14 @@ grpc::Status MaterializationController::confirm(
     return Status::OK;
   }
 
-  // Wait bounded by a 30s cap (Confirm has no user timeout)
-  auto wait_ms = std::chrono::milliseconds(30000);
-  absl::Status st = entry->ready.wait_for(wait_ms) == std::future_status::ready
-      ? entry->ready.get()
-      : absl::DeadlineExceededError("confirm timeout");
+  // Wait bounded by gRPC deadline with a 30s hard cap (Confirm has no user timeout)
+  using namespace std::chrono;
+  const auto wait_ms = ClampToDeadline(rctx.server_context(), milliseconds(30000), milliseconds(30000));
+  const auto st_wait = entry->ready.wait_for(wait_ms);
+  if (st_wait == std::future_status::timeout) {
+    return {StatusCode::DEADLINE_EXCEEDED, "confirm timeout"};
+  }
+  absl::Status st = entry->ready.get();
   if (st.ok()) {
     resp.set_code(0);
     rctx.mark_success();

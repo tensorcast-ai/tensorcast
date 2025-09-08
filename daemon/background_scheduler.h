@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include "absl/log/log.h"
+
 namespace tensorcast::daemon {
 
 enum class TaskKind : std::uint8_t { kSessionTTL, kLockTTL, kPidWatch, kVerification, kEviction };
@@ -107,7 +109,8 @@ class BackgroundScheduler {
         try {
           tasks_[idx].fn();
         } catch (...) {
-          // swallow
+          // Log and continue; background failures must not kill the scheduler
+          VLOG(1) << "BackgroundScheduler task threw; kind=" << static_cast<int>(tasks_[idx].kind);
         }
       }
       lk.lock();

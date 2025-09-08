@@ -27,8 +27,8 @@ grpc::Status TransportController::lock(
 
   store::loading::ReplicaKey key;
   key.artifact_id = req.artifact_id();
-  key.device = store::DeviceRegistry::instance().gpu_key(0);
   key.replica = 0;
+  // Resolve device lazily to avoid defaulting to GPU0 prematurely
   if (req.has_device_id()) {
     key.device = store::DeviceRegistry::instance().gpu_key(req.device_id());
   }
