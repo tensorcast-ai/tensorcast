@@ -1,0 +1,111 @@
+// Copyright (c) 2025, TensorCast Team.
+
+// StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas_v2
+
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <functional>
+
+#include "core/store/store_engine.h"
+#include "daemon/ref_tracker.h"
+#include "daemon/replica_listing.h"
+#include "daemon/rpc_context.h"
+#include "daemon/service/controllers/status_assembler.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/provider.h"
+
+namespace tensorcast::daemon {
+
+class StatusController {
+ public:
+  struct Dep {
+    store::StoreEngine& engine;
+    RefTracker& refs;
+    std::atomic<bool>& is_shutting_down;
+    std::function<bool()> is_registered;
+    std::function<std::string()> worker_id;
+    std::function<std::chrono::seconds()> uptime;
+  };
+
+  explicit StatusController(Dep d) : d_(std::move(d)) {}
+
+  grpc::Status get_server_config(RpcContext& rctx, v1::GetServerConfigResponse& resp) {
+    auto& e = d_.engine;
+    (void)rctx;
+    resp.set_mem_pool_size(static_cast<int64_t>(e.get_mem_pool_size()));
+    resp.set_chunk_size(static_cast<int64_t>(e.get_chunk_size()));
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+
+  grpc::Status get_worker_status(RpcContext& rctx, v1::GetWorkerStatusResponse& resp) const {
+    resp.set_is_registered(d_.is_registered());
+    resp.set_is_healthy(true);
+    resp.set_is_shutting_down(d_.is_shutting_down.load());
+    resp.set_mem_pool_total_size(d_.engine.get_mem_pool_size());
+    resp.set_mem_pool_available_size(d_.engine.get_available_memory());
+    resp.set_uptime_seconds(d_.uptime().count());
+    resp.set_worker_id(d_.is_registered() ? d_.worker_id() : "");
+    // Optional metrics for status snapshots
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto upt_hist = meter->CreateDoubleHistogram("tc_status_worker_uptime_seconds");
+      static auto reg_counter = meter->CreateDoubleCounter("tc_status_worker_registered_total");
+      upt_hist->Record(static_cast<double>(resp.uptime_seconds()), opentelemetry::context::Context{});
+      if (resp.is_registered())
+        reg_counter->Add(1.0);
+    } catch (...) {
+    }
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+
+  grpc::Status get_detailed_status(RpcContext& rctx, v1::GetDetailedStatusResponse& resp) {
+    resp.set_is_registered(d_.is_registered());
+    resp.set_is_healthy(true);
+    resp.set_is_shutting_down(d_.is_shutting_down.load());
+    resp.set_uptime_seconds(d_.uptime().count());
+    resp.set_worker_id(d_.is_registered() ? d_.worker_id() : "");
+    StatusAssembler::FillDetailedStatus(d_.engine, d_.refs, resp);
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto repl_hist = meter->CreateDoubleHistogram("tc_status_total_replicas");
+      static auto bytes_hist = meter->CreateDoubleHistogram("tc_status_total_bytes");
+      repl_hist->Record(static_cast<double>(resp.total_replicas_loaded()), opentelemetry::context::Context{});
+      bytes_hist->Record(static_cast<double>(resp.total_artifact_size_bytes()), opentelemetry::context::Context{});
+    } catch (...) {
+    }
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+
+  grpc::Status get_loaded_replicas_v2(
+      RpcContext& rctx,
+      const v1::GetLoadedReplicasV2Request& req,
+      v1::GetLoadedReplicasV2Response& resp,
+      bool use_cursor_pagination) {
+    if (rctx.allow_high_card_attrs()) {
+      if (req.has_artifact_id_filter())
+        rctx.span()->SetAttribute("tc.artifact.filter", req.artifact_id_filter());
+    }
+    listing::FillLoadedReplicasV2(d_.engine, d_.refs, req, resp, use_cursor_pagination);
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto page_counter = meter->CreateDoubleCounter("tc_status_list_pages_total");
+      static auto size_hist = meter->CreateDoubleHistogram("tc_status_list_page_size");
+      const double page_size = static_cast<double>(resp.replicas_size());
+      page_counter->Add(1.0);
+      size_hist->Record(page_size, opentelemetry::context::Context{});
+    } catch (...) {
+    }
+    rctx.mark_success();
+    return grpc::Status::OK;
+  }
+
+ private:
+  Dep d_;
+};
+
+} // namespace tensorcast::daemon

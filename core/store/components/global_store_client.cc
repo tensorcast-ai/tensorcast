@@ -58,7 +58,7 @@ absl::Status GlobalStoreClient::initialize() {
   span->SetAttribute("rpc.system", "grpc");
   span->SetAttribute("rpc.service", "tensorcast.global_store.GlobalStoreService");
   span->SetAttribute("rpc.method", "HealthCheck");
-  tensorcast::common::otel::InjectIntoClientMetadata(context);
+  tensorcast::common::otel::inject_into_client_metadata(context);
 
   auto status = stub_->HealthCheck(&context, req, &resp);
   if (!status.ok()) {
@@ -605,7 +605,7 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     span->SetAttribute("rpc.system", "grpc");
     span->SetAttribute("rpc.service", "tensorcast.global_store.GlobalStoreService");
     span->SetAttribute("rpc.method", method_name);
-    tensorcast::common::otel::InjectIntoClientMetadata(context);
+    tensorcast::common::otel::inject_into_client_metadata(context);
 
     auto status = method(&context, request, response);
     if (!status.ok()) {

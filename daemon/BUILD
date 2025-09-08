@@ -15,10 +15,28 @@ sc_cc_library(
     hdrs = ["grpc_service_impl.h"],
     copts = [],
     deps = [
+        ":background_scheduler_hdr",
+        ":cuda_ipc_raii_hdr",
+        ":device_resolver_hdr",
+        ":grpc_metrics_hdr",
+        ":grpc_span_hdr",
+        ":lip_bridge_lib",
+        ":lip_manager_lib",
+        ":materialization_controller_lib",
         ":ref_tracker_hdr",
+        ":registration_controller_lib",
+        ":registration_manager_lib",
+        ":replica_listing_hdr",
+        ":rpc_context_hdr",
         ":session_manager_hdr",
+        ":sessions_service_hdr",
+        ":status_controller_hdr",
         ":status_utils",
+        ":sweep_tasks_hdr",
+        ":transport_controller_lib",
         ":transport_lock_manager_hdr",
+        ":types_hdr",
+        ":verification_tracker_hdr",
         "//core/common:artifact_hash_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store:global_store_client",
@@ -29,6 +47,60 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_header_only_library(
+    name = "replica_listing_hdr",
+    hdrs = ["replica_listing.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ref_tracker_hdr",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_header_only_library(
+    name = "verification_tracker_hdr",
+    hdrs = ["verification_tracker.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
+    name = "registration_manager_lib",
+    hdrs = ["registration_manager.h"],
+    deps = [
+        ":types_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
+    name = "lip_manager_lib",
+    srcs = ["lip_manager.cc"],
+    hdrs = ["lip_manager.h"],
+    deps = [
+        ":cuda_ipc_raii_hdr",
+        ":types_hdr",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/store/loader:segment_plan_source",
+        "//core/store/loader:source_hash",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -95,6 +167,185 @@ sc_header_only_library(
         "//core/store:loading_spec",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_header_only_library(
+    name = "cuda_ipc_raii_hdr",
+    hdrs = ["cuda_ipc_raii.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:cuda_api_lib",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+sc_header_only_library(
+    name = "types_hdr",
+    hdrs = ["types.h"],
+    visibility = ["//visibility:public"],
+    deps = [":cuda_ipc_raii_hdr"],
+)
+
+sc_header_only_library(
+    name = "background_scheduler_hdr",
+    hdrs = ["background_scheduler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/base:core_headers",
+    ],
+)
+
+sc_header_only_library(
+    name = "grpc_span_hdr",
+    hdrs = ["grpc_span.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:otel_grpc_propagation_lib",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_header_only_library(
+    name = "grpc_metrics_hdr",
+    hdrs = ["grpc_metrics.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_header_only_library(
+    name = "sweep_tasks_hdr",
+    hdrs = ["sweep_tasks.h"],
+    deps = [
+        ":background_scheduler_hdr",
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":session_manager_hdr",
+        ":transport_lock_manager_hdr",
+        ":verification_tracker_hdr",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# RFC-0016 helpers and controllers
+sc_header_only_library(
+    name = "rpc_context_hdr",
+    hdrs = ["rpc_context.h"],
+    deps = [
+        ":grpc_metrics_hdr",
+        ":grpc_span_hdr",
+    ],
+)
+
+sc_header_only_library(
+    name = "deadline_utils_hdr",
+    hdrs = ["deadline_utils.h"],
+    deps = [],
+)
+
+sc_header_only_library(
+    name = "device_resolver_hdr",
+    hdrs = ["device_resolver.h"],
+    deps = [
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_header_only_library(
+    name = "sessions_service_hdr",
+    hdrs = ["sessions_service.h"],
+    deps = [
+        ":background_scheduler_hdr",
+        ":session_manager_hdr",
+        ":verification_tracker_hdr",
+    ],
+)
+
+sc_header_only_library(
+    name = "status_controller_hdr",
+    hdrs = [
+        "service/controllers/status_assembler.h",
+        "service/controllers/status_controller.h",
+    ],
+    deps = [
+        ":ref_tracker_hdr",
+        ":replica_listing_hdr",
+        ":rpc_context_hdr",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "lip_bridge_lib",
+    srcs = ["lip_bridge.cc"],
+    hdrs = ["lip_bridge.h"],
+    deps = [
+        ":lip_manager_lib",
+        # no direct StoreEngine dependency in header; uses loading_spec
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_controller_lib",
+    srcs = ["service/controllers/materialization_controller.cc"],
+    hdrs = ["service/controllers/materialization_controller.h"],
+    deps = [
+        ":device_resolver_hdr",
+        ":lip_bridge_lib",
+        ":ref_tracker_hdr",
+        ":rpc_context_hdr",
+        ":sessions_service_hdr",
+        ":status_utils",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "registration_controller_lib",
+    srcs = ["service/controllers/registration_controller.cc"],
+    hdrs = ["service/controllers/registration_controller.h"],
+    deps = [
+        ":cuda_ipc_raii_hdr",
+        ":lip_manager_lib",
+        ":registration_manager_lib",
+        ":rpc_context_hdr",
+        ":status_utils",
+        "//core/store:store_engine",
+        "//core/store/loader:segment_plan_source",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "transport_controller_lib",
+    srcs = ["service/controllers/transport_controller.cc"],
+    hdrs = ["service/controllers/transport_controller.h"],
+    deps = [
+        ":lip_manager_lib",
+        ":rpc_context_hdr",
+        ":status_utils",
+        ":transport_lock_manager_hdr",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
     ],
 )
 

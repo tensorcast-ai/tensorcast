@@ -15,6 +15,8 @@ Quick run example (unified config):
 ```bash
 bazel build //daemon:tensorcast_daemon
 bazel-bin/daemon/tensorcast_daemon --config=examples/config/store_daemon_config.yaml
+# Enable cursor pagination for replica listing (optional feature flag)
+# bazel-bin/daemon/tensorcast_daemon --config=examples/config/store_daemon_config.yaml --use_cursor_pagination=true
 ```
 
 ## System Context (Where this daemon fits)
@@ -40,6 +42,53 @@ graph TD
 
 The daemon is a “thin gRPC layer + StoreEngine” design. The service layer maintains sessions, process references and transport locks, and runs several background sweepers:
 
+Recent changes (RFC‑0015 execution):
+- Strong‑typed LIP keys via `ArtifactDeviceKey {artifact_id, device_id}` (no string concat keys)
+- Strict CUDA IPC handle size checks (prevent partial memcpy truncation)
+- Lease In‑Place commit bug fix: eliminate double close by transferring ownership to the seekable source
+- TTL refresh in FeedRegisterArtifactStream: single combined refresh per frame with engine call outside lock
+- LIP fast path now propagates `keep_for_global` from `MaterializeReplicaRequest`
+- BackgroundScheduler integrated: sessions/locks/verification/pid/eviction sweepers now run via a central, event‑driven scheduler with `notify(TaskKind)` on verification enqueues.
+- GrpcSpan RAII helper extracted (`daemon/grpc_span.h`) and adopted in key RPCs to unify `rpc.*` attributes and reduce instrumentation boilerplate.
+- RpcMethodMetricsTimer extracted (`daemon/grpc_metrics.h`) and adopted across RPCs:
+  - Emits `tc_rpc_requests_total{rpc.method}` and `tc_rpc_errors_total{rpc.method}` counters
+  - Records `tc_rpc_duration_seconds{rpc.method}` histogram on every call
+  - Best-effort; metrics failures never affect control flow
+- CudaIpcMapping RAII (`daemon/cuda_ipc_raii.h`) adopted across LIP fast paths (cross‑device copy, staged export, LIP commit hashing) and coalesced destination mapping; Unlock path now relies on RAII to close IPC mappings.
+- Introduced `LipManager` (`daemon/lip_manager.{h,cc}`): encapsulates LIP → coalesced copy on target GPU using RAII mappings. Service now delegates cross‑device fast‑path copies to this manager.
+- Verification registry now enforces TTL (default 5m) and a capacity bound (4096 entries) via the background scheduler to prevent unbounded memory growth.
+- GetLoadedReplicasV2 supports cursor pagination behind an option flag (`Options.use_cursor_pagination`).
+  - When enabled, the service returns an opaque JSON token encoding the last item (sorted by `(artifact_id, device_id)`) to resume after.
+  - When disabled (default), legacy numeric `page_token` behavior is preserved for backward compatibility.
+- Introduced `RegistrationManager` (`daemon/registration_manager.h`): encapsulates registration state (meta + lease segments) and TTL refresh/keepalive helpers used by Begin/Feed/KeepAlive/Commit.
+- LIP staged export moved into `LipManager` (`create_staged_export`/`release_staged_export`): service delegates chunk registration and CUDA IPC mapping lifecycle; service no longer manages `lip_exports_`.
+
+RFC‑0016 (incremental controller split) — progress:
+- Added thin, reusable helpers:
+  - `daemon/rpc_context.h`: wraps `GrpcSpan` and `RpcMethodMetricsTimer` with a unified, low‑boilerplate per‑RPC context.
+  - `daemon/deadline_utils.h`: utility to clamp user timeouts to the gRPC deadline.
+  - `daemon/device_resolver.h`: unifies request→`DeviceKey` resolution with DISK→default GPU parity.
+  - `daemon/sessions_service.h`: composes `ReplicaSessionManager` + `VerificationTracker` with scheduler notify.
+  - `daemon/lip_bridge.{h,cc}`: adapter over `LipManager` for cross‑device LIP fast‑path.
+- Introduced `MaterializationController` (`daemon/service/controllers/materialization_controller.{h,cc}`) and delegated:
+  - `MaterializeReplica`, `MaterializeByKey`, `GetArtifactIndexById`, `ConfirmReplica`, `UnloadReplica`, and `WaitReplicaVerification`.
+- Introduced `RegistrationController` (`daemon/service/controllers/registration_controller.{h,cc}`) and delegated:
+  - `BeginRegisterArtifact`, `FeedRegisterArtifactStream` (and test vector variant), `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `KeepAliveRegisterArtifact`, and `RevokeRegisteredArtifact`.
+  - Streaming feed path now centralizes TTL refresh and payload handling; vector helper forwards to the same logic to remove duplication.
+- Introduced `TransportController` (`daemon/service/controllers/transport_controller.{h,cc}`) and delegated:
+  - `LockTransportChunks` and `UnlockTransportChunks`; includes unique GPU residency inference helper with current service-side behavior preserved.
+- Service now constructs controllers after scheduler initialization and delegates via `RpcContext`.
+- Introduced `StatusController` (`daemon/service/controllers/status_controller.h`) with `StatusAssembler` helper:
+  - Delegates `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, and wraps `GetLoadedReplicasV2` (proxying to `listing::FillLoadedReplicasV2(...)` with optional cursor pagination).
+  - Adds status metrics: `tc_status_worker_uptime_seconds`, `tc_status_worker_registered_total`,
+    `tc_status_total_replicas`, `tc_status_total_bytes`, `tc_status_list_pages_total`, and
+    `tc_status_list_page_size`. These complement unified RPC metrics
+    (`tc_rpc_requests_total`, `tc_rpc_duration_seconds`, `tc_rpc_errors_total`).
+ - Background sweepers objectified: `daemon/sweep_tasks.h` defines `SessionTtlTask`, `LockTtlTask`, `VerificationTask`, `PidWatchTask`, and `EvictionTask`. `start_sweepers()` registers these classes with intervals, improving testability and encapsulation versus inline lambdas.
+
+Notes:
+- `MaterializeByKey`’s keep_for_global pass‑through remains unchanged (false) because the current proto does not carry this flag; changing proto is out of scope for RFC‑0016’s incremental step.
+
 ```mermaid
 graph TD
   subgraph Daemon (C++)
@@ -61,6 +110,7 @@ graph TD
   RPC --> SESS
   RPC --> REFS
   RPC --> LOCKS
+  RPC --> ENG
   WLM --> GSCLI
   ENG --> COMM
 ```
@@ -319,8 +369,11 @@ with lease:
 ## Key files and build targets
 
 - Service implementation: `daemon/grpc_service_impl.{h,cc}`
+- LIP manager (LIP → coalesced copy, staged exports, in‑place commit): `daemon/lip_manager.{h,cc}`
+- Verification tracker (verification registry + completion queue): `daemon/verification_tracker.h`
 - Lifecycle manager: `daemon/worker_lifecycle_manager.{h,cc}`
 - Session manager: `daemon/replica_session_manager.h`
+- Registration manager (Begin/Feed/KeepAlive/Commit metadata): `daemon/registration_manager.h`
 - Reference tracker: `daemon/ref_tracker.h`
 - Transport locks: `daemon/transport_lock_manager.h`
 - Entry point: `daemon/server_main.cc` (Bazel: `//daemon:tensorcast_daemon`)

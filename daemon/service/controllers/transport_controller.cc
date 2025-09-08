@@ -1,0 +1,91 @@
+// Copyright (c) 2025, TensorCast Team.
+
+// Implementation of TransportController
+
+#include "daemon/service/controllers/transport_controller.h"
+
+#include <string>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "core/store/device_registry.h"
+
+namespace tensorcast::daemon {
+
+using ::grpc::Status;
+using status_utils::to_grpc_status;
+
+grpc::Status TransportController::lock(
+    RpcContext& rctx,
+    const v1::LockTransportChunksRequest& req,
+    v1::LockTransportChunksResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.artifact_id());
+  if (req.has_device_id())
+    span->SetAttribute("tc.device.id", static_cast<int64_t>(req.device_id()));
+
+  store::loading::ReplicaKey key;
+  key.artifact_id = req.artifact_id();
+  key.device = store::DeviceRegistry::instance().gpu_key(0);
+  key.replica = 0;
+  if (req.has_device_id()) {
+    key.device = store::DeviceRegistry::instance().gpu_key(req.device_id());
+  }
+
+  // LIP staged export path
+  if (auto lip_opt = d_.lip.find_active_by_artifact_id(req.artifact_id()); lip_opt.has_value()) {
+    const auto& lip = *lip_opt;
+    std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
+    auto tok_or = d_.lip.create_staged_export(lip, absl::MakeSpan(indices), d_.engine);
+    if (!tok_or.ok())
+      return to_grpc_status(tok_or.status());
+    resp.set_lock_token(*tok_or);
+    if (!lip.verification_json.empty())
+      resp.set_verification_json(lip.verification_json);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  if (!req.has_device_id()) {
+    auto dev_or = d_.engine.get_unique_gpu_residency(req.artifact_id());
+    if (!dev_or.ok())
+      return to_grpc_status(dev_or.status());
+    if (*dev_or >= 0)
+      key.device = store::DeviceRegistry::instance().gpu_key(*dev_or);
+  }
+
+  std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
+  auto st = d_.engine.lock_chunks(key, absl::MakeSpan(indices));
+  if (!st.ok())
+    return to_grpc_status(st);
+  std::string token = d_.locks.mint_token();
+  d_.locks.put(token, key, std::move(indices));
+  resp.set_lock_token(token);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status TransportController::unlock(
+    RpcContext& rctx,
+    const v1::UnlockTransportChunksRequest& req,
+    v1::UnlockTransportChunksResponse& /*resp*/) {
+  auto& span = rctx.span();
+  if (rctx.allow_high_card_attrs())
+    span->SetAttribute("tc.lock.token", req.lock_token());
+  auto entry = d_.locks.get(req.lock_token());
+  if (!entry.has_value()) {
+    auto st = d_.lip.release_staged_export(req.lock_token(), d_.engine);
+    if (!st.ok())
+      return to_grpc_status(st);
+    rctx.mark_success();
+    return Status::OK;
+  }
+  auto st = d_.engine.unlock_chunks(entry->key, absl::MakeSpan(entry->chunk_indices), /*copied_gpu=*/false);
+  if (!st.ok())
+    return to_grpc_status(st);
+  d_.locks.erase(req.lock_token());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+} // namespace tensorcast::daemon
