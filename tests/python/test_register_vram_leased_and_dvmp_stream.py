@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tensorcast.api._config import RegisterArtifactOptions
-from tensorcast.api._register import register_artifact
+from tensorcast.api import register_artifact
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast._C import get_cuda_memory_handle
@@ -118,7 +118,8 @@ def test_register_dvmp_stream_commit(tmp_path: Path):
 
         opts = RegisterArtifactOptions(plan="dvmp")
         # device_id enforces CPU input mode for dvmp path in SDK
-        _, desc = register_artifact(state, options=opts, device_id=0, daemon_address=listen)
+        res = register_artifact(state, options=opts, device_id=0, daemon_address=listen)
+        desc = res.descriptor
         assert desc.artifact_id.startswith("mi2:")
         assert desc.total_size > 0
     finally:
@@ -149,7 +150,8 @@ def test_register_vram_leased_commit(tmp_path: Path):
 
         opts = RegisterArtifactOptions(plan="vram_leased")
         # For lease: do not pass device_id so SDK infers and uses CUDA path
-        _, desc = register_artifact(state, options=opts, daemon_address=listen)
+        res = register_artifact(state, options=opts, daemon_address=listen)
+        desc = res.descriptor
         assert desc.artifact_id.startswith("mi2:")
         assert desc.total_size > 0
     finally:

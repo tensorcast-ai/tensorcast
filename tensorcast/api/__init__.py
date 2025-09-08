@@ -22,7 +22,6 @@ from ._register import (
     RegisteredLease,
     begin_register_artifact_sdk,
     register_artifact,
-    register_artifact_lease_in_place,
 )
 
 __all__ = [
@@ -34,7 +33,6 @@ __all__ = [
     "save_dict",
     "load_dict_from_disk",
     "register_artifact",
-    "register_artifact_lease_in_place",
     "begin_register_artifact_sdk",
     "RegisteredArtifact",
     "RegisteredLease",

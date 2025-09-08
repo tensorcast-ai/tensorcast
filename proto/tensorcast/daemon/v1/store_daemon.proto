@@ -379,7 +379,7 @@ message LeaseOptions {
   uint64 min_tensor_bytes = 1;
   uint32 max_tensor_count = 2;
   uint64 lease_bytes_limit = 3; // 0 = daemon policy
-  bool in_place = 4;            // When true, Commit registers an in-place lease (LIP)
+  bool in_place = 4; // When true, Commit registers an in-place lease (LIP)
 }
 
 // Begin registration response

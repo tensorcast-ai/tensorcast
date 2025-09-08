@@ -8,7 +8,7 @@ import grpc
 import pytest
 import torch
 
-from tensorcast.api import RegisterArtifactOptions, register_artifact_lease_in_place
+from tensorcast.api import RegisterArtifactOptions, register_artifact
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
 from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
@@ -101,10 +101,13 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
         b = torch.full((64,), 0x77, dtype=torch.uint8, device=dev)
         state = {"a": a, "b": b}
         opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
-        desc, lease = register_artifact_lease_in_place(state, options=opts, ttl_ms=2000, daemon_address=listen)
+        res = register_artifact(state, options=opts, ttl_ms=2000, daemon_address=listen, create_post_commit_lease=True)
+        desc, lease = res.descriptor, res.lease
         assert desc.artifact_id.startswith("mi2:")
         # Keepalive thread should be running; sleep to allow a keepalive tick
         time.sleep(0.5)
+
+        assert lease is not None
         # Context revoke
         with lease:
             pass

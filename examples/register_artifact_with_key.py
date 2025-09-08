@@ -5,8 +5,8 @@ from pathlib import Path
 
 import torch
 
+from tensorcast.api import register_artifact
 from tensorcast.api._config import RegisterArtifactOptions, set_global_store_address
-from tensorcast.api._register import register_artifact
 
 
 def main() -> None:
@@ -29,7 +29,8 @@ def main() -> None:
         key="demo:model:001",
         disk_path=str(out_dir),  # validate/record disk source
     )
-    _, desc = register_artifact(state_dict, options=opts, device_id=0)
+    res = register_artifact(state_dict, options=opts, device_id=0)
+    desc = res.descriptor
     print("Committed artifact_id:", desc.artifact_id)
 
 

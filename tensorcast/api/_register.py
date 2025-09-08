@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import threading
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -22,6 +23,27 @@ from tensorcast.daemon_ctl import get_daemon_client
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
+from tensorcast.api._config import (
+    PlanType,
+    RegisterArtifactOptions,
+    get_daemon_address,
+    get_global_store_address,
+)
+from tensorcast.api._device import resolve_device
+from tensorcast.api._errors import (
+    DeviceMismatch,
+    FeedFailed,
+    InvalidPlan,
+    TensorCastError,
+)
+from tensorcast.api._indices import (
+    TensorDataIndex,
+    TensorDeviceOffsets,
+    TensorMetaIndex,
+    build_v2_index_bytes,
+)
+from tensorcast.api._io_disk import save_dict
+from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.global_store.v1 import global_store_pb2 as gs_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2_grpc as gs_pb2_grpc
@@ -35,26 +57,23 @@ from tensorcast.types import (
     LeaseSegment,
 )
 
-from ._config import (
-    PlanType,
-    RegisterArtifactOptions,
-    get_daemon_address,
-    get_global_store_address,
-)
-from ._device import resolve_device
-from ._errors import DeviceMismatch, FeedFailed, InvalidPlan, TensorCastError
-from ._indices import (
-    TensorDataIndex,
-    TensorDeviceOffsets,
-    TensorMetaIndex,
-    build_v2_index_bytes,
-)
-from ._io_disk import save_dict
-from ._utils import validate_disk_index_matches
-
 # Internal alignment hint for layout computation.
 # Currently unused by the underlying calculator but kept for API clarity.
 DEFAULT_ALIGN = 1
+
+
+@dataclass
+class RegistrationResult:
+    """Unified result for registration APIs.
+
+    - state_dict: destination state dict for coalesced/DVMP; original artifact for lease
+    - descriptor: content-addressed artifact descriptor
+    - lease: post-commit lease handle when using lease-in-place; otherwise None
+    """
+
+    state_dict: dict[str, torch.Tensor] | None
+    descriptor: ArtifactDescriptor
+    lease: RegisteredLease | None
 
 
 class RegisteredArtifact:
@@ -64,7 +83,7 @@ class RegisteredArtifact:
         daemon_address: str,
         *,
         ttl_ms: int | None = None,
-        client: "DaemonCtl" | None = None,
+        client: DaemonCtl | None = None,
     ) -> None:
         import threading
 
@@ -78,7 +97,7 @@ class RegisteredArtifact:
         self._ctl = client or get_daemon_client(self._addr)
 
     @property
-    def client(self) -> "DaemonCtl":
+    def client(self) -> DaemonCtl:
         return self._ctl
 
     def __enter__(self) -> "RegisteredArtifact":
@@ -165,7 +184,7 @@ class RegisteredLease:
             def _keepalive() -> None:
                 import random
 
-                ctl = DaemonCtl(self._addr)
+                ctl = get_daemon_client(self._addr)
                 while not self._ka_stop.wait(interval * (0.9 + 0.2 * random.random())):
                     try:
                         ctl.keep_alive_registered_artifact(
@@ -191,7 +210,7 @@ class RegisteredLease:
 
     def _best_effort_revoke(self) -> None:
         try:
-            ctl = DaemonCtl(self._addr)
+            ctl = get_daemon_client(self._addr)
             ctl.revoke_registered_artifact(self.registration_id)
         except Exception:  # noqa: BLE001
             # rely on TTL + pid_watcher
@@ -206,77 +225,6 @@ class RegisteredLease:
                 inst._best_effort_revoke()
             except Exception:  # noqa: BLE001
                 continue
-
-
-def register_artifact_lease_in_place(
-    artifact: dict[str, torch.Tensor],
-    *,
-    options: RegisterArtifactOptions,
-    ttl_ms: int | None = None,
-    daemon_address: str | None = None,
-) -> tuple[ArtifactDescriptor, RegisteredLease]:
-    """Register a CUDA artifact as a Lease-In-Place (LIP) and return a lease handle.
-
-    Returns a content-addressed descriptor and a RegisteredLease context manager
-    that maintains post-Commit keepalives and performs best-effort revoke on exit.
-    """
-    if not artifact:
-        raise TensorCastError("artifact must not be empty")
-
-    # Build context & layout, then index bytes (CUDA input required)
-    ctx = BuildContext.from_artifact(artifact, device_id=None)
-    if ctx.input_mode != "cuda":
-        raise DeviceMismatch(
-            "lease_in_place requires CUDA tensors without explicit device_id"
-        )
-    layout = CoalescedLayout.compute(
-        ctx.tensor_source_index, ctx.device_id, align=DEFAULT_ALIGN
-    )
-    index_bytes = IndexV2.build_bytes(
-        ctx.tensor_meta_index, ctx.tensor_source_index, layout.offsets, ctx.device_id
-    )
-
-    ensure_client_otel("tensorcast-client", role="client")
-    addr = daemon_address or get_daemon_address()
-    # Force in_place regardless of caller option to avoid ambiguity
-    plan = LeasePlan(
-        kind="lease",
-        min_tensor_bytes=options.min_tensor_bytes,
-        max_tensor_count=options.max_tensor_count,
-        lease_bytes_limit=options.lease_bytes_limit,
-        in_place=True,
-    )
-
-    handle, hs = begin_register_artifact_sdk(
-        device_id=ctx.device_id,
-        total_size_bytes=layout.total_size,
-        ttl_ms=ttl_ms,
-        tensor_index_data=index_bytes,
-        plan=plan,
-        daemon_address=addr,
-    )
-
-    registrar = _LeaseUploader()
-    with handle:
-        _ = registrar.upload(
-            artifact=artifact,
-            ctx=ctx,
-            layout=layout,
-            handle=handle,
-            handshake=hs,
-            daemon_address=addr,
-        )
-        desc = handle.commit(timeout_s=60.0)
-        # Create RegisteredLease tied to the same registration id
-        lease = RegisteredLease(
-            registration_id=handle.registration_id,
-            daemon_address=addr,
-            ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
-            owner_pid=DaemonCtl(
-                addr
-            )._get_effective_pid(),  # uses host pid if configured
-        )
-        return desc, lease
 
 
 def begin_register_artifact_sdk(
@@ -501,6 +449,21 @@ class IndexV2:
         )
 
 
+def _prepare_build(
+    artifact: dict[str, torch.Tensor],
+    device_id: int | torch.device | None,
+) -> tuple[BuildContext, CoalescedLayout, bytes]:
+    """Compute BuildContext, layout, and index bytes for an artifact."""
+    ctx = BuildContext.from_artifact(artifact, device_id)
+    layout = CoalescedLayout.compute(
+        ctx.tensor_source_index, ctx.device_id, align=DEFAULT_ALIGN
+    )
+    index_bytes = IndexV2.build_bytes(
+        ctx.tensor_meta_index, ctx.tensor_source_index, layout.offsets, ctx.device_id
+    )
+    return ctx, layout, index_bytes
+
+
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
 ) -> CoalescedPlan | DVMPPlan | LeasePlan:
@@ -656,36 +619,47 @@ PLAN_REGISTRY: dict[PlanType, object] = {
 }
 
 
-def register_artifact(
-    artifact: dict[str, torch.Tensor],
+def _register_artifact_core(
     *,
+    artifact: dict[str, torch.Tensor],
     options: RegisterArtifactOptions,
-    device_id: int | torch.device | None = None,
-    ttl_ms: int | None = None,
-    daemon_address: str | None = None,
-) -> tuple[dict[str, torch.Tensor], ArtifactDescriptor]:
+    device_id: int | torch.device | None,
+    ttl_ms: int | None,
+    daemon_address: str | None,
+    force_lease_in_place: bool = False,
+    prevalidate_disk: bool = True,
+    create_post_commit_lease: bool = False,
+) -> RegistrationResult:
     if not artifact:
         raise TensorCastError("artifact must not be empty")
 
-    # 1) Build context and layout, then index bytes
-    ctx = BuildContext.from_artifact(artifact, device_id)
-    layout = CoalescedLayout.compute(
-        ctx.tensor_source_index, ctx.device_id, align=DEFAULT_ALIGN
-    )
-    index_bytes = IndexV2.build_bytes(
-        ctx.tensor_meta_index, ctx.tensor_source_index, layout.offsets, ctx.device_id
-    )
+    ctx, layout, index_bytes = _prepare_build(artifact, device_id)
 
-    # Optional pre-validation against existing disk path
-    if options.disk_path is not None and options.disk_path.strip() != "":
+    if (
+        prevalidate_disk
+        and options.disk_path is not None
+        and options.disk_path.strip() != ""
+    ):
         cand = Path(options.disk_path)
         if cand.exists() and cand.is_dir():
             validate_disk_index_matches(index_bytes, str(cand))
 
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    plan_type = cast(PlanType, options.plan)
     addr = daemon_address or get_daemon_address()
+
+    if force_lease_in_place:
+        plan_type = PlanType.VRAM_LEASED
+        plan_model = LeasePlan(
+            kind="lease",
+            min_tensor_bytes=options.min_tensor_bytes,
+            max_tensor_count=options.max_tensor_count,
+            lease_bytes_limit=options.lease_bytes_limit,
+            in_place=True,
+        )
+    else:
+        plan_type = cast(PlanType, options.plan)
+        plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints
     if plan_type is PlanType.DVMP and ctx.input_mode != "cpu":
@@ -702,7 +676,6 @@ def register_artifact(
         PlanType.DVMP: "Client/RegisterArtifact.DVMP",
         PlanType.VRAM_LEASED: "Client/RegisterArtifact.Lease",
     }
-    plan_model = make_plan_model(options, layout.total_size)
 
     with tracer.start_as_current_span(span_names[plan_type], kind=SpanKind.INTERNAL):
         handle, hs = begin_register_artifact_sdk(
@@ -730,7 +703,10 @@ def register_artifact(
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=state_dict
                 )
-                return state_dict, desc
+                return RegistrationResult(
+                    state_dict=state_dict, descriptor=desc, lease=None
+                )
+
             if isinstance(registrar, _DVMPUploader):
                 state_dict = registrar.upload(
                     artifact=artifact,
@@ -744,9 +720,12 @@ def register_artifact(
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=state_dict
                 )
-                return state_dict, desc
+                return RegistrationResult(
+                    state_dict=state_dict, descriptor=desc, lease=None
+                )
+
             if isinstance(registrar, _LeaseUploader):
-                state_dict = registrar.upload(
+                _ = registrar.upload(
                     artifact=artifact,
                     ctx=ctx,
                     layout=layout,
@@ -758,6 +737,45 @@ def register_artifact(
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=None
                 )
-                return state_dict, desc
+                lease_obj: RegisteredLease | None = None
+                if create_post_commit_lease:
+                    ctl = get_daemon_client(addr)
+                    lease_obj = RegisteredLease(
+                        registration_id=handle.registration_id,
+                        daemon_address=addr,
+                        ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
+                        owner_pid=ctl._get_effective_pid(),
+                    )
+                # For lease plans, return original artifact as the state_dict (compat)
+                return RegistrationResult(
+                    state_dict=artifact, descriptor=desc, lease=lease_obj
+                )
 
     raise InvalidPlan(f"Unknown plan: {plan_type}")
+
+
+def register_artifact(
+    artifact: dict[str, torch.Tensor],
+    *,
+    options: RegisterArtifactOptions,
+    device_id: int | torch.device | None = None,
+    ttl_ms: int | None = None,
+    daemon_address: str | None = None,
+    create_post_commit_lease: bool = False,
+) -> RegistrationResult:
+    """Unified high-level API returning a structured result.
+
+    - For Coalesced/DVMP: returns destination state dict and descriptor.
+    - For Lease (in_place according to options): returns original artifact as state_dict and descriptor.
+    - If create_post_commit_lease is True and plan is lease in-place, also returns a RegisteredLease.
+    """
+    return _register_artifact_core(
+        artifact=artifact,
+        options=options,
+        device_id=device_id,
+        ttl_ms=ttl_ms,
+        daemon_address=daemon_address,
+        force_lease_in_place=False,
+        prevalidate_disk=True,
+        create_post_commit_lease=create_post_commit_lease,
+    )
