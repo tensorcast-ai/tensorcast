@@ -12,11 +12,15 @@
 #include <optional>
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/otel/grpc_propagation.h"
+#include "core/communicator/engine/engine.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/loader/segment_plan_source.h"
+#include "core/store/loader/source.h"
+#include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/context/runtime_context.h"
@@ -30,13 +34,133 @@ using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
+absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coalesced_int(
+    int target_device_id,
+    const std::string& canonical_index_json,
+    uint64_t total_size,
+    absl::Span<const LeaseSegMeta> segments) {
+  // Begin destination allocation on target device
+  store::StoreEngine::ArtifactRegistration areg;
+  areg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
+  areg.tensor_index_data = canonical_index_json;
+  areg.schema_version = "v2";
+  areg.encoding = "json";
+  areg.device_id = target_device_id;
+  areg.total_size_bytes = total_size;
+  areg.enable_p2p = true;
+  auto begin_or = engine_->begin_register_artifact(areg);
+  if (!begin_or.ok())
+    return begin_or.status();
+  const auto& out = *begin_or;
+  // Ensure pending registration is aborted on any error prior to successful commit
+  struct RegAbortGuard {
+    store::StoreEngine* engine;
+    std::string id;
+    bool active{true};
+    ~RegAbortGuard() {
+      if (active && engine) {
+        (void)engine->abort_registered_artifact(id);
+      }
+    }
+    void release() {
+      active = false;
+    }
+  } abort_guard{.engine = engine_.get(), .id = out.registration_id};
+
+  // Build plan and zero PAD regions on destination
+  auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size, 8);
+  if (!plan_or.ok())
+    return plan_or.status();
+  auto plan = *plan_or;
+  cudaIpcMemHandle_t hdst{};
+  std::memcpy(&hdst, out.cuda_ipc_handle_bytes.data(), sizeof(hdst));
+  void* dst_dev = nullptr;
+  if (auto st = cuda::open_ipc_mem_handle(&dst_dev, hdst, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+    return st;
+  }
+  (void)cuda::set_device(target_device_id);
+  for (const auto& p : plan) {
+    if (p.kind != store::loader::SegmentPiece::PAD || p.length == 0)
+      continue;
+    auto st = cuda::memset(static_cast<uint8_t*>(dst_dev) + p.dst_offset, 0, static_cast<size_t>(p.length));
+    if (!st.ok()) {
+      (void)cuda::close_ipc_mem_handle(dst_dev);
+      return st;
+    }
+  }
+
+  // Map source segments and copy
+  struct Opened {
+    int device_id;
+    void* ptr;
+    uint64_t base;
+    uint64_t len;
+    uint64_t dst;
+  };
+  std::vector<Opened> opened;
+  opened.reserve(segments.size());
+  for (const auto& seg : segments) {
+    cudaIpcMemHandle_t hs{};
+    size_t n = std::min(sizeof(hs), seg.handle_bytes.size());
+    if (n > 0)
+      std::memcpy(&hs, seg.handle_bytes.data(), n);
+    void* src_ptr = nullptr;
+    if (auto st = cuda::open_ipc_mem_handle(&src_ptr, hs, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+      for (const auto& o : opened)
+        (void)cuda::close_ipc_mem_handle(o.ptr);
+      (void)cuda::close_ipc_mem_handle(dst_dev);
+      return st;
+    }
+    opened.push_back(
+        Opened{
+            .device_id = seg.device_id,
+            .ptr = src_ptr,
+            .base = seg.base_offset,
+            .len = seg.length,
+            .dst = seg.dst_offset});
+  }
+  for (const auto& o : opened) {
+    if (o.dst > total_size || o.len > total_size || o.dst + o.len > total_size) {
+      (void)cuda::close_ipc_mem_handle(dst_dev);
+      for (const auto& k : opened)
+        (void)cuda::close_ipc_mem_handle(k.ptr);
+      return absl::OutOfRangeError("LIP segment dst range out of bounds");
+    }
+    auto st = cuda::memcpy(
+        static_cast<uint8_t*>(dst_dev) + o.dst,
+        static_cast<uint8_t*>(o.ptr) + o.base,
+        static_cast<size_t>(o.len),
+        cudaMemcpyDeviceToDevice);
+    if (!st.ok()) {
+      (void)cuda::close_ipc_mem_handle(dst_dev);
+      for (const auto& k : opened)
+        (void)cuda::close_ipc_mem_handle(k.ptr);
+      return st;
+    }
+  }
+  (void)cuda::device_synchronize();
+  (void)cuda::close_ipc_mem_handle(dst_dev);
+  for (const auto& o : opened)
+    (void)cuda::close_ipc_mem_handle(o.ptr);
+
+  // Commit and return destination IPC handle bytes
+  auto commit_or = engine_->commit_registered_artifact(out.registration_id);
+  if (!commit_or.ok())
+    return commit_or.status();
+  // Successful commit; prevent abort on scope exit
+  abort_guard.release();
+  std::vector<uint8_t> bytes(out.cuda_ipc_handle_bytes.size());
+  std::memcpy(bytes.data(), out.cuda_ipc_handle_bytes.data(), out.cuda_ipc_handle_bytes.size());
+  return bytes;
+}
+
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
     const v1::MaterializeReplicaRequest* req,
     v1::MaterializeReplicaResponse* resp) {
   namespace otel = opentelemetry;
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.daemon");
-  auto parent_ctx = tensorcast::common::otel::ExtractFromServerMetadata(*ctx);
+  auto parent_ctx = common::otel::ExtractFromServerMetadata(*ctx);
   auto ctx_token = opentelemetry::context::RuntimeContext::Attach(parent_ctx);
   otel::trace::StartSpanOptions opts;
   opts.kind = otel::trace::SpanKind::kServer;
@@ -87,10 +211,70 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
   if (has_disk)
     hints.disk_path = req->disk_path();
 
+  // LIP same-device denial
+  if (has_artifact) {
+    absl::MutexLock l(&lip_mu_);
+    int dev_id = device.ordinal;
+    std::string lip_key = absl::StrCat(req->artifact_id(), "@", dev_id);
+    auto it = lip_by_key_.find(lip_key);
+    if (it != lip_by_key_.end()) {
+      if (it->second.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() <= it->second.expiry) {
+        resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return {StatusCode::FAILED_PRECONDITION, "lease_in_place not supported for same device_id consumers"};
+      }
+    }
+  }
+
+  // Cross-device local consumption from LIP → coalesced (artifact_id case only)
+  if (has_artifact) {
+    std::optional<LipLeaseEntry> lip_src;
+    {
+      absl::MutexLock l(&lip_mu_);
+      for (const auto& kv : lip_by_key_) {
+        const auto& e = kv.second;
+        if (e.artifact_id != req->artifact_id())
+          continue;
+        if (e.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > e.expiry)
+          continue;
+        if (e.device_id == device.ordinal)
+          continue;
+        lip_src = e;
+        break;
+      }
+    }
+    if (lip_src.has_value()) {
+      auto hbytes_or = lip_copy_to_new_coalesced_int(
+          device.ordinal, lip_src->index_data, lip_src->total_size, absl::MakeSpan(lip_src->segments));
+      if (!hbytes_or.ok())
+        return to_grpc_status(hbytes_or.status());
+      if (!req->replica_uuid().empty()) {
+        std::promise<absl::Status> p;
+        p.set_value(absl::OkStatus());
+        store::loading::ReplicaKey rkey;
+        rkey.artifact_id = req->artifact_id();
+        rkey.device = store::DeviceRegistry::instance().gpu_key(device.ordinal);
+        rkey.replica = 0;
+        sessions_.put(req->replica_uuid(), rkey, p.get_future().share());
+      }
+      if (req->pid() > 0) {
+        store::loading::ReplicaKey rkey;
+        rkey.artifact_id = req->artifact_id();
+        rkey.device = store::DeviceRegistry::instance().gpu_key(device.ordinal);
+        rkey.replica = 0;
+        refs_.add_ref(rkey, req->pid(), /*keep_for_global=*/false);
+      }
+      auto* mem = resp->mutable_mem_handle();
+      const auto& bytes = *hbytes_or;
+      mem->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+      resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+      return Status::OK;
+    }
+  }
+
   // Choose mode
-  tensorcast::store::StoreEngine::MaterializeMode mode = tensorcast::store::StoreEngine::MaterializeMode::AUTO;
+  store::StoreEngine::MaterializeMode mode = store::StoreEngine::MaterializeMode::AUTO;
   if (has_disk) {
-    mode = tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY;
+    mode = store::StoreEngine::MaterializeMode::LOAD_ONLY;
   }
 
   auto result = engine_->materialize_replica(device, mode, hints);
@@ -233,6 +417,70 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
   // RFC-0014: provide optional disk fallback when mapping carries disk_path
   if (!mapping.disk_path.empty()) {
     hints.disk_path = mapping.disk_path;
+  }
+
+  // LIP same-device denial: if an ACTIVE LIP exists on the requested device, reject
+  {
+    absl::MutexLock l(&lip_mu_);
+    std::string lip_key = absl::StrCat(mapping.artifact_id, "@", req->device_id());
+    auto it = lip_by_key_.find(lip_key);
+    if (it != lip_by_key_.end()) {
+      if (it->second.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() <= it->second.expiry) {
+        resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return {StatusCode::FAILED_PRECONDITION, "lease_in_place not supported for same device_id consumers"};
+      }
+    }
+  }
+
+  // Cross-device local consumption: if an ACTIVE LIP exists on a different device,
+  // copy from LIP into a new coalesced replica on target GPU and return IPC handle.
+  {
+    std::optional<LipLeaseEntry> lip_src;
+    {
+      absl::MutexLock l(&lip_mu_);
+      for (const auto& kv : lip_by_key_) {
+        const auto& e = kv.second;
+        if (e.artifact_id != mapping.artifact_id)
+          continue;
+        if (e.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > e.expiry)
+          continue;
+        if (e.device_id == req->device_id())
+          continue;
+        lip_src = e;
+        break;
+      }
+    }
+    if (lip_src.has_value()) {
+      auto hbytes_or = lip_copy_to_new_coalesced_int(
+          req->device_id(), lip_src->index_data, lip_src->total_size, absl::MakeSpan(lip_src->segments));
+      if (!hbytes_or.ok())
+        return to_grpc_status(hbytes_or.status());
+      if (!req->replica_uuid().empty()) {
+        // Ready future already completed OK
+        std::promise<absl::Status> p;
+        p.set_value(absl::OkStatus());
+        store::loading::ReplicaKey rkey;
+        rkey.artifact_id = mapping.artifact_id;
+        rkey.device = store::DeviceRegistry::instance().gpu_key(req->device_id());
+        rkey.replica = 0;
+        sessions_.put(req->replica_uuid(), rkey, p.get_future().share());
+      }
+      if (req->pid() > 0) {
+        store::loading::ReplicaKey rkey;
+        rkey.artifact_id = mapping.artifact_id;
+        rkey.device = store::DeviceRegistry::instance().gpu_key(req->device_id());
+        rkey.replica = 0;
+        refs_.add_ref(rkey, req->pid(), /*keep_for_global=*/false);
+      }
+
+      auto* mem = resp->mutable_mem_handle();
+      const auto& bytes = *hbytes_or;
+      mem->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+      resp->set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+      resp->set_artifact_id(mapping.artifact_id);
+      resp->set_used_disk_path(mapping.disk_path);
+      return Status::OK;
+    }
   }
 
   auto result = engine_->materialize_replica(device, store::StoreEngine::MaterializeMode::AUTO, hints);
@@ -482,16 +730,15 @@ StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-static tensorcast::store::DeviceKey default_gpu_key() {
-  return tensorcast::store::DeviceRegistry::instance().gpu_key(0);
+static store::DeviceKey default_gpu_key() {
+  return store::DeviceRegistry::instance().gpu_key(0);
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::MaterializeReplicaRequest& req) {
-  using tensorcast::DeviceType;
-  using tensorcast::store::DeviceKey;
+store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::MaterializeReplicaRequest& req) {
+  using store::DeviceKey;
   if (!req.device_uuid().empty()) {
     DeviceKey key{.type = DeviceType::GPU, .ordinal = 0, .uuid = req.device_uuid()};
-    return tensorcast::store::DeviceRegistry::instance().normalize(key);
+    return store::DeviceRegistry::instance().normalize(key);
   }
   switch (req.target_device_type()) {
     case v1::DeviceType::DEVICE_TYPE_CPU:
@@ -504,9 +751,8 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::Ma
   }
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::ConfirmReplicaRequest& req) {
-  using tensorcast::DeviceType;
-  using tensorcast::store::DeviceKey;
+store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::ConfirmReplicaRequest& req) {
+  using store::DeviceKey;
   switch (req.target_device_type()) {
     case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
@@ -517,9 +763,8 @@ tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::Co
   }
 }
 
-tensorcast::store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::UnloadReplicaRequest& req) {
-  using tensorcast::DeviceType;
-  using tensorcast::store::DeviceKey;
+store::DeviceKey StoreDaemonServiceImpl::resolve_device(const v1::UnloadReplicaRequest& req) {
+  using store::DeviceKey;
   switch (req.target_device_type()) {
     case v1::DeviceType::DEVICE_TYPE_CPU:
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
@@ -633,7 +878,136 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
   // Resolve ReplicaKey, prefer explicit device_id then infer residency
   auto key = make_replica_key(req->artifact_id());
   if (req->has_device_id()) {
-    key.device = tensorcast::store::DeviceRegistry::instance().gpu_key(req->device_id());
+    key.device = store::DeviceRegistry::instance().gpu_key(req->device_id());
+  }
+
+  // LIP-backed staged export path (no coalesced replica present). If a LIP
+  // lease exists for the requested artifact (and is not expired), register
+  // per-chunk GPU ranges with the CommunicateEngine and return a lock token.
+  // This path is staged-only (TCP/DRAM stager) and does not register RNIC MR.
+  {
+    std::optional<LipLeaseEntry> lip_opt;
+    {
+      absl::MutexLock l(&lip_mu_);
+      const auto now = std::chrono::steady_clock::now();
+      for (const auto& kv : lip_by_key_) {
+        const auto& e = kv.second;
+        if (e.artifact_id != req->artifact_id())
+          continue;
+        if (e.expiry.time_since_epoch().count() > 0 && now > e.expiry)
+          continue; // expired
+        lip_opt = e;
+        break;
+      }
+    }
+    if (lip_opt.has_value()) {
+      const auto& lip = *lip_opt;
+      // TTL gating
+      const auto now = std::chrono::steady_clock::now();
+      if (lip.expiry.time_since_epoch().count() > 0 && now > lip.expiry) {
+        return {StatusCode::DEADLINE_EXCEEDED, "lease expired (TTL)"};
+      }
+      // Communication required
+      auto comm_mgr = engine_->get_shared_comm_manager();
+      if (!comm_mgr->is_enabled()) {
+        return {StatusCode::UNAVAILABLE, "communication engine not enabled"};
+      }
+      auto& comm_engine = comm_mgr->get_engine();
+      const size_t chunk_size = engine_->get_chunk_size();
+      if (chunk_size == 0) {
+        return {StatusCode::FAILED_PRECONDITION, "invalid chunk_size (0)"};
+      }
+      // Build unique CUDA IPC mappings per segment
+      struct OpenedSeg {
+        int device_id;
+        void* ptr;
+        uint64_t base;
+        uint64_t len;
+        uint64_t dst;
+      };
+      std::vector<OpenedSeg> opened;
+      opened.reserve(lip.segments.size());
+      for (const auto& seg : lip.segments) {
+        cudaIpcMemHandle_t h{};
+        size_t n = std::min(sizeof(h), seg.handle_bytes.size());
+        if (n > 0)
+          std::memcpy(&h, seg.handle_bytes.data(), n);
+        void* dev_ptr = nullptr;
+        if (auto st = cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+          for (const auto& o : opened)
+            (void)cuda::close_ipc_mem_handle(o.ptr);
+          return to_grpc_status(st);
+        }
+        opened.push_back(
+            OpenedSeg{
+                .device_id = seg.device_id,
+                .ptr = dev_ptr,
+                .base = seg.base_offset,
+                .len = seg.length,
+                .dst = seg.dst_offset});
+      }
+      // Helper: locate a segment that fully covers [off, off+len)
+      auto find_covering = [&](uint64_t off, uint64_t len) -> const OpenedSeg* {
+        for (const auto& s : opened) {
+          if (off >= s.dst && (off + len) <= (s.dst + s.len))
+            return &s;
+        }
+        return nullptr;
+      };
+      // Register per-chunk GPU ranges; name keys deterministically to allow
+      // receivers to derive them by chunk index.
+      std::vector<std::string> tensor_keys;
+      tensor_keys.reserve(req->chunk_indices_size());
+      for (uint32_t idx : req->chunk_indices()) {
+        uint64_t off = static_cast<uint64_t>(idx) * static_cast<uint64_t>(chunk_size);
+        if (off >= lip.total_size) {
+          for (const auto& o : opened)
+            (void)cuda::close_ipc_mem_handle(o.ptr);
+          return {StatusCode::OUT_OF_RANGE, "chunk offset exceeds artifact size"};
+        }
+        uint64_t len = std::min<uint64_t>(chunk_size, lip.total_size - off);
+        const OpenedSeg* seg = find_covering(off, len);
+        if (seg == nullptr) {
+          // For now, do not stitch across segments; require chunk alignment to segments.
+          for (const auto& o : opened)
+            (void)cuda::close_ipc_mem_handle(o.ptr);
+          return {StatusCode::UNIMPLEMENTED, "LIP chunk crosses segment boundary (unsupported)"};
+        }
+        uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg->ptr) + (seg->base + (off - seg->dst)));
+        std::string tkey = absl::StrCat(lip.artifact_id, "_GPU_chunk_", idx);
+        communicator::engine::CommunicateEngine::RegisterTensorOptions ro;
+        ro.register_mr = comm_engine.is_rdma_enabled();
+        ro.needs_staging = (!comm_engine.is_rdma_enabled()); // GPU over TCP requires staging
+        ro.async = false;
+        auto st = comm_engine.register_tensor_ex(
+            tkey, addr, static_cast<size_t>(len), communicator::base::COMMUNICATE_ENGINE_DEV_GPU, seg->device_id, ro);
+        if (!st.ok()) {
+          for (const auto& o : opened)
+            (void)cuda::close_ipc_mem_handle(o.ptr);
+          return to_grpc_status(st);
+        }
+        tensor_keys.push_back(std::move(tkey));
+      }
+      // Mint a transport lock token and cache export record for cleanup
+      std::string token = locks_.mint_token();
+      {
+        absl::MutexLock lk(&lip_export_mu_);
+        LipExportRecord rec;
+        rec.artifact_id = lip.artifact_id;
+        rec.device_id = lip.device_id;
+        for (const auto& o : opened)
+          rec.opened_ptrs.push_back(o.ptr);
+        rec.tensor_keys = tensor_keys;
+        lip_exports_.emplace(token, std::move(rec));
+      }
+      // NOTE: We do not DVMP-lock chunks for LIP; the source memory is owned
+      // by the producer process and governed by the lease TTL.
+      resp->set_lock_token(token);
+      if (!lip.verification_json.empty()) {
+        resp->set_verification_json(lip.verification_json);
+      }
+      return Status::OK;
+    }
   }
   {
     int unique_gpu_device = -2; // -2=unknown, -1=none, >=0=single device
@@ -648,7 +1022,7 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
       }
     }
     if (unique_gpu_device >= 0) {
-      key.device = tensorcast::store::DeviceRegistry::instance().gpu_key(unique_gpu_device);
+      key.device = store::DeviceRegistry::instance().gpu_key(unique_gpu_device);
     } else if (unique_gpu_device == -3) {
       return {StatusCode::INVALID_ARGUMENT, "ambiguous artifact residency across multiple GPUs; device_id required"};
     }
@@ -683,7 +1057,24 @@ Status StoreDaemonServiceImpl::UnlockTransportChunks(
   }
   auto entry = locks_.get(req->lock_token());
   if (!entry.has_value()) {
-    return {StatusCode::NOT_FOUND, "unknown lock token"};
+    // Check if this is a LIP export token
+    absl::MutexLock lk(&lip_export_mu_);
+    auto lit = lip_exports_.find(req->lock_token());
+    if (lit == lip_exports_.end()) {
+      return {StatusCode::NOT_FOUND, "unknown lock token"};
+    }
+    auto comm_mgr = engine_->get_shared_comm_manager();
+    if (comm_mgr->is_enabled()) {
+      auto& comm_engine = comm_mgr->get_engine();
+      for (const auto& k : lit->second.tensor_keys) {
+        (void)comm_engine.unregister_tensor(k);
+      }
+    }
+    for (void* p : lit->second.opened_ptrs) {
+      (void)cuda::close_ipc_mem_handle(p);
+    }
+    lip_exports_.erase(lit);
+    return Status::OK;
   }
   auto st = engine_->unlock_chunks(entry->key, absl::MakeSpan(entry->chunk_indices), /*copied_gpu=*/false);
   if (!st.ok())
@@ -709,7 +1100,7 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
   span->SetAttribute("rpc.method", "BeginRegisterArtifact");
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req->total_size()));
-  tensorcast::store::StoreEngine::ArtifactRegistration reg;
+  store::StoreEngine::ArtifactRegistration reg;
   // Use a temporary placeholder identifier for pre-commit residency; replaced at Commit with mi2:...
   reg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
   reg.device_id = req->device_id();
@@ -718,6 +1109,10 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
   reg.enable_p2p = true;
   if (req->has_ttl_ms())
     reg.ttl_ms = req->ttl_ms();
+  // owner_pid is required per RFC-0014
+  if (req->owner_pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "owner_pid is required (>0)"};
+  }
   // Build registration meta
   RegPlan plan = RegPlan::COALESCED;
   if (req->has_dvmp())
@@ -728,6 +1123,10 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
   meta.plan = plan;
   meta.total_size = req->total_size();
   meta.device_id = req->device_id();
+  meta.owner_pid = req->owner_pid();
+  if (req->has_lease()) {
+    meta.lease_in_place = req->lease().in_place();
+  }
   if (req->has_ttl_ms() && req->ttl_ms() > 0) {
     meta.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req->ttl_ms());
     meta.ttl_ms = static_cast<uint32_t>(req->ttl_ms());
@@ -771,7 +1170,8 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
       reg_meta_[out.registration_id] = meta;
     }
     return Status::OK;
-  } else if (plan == RegPlan::DVMP) {
+  }
+  if (plan == RegPlan::DVMP) {
     // Engine-backed DVMP begin: allocate DVMP/UMA CPU region
     store::StoreEngine::ArtifactRegistration a;
     a.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
@@ -809,7 +1209,8 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
       reg_meta_[out.registration_id] = meta;
     }
     return Status::OK;
-  } else if (plan == RegPlan::LEASE) {
+  }
+  if (plan == RegPlan::LEASE) {
     // Lease plan stub: return empty lease handshake
     std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
     resp->set_registration_id(reg_id);
@@ -897,6 +1298,270 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     return Status::OK;
   }
   if (meta.plan == RegPlan::LEASE) {
+    // TTL enforcement: if expired, cleanup and fail fast
+    if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
+      absl::MutexLock l(&reg_mu_);
+      reg_meta_.erase(req->registration_id());
+      reg_leases_.erase(req->registration_id());
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
+        counter->Add(1.0);
+      } catch (...) {
+        VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
+      }
+      return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+    }
+
+    // If in-place lease requested, do not materialize into daemon VRAM. Compute descriptor
+    // directly from the leased segments and register a LIP lease entry for TTL/keepalive.
+    if (meta.lease_in_place) {
+      if (meta.index_data.empty() && meta.index_key_hex.empty()) {
+        return {StatusCode::FAILED_PRECONDITION, "canonical index is required for LIP commit"};
+      }
+      auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(meta.index_data, meta.total_size, 8);
+      if (!plan_or.ok())
+        return to_grpc_status(plan_or.status());
+      // Copy lease segments under lock
+      std::vector<LeaseSegMeta> lease_vec;
+      {
+        absl::MutexLock l(&reg_mu_);
+        auto itl = reg_leases_.find(req->registration_id());
+        if (itl == reg_leases_.end())
+          return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
+        lease_vec = itl->second;
+      }
+
+      struct OpenedSeg {
+        int device_id;
+        void* ptr;
+        uint64_t base;
+        uint64_t len;
+        uint64_t dst;
+      };
+      std::vector<OpenedSeg> opened;
+      opened.reserve(lease_vec.size());
+      for (const auto& seg : lease_vec) {
+        cudaIpcMemHandle_t h{};
+        size_t n = std::min(sizeof(h), seg.handle_bytes.size());
+        if (n > 0)
+          std::memcpy(&h, seg.handle_bytes.data(), n);
+        void* dev_ptr = nullptr;
+        if (auto st = cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+          for (const auto& o : opened)
+            (void)cuda::close_ipc_mem_handle(o.ptr);
+          return to_grpc_status(st);
+        }
+        opened.push_back(
+            OpenedSeg{
+                .device_id = seg.device_id,
+                .ptr = dev_ptr,
+                .base = seg.base_offset,
+                .len = seg.length,
+                .dst = seg.dst_offset});
+      }
+
+      // Build a seekable source over the opened segments with PAD=0 semantics
+      class LipSeekableSource final : public store::loader::SeekableSource {
+       public:
+        explicit LipSeekableSource(std::vector<OpenedSeg> segs, uint64_t total)
+            : segs_(std::move(segs)), total_(total) {
+          // Sort by dst
+          std::sort(segs_.begin(), segs_.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
+        }
+        ~LipSeekableSource() override {
+          for (const auto& s : segs_) {
+            (void)cuda::close_ipc_mem_handle(s.ptr);
+          }
+        }
+        absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+          return read_at(cur_, dst, max_bytes);
+        }
+        absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+          if (offset >= total_)
+            return static_cast<size_t>(0);
+          size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_ - offset));
+          uint8_t* out = static_cast<uint8_t*>(dst);
+          while (remaining > 0) {
+            // Find segment that covers offset
+            const OpenedSeg* seg = nullptr;
+            for (const auto& s : segs_) {
+              if (offset >= s.dst && offset < s.dst + s.len) {
+                seg = &s;
+                break;
+              }
+              if (offset < s.dst)
+                break;
+            }
+            if (seg == nullptr) {
+              // Fill until next segment or end
+              uint64_t next = total_;
+              for (const auto& s : segs_) {
+                if (s.dst > offset) {
+                  next = s.dst;
+                  break;
+                }
+              }
+              size_t take = static_cast<size_t>(std::min<uint64_t>(remaining, next - offset));
+              std::memset(out, 0, take);
+              out += take;
+              offset += take;
+              remaining -= take;
+              continue;
+            }
+            const uint64_t local = offset - seg->dst;
+            const size_t avail = static_cast<size_t>(seg->len - local);
+            const size_t take = std::min(remaining, avail);
+            if (auto st = cuda::set_device(seg->device_id); !st.ok())
+              return st;
+            auto st =
+                cuda::memcpy(out, static_cast<uint8_t*>(seg->ptr) + (seg->base + local), take, cudaMemcpyDeviceToHost);
+            if (!st.ok())
+              return st;
+            if (auto sync = cuda::device_synchronize(); !sync.ok())
+              return sync;
+            out += take;
+            offset += take;
+            remaining -= take;
+          }
+          return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
+        }
+
+       private:
+        std::vector<OpenedSeg> segs_;
+        uint64_t total_;
+        uint64_t cur_{0};
+      } src(opened, meta.total_size);
+
+      // Hash: compute index and data multihashes
+      auto index_mh_or =
+          common::compute_index_multihash(std::optional<std::string>(meta.index_data), meta.index_key_hex);
+      if (!index_mh_or.ok()) {
+        for (const auto& o : opened)
+          (void)cuda::close_ipc_mem_handle(o.ptr);
+        return to_grpc_status(index_mh_or.status());
+      }
+      auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, meta.total_size);
+      if (!data_mh_or.ok()) {
+        for (const auto& o : opened)
+          (void)cuda::close_ipc_mem_handle(o.ptr);
+        return to_grpc_status(data_mh_or.status());
+      }
+      for (const auto& o : opened)
+        (void)cuda::close_ipc_mem_handle(o.ptr);
+
+      const std::string artifact_id_mi2 = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
+      auto* desc = resp->mutable_artifact_descriptor();
+      desc->set_artifact_id(artifact_id_mi2);
+      desc->set_index_multihash(*index_mh_or);
+      desc->set_data_multihash(*data_mh_or);
+      desc->set_schema_version("v2");
+      desc->set_encoding("json");
+      desc->set_total_size(meta.total_size);
+
+      // Register LIP entry for TTL/keepalive
+      {
+        absl::MutexLock l(&lip_mu_);
+        std::string lip_key = absl::StrCat(artifact_id_mi2, "@", meta.device_id);
+        LipLeaseEntry e;
+        e.registration_id = req->registration_id();
+        e.artifact_id = artifact_id_mi2;
+        e.device_id = meta.device_id;
+        e.owner_pid = meta.owner_pid;
+        e.ttl_ms = meta.ttl_ms > 0 ? meta.ttl_ms : 600000; // default 10 min when absent
+        e.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(e.ttl_ms);
+        e.epoch = meta.epoch;
+        e.total_size = meta.total_size;
+        e.index_data = meta.index_data;
+        e.segments = std::move(lease_vec);
+        // Lightweight verification: key points (start, middle, end)
+        // Re-open segments to read 8-byte values via LipSeekableSource
+        auto build_source = [&]() -> std::unique_ptr<LipSeekableSource> {
+          // Map IPC handles again for a short critical section
+          struct OpenedSeg2 {
+            int device_id;
+            void* ptr;
+            uint64_t base;
+            uint64_t len;
+            uint64_t dst;
+          };
+          std::vector<OpenedSeg2> opened2;
+          opened2.reserve(e.segments.size());
+          for (const auto& seg : e.segments) {
+            cudaIpcMemHandle_t h{};
+            size_t n = std::min(sizeof(h), seg.handle_bytes.size());
+            if (n > 0)
+              std::memcpy(&h, seg.handle_bytes.data(), n);
+            void* dev_ptr = nullptr;
+            if (auto st = cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+              for (const auto& o : opened2)
+                (void)cuda::close_ipc_mem_handle(o.ptr);
+              return nullptr;
+            }
+            opened2.push_back(
+                OpenedSeg2{
+                    .device_id = seg.device_id,
+                    .ptr = dev_ptr,
+                    .base = seg.base_offset,
+                    .len = seg.length,
+                    .dst = seg.dst_offset});
+          }
+          // Move into LipSeekableSource (will need a variant accepting OpenedSeg2)
+          // Convert to the OpenedSeg type expected by LipSeekableSource
+          std::vector<OpenedSeg> opened_cast;
+          opened_cast.reserve(opened2.size());
+          for (const auto& s : opened2)
+            opened_cast.push_back(
+                OpenedSeg{.device_id = s.device_id, .ptr = s.ptr, .base = s.base, .len = s.len, .dst = s.dst});
+          return std::unique_ptr<LipSeekableSource>(new LipSeekableSource(std::move(opened_cast), e.total_size));
+        };
+        // Use the source to read key points
+        std::string vjson;
+        if (auto src = build_source()) {
+          auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
+            uint64_t val = 0;
+            size_t to_read = 8;
+            auto st = src->read_at(off, &val, to_read);
+            if (!st.ok())
+              return std::nullopt;
+            return val;
+          };
+          uint64_t size = e.total_size;
+          auto v0 = read_u64(0);
+          auto v1 = read_u64(size / 2);
+          auto v2 = read_u64(size >= 8 ? size - 8 : 0);
+          // Close mapped segments by destroying src (calls destructor)
+          src.reset();
+          if (v0.has_value() && v1.has_value() && v2.has_value()) {
+            nlohmann::json jv;
+            jv["artifact_size"] = size;
+            jv["key_values"] = {*v0, *v1, *v2};
+            vjson = jv.dump();
+          }
+        }
+        e.verification_json = std::move(vjson);
+        lip_by_key_[lip_key] = std::move(e);
+        lip_key_by_reg_[req->registration_id()] = lip_key;
+      }
+
+      // Metrics: commit (lease_in_place)
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_register_commit_lip_total");
+        counter->Add(1.0);
+      } catch (...) {
+        VLOG(1) << "metrics counter tc_register_commit_lip_total unavailable";
+      }
+      // Cleanup registration meta (segments moved into LIP entry)
+      {
+        absl::MutexLock l2(&reg_mu_);
+        reg_meta_.erase(req->registration_id());
+        reg_leases_.erase(req->registration_id());
+      }
+      return Status::OK;
+    }
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
       absl::MutexLock l(&reg_mu_);
       reg_meta_.erase(req->registration_id());
@@ -918,8 +1583,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
       return {StatusCode::INVALID_ARGUMENT, "lease commit requires canonical index bytes (v2 json)"};
     }
     // Build SegmentPlan
-    auto plan_or =
-        tensorcast::store::loader::build_segment_plan_from_canonical_index_json(meta.index_data, meta.total_size, 8);
+    auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(meta.index_data, meta.total_size, 8);
     if (!plan_or.ok())
       return to_grpc_status(plan_or.status());
     auto plan = *plan_or;
@@ -932,7 +1596,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
         return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
       lease_vec = itl->second;
     }
-    // Map IPC handles for source segments
+    // Map IPC handles for source segments (materialize into daemon VRAM)
     struct Opened {
       int device_id;
       void* ptr;
@@ -947,9 +1611,9 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
       if (n > 0)
         std::memcpy(&h, seg.handle_bytes.data(), n);
       void* dev_ptr = nullptr;
-      if (auto st = tensorcast::cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+      if (auto st = cuda::open_ipc_mem_handle(&dev_ptr, h, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
         for (const auto& o : opened)
-          (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+          (void)cuda::close_ipc_mem_handle(o.ptr);
         return to_grpc_status(st);
       }
       opened.push_back(Opened{.device_id = seg.device_id, .ptr = dev_ptr, .base = seg.base_offset, .len = seg.length});
@@ -967,13 +1631,13 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     auto begin2_or = engine_->begin_register_artifact(areg);
     if (!begin2_or.ok()) {
       for (const auto& o : opened)
-        (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+        (void)cuda::close_ipc_mem_handle(o.ptr);
       return to_grpc_status(begin2_or.status());
     }
     const auto& out2 = begin2_or.value();
     // Ensure pending registration is aborted on any error prior to successful commit
     struct RegAbortGuard {
-      tensorcast::store::StoreEngine* engine;
+      store::StoreEngine* engine;
       std::string id;
       bool active{true};
       ~RegAbortGuard() {
@@ -989,24 +1653,23 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     cudaIpcMemHandle_t hdst{};
     std::memcpy(&hdst, out2.cuda_ipc_handle_bytes.data(), sizeof(hdst));
     void* dst_dev = nullptr;
-    if (auto st = tensorcast::cuda::open_ipc_mem_handle(&dst_dev, hdst, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
+    if (auto st = cuda::open_ipc_mem_handle(&dst_dev, hdst, cudaIpcMemLazyEnablePeerAccess); !st.ok()) {
       for (const auto& o : opened)
-        (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+        (void)cuda::close_ipc_mem_handle(o.ptr);
       return to_grpc_status(st);
     }
     // Zero PAD segments per plan to ensure deterministic padding
-    (void)tensorcast::cuda::set_device(meta.device_id);
+    (void)cuda::set_device(meta.device_id);
     for (const auto& p : plan) {
-      if (p.kind != tensorcast::store::loader::SegmentPiece::PAD)
+      if (p.kind != store::loader::SegmentPiece::PAD)
         continue;
       if (p.length == 0)
         continue;
-      auto st =
-          tensorcast::cuda::memset(static_cast<uint8_t*>(dst_dev) + p.dst_offset, 0, static_cast<size_t>(p.length));
+      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev) + p.dst_offset, 0, static_cast<size_t>(p.length));
       if (!st.ok()) {
-        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        (void)cuda::close_ipc_mem_handle(dst_dev);
         for (const auto& o : opened)
-          (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+          (void)cuda::close_ipc_mem_handle(o.ptr);
         return to_grpc_status(st);
       }
     }
@@ -1016,27 +1679,27 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
       const uint64_t dst_off = lease_vec[j].dst_offset;
       // Validate destination range within [0, total_size)
       if (dst_off > meta.total_size || o.len > meta.total_size || dst_off + o.len > meta.total_size) {
-        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        (void)cuda::close_ipc_mem_handle(dst_dev);
         for (const auto& k : opened)
-          (void)tensorcast::cuda::close_ipc_mem_handle(k.ptr);
+          (void)cuda::close_ipc_mem_handle(k.ptr);
         return {StatusCode::OUT_OF_RANGE, "lease segment dst range out of bounds"};
       }
-      auto st = tensorcast::cuda::memcpy(
+      auto st = cuda::memcpy(
           static_cast<uint8_t*>(dst_dev) + dst_off,
           static_cast<uint8_t*>(o.ptr) + o.base,
           static_cast<size_t>(o.len),
           cudaMemcpyDeviceToDevice);
       if (!st.ok()) {
-        (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+        (void)cuda::close_ipc_mem_handle(dst_dev);
         for (const auto& k : opened)
-          (void)tensorcast::cuda::close_ipc_mem_handle(k.ptr);
+          (void)cuda::close_ipc_mem_handle(k.ptr);
         return to_grpc_status(st);
       }
     }
-    (void)tensorcast::cuda::device_synchronize();
-    (void)tensorcast::cuda::close_ipc_mem_handle(dst_dev);
+    (void)cuda::device_synchronize();
+    (void)cuda::close_ipc_mem_handle(dst_dev);
     for (const auto& o : opened)
-      (void)tensorcast::cuda::close_ipc_mem_handle(o.ptr);
+      (void)cuda::close_ipc_mem_handle(o.ptr);
     // Commit the coalesced registration in engine to finalize and compute descriptor
     auto commit2_or = engine_->commit_registered_artifact(out2.registration_id);
     if (!commit2_or.ok())
@@ -1275,18 +1938,47 @@ Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
     grpc::ServerContext* /*ctx*/,
     const v1::KeepAliveRegisterArtifactRequest* req,
     v1::KeepAliveRegisterArtifactResponse* /*resp*/) {
-  absl::MutexLock l(&reg_mu_);
-  auto it = reg_meta_.find(req->registration_id());
-  if (it == reg_meta_.end()) {
-    return {StatusCode::NOT_FOUND, "registration_id not found"};
+  // Pre-commit path
+  {
+    absl::MutexLock l(&reg_mu_);
+    auto it = reg_meta_.find(req->registration_id());
+    if (it != reg_meta_.end()) {
+      // Owner PID must match
+      if (req->owner_pid() != it->second.owner_pid) {
+        return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch"};
+      }
+      it->second.epoch = req->epoch();
+      if (req->ttl_ms() > 0) {
+        it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req->ttl_ms());
+        it->second.ttl_ms = static_cast<uint32_t>(req->ttl_ms());
+        // Propagate to engine so internal TTL check also extends
+        (void)engine_->keep_alive_registered_artifact(req->registration_id(), it->second.ttl_ms);
+      }
+      // Metrics recorded below
+      goto KEEPALIVE_OK;
+    }
   }
-  it->second.epoch = req->epoch();
-  if (req->ttl_ms() > 0) {
-    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req->ttl_ms());
-    it->second.ttl_ms = static_cast<uint32_t>(req->ttl_ms());
-    // Propagate to engine so internal TTL check also extends
-    (void)engine_->keep_alive_registered_artifact(req->registration_id(), it->second.ttl_ms);
+  // Post-commit LIP path: registration_id refers to a LIP entry
+  {
+    absl::MutexLock l(&lip_mu_);
+    auto itkey = lip_key_by_reg_.find(req->registration_id());
+    if (itkey == lip_key_by_reg_.end()) {
+      return {StatusCode::NOT_FOUND, "registration_id not found"};
+    }
+    auto it = lip_by_key_.find(itkey->second);
+    if (it == lip_by_key_.end()) {
+      lip_key_by_reg_.erase(itkey);
+      return {StatusCode::NOT_FOUND, "lease not found"};
+    }
+    if (req->owner_pid() != it->second.owner_pid) {
+      return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch"};
+    }
+    it->second.epoch = req->epoch();
+    const uint32_t extend = req->ttl_ms() > 0 ? req->ttl_ms() : (it->second.ttl_ms > 0 ? it->second.ttl_ms : 600000);
+    it->second.ttl_ms = extend;
+    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(extend);
   }
+KEEPALIVE_OK:
   // Metrics: keepalive
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -1302,12 +1994,24 @@ Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
     grpc::ServerContext* /*ctx*/,
     const v1::RevokeRegisteredArtifactRequest* req,
     v1::RevokeRegisteredArtifactResponse* /*resp*/) {
-  // Best-effort abort + cleanup meta
-  (void)engine_->abort_registered_artifact(req->registration_id());
-  absl::MutexLock l(&reg_mu_);
-  reg_meta_.erase(req->registration_id());
-  reg_buffers_.erase(req->registration_id());
-  reg_leases_.erase(req->registration_id());
+  // Best-effort abort + cleanup meta or LIP entry
+  {
+    absl::MutexLock l(&lip_mu_);
+    auto itkey = lip_key_by_reg_.find(req->registration_id());
+    if (itkey != lip_key_by_reg_.end()) {
+      lip_by_key_.erase(itkey->second);
+      lip_key_by_reg_.erase(itkey);
+      goto REVOKE_DONE;
+    }
+  }
+  {
+    (void)engine_->abort_registered_artifact(req->registration_id());
+    absl::MutexLock l(&reg_mu_);
+    reg_meta_.erase(req->registration_id());
+    reg_buffers_.erase(req->registration_id());
+    reg_leases_.erase(req->registration_id());
+  }
+REVOKE_DONE:
   // Metrics: revoke
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -1430,6 +2134,36 @@ void StoreDaemonServiceImpl::start_sweepers() {
           }
         }
       }
+      // Also sweep LIP leases: TTL expiry and dead owner_pid
+      {
+        absl::MutexLock l(&lip_mu_);
+        std::vector<std::string> to_erase;
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& kv : lip_by_key_) {
+          const auto& e = kv.second;
+          if (e.expiry.time_since_epoch().count() > 0 && now > e.expiry) {
+            to_erase.push_back(kv.first);
+            continue;
+          }
+          // PID check
+          std::string proc_path = absl::StrCat("/proc/", e.owner_pid);
+          if (::access(proc_path.c_str(), F_OK) != 0) {
+            to_erase.push_back(kv.first);
+          }
+        }
+        for (const auto& k : to_erase) {
+          // remove reg mapping as well
+          std::vector<std::string> regs_to_erase;
+          for (const auto& rk : lip_key_by_reg_) {
+            if (rk.second == k)
+              regs_to_erase.push_back(rk.first);
+          }
+          for (const auto& rid : regs_to_erase) {
+            lip_key_by_reg_.erase(rid);
+          }
+          lip_by_key_.erase(k);
+        }
+      }
       std::this_thread::sleep_for(opts_.proc_check_interval);
     }
   });
@@ -1474,7 +2208,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
               continue;
             store::loading::ReplicaKey key{
                 .artifact_id = info.artifact_id,
-                .device = tensorcast::store::DeviceRegistry::instance().gpu_key(dev),
+                .device = store::DeviceRegistry::instance().gpu_key(dev),
                 .replica = 0};
             if (refs_.ref_count(key) > 0 || refs_.keep_for_global(key))
               continue;
@@ -1697,9 +2431,8 @@ Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
 
     store::loading::ReplicaKey key;
     key.artifact_id = info.artifact_id;
-    key.device = (device_id >= 0)
-        ? tensorcast::store::DeviceRegistry::instance().gpu_key(device_id)
-        : tensorcast::store::DeviceKey{.type = tensorcast::DeviceType::CPU, .ordinal = -1, .uuid = ""};
+    key.device = (device_id >= 0) ? store::DeviceRegistry::instance().gpu_key(device_id)
+                                  : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
     key.replica = 0;
 
     Entry e;

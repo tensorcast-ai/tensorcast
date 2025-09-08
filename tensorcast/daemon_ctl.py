@@ -594,6 +594,7 @@ class DaemonCtl:
         req = store_daemon_pb2.BeginRegisterArtifactRequest(
             device_id=int(device_id),
             total_size=int(total_size_bytes),
+            owner_pid=int(self._get_effective_pid()),
         )
         if ttl_ms is not None and ttl_ms > 0:
             req.ttl_ms = int(ttl_ms)
@@ -865,7 +866,10 @@ class DaemonCtl:
         self, registration_id: str, ttl_ms: int, epoch: int
     ) -> bool:
         req = store_daemon_pb2.KeepAliveRegisterArtifactRequest(
-            registration_id=registration_id, ttl_ms=int(ttl_ms), epoch=int(epoch)
+            registration_id=registration_id,
+            ttl_ms=int(ttl_ms),
+            epoch=int(epoch),
+            owner_pid=int(self._get_effective_pid()),
         )
         try:
             self._unary_call(

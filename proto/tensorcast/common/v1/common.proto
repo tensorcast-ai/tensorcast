@@ -43,6 +43,9 @@ message MemoryInfo {
   string tensor_index_key = 11;
   google.protobuf.Timestamp creation_ts = 12;
   string source_process_id = 13;
+  // Optional verification metadata (JSON). When present, receivers may perform
+  // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
+  string verification_json = 14;
 }
 
 message ReplicaRef {

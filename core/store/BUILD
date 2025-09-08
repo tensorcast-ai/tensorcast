@@ -288,6 +288,25 @@ cc_test(
 )
 
 cc_test(
+    name = "store_engine_p2p_verification_fail_test",
+    srcs = ["store_engine_p2p_verification_fail_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    tags = ["requires_cuda"],
+    deps = [
+        ":store_engine",
+        "//core/common",
+        "//core/communicator:engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "registration_memory_replica_test",
     srcs = ["registration_memory_replica_test.cc"],
     linkopts = select({

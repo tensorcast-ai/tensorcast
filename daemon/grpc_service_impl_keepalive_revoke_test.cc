@@ -33,6 +33,7 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1024 * 1024);
+  breq.set_owner_pid(getpid());
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data("{}");
   idx->set_schema_version("v2");
@@ -47,6 +48,7 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   kreq.set_registration_id(bresp.registration_id());
   kreq.set_ttl_ms(2000);
   kreq.set_epoch(1);
+  kreq.set_owner_pid(getpid());
   st = service.KeepAliveRegisterArtifact(&ctx, &kreq, &kresp);
   REQUIRE(st.ok());
 

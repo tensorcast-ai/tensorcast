@@ -48,6 +48,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     p2p_src.port = static_cast<uint16_t>(remote.node_port);
     p2p_src.memory_keys = remote.remote_memory_keys;
     p2p_src.buf_sizes = remote.buffer_sizes;
+    p2p_src.verification_json = remote.verification_json;
     p2p_src.enable_checksum = true;
     p2p_src.location.type = remote.memory_type;
     p2p_src.location.device_id = remote.device_id;

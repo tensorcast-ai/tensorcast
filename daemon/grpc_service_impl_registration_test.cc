@@ -44,6 +44,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1 * 1024 * 1024);
+  breq.set_owner_pid(getpid());
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data("{}");
   idx->set_schema_version("v2");

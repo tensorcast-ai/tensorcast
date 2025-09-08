@@ -191,6 +191,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - Directory layout must mirror package/namespace hierarchy.
 - C++: Derive namespace from path (`a/b/c` -> `a::b::c`); open matching nested namespaces. In the innermost namespace, prefer unqualified local names; fully qualify only when crossing namespaces or to disambiguate. Do not use `using namespace` at file scope.
   - `/core/`: drop leading `core` when deriving (`core/a/b/c` -> `tensorcast::a::b::c`).
+  - `/daemon/`: do NOT drop `daemon`; derive as `tensorcast::daemon::<subdirs>` (e.g., `daemon/a/b` -> `tensorcast::daemon::a::b`).
   - Tests (`*_test.cc`): allow narrowly scoped `using`; prefer `using a::b::Symbol;` over broad imports.
   - Qualification elision:
     - Most sources sit under outer `tensorcast`; inside it, omit the `tensorcast::` prefix (e.g., `communicator::misc::GB`).
@@ -199,6 +200,8 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - Examples:
     - Good: `loading::ReplicaHandle`, `replica::Replica::create(...)`, `communicator::misc::GB`
     - Bad: `tensorcast::store::loading::ReplicaHandle`, `tensorcast::store::replica::Replica::create(...)`, `tensorcast::communicator::misc::GB`
+    - Good (inside daemon): `grpc::ServiceImpl`
+    - Bad (inside daemon): `tensorcast::daemon::grpc::ServiceImpl`
 
 ### C++ Guidelines (Simplified)
 
@@ -255,6 +258,7 @@ if (fd < 0) {
 - **Testing**: Catch2 framework with Arrange-Act-Assert pattern
 - **Concurrency**: Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
 - **Documentation**: Doxygen style for public APIs
+ - **Pointer annotations**: Prefer `std::unique_ptr` over `std::shared_ptr`. When using pointers, annotate intent with GSL: use `gsl::not_null<>` for non-null, non-owning pointers and `gsl::owner<>` for owning pointers. Constrain pointers at the type level wherever possible.
 
 ### Python Guidelines
 

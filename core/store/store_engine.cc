@@ -893,6 +893,23 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   }
   handle.replica_key = loading::ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
 
+  // Receiver-side verification: if the P2P source provides verification
+  // metadata (JSON), verify the loaded replica before returning.
+  if (!p2p_source.verification_json.empty()) {
+    auto info_or = common::ArtifactVerificationInfo::from_json(p2p_source.verification_json);
+    if (!info_or.ok()) {
+      LOG(WARNING) << "P2P verification_json parse failed: " << info_or.status();
+      return absl::DataLossError("verification_json parse failed");
+    }
+    const auto& info = *info_or;
+    const auto verify_loc = target_location;
+    auto vst = replica->verify_key_points(verify_loc, info);
+    if (!vst.ok()) {
+      LOG(ERROR) << "Receiver-side verification failed for artifact '" << artifact_identifier << "': " << vst;
+      return absl::DataLossError(std::string(vst.message()));
+    }
+  }
+
   // Ready future is already resolved (synchronous path)
   std::promise<absl::Status> promise;
   promise.set_value(absl::OkStatus());
@@ -1352,7 +1369,7 @@ int StoreEngine::unload_replica(const ReplicaKey& key) {
   // there was anything to unload.  This avoids treating a no-op release as a
   // success – a scenario that would allow multiple threads to report success
   // when only the first one actually freed memory.
-  tensorcast::store::MemoryState before_state = replica->get_memory_state(loc);
+  store::MemoryState before_state = replica->get_memory_state(loc);
 
   if (before_state <= MemoryState::UNALLOCATED) {
     // Nothing to release – another thread has already unloaded this instance.
@@ -1916,6 +1933,20 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
         .uuid = ""};
     const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
+    // Generate lightweight verification info (KEY_POINTS) for receiver-side validation
+    std::optional<std::string> verification_json;
+    if (!remote_keys.empty()) {
+      std::vector<void*> data_ptrs = entry.replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+      if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
+        std::vector<size_t> data_sizes{static_cast<size_t>(entry.size_bytes)};
+        auto info_or = common::ArtifactVerifier::generate_verification_info(
+            data_ptrs, data_sizes, entry.device_id, common::VerificationLevel::KEY_POINTS);
+        if (info_or.ok()) {
+          verification_json = info_or->to_json();
+        }
+      }
+    }
+
     auto reg_or = global_store_client_->register_memory_replica(
         entry.artifact_id,
         /*worker_id=*/wid,
@@ -1927,7 +1958,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         entry.tensor_index_data,
         entry.encoding,
         entry.schema_version,
-        /*max_concurrency=*/1);
+        /*max_concurrency=*/1,
+        verification_json);
     if (!reg_or.ok()) {
       return reg_or.status();
     }

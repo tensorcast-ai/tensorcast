@@ -377,3 +377,7 @@ high_availability:
     batch_size: 100
     sync_interval_ms: 5000
 ```
+Integrity verification metadata:
+- When a sender has precomputed lightweight verification (e.g., KEY_POINTS or SEGMENT_HASHES), it includes `verification_json` in the registered memory replica (Global Store `MemoryInfo`).
+- Global Store propagates `verification_json` in `RequestReplicaTransportResponse.remote_memory_info`.
+- The receiver (StoreEngine) consumes `verification_json` via `P2PSource` and validates the loaded replica before completing materialization. On mismatch, the operation fails with a DataLoss error.

@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS artifact_replicas (
     is_available BOOLEAN DEFAULT TRUE,
     remote_memory_keys TEXT[] NULL,
     buffer_sizes BIGINT[] NULL,
+    verification_json TEXT NULL,
     -- 关联到 workers 表
     worker_id TEXT,
     -- Memory replica fields

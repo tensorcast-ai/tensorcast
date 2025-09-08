@@ -80,6 +80,17 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
                   reg_opts)
               .ok());
 
+  // Build verification_json from the source GPU buffer using ArtifactVerifier
+  std::string verification_json;
+  {
+    std::vector<void*> ptrs{src_gpu_ptr};
+    std::vector<size_t> sizes{artifact_size};
+    auto info_or = tensorcast::common::ArtifactVerifier::generate_verification_info(
+        ptrs, sizes, /*device_id=*/0, tensorcast::common::VerificationLevel::KEY_POINTS);
+    REQUIRE(info_or.ok());
+    verification_json = info_or->to_json();
+  }
+
   // ---------------------------------------------------------------------------
   // 2. Instantiate the target StoreEngine with communication enabled.
   // ---------------------------------------------------------------------------
@@ -131,6 +142,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   p2p_src.location.type = MemoryLocation::GPU; // Remote data is on GPU
   p2p_src.location.device_id = 0;
   p2p_src.enable_checksum = true;
+  p2p_src.verification_json = verification_json;
   spec.source = p2p_src;
 
   // Configure target

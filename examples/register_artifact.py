@@ -6,8 +6,8 @@ import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 from tensorcast import init
+from tensorcast.api import register_artifact
 from tensorcast.api._config import RegisterArtifactOptions
-from tensorcast.api._register import register_artifact
 from tensorcast.types import ArtifactDescriptor
 
 init()
@@ -21,9 +21,9 @@ artifact = AutoModelForCausalLM.from_pretrained(
 state_dict = artifact.state_dict()
 
 opts = RegisterArtifactOptions(plan="vram_coalesced")
-saved_dict, commit_info = register_artifact(state_dict, options=opts, device_id=0)
-# commit_info is ArtifactDescriptor now
-assert isinstance(commit_info, ArtifactDescriptor)
+res = register_artifact(state_dict, options=opts, device_id=0)
+saved_dict, commit_info = res.state_dict, res.descriptor
+assert isinstance(res.descriptor, ArtifactDescriptor)
 
 
 def assert_state_dict_equal(

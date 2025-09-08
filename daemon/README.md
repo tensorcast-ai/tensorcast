@@ -238,6 +238,23 @@ Notes:
 - Set `TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS=1` to include attributes like `device_uuid` and `disk_path`
 
 ### Periodic eviction (optional)
+
+## VRAM Lease In Place (RFC-0014)
+
+The daemon implements VRAM Leased-In-Place (LIP) registration semantics:
+- BeginRegisterArtifact accepts `LeaseOptions` with `in_place=true` and requires `owner_pid`.
+- CommitRegisteredArtifact computes the content-address descriptor from the leased GPU segments without materializing into daemon VRAM and registers an in-memory LIP lease entry with TTL.
+- KeepAliveRegisterArtifact and RevokeRegisteredArtifact operate both pre-Commit (pending registration) and post-Commit (LIP lease) and enforce `owner_pid` equality.
+- LIP leases are excluded from P2P/source selection if expired and are auto-revoked when the `owner_pid` process terminates.
+- Local same-device consumers are rejected with FAILED_PRECONDITION; cross-device materialization falls back to normal replica creation (engine path).
+- Lightweight verification is generated at LIP Commit (KEY_POINTS: first/middle/last values) and stored with the lease for future offer attachment.
+
+Note: P2P transport remains staged-only per RFC-0009. LIP leases are not directly registered for RNIC MR.
+
+P2P export from LIP:
+- LockTransportChunks detects ACTIVE LIP entries, maps CUDA IPC segments, and registers per-chunk GPU ranges with CommunicateEngine (staged-only; no RNIC MR).
+- Response includes optional `verification_json` (KEY_POINTS) that receivers can validate after transfer.
+- UnlockTransportChunks unregisters keys and closes temporary IPC mappings.
 Controlled by environment variables (handled by a background thread in the service layer):
 - `TC_DAEMON_ENABLE_PERIODIC_EVICTION`: enable/disable (default: false)
 - `TC_DAEMON_GPU_MEMORY_LIMIT_FRACTION`: usage threshold (default: 0.90)
@@ -285,6 +302,19 @@ Hashing and identity:
 - `index_multihash` from canonical index bytes or key
 - `data_multihash` via SegmentPlan linearization with PAD=0 across RP‑A/B/C (coalesced/dvmp/lease) → byte‑equivalent results
 - `artifact_id = mi2:<index_multihash>:<data_multihash>`
+
+### Python helper (SDK)
+
+For ergonomic LIP flows, use the high‑level helper that returns both the content‑address descriptor and a `RegisteredLease` context manager for keepalives and best‑effort revoke:
+
+```python
+from tensorcast.api import RegisterArtifactOptions, register_artifact_lease_in_place
+
+opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
+desc, lease = register_artifact_lease_in_place(state_dict, options=opts, ttl_ms=600_000, daemon_address="127.0.0.1:8073")
+with lease:
+    pass
+```
 
 ## Key files and build targets
 

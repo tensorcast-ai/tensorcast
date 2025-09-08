@@ -1,101 +1,115 @@
-# 0014 — AVBS Unified In‑Memory Registration
+# 0014 — AVBS Unified In‑Memory Registration **with Lease‑In‑Place (LIP)**
 
 Author: TensorCast Team
-Status: Final (executed, deduplicated)
-Supersedes: 0006 (consolidates prior drafts into a single source of truth)
-Depends on: 0001 (DVMP 2.0), 0007 (Content‑addressed mi2), 0009 (MemoryStager & Staged P2P)
+Status: **Final (executed; deduplicated; includes LIP)**
+Supersedes: **0006** (coalesced VRAM registration), **0014** (VRAM Leased‑In‑Place) — both merged into this single source of truth
+Depends on: **0001** (DVMP 2.0), **0007** (Content‑addressed mi2), **0009** (MemoryStager & Staged P2P)
 
 ---
 
 ## 0. Summary
 
-- Introduces AVBS (Artifact Virtual Byte Stream, a canonical linear byte stream) as the sole abstraction for artifact “content”, determined by Canonical Index (v2) and a SegmentPlan (DATA/PAD).
-- At Commit, computes a unified `artifact_id = "mi2:" + index_multihash + ":" + data_multihash`. The `data_multihash` is computed by SegmentPlan linearization (PAD=0), ensuring byte‑equivalence across three Realization Plans (RP):
-  - RP‑A: Daemon‑owned Coalesced VRAM
-  - RP‑B: VRAM Lease (FDML, foreign device memory lease)
-  - RP‑C: DVMP (CPU UMA)
-- Unified gRPC method family: Begin/FeedStream/KeepAlive/Commit/Abort/Revoke (oneof plan/handshake/feed). The SDK exposes a single `register_artifact` entry and routes to the selected plan.
-- Cross‑machine transfers strictly follow staged‑only (RFC‑0009): DVMP/Lease/VRAM always go through a MemoryStager (DRAM/GPU) into pooled host‑pinned buffers before network; ACK releases; direct MR on DVMP/Lease is forbidden.
-- Same‑machine zero‑copy invariant: consumers always map the daemon‑owned Coalesced VRAM via CUDA IPC. For DVMP/Lease sources, the first materialize coalesces into daemon VRAM.
+This RFC defines the unified abstraction and protocol for registering model artifacts into the TensorCast store using **AVBS** (Artifact Virtual Byte Stream) and a single family of registration RPCs. It **consolidates prior variants** (coalesced VRAM, DVMP, VRAM lease) and **adds Lease‑In‑Place (LIP)** as an optional post‑Commit replica mode.
 
-This RFC merges RFC‑0006 “coalesced VRAM memory replica registration” into the “AVBS + Realization Plans” abstraction, deduped and aligned to current code.
+Core ideas:
+
+* **AVBS**: a canonical linear byte stream for an artifact’s “content”, determined by **Canonical Index (v2)** and a **SegmentPlan** of `DATA`/`PAD`.
+* **Unified identity at Commit**:
+  `artifact_id = "mi2:" + index_multihash + ":" + data_multihash`,
+  where `data_multihash` is computed by **SegmentPlan linearization with PAD=0**, guaranteeing cross‑plan byte equivalence.
+* **Unified RPC family**: `Begin / FeedStream / KeepAlive / Commit / Abort / Revoke`. The SDK exposes one high‑level call: `register_artifact(...)` that selects the plan.
+* **Transport safety**: cross‑machine transfers are **strictly staged‑only** (per RFC‑0009) through pooled host‑pinned buffers; **no direct RNIC MR** on DVMP or leased VRAM.
+* **Same‑machine zero‑copy invariant**: consumers always map **daemon‑owned Coalesced VRAM** via CUDA IPC; non‑VRAM sources first materialize to daemon VRAM on first local use.
+* **Lease‑In‑Place (LIP)**: when using the Lease plan, callers may opt into **in\_place** to register an **ephemeral, discoverable VRAM replica backed by the producer’s memory** after Commit. LIP replicas have a TTL, require KeepAlive, are **not** same‑device shareable, remain staged‑only for P2P, and support lightweight **receiver‑side verification**.
+
+> This document **merges and retires** RFC‑0014. All LIP semantics are folded into 0014.
 
 ### 0.1 Why (Problems & Motivation)
 
-- Mode split and inconsistency: previously Coalesced/DVMP/Lease were not fully equivalent in semantics/hashing, causing cross‑machine/P2P divergence, complex validation, and cache fragmentation.
-- Fragmented UX: multiple registration APIs with divergent naming increased cognitive and maintenance overhead; no single entry to “choose a plan” automatically.
-- Transport resource risk: attempting direct RNIC MR on DVMP/leased VRAM can cause wide pinning, NUMA mismatch, and conflicts with eviction policies, reducing stability.
-- Security & ownership: exposing DVMP VA to clients risks privilege creep and lifecycle confusion; mapping leased VRAM directly to consumers increases attack surface.
-- Metadata bloat: storing full index BLOB per replica increases storage and synchronization overhead; lacks key‑first dedup.
-
-Conclusion: adopt a holistic design of “AVBS (content) + unified registration family + staged‑only transport” to simultaneously solve consistency, ownership, resource control, and extensibility.
+* **Equivalence & cache fragmentation:** historical differences between Coalesced/DVMP/Lease hashing caused divergent IDs and validation complexity. AVBS + SegmentPlan unifies bytes across plans.
+* **Fragmented UX:** multiple registration APIs/names increased cognitive load; this RFC exposes a single entry point.
+* **Transport risk:** direct RNIC MR on DVMP/Lease pins wide regions and conflicts with eviction/NUMA policies; staged‑only avoids instability.
+* **Ownership & security:** daemon‑owned coalesced replicas provide a controlled, minimal‑privilege mapping surface.
+* **Low‑copy workflows:** some producers retain their GPU memory for minutes; **LIP** allows reusing that memory as a short‑lived source without extra copies while keeping strong safety rails.
+* **Consistency & drift:** content addressing plus optional **verification metadata** (KEY\_POINTS/SEGMENT\_HASHES) catches post‑Commit mutations, especially relevant for LIP.
 
 ### 0.2 What (User/Platform Capabilities)
 
-- Single registration entry: `register_artifact(state_dict, options)`.
-- Unified identity: Commit returns content‑addressed `mi2:`; the same AVBS yields identical IDs across Coalesced/DVMP/Lease.
-- Same‑machine zero‑copy: consumers always map daemon‑owned Coalesced VRAM (CUDA IPC).
-- Stable cross‑machine: strictly staged‑only via memory pools; ACK drives reclamation; PAD never sent on the wire (receiver zero‑fills).
-- Control: TTL/KeepAlive (Lease), Abort/Revoke, quotas, metrics; clear errors, observable behavior.
-- Metadata dedup: Global Store keeps canonical index BLOBs by `tensor_index_key`; replicas store the key only.
+* **One API:** `register_artifact(state_dict, options)`, with plan=`vram_coalesced | dvmp | vram_leased`.
+* **Unified identity:** identical AVBS yields identical `mi2:` across all plans.
+* **Same‑machine zero‑copy:** consumers always map **daemon‑owned coalesced VRAM** (CUDA IPC).
+* **Cross‑machine stability:** staged‑only through stagers; **PAD never travels** over the wire (receiver zero‑fills).
+* **Lease‑In‑Place (LIP):**
+
+  * Opt‑in via `LeaseOptions.in_place=true`.
+  * After Commit, the daemon **does not** coalesce into its VRAM; instead it registers an **ephemeral LIP replica** over the producer’s VRAM (via CUDA IPC handles it opens as needed).
+  * **TTL default 10 minutes**; KeepAlive at `TTL/2` cadence with jitter; immediate exclusion on expiry; graceful `Revoke` on shutdown.
+  * **Local same‑device consumption is rejected**; cross‑device local materialization copies D2D into a new coalesced replica.
+  * P2P remains **staged‑only**; receivers validate identity and may verify bytes using sender‑provided `verification_json`.
+* **Control:** TTL/KeepAlive, Abort/Revoke, quotas, metrics, clear error taxonomy.
+* **Metadata dedup:** Global Store keeps canonical index BLOBs by key; replicas store only the key.
 
 ### 0.3 Non‑Goals
 
-- Multi‑device artifacts (a single artifact spanning multiple GPUs) are out of scope in this version (interfaces preserve future compatibility).
-- Direct RNIC MR on DVMP or leased VRAM is not supported (conflicts with RFC‑0009 principles).
-- Sparse/quantized/special layout tensors are out of scope (consistent with current constraints).
-- End‑to‑end encryption/leases across multi‑tenant boundaries are out of scope (future security track).
+* Multi‑device artifacts (single artifact spanning multiple GPUs) — out of scope for this revision (interfaces preserve future compatibility).
+* **Direct RNIC MR** on DVMP/Lease/LIP memory — not supported.
+* Sparse/quantized/special layouts — out of scope for hashing/plan semantics here.
+* Cross‑tenant E2E encryption/leases — out of scope (future security track).
+* **LIP same‑device zero‑copy** between unrelated processes — intentionally **not** supported.
 
 ### 0.4 Principles
 
-- Single source of truth: AVBS/SegmentPlan determines hashing/export/reconstruction.
-- Deep modules & complexity reduction: simple APIs on top; complexity hidden in the daemon/engine.
-- Security first: minimal privilege for IPC/leases/transfers; forbid direct MR on non‑owned memory.
-- Resource control: pooling, ACK, limits, TTL; bounded peaks and reclaimability.
-- Evolvability: oneof plan/handshake/feed enables future backends (HIP/ROCm) without API churn.
+* **Single source of truth:** AVBS/SegmentPlan determine hashing/export/reconstruction.
+* **Security first:** minimal privilege; short‑lived mappings; forbid broad MR; PID‑bound LIP lifecycle.
+* **Resource control:** pooling, ACK‑driven release, TTL, quotas.
+* **Evolvability:** `oneof plan/handshake/feed` enables future backends (HIP/ROCm) without API churn.
+* **Predictability:** server computes authoritative `mi2:` at Commit.
 
 ---
 
-## 1. Current Status (Code Aligned)
+## 1. Current Status (Code‑Aligned)
 
-This section reflects what is implemented today (code‑aligned), so this RFC can be used operationally.
+**SDK & RPCs**
 
-- Python SDK (unified entry)
-- `tensorcast/api` exposes:
-    - `RegisterArtifactOptions` (simple class, not Pydantic): plan=`vram_coalesced|dvmp|vram_leased` and per‑plan options.
-    - `register_artifact(state_dict, options, device_id?, ttl_ms?, daemon_address?)`: routes to unified RPC per plan:
-      - vram_coalesced: Begin → IPC map → chunked writes → Commit.
-      - dvmp: Begin → linearize into bytes → FeedStream(DVMP chunks) → Commit.
-      - vram_leased: Begin → collect CUDA IPC segments via PyBind (`_C.get_cuda_memory_handle`) with explicit `dst_offset` per segment → FeedStream(segments) → Commit.
-    - Returns `(dest_state_dict, descriptor_dict)`, where `descriptor_dict` includes `artifact_id / index_multihash / data_multihash / schema_version / encoding / total_size`.
-  - `RegisteredArtifact` currently implements `commit()` only (SDK handle). `abort/keep_alive/revoke` are provided via `DaemonCtl` (see improvements).
+* Python SDK unified entry and routing:
 
-- Daemon control client (SDK)
-  - `tensorcast/daemon_ctl.py` uses the v1 proto and provides wrappers:
-    - Begin/Feed/KeepAlive/Commit/Abort/Revoke; DVMP/Lease use `feed_register_artifact_*`; Commit returns a descriptor.
-- The streaming feed wrapper is exposed and used by the SDK. DVMP uses client‑streaming feed only; unary feed has been removed.
+  * `RegisterArtifactOptions` (simple class): `plan` + per‑plan options (including `lease.in_place`).
+  * `register_artifact(state_dict, options, device_id?, ttl_ms?, daemon_address?)` → unified RPC sequence.
+  * Returns `(dest_state_dict, descriptor_dict)` with `artifact_id / index_multihash / data_multihash / schema_version / encoding / total_size`.
+* **Lifecycle methods**: `DaemonCtl` wraps `Begin/FeedStream/KeepAlive/Commit/Abort/Revoke`.
 
-- Unified Proto (v1)
-  - `proto/tensorcast/daemon/v1/store_daemon.proto` provides:
-    - Method family: Begin / FeedStream / KeepAlive / Commit / Abort / Revoke (oneof plan/handshake/feed). Streaming is canonical for all plans.
-    - Plan options: `CoalescedOptions`, `DvmpOptions` (channel preference), `LeaseOptions`.
-    - Begin index uses oneof: `tensor_index_key | tensor_index_data{encoding,schema_version}`.
+  * `RegisteredArtifact` implements `commit()`; lifecycle helpers use `DaemonCtl`.
+  * **RegisteredLease** helper (when LIP): background KeepAlive after Commit; context manager for best‑effort `Revoke` on exit/atexit/GC.
 
-- StoreEngine (C++)
-  - Begin/Feed (DVMP)/Commit implemented; Commit computes unified `mi2:`:
-    - `index_multihash` derives from canonical index (or from key by rule when only key is provided).
-    - `data_multihash`:
-      - DVMP: CPU linear read (SegmentPlan + PAD=0).
-      - Coalesced VRAM: use GPU linearization when plan is available; otherwise fall back to contiguous GPU hashing.
-      - Lease: open CUDA IPC segments and linearize by SegmentPlan + PAD=0.
-  - TTL expiry cleanup, idempotent Abort, clear errors, and metrics are implemented.
+**Proto (v1, extended)**
 
-- Global Store (Python)
-  - Key‑first index storage: `artifact_indices` (DuckDB) for dedup; `GetArtifactIndex` RPC fetches index bytes by key; `artifacts` stores `mi2:` descriptor; `artifact_replicas` records replicas with `tensor_index_key/is_memory_replica`, etc.
-  - `GetArtifactIndex` currently returns default `encoding="json"/schema_version="v2"` (see improvements).
+* Method family unchanged: `BeginRegisterArtifact / FeedRegisterArtifactStream / KeepAliveRegisterArtifact / CommitRegisteredArtifact / AbortRegisteredArtifact / RevokeRegisteredArtifact`.
+* **Additions for LIP & ownership:**
 
-- Communicator (C++)
-  - `MemoryStager`/`GpuNetStager`/`DRAMStager` implement staged‑only; pooled host‑pinned buffers; ACK‑driven release; a pin‑lease provider hook for DVMP is stubbed.
+  * `LeaseOptions.in_place: bool` (default `false`).
+  * `BeginRegisterArtifactRequest.owner_pid: int32` (**required > 0**).
+  * `KeepAliveRegisterArtifactRequest.owner_pid: int32` (**must match** Begin’s owner\_pid).
+
+**Engine/Store**
+
+* Commit computes unified `mi2:` using SegmentPlan (PAD=0) across plans.
+* Replica kinds:
+
+  * `COALESCED_VRAM` (daemon‑owned),
+  * `DVMP` (UMA),
+  * **`VRAM_LEASE_IN_PLACE` (LIP)** — ephemeral, TTL‑gated, PID‑owned.
+* LIP registry stores: `{lease_id, device_id, expiry_time, ttl_ms, epoch, owner_pid, bytes_served_total, last_keepalive}` with states `ACTIVE | EXPIRED | REVOKED`.
+* **Verification metadata** (e.g., KEY\_POINTS) computed at Commit (for coalesced and LIP) and optionally propagated for receiver‑side checks.
+
+**Communicator & P2P**
+
+* Staged‑only transport (`MemoryStager`/`GpuNetStager`/`DRAMStager`); pooled pinned buffers; ACK‑driven release.
+* **LIP export path**: sender maps CUDA IPC handles short‑lived per transfer; `LockTransportChunks` exposes chunk keys + optional `verification_json`; `Unlock` cleans up. No direct MR.
+
+**Global Store**
+
+* Key‑first index storage, descriptor registry, and replicas table.
+* Memory replicas may carry `verification_json`; selection prefers VRAM, then DVMP, with DISK fallback (see §14).
 
 ---
 
@@ -103,196 +117,195 @@ This section reflects what is implemented today (code‑aligned), so this RFC ca
 
 ### 2.1 AVBS & SegmentPlan
 
-- AVBS: linear range `[0, total_size)` determined by Canonical Index (v2).
-- SegmentPlan: a full‑coverage sequence of `DATA{source, base, len}` / `PAD{len}`.
-- Hashing: linear traversal by the SegmentPlan, reading bytes for DATA and injecting zeros for PAD; SHA‑256 Merkle tree (4–16MiB leaves); multibase(base32) output.
-- Invariant: `data_multihash` is equivalent across all RPs; the resulting `artifact_id` is identical across plans.
-
-Visualization (SegmentPlan structure):
+* AVBS: linear range `[0, total_size)` from Canonical Index (v2).
+* SegmentPlan: coverage with `DATA{source, base, len}` and `PAD{len}`.
+* Hashing: walk SegmentPlan (PAD injects zeros) → SHA‑256 Merkle (4–16 MiB leaves) → multibase(base32).
+* Invariant: `data_multihash` is identical across all realization plans; hence `artifact_id` is plan‑agnostic.
 
 ```mermaid
-classDiagram
-class SegmentPlan {
-  +pieces: list<Piece>
-  +covers [0,total_size)
-  +no overlaps
-}
-class Piece {
-  <<abstract>>
-  +len: uint64
-}
-class DATA {
-  +source: {VRAM|DVMP|Lease}
-  +base: uint64
-  +len: uint64
-}
-class PAD {
-  +len: uint64
-}
-SegmentPlan o--> Piece
-Piece <|-- DATA
-Piece <|-- PAD
+flowchart TD
+  A[Canonical Index bytes or key] -->|hash| B[index_multihash]
+  C[SegmentPlan(DATA+PAD=0)] --> D[Linearize]
+  D --> E[SHA-256 Merkle]
+  E --> F[data_multihash]
+  B --> H[artifact_id = mi2:<index>:<data>]
+  F --> H
 ```
 
-### 2.2 Realization Plans (RP)
+### 2.2 Realization Plans & Replica Kinds
 
-- RP‑A: Coalesced VRAM (daemon‑owned)
-  - Begin allocates a single VRAM segment + exports CUDA IPC; client writes; Commit computes `mi2:` and persists a GPU‑resident replica (may export remote keys).
+* **RP‑A: Coalesced VRAM (daemon‑owned)**
+  Begin allocates VRAM + exports CUDA IPC; client writes; Commit computes `mi2:` and registers a coalesced replica.
+* **RP‑B: VRAM Lease** (single device)
 
-- RP‑B: VRAM Lease (FDML)
-  - Client provides lease segments (single device). At Commit, the daemon opens IPC handles and copies into daemon‑owned VRAM by SegmentPlan (PAD regions zero‑filled), computes `mi2:`, and registers; same‑machine consumption always maps daemon VRAM; cross‑machine strictly staged‑only (no direct MR).
+  * **Materialize‑on‑Commit (default):** open IPC handles, copy Lease→daemon VRAM following SegmentPlan (PAD zero‑filled), compute `mi2:`, register coalesced replica.
+  * **Lease‑In‑Place (LIP, new, opt‑in):** set `lease.in_place=true`. Commit computes `mi2:` directly over the leased view and registers an **ephemeral `VRAM_LEASE_IN_PLACE` replica** instead of copying to daemon VRAM.
+
+    * **Local consumption:**
+
+      * **Same `device_id`:** **reject** with `FAILED_PRECONDITION` (“LIP not supported for same‑device consumers”).
+      * **Different `device_id`:** D2D copy from LIP → new coalesced allocation on target device; then serve via CUDA IPC as usual.
+    * **Remote P2P:** staged‑only; sender opens IPC briefly per transfer; receivers validate identity and (optionally) verify bytes from `verification_json`.
+    * **Lifecycle:** TTL defaults to **10 min**; KeepAlive at `TTL/2` ± jitter; expiry excludes the replica from selection and revokes exports; `Revoke` drops it immediately; PID‑watcher may auto‑revoke if owner exits.
+* **RP‑C: DVMP (CPU UMA)**
+  Client‑streaming feed writes into UMA; Commit computes `mi2:`. First local materialize coalesces DVMP→daemon VRAM; cross‑machine via DRAMStager.
 
 #### 2.2.1 LeaseSegments ↔ SegmentPlan (Mapping)
 
-- Required destination: each `LeasedSegment` must carry `dst_offset` (destination offset inside the coalesced VRAM buffer defined by the Canonical Index). The server places bytes at `dst_offset..dst_offset+length` regardless of feed order.
-- PAD handling: the daemon zero‑fills every PAD interval computed from SegmentPlan before/while placing DATA segments. Clients never send PAD bytes.
-- Order independence: segment feed order is irrelevant; correctness relies solely on `dst_offset` and `length`.
-- Validation: segments must be single‑device homogeneous; destination ranges must be in‑bounds; overlapping ranges are undefined and should be avoided by clients.
+* Each `LeasedSegment` carries `dst_offset` within the canonical coalesced layout; server places bytes at `[dst_offset, dst_offset+len)`.
+* PAD is **never sent**; daemon zero‑fills PAD ranges per SegmentPlan.
+* Order‑independent; segments must be single‑device; in‑bounds; overlapping writes are undefined.
 
- - RP‑C: DVMP (CPU UMA)
-  - Begin returns an upload channel. The SDK uses client‑streaming feed; the server writes into UMA via `DVMPRegionSink::write_at`; Commit computes `mi2:` and registers.
-  - Same‑machine first materialize: DVMP→VRAM coalescence, then CUDA IPC; cross‑machine via DRAMStager.
+### 2.3 Cross‑Machine & Same‑Machine
 
-### 2.3 Cross‑Machine and Same‑Machine (aligned to 0009/0001)
-
-- Cross‑machine:
-  - VRAM → GpuNetStager; DVMP → DRAMStager; Lease → GpuNetStager; unified EX + ACK, pooled MR buffers only.
-  - Prohibit direct MR on DVMP/Lease; PAD never exported (receiver zero‑fills locally).
-
-- Same‑machine:
-  - Regardless of source, consumers ultimately map daemon‑owned Coalesced VRAM (zero‑copy invariant). When the source is not VRAM, the first materialize performs DVMP/Lease → VRAM coalescence and zero‑fills PAD.
+* **Cross‑machine:**
+  VRAM & LIP → `GpuNetStager`; DVMP → `DRAMStager`; ACK‑driven pooled buffers; no PAD on the wire; **no direct MR** on DVMP/Lease/LIP.
+* **Same‑machine:**
+  Consumers always map **daemon‑owned coalesced VRAM** (zero‑copy invariant). For DVMP/Lease/LIP sources, first materialize produces/uses a coalesced replica; **LIP same‑device is disallowed** (see RP‑B).
 
 ---
 
 ## 3. Unified Interfaces
 
-### 3.1 Proto (Final)
+### 3.1 Proto (Final, v1 with LIP extensions)
 
-- Method family: `BeginRegisterArtifact` / `FeedRegisterArtifactStream` / `KeepAliveRegisterArtifact` / `CommitRegisteredArtifact` / `AbortRegisteredArtifact` / `RevokeRegisteredArtifact`. Unary feed has been removed; streaming is canonical for all plans.
-- Begin: `device_id/total_size/ttl_ms/oneof index/oneof plan`; returns a `oneof handshake` (coalesced.ipc, dvmp.channel, lease empty).
-- Commit: returns `ArtifactDescriptor` only (`mi2:` + multihashes + schema/encoding/total_size).
-- See code for exact message definitions; not duplicated here.
+* **Begin** → plan‑specific handshake (`coalesced.ipc`, `dvmp.channel`, or empty for lease).
+* **FeedStream** → streaming is canonical for all plans.
+* **KeepAlive** → used **pre‑Commit** for registration liveness and **post‑Commit** to maintain LIP leases.
+* **Commit** → returns `ArtifactDescriptor` only.
+* **Abort** → idempotent pre‑Commit cleanup.
+* **Revoke** → explicit deregistration; for LIP it drops the post‑Commit lease immediately.
 
-### 3.2 Python SDK (Current)
+**Message deltas (abridged):**
 
-- Entry: `register_artifact(...)` (routes by plan).
-- Options: `RegisterArtifactOptions` (simple class); fields aligned with proto.
-- Control plane: `DaemonCtl` wraps unified RPCs; exposes `begin/feed/keepalive/commit/abort/revoke`.
-- Note: SDK `RegisteredArtifact` currently implements `commit()` only; lifecycle methods are available via `DaemonCtl` (see improvements).
+```proto
+message LeaseOptions {
+  uint64 min_tensor_bytes = 1;
+  uint32 max_tensor_count = 2;
+  uint64 lease_bytes_limit = 3; // 0 = daemon policy
+  bool   in_place = 4;          // false = materialize at Commit; true = LIP
+}
 
-### 3.3 Hash & Descriptor Calculation (Mermaid)
+message BeginRegisterArtifactRequest {
+  int32 device_id = 1;
+  uint64 total_size = 2;
+  optional uint32 ttl_ms = 3; // default 600_000 when lease
+  oneof index { string tensor_index_key = 4; TensorIndexData tensor_index_data = 5; }
+  oneof plan { CoalescedOptions coalesced = 10; DvmpOptions dvmp = 11; LeaseOptions lease = 12; }
+  int32 owner_pid = 6; // REQUIRED (>0)
+}
 
-```mermaid
-flowchart TD
-  A[Canonical Index bytes or key] -->|compute index_multihash| B[index_multihash]
-  C[SegmentPlan: DATA + PAD=0] --> D[Linearize by pieces]
-  D --> E[SHA-256 leaves (4-16MiB)]
-  E --> F[Merkle root]
-  F --> G[data_multihash (multibase base32)]
-  B --> H[artifact_id = mi2:<index_multihash>:<data_multihash>]
-  G --> H
+message KeepAliveRegisterArtifactRequest {
+  string registration_id = 1;
+  uint32 ttl_ms = 2;
+  uint64 epoch = 3;
+  int32 owner_pid = 4; // REQUIRED; must match Begin.owner_pid
+}
 ```
 
-### 3.4 Behavior & Error Semantics (What)
+> **Compatibility note:** `owner_pid` is required on Begin/KeepAlive. Older clients must update stubs. Operators may offer a temporary compatibility knob, but it is **not** part of the stable contract.
 
-- Begin: validates `device_id/total_size` and index (key or data), returns a plan‑specific handshake (coalesced IPC / DVMP channel / empty for lease).
-- Feed:
-  - DVMP: `offset` must be in‑range and monotonically advance coverage; `last` is idempotent end‑marker.
-  - Lease: each segment carries `dst_offset` and `length`; server copies to the exact destination range, independent of ordering. Segments must be single‑device homogeneous; destination ranges must be in‑bounds; overlapping writes are undefined and should be avoided.
-  - TTL enforcement: optional fail‑fast at Feed rejects expired registrations (in addition to Commit‑time TTL enforcement).
-- KeepAlive (Lease): send every `ttl_ms/2`; expiry revokes immediately.
-- Commit: computes `mi2:` and registers the replica; only returns the `descriptor` (no process details).
-- Abort: idempotent cleanup; `NOT_FOUND` is treated as already cleaned up.
-- Revoke (Lease): explicit revoke; cleans up exports.
-- Error taxonomy: `INVALID_ARGUMENT` (bad args/index), `FAILED_PRECONDITION` (plan constraint), `NOT_FOUND` (unknown registration), `DEADLINE_EXCEEDED` (TTL), `RESOURCE_EXHAUSTED` (memory/pool), `PERMISSION_DENIED` (IPC/FDML mapping failure).
+### 3.2 Python SDK
+
+* Entry: `register_artifact(...)` routes by plan; options mirror proto.
+* **Lease options:** `in_place: bool = False`.
+* **RegisteredLease** (when `in_place=True`): background KeepAlive at `ttl_ms/2` with ±10% jitter; context manager & atexit best‑effort `revoke()`.
+* Control plane helpers live in `DaemonCtl`.
+
+### 3.3 Behavior & Error Semantics
+
+* **Begin**: validate device, total\_size, index (key or bytes); emit plan‑specific handshake.
+* **Feed**:
+
+  * DVMP: `offset` in‑range, monotonic coverage; `last` idempotent.
+  * Lease: `dst_offset/length` define placement; single device; in‑bounds; no overlap.
+  * TTL gating: optional fail‑fast rejects expired registrations during Feed.
+* **KeepAlive**:
+
+  * Pre‑Commit: keeps registration alive as today.
+  * Post‑Commit (LIP): extends lease; `owner_pid` must match; server does **not** implicitly refresh TTL when serving reads/copies.
+* **Commit**: computes `mi2:`; for LIP registers a TTL‑gated ephemeral replica; may compute and store `verification_json`.
+* **Abort**: idempotent pre‑Commit cleanup; `NOT_FOUND` treated as already cleaned up.
+* **Revoke**: idempotent; for LIP drops the lease immediately.
+* **Errors**:
+  `INVALID_ARGUMENT` (bad args/index, out‑of‑bounds),
+  `FAILED_PRECONDITION` (LIP same‑device, plan constraints),
+  `DEADLINE_EXCEEDED` (lease expired),
+  `NOT_FOUND` (unknown/expired lease),
+  `RESOURCE_EXHAUSTED` (pool/memory caps),
+  `PERMISSION_DENIED` (IPC open failure / policy block / KeepAlive PID mismatch),
+  `DATA_LOSS` (receiver‑side verification mismatch).
 
 ---
 
 ## 4. Validation, Limits, Metrics
 
-- Validation: Index v2, 8‑byte alignment, dtype/stride/normalized storage_offset; Lease single‑device and quotas; `mi2:` equivalence (A/B/C).
-- Limits:
-  - Coalesced: `max_inflight_bytes`, per‑tensor release.
-  - Lease: `min_tensor_bytes/max_tensor_count/lease_bytes_limit`.
-  - Stager: pool size/concurrency/NUMA (per RFC‑0009).
-- Metrics (OpenTelemetry): counters and latency for Begin/Feed/Commit/Abort/KeepAlive/Revoke; staged bytes and release queues; DVMP write bytes and pin‑lease counts; TTL expirations at Feed/Commit (`tc_register_ttl_expired_feed_total`, `tc_register_ttl_expired_commit_total`).
+* **Validation:** Index v2 invariants (dtype/shape/stride/storage\_offset/8‑byte alignment); Lease single‑device; LIP PID ownership; `mi2:` equivalence across RPs; optional verification presence per policy.
+* **Limits:**
+  Coalesced: `max_inflight_bytes`, per‑tensor release;
+  Lease: `min_tensor_bytes / max_tensor_count / lease_bytes_limit`;
+  Stagers: pool size/concurrency/NUMA per RFC‑0009;
+  LIP: caps on active leases and bytes per worker.
+* **Metrics (OpenTelemetry):**
+  Registration: counters & latency for Begin/Feed/Commit/Abort/KeepAlive/Revoke;
+  Staging: staged bytes, release queues;
+  Lease: `tc_lip_export_total`, `tc_lip_unlock_total`, `tc_lip_verification_fail_total`, TTL expirations (`tc_register_ttl_expired_{feed|commit}_total`), owner PID auto‑revokes;
+  Get‑by‑key: source/fallback labels (see §14.6).
 
-### 4.1 Operations & SLOs (What)
+### 4.1 Operations & SLOs
 
-- Availability: registration and Commit are short local transactions in the daemon; export/GS registration should be retry‑safe and idempotent.
-- Peak control: Coalesced is bounded by `max_inflight_bytes` and per‑tensor releases; Lease/DVMP do not consume VRAM peaks (until first same‑host materialize).
-- Reclamation: ACK releases pooled buffers; TTL cleans up abandoned registrations; Abort/failure paths must ensure zero leaks.
-- Observability: histograms for registration latency, failure rates, pool occupancy, lease survival counts; wire alerts to thresholds.
+Short local Commit transactions; retry‑safe idempotence; bounded peaks via pools; ACK‑driven reclamation; robust TTL cleanup; explicit revoke; observability on latency/failure/pool occupancy/lease survival.
 
 ---
 
 ## 5. Compatibility & Migration
 
-- Unified content addressing: Commit computes `mi2:`; Begin no longer accepts `artifact_id`.
-- Unified method family and semantics; legacy wrappers/naming removed or migrated to SDK (e.g., historical PyBind wrappers).
-- Global Store is key‑first for indices; replicas store `tensor_index_key` and memory flags; clients fetch index via `GetArtifactIndex` as needed.
+* Unified identity at Commit; Begin no longer accepts client‑provided `artifact_id`.
+* **Wire change**: `owner_pid` required; re‑generate client stubs and update SDK usage.
+* LIP is **opt‑in** and does not alter default Lease behavior (materialize‑on‑Commit).
 
 ---
 
 ## 6. Completed & Code Anchors
 
-- Unified RPCs (v1) and SDK wrappers: implemented.
-- Hashing unification: Commit computes `data_multihash` via SegmentPlan (PAD=0) consistently across Lease/DVMP/VRAM; fall back to contiguous GPU hashing when plan is absent.
-- DVMP upload: client‑streaming feed is used; server writes UMA via `DVMPRegionSink::write_at`.
-- Lease lifecycle: segment feed, TTL, KeepAlive/Revoke RPCs; Commit materializes to daemon VRAM and registers.
-- Staged‑only P2P: `MemoryStager`/`GpuNetStager`/`DRAMStager` used in the engine (EX + ACK release).
-- Global Store: `artifact_indices` / `artifacts` / `artifact_replicas` and `GetArtifactIndex` are operational.
+* Unified RPCs (v1) and SDK wrappers.
+* Hashing unification (SegmentPlan PAD=0) across Coalesced/Lease/DVMP.
+* DVMP upload via client‑streaming to UMA sink.
+* Lease lifecycle: segment feed, TTL, KeepAlive/Revoke.
+* **LIP**:
+
+  * Commit over leased memory (no coalesce); ephemeral replica registry with TTL + PID ownership.
+  * Same‑device denial; cross‑device local D2D copy into coalesced VRAM.
+  * P2P staged‑only export via short‑lived IPC mapping and chunk locking.
+  * Optional `verification_json` generation (KEY\_POINTS) and receiver validation.
+* Global Store: key‑first indices, descriptors, replicas; memory replicas can carry `verification_json`.
 
 ---
 
-## 7. Improvements & TODO (Gaps vs Current Code)
+## 7. Improvements & TODO (Near‑term)
 
-Short‑term (target next iteration):
-
-1) SDK ergonomics
-- Add `abort()/keep_alive()/revoke()` methods to `RegisteredArtifact` calling `DaemonCtl` internally, to provide object‑oriented lifecycle.
-- DONE: Streaming feed wrappers are exposed; DVMP uses client‑streaming by default.
-
-2) Lease improvements
-- Coalesce adjacent DATA pieces during Lease→VRAM materialization to reduce D2D calls; batch per tensor and use CUDA streams for parallelism.
-- Validation: enforce single‑device homogeneity at server for submitted segments; improve error messages.
-
-3) DRAMStager ↔ DVMP pin‑lease
-- Wire DRAMStager’s `LeaseProvider` to DVMP pin‑lease (hold only during memcpy) to avoid long pins.
-
-4) Global Store index metadata
-- Persist `encoding/schema_version` in `artifact_indices` and return actual values (not defaults) in `GetArtifactIndex`.
-
-5) Docs & tools
-- Migrate CLI/scripts to v1 proto path (e.g., `daemon_manager.py`).
-- Clarify plan aliases in `tensorcast/api` (`vram_coalesced|coalesced` / `vram_leased|lease` / `dvmp|uma|cpu`).
-
-Mid‑term:
-
-- Multi‑GPU extension: extend AVBS/SegmentPlan to multi‑device shards while preserving `mi2:` invariants; add routing/validation for Lease/DVMP multi‑device submissions.
-- Hashing/Index encoding: add CBOR end‑to‑end; expose selection in SDK.
-
-Security & policy:
-
-- Same‑process CUDA IPC fallback is disabled in the final scheme (no env gating).
-- Audit and revoke logs for Lease/DVMP access.
-- Budget/throttling for registration peak memory/bandwidth, integrated with eviction policies.
+* Lease→VRAM materialization: coalesce adjacent DATA pieces; CUDA stream parallelism.
+* Enforce single‑device homogeneity server‑side with clearer errors.
+* DRAMStager ↔ DVMP pin‑lease integration (hold pins only during memcpy).
+* Global Store: persist actual `encoding/schema_version` for indices; return real values from `GetArtifactIndex`.
+* CLI/scripts migration to v1 path; plan alias clarity in SDK.
+* **LIP follow‑ups:** cross‑segment chunk stitching for exports; configurable verification levels (SEGMENT\_HASHES/FULL\_HASH); policy knobs (require verification, TTL default, LIP caps); control‑plane offer formalization (avoid key derivation).
 
 ---
 
 ## 8. Risks & Mitigations
 
-- Equivalence regressions: SegmentPlan linearization (PAD=0) is the authority; tests cover cross‑plan hashing equivalence.
-- Misuse of direct networking for DVMP/Lease: enforce staged‑only via API and implementation; transports use pooled MR buffers only.
-- TTL/KeepAlive: expiry must release all intermediate resources; KeepAlive failures are surfaced; Revoke should immediately terminate leases.
+* **Equivalence regressions:** enforce SegmentPlan PAD=0; cross‑plan hashing tests.
+* **Transport misuse:** hard‑ban direct MR on DVMP/Lease/LIP; staged‑only enforced in code & API.
+* **LIP drift/mutation:** combine `artifact_id` checks with receiver‑side verification; make verification policy default **ON** for LIP P2P.
+* **Lease churn/herd:** TTL/2 KeepAlive with jitter; caps and backpressure.
+* **Ownership confusion:** PID‑bound keepalives; auto‑revoke on PID death; explicit `Revoke`.
 
 ---
 
-## 9. Sequences & Interactions (Overview)
+## 9. Sequences & Interactions
 
-The unified registration is: Begin → (Feed/KeepAlive) → Commit/Abort/Revoke. Same‑machine materialize always maps Coalesced VRAM; cross‑machine is strictly staged‑only with ACK‑driven release. See RFC‑0009 and code for details.
-
-### 9.1 Unified Registration (Mermaid)
+### 9.1 Unified Registration
 
 ```mermaid
 sequenceDiagram
@@ -301,254 +314,178 @@ sequenceDiagram
   participant DM as Daemon
   participant DV as DVMP
 
-  CL->>DM: BeginRegisterArtifact(device_id,total_size,index,plan)
-  alt RP-A vram_coalesced
-    DM-->>CL: handshake.coalesced.daemon_ipc_handle
-    CL->>CL: Chunked writes into IPC mapping
+  CL->>DM: BeginRegisterArtifact(device_id,total_size,index,plan,owner_pid)
+  alt vram_coalesced
+    DM-->>CL: handshake.coalesced.ipc
+    CL->>CL: Write chunks into IPC mapping
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: Hash via SegmentPlan (PAD=0)
+    DM->>DM: Hash via SegmentPlan (PAD=0) → mi2:
     DM->>DM: Register COALESCED_VRAM
-  else RP-B vram_leased
-    CL->>DM: FeedRegisterArtifactStream{lease_segments}
-    loop every ttl_ms/2
-      CL->>DM: KeepAliveRegisterArtifact
-    end
+  else vram_leased (in_place=false)
+    CL->>DM: FeedRegisterArtifactStream{lease_segments(dst_offset,...)}
+    CL-->>DM: KeepAliveRegisterArtifact (optional pre-Commit)
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: Copy Lease→VRAM + zero PAD
-    DM->>DM: Register LEASED_VRAM (materialized)
-  else RP-C dvmp
-    DM-->>CL: handshake.dvmp.channel (grpc stream)
-    CL->>DM: FeedRegisterArtifactStream{dvmp_chunk} (SegmentPlan order)
+    DM->>DM: Copy Lease→VRAM + zero PAD; register COALESCED_VRAM
+  else vram_leased (in_place=true, LIP)
+    CL->>DM: FeedRegisterArtifactStream{lease_segments}
+    CL-->>DM: KeepAliveRegisterArtifact (optional pre-Commit)
+    CL->>DM: CommitRegisteredArtifact
+    DM->>DM: Hash leased view (PAD=0) → mi2:
+    DM->>DM: Register VRAM_LEASE_IN_PLACE{ttl,owner_pid}
+    note over CL,DM: Post-Commit KeepAlive continues at ttl/2 cadence
+  else dvmp
+    DM-->>CL: handshake.dvmp.channel
+    CL->>DM: FeedRegisterArtifactStream{dvmp_chunk}
     DM->>DV: DVMPRegionSink.write_at
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: Hash DVMP via SegmentPlan (PAD=0)
-    DM->>DM: Register DVMP
+    DM->>DM: Hash → mi2:; register DVMP
   end
 ```
 
-### 9.2 Same‑Machine Materialization (Mermaid)
+### 9.2 Same‑Machine Materialization
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant CON as Consumer
   participant DM as Daemon
-  participant DV as DVMP
 
-  CON->>DM: Materialize(artifact_id)
-  alt VRAM present
-    DM-->>CON: Map CUDA IPC of coalesced VRAM
-  else Source is DVMP
-    DM->>DM: Allocate VRAM
-    DM->>DM: Copy DVMP→VRAM
-    DM->>DM: Zero PAD regions
+  CON->>DM: Materialize(artifact_id, device=Y)
+  alt Coalesced on Y exists
+    DM-->>CON: Map CUDA IPC (zero‑copy)
+  else Source = DVMP
+    DM->>DM: DVMP→VRAM coalesce + zero PAD → IPC
+  else Source = LEASE (in_place=false) materialized to VRAM
     DM-->>CON: Map CUDA IPC
-  else Source is LEASED_VRAM
-    DM->>DM: Allocate VRAM
-    DM->>DM: Copy Lease→VRAM
-    DM->>DM: Zero PAD regions
-    DM-->>CON: Map CUDA IPC
+  else Source = LIP on device X
+    alt Y == X
+      DM-->>CON: FAILED_PRECONDITION (LIP same‑device denied)
+    else
+      DM->>DM: D2D X→Y into coalesced VRAM + zero PAD → IPC
+    end
   end
 ```
 
-### 9.3 Cross‑Machine Transfer (Mermaid)
+### 9.3 Cross‑Machine Transfer (incl. LIP)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant S as Sender
-  participant ST as MemoryStager
-  participant R as Receiver
+  participant S as Sender Daemon
+  participant R as Receiver Daemon
 
-  S->>S: Select source (VRAM > DVMP)
-  alt Source is VRAM
-    S->>ST: Stage VRAM slices via GpuNetStager
+  R->>S: LockTransportChunks(artifact_id, chunk_indices)
+  alt Source is Coalesced
+    S-->>R: remote_keys + (optional) verification_json
   else Source is DVMP
-    S->>ST: Stage DVMP slices via DRAMStager
-  else Source is LEASED_VRAM
-    S->>ST: Stage leased VRAM via GpuNetStager
+    S-->>R: staged DRAM plan
+  else Source is LIP (ACTIVE, not expired)
+    S->>S: Map CUDA IPC segments short‑lived
+    S-->>R: remote_keys + verification_json
+  else Source expired
+    S-->>R: DEADLINE_EXCEEDED/NOT_FOUND
   end
-
-  loop For each batch
-    S-->>R: READ_RESPONSE_EX segments (staged=1)
-    R-->>S: RDMA_READ_DONE_EX ack
-    S->>ST: release pool buffers
+  R->>R: Transfer staged (GpuNet/DRAM) → target
+  R->>R: Verify using verification_json (if present)
+  alt verify OK
+    R-->>S: UnlockTransportChunks (release keys)
+  else mismatch
+    R-->>S: Unlock; abort with DATA_LOSS
   end
 ```
 
-### 9.4 Failure Scenarios & Recovery (What)
+### 9.4 Failure Handling
 
-- Crash after Begin: TTL expiry auto‑reclaims; client retries Begin idempotently (same index/key reusable).
-- Feed loss/replay: DVMP uses `offset` to uniquely position idempotent writes; Lease forbids overwriting segments (replays are no‑ops).
-- Commit failure: any failure in registration/export returns error while keeping the operation retryable; Abort cleans up if needed.
-- Materialize failure: same‑machine failures do not affect registered replicas; retry or fall back (e.g., from VRAM to DVMP) as appropriate.
+* Crash after Begin → TTL reclaims; Begin is retryable (same index/key).
+* Feed replay → DVMP uses offset; Lease avoids overlaps; replays are no‑ops.
+* Commit failure → returns error; cleanup via Abort; retry allowed.
+* LIP expiry → new selections fail; in‑flight transfers may complete; exports revoked afterward.
 
 ---
 
 ## 10. Validation & Tests
 
-- Python:
-  - Begin → IPC map → Commit (coalesced)
-  - DVMP: streaming feed + Commit (TTL expiry tests)
-  - Lease: streaming segment feed + Commit (runs when CUDA is available)
-- C++:
-  - StoreEngine: unit tests for Begin/Feed/Commit/Abort/TTL and hashing equivalence
-  - Communicator: EX + ACK staged transfer regression
+* Python: coalesced Begin→Commit; DVMP streaming + TTL; Lease streaming; LIP keepalive context and revoke paths.
+* C++: StoreEngine Begin/Feed/Commit/Abort/TTL; hashing equivalence; staged transfer regressions; LIP same‑device denial; LIP TTL gating; P2P verification positive/negative (DATA\_LOSS on mismatch).
 
 ---
 
 ## 11. Execution Status (This Branch)
 
-- Unified RPCs, SDK wrappers, hashing, DVMP/Lease flows, and staged‑only P2P are merged.
-- Global Store key‑first and `GetArtifactIndex` are functional.
-- Still pending (short‑term): SDK `RegisteredArtifact` lifecycle APIs, DVMP streaming wrappers, DRAMStager pin‑lease integration, GS index metadata persistence.
-- Performance: Lease→VRAM coalescing/parallelism and CLI migrations are in progress.
+* Unified RPCs, hashing, DVMP/Lease flows, staged‑only P2P — **landed**.
+* **LIP core shipped** (daemon + SDK):
+
+  * Proto extended with `lease.in_place` and `owner_pid` (Begin/KeepAlive).
+  * Commit over leased segments (no coalescing); LIP registry with TTL; PID‑watcher auto‑revoke.
+  * Local cross‑device D2D materialization; same‑device denial enforced.
+  * P2P staged export for LIP via per‑chunk lock/unlock; deterministic key naming; TTL gating on offers.
+  * Verification: KEY\_POINTS computed at Commit; included in offers; receiver‑side verification integrated.
+* Global Store: memory‑replica `verification_json` plumbed through request/response; orchestrator sets `P2PSource.verification_json`.
 
 ---
 
 ## 12. Conclusion
 
-This RFC unifies RFC‑0006 and RFC‑0014 under the “AVBS + Realization Plans” semantics, removing duplication/ambiguity and aligning with current implementation:
-
-- Content addressing (`mi2:`) and hashing equivalence guarantee cross‑plan consistency.
-- Same‑machine zero‑copy invariant is preserved.
-- Cross‑machine strictly staged‑only, avoiding pin explosions and complex resource states.
-- Method family and SDK are unified; remaining work focuses on ergonomics and metadata fidelity.
-
-> Note: RFC‑0006 is now a historical reference and will not be maintained separately; this RFC is the single source of truth for unified registration.
+This revision completes the unification of artifact registration under **AVBS + SegmentPlan** with a single RPC family and **integrates LIP** as an opt‑in lease realization. It preserves the **same‑machine zero‑copy invariant** via daemon‑owned VRAM, enforces **staged‑only** cross‑machine semantics, and adds a clear, safe **lease lifecycle** with TTL, PID ownership, and receiver‑side verification.
 
 ---
 
-## 13. Design Trade‑offs & Alternatives (Why Not X)
+## 13. Design Trade‑offs & Alternatives
 
-- Why unify hashing on SegmentPlan instead of “scan memory as is” per plan?
-  - Only SegmentPlan (DATA + PAD=0) ensures byte‑level equivalence across Coalesced/DVMP/Lease, preventing cross‑plan cache fragmentation and validation ambiguity.
-- Why compute `mi2:` at Commit on the daemon instead of client‑provided?
-  - The server holds the authoritative byte view (including PAD semantics and lease/DVMP intermediates) and can ensure consistent, verifiable IDs; client‑provided IDs introduce trust inconsistencies and replay risks.
-- Why materialize to daemon‑owned VRAM for same‑machine zero‑copy?
-  - Provides a uniform, controllable lifecycle and IPC handle for consumers; avoids mapping Lease/DVMP sources to consumers (security/resource risks).
-- Why strictly staged‑only (no direct MR on DVMP/Lease)?
-  - Avoids broad pinning, NUMA penalties, and conflicts with DVMP eviction; builds stability on small, controlled pooled buffers (ACK reclaimable).
-- Why key‑first in Global Store?
-  - Dedup/reduction: replicas carry only the index key; the BLOB is upserted/fetched on demand, reducing metadata amplification and sync complexity.
+* **SegmentPlan‑based hashing vs “scan memory as‑is”:** only SegmentPlan(PAD=0) yields byte‑equivalence across plans, preventing cache fragmentation.
+* **Server‑computed `mi2:` at Commit:** server has authoritative bytes (PAD semantics, intermediates); client‑provided IDs introduce trust and replay risks.
+* **Materialize‑to‑VRAM vs LIP:** materialization preserves zero‑copy semantics; LIP avoids copies for ephemeral sharing but forbids same‑device aliasing and relies on TTL/verification.
+* **No direct MR on non‑owned memory:** avoids wide pinning, NUMA penalties, and eviction conflicts.
 
 ---
 
-## 14. Key‑Based Artifact Mapping and Disk Fallback (Merged from RFC‑0017)
+## 14. Key‑Based Artifact Mapping and Disk Fallback (from RFC‑0017, integrated)
 
-This section integrates the capabilities originally proposed in RFC‑0017 into the unified registration and consumption model defined by this document. It enables directed cross‑node lookup via a human/automation friendly key and provides a robust disk‑source fallback path with strict consistency validation.
+**Capabilities**
 
-### 14.1 Capabilities (What)
+* Globally unique **key → artifact\_id (mi2:)** mapping; multiple replicas (VRAM/DVMP/DISK) per artifact.
+* Registration may include `disk_path` to a canonical checkpoint; P2P failure can fall back to disk while preserving reconstruction/verification guarantees.
+* SDK additions: `RegisterArtifactOptions.key`, `.disk_path`; `get_artifact_sync(key, ...)` prefers P2P with automatic disk fallback.
 
-- Key → Artifact mapping:
-  - A globally unique string key resolves to exactly one `artifact_id` (content‑addressed `mi2:`).
-  - Multiple replicas (VRAM/DVMP/DISK) may exist for the same `artifact_id`; load balancing selects the best source.
-  - Upserts are idempotent when `artifact_id` matches; conflicting `artifact_id` is rejected.
-- Disk source and fallback:
-  - Registration can include a `disk_path` pointing to a canonical checkpoint directory (see Store Checkpoint format).
-  - On P2P failure, the system falls back to the registered disk path and loads the artifact, preserving the same reconstruction/verification guarantees.
-  - When `disk_path == ""` the daemon may choose an effective path under its configured `storage_root` and persist the checkpoint after Commit (Phase 2 rollout).
-- Client SDK:
-  - `RegisterArtifactOptions` gains `key: str | None` and `disk_path: str | None`.
-  - `get_artifact_sync(key, ...)` materializes by key, preferring P2P, with automatic disk fallback.
+**Consistency & Validation**
 
-### 14.2 Consistency & Validation (Why)
+* Client builds canonical Index v2 bytes.
+* If `disk_path/tensor_index.json` exists, re‑canonicalize and require equality (or equal multihash).
+* If `verification.json.full_artifact_hash` exists, require equality. Mismatches → `INVALID_ARGUMENT` with concise diff.
 
-Strict consistency is enforced via canonical Index v2 bytes and optional verification hash:
+**Control Plane**
 
-- The client builds canonical Index v2 bytes (stable key order/encoding) during registration.
-- If `disk_path/tensor_index.json` exists, it is parsed and re‑canonicalized; the bytes (or multihash) must exactly match.
-- If `verification.json.full_artifact_hash` exists, it must match the computed value.
-- Any mismatch fails registration with `INVALID_ARGUMENT` and a concise diff summary.
+* Daemon publishes key→artifact mapping post‑Commit when `key` is provided.
+* Global Store is authoritative for `key → artifact_id`, tracks replicas and liveness.
 
-Note: Validation concerns metadata and reconstruction‑critical fields (dtype/shape/stride/storage_offset, layout), not full data file byte‑equality.
+**API surface (abridged)**
 
-### 14.3 Control Plane & Ownership (Where)
+* Daemon: `PublishReplicaKey`, `MaterializeByKey`.
+* Global Store: `UpsertKeyMapping`, `ResolveKeyMapping`, `RevokeKeyMapping`.
 
-- Store Daemon:
-  - Owns local registration materialization and (optionally) disk persistence when `disk_path == ""`.
-  - Publishes key→artifact mapping to the Global Store upon successful Commit (when a `key` is provided).
-- Global Store:
-  - Owns the authoritative, globally unique mapping `key → artifact_id` with TTL and idempotence guarantees.
-  - Continues to track replicas by `artifact_id` (VRAM/DVMP/DISK) and supports selection/liveness via existing tables.
+**Flows & Observability**
 
-### 14.4 API Surface (How)
+* Register with key+disk → validate disk (if present) → Commit → optional persist → publish key mapping.
+* Get by key → resolve → select best replica (VRAM/DVMP preferred, DISK lowest) → staged P2P; on failure → disk fallback.
+* Metrics: source/fallback labels; publish/revoke/conflict counters; disk load/p2p latencies.
 
-Client SDK (Python):
+---
 
-- `RegisterArtifactOptions`:
-  - `key: str | None = None`
-  - `disk_path: str | None = None`  // empty string means "daemon chooses path and persists" (Phase 2)
-- Registration semantics:
-  - If `disk_path` is non‑empty and exists, validate metadata before Begin/Commit; on failure, abort without committing.
-  - On successful Commit: if `key` is provided, publish key mapping; if `disk_path == ""`, daemon may persist and register a DISK replica (Phase 2).
-- Retrieval:
-  - `get_artifact_sync(key, device_id=0, options=GetArtifactOptions)` prefers P2P; for async, use `get_artifact_async(...)`. On failure, falls back to DISK if available. `GetArtifactOptions` includes `prefer`, `pinned_allocation_timeout_ms`, `enable_verification`.
+## 15. Security & Policy Notes
 
-Store Daemon (gRPC additions):
+* Same‑process CUDA IPC fallback is disabled.
+* LIP: short‑lived IPC mappings per export; no long‑lived pins; PID verification on KeepAlive; optional policy to **require** verification for LIP P2P.
+* Budgeting/throttling integrates with eviction policies (peak memory/bandwidth).
 
-- `PublishReplicaKey(PublishReplicaKeyRequest) → PublishReplicaKeyResponse`
-- `MaterializeByKey(MaterializeByKeyRequest) → MaterializeByKeyResponse`
+---
 
-Global Store (gRPC additions):
+## 16. Appendix — SDK LIP Helper (sketch)
 
-- `UpsertKeyMapping(UpsertKeyMappingRequest) → UpsertKeyMappingResponse`
-- `ResolveKeyMapping(ResolveKeyMappingRequest) → ResolveKeyMappingResponse`
-- `RevokeKeyMapping(RevokeKeyMappingRequest) → RevokeKeyMappingResponse`
-
-Example proto (abridged for clarity):
-
-```proto
-// Store Daemon Service
-rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
-rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
-
-message PublishReplicaKeyRequest {
-  string key = 1;
-  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
-  string replica_uuid = 3;
-  string disk_path = 4; // "" lets daemon choose under storage_root (Phase 2)
-  bool fail_if_exists = 5; // default true
-  bool validate_disk = 6;  // default true
-}
-
-// Global Store Service
-rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
-rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
-rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
+```python
+class RegisteredLease:
+    # Background keepalive at ttl_ms/2 with ±10% jitter
+    # Context manager + atexit best‑effort Revoke
+    ...
 ```
 
-### 14.5 Interactions (Flows)
-
-- Register with key and disk:
-  1) Client validates existing `disk_path` (if provided and exists).
-  2) Begin/Feed/Commit unified registration; Commit returns `artifact_id`.
-  3) If `disk_path == ""`, daemon may persist under `storage_root` and register DISK replica (Phase 2).
-  4) Daemon publishes `key → artifact_id` to Global Store.
-- Get by key:
-  1) Client calls local daemon `MaterializeByKey(key, ...)`.
-  2) Daemon resolves key → `artifact_id` via Global Store and selects the best replica (VRAM/DVMP preferred, DISK lowest).
-  3) Transfer via staged‑only P2P; on failure, load from DISK fallback.
-
-### 14.6 Observability
-
-- Client attributes: `tc.get_artifact.source={p2p|disk}`, `tc.get_artifact.fallback={true|false}`,
-  `tc.register_artifact.disk.validate={pass|fail}`, `tc.register_artifact.disk.persist_bytes/seconds`.
-- Daemon metrics: `materialize_by_key_total{result=success|fallback|error}`, `p2p_transfer_seconds`, `disk_load_seconds`, `fallback_seconds`, `key_mapping_state{state=publish|revoke|conflict}`.
-- Global Store metrics: `key_mapping_total{op=upsert|resolve|revoke, result=ok|conflict|error}`.
-
-### 14.7 Compatibility & Migration
-
-- All additions are optional; legacy `artifact_id`‑based flows remain unchanged.
-- Default path derivation is only active when `disk_path == ""` and is daemon‑controlled (Phase 2).
-
-### 14.8 Execution Status & Phasing
-
-- Phase 1 (SDK + control plane):
-  - SDK options `key/disk_path`, metadata validation, `get_artifact_sync(key, ...)`.
-  - Global Store RPCs and backing table(s) for key mappings, TTL, and idempotent upserts.
-  - Daemon RPCs to publish keys and materialize by key; fallback hints wired to the orchestrator.
-- Phase 2 (daemon persistence):
-  - Enable `disk_path == ""` behavior: daemon persists to `${storage_root}/${artifact_id}/${replica_uuid}/` atomically post‑Commit and registers a DISK replica.
-- Phase 3 (observability & hardening):
-  - Emit metrics listed above and exercise failure drills (P2P failure, disk unreachable, mapping conflicts).
+(Full implementation lives in `tensorcast/api`; idempotent revoke; handles SIGINT/SIGTERM best‑effort without interfering with app handlers.)

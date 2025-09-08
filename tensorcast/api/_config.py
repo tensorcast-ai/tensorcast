@@ -65,6 +65,8 @@ class RegisterArtifactOptions:
     min_tensor_bytes: int = 64 * 1024
     max_tensor_count: int = 8192
     lease_bytes_limit: int = 0
+    # Lease/LIP specific: opt-in in-place mode per RFC-0014
+    lease_in_place: bool = False
     dvmp_preferred_channel: int = 2
     dvmp_ring_bytes: int = 0
     key: str | None = None

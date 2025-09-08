@@ -266,6 +266,12 @@ class StoreEngine {
       absl::Span<const uint32_t> chunk_indices,
       bool copied_gpu);
 
+  // Expose the configured communication manager to daemon for P2P export paths
+  // that are not bound to a loaded replica (e.g., LIP-backed staged transfers).
+  [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const {
+    return comm_manager_;
+  }
+
  private:
   // ═══════════════════════════════════════════════════════════════════════════
   // Configuration

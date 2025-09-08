@@ -154,6 +154,30 @@ cc_test(
 )
 
 cc_test(
+    name = "grpc_service_impl_lip_same_device_denial_test",
+    srcs = ["grpc_service_impl_lip_same_device_denial_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_lip_ttl_expiry_test",
+    srcs = ["grpc_service_impl_lip_ttl_expiry_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_parity_test",
     srcs = ["grpc_service_impl_parity_test.cc"],
     deps = [

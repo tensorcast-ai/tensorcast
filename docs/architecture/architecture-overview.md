@@ -130,3 +130,15 @@ Client                                 Store Daemon                        Globa
 - Each replica tracks `max_concurrency` and `current_requests`; selection is atomic
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
+
+## VRAM Leased-In-Place (RFC‑0014)
+
+LIP adds a replica mode where a producer process exposes its existing GPU memory to the daemon with a time‑bounded lease, avoiding copies into daemon‑owned VRAM at Commit.
+
+- Registration: Begin with `LeaseOptions.in_place=true` and `owner_pid`; Commit computes `mi2:` by linearizing lease segments with PAD=0.
+- Local consumption: same‑device consumers are rejected; cross‑device consumers are served via a D2D copy into a new coalesced replica on the target GPU.
+- P2P: staged‑only (no direct MR on leased memory); sender stages GPU→host‑pinned buffers before network.
+- Lifecycle: leases require KeepAlive at TTL/2 cadence post‑Commit; TTL expiry removes from selection; leases auto‑revoke when `owner_pid` exits.
+- Verification: lightweight KEY_POINTS metadata is generated and stored at Commit for later offer attachment.
+
+This preserves staged‑only safety and the zero‑copy invariant for daemon‑owned coalesced replicas while enabling low‑latency in‑place sharing and fast cross‑device replication.

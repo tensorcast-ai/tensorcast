@@ -19,6 +19,7 @@ from ._loader import (
 )
 from ._register import (
     RegisteredArtifact,
+    RegisteredLease,
     begin_register_artifact_sdk,
     register_artifact,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "register_artifact",
     "begin_register_artifact_sdk",
     "RegisteredArtifact",
+    "RegisteredLease",
     "set_daemon_address",
     "get_daemon_address",
     # Config/Options

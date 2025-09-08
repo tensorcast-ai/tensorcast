@@ -44,6 +44,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(48);
+  breq.set_owner_pid(getpid());
   breq.mutable_tensor_index_data()->set_data(index_bytes);
   breq.mutable_tensor_index_data()->set_schema_version("v2");
   breq.mutable_tensor_index_data()->set_encoding("json");

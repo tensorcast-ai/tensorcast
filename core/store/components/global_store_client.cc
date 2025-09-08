@@ -244,7 +244,8 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     const std::optional<std::string>& tensor_index_data,
     std::string_view encoding,
     std::string_view schema_version,
-    uint32_t max_concurrency) {
+    uint32_t max_concurrency,
+    const std::optional<std::string>& verification_json) {
   // NOTE: This implementation relies on proto/global_store.proto support for
   // memory replicas with tensor index key. If the server does not support the
   // new fields it will still accept the request but ignore extra data.
@@ -264,6 +265,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   mem_info->set_is_memory_replica(true);
   if (!tensor_index_key.empty()) {
     mem_info->set_tensor_index_key(std::string(tensor_index_key));
+  }
+  if (verification_json.has_value() && !verification_json->empty()) {
+    mem_info->set_verification_json(*verification_json);
   }
   // Best-effort creation metadata
   {
@@ -571,6 +575,9 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
 
   for (const auto& size : info.buffer_sizes()) {
     replica.buffer_sizes.push_back(size);
+  }
+  if (!info.verification_json().empty()) {
+    replica.verification_json = info.verification_json();
   }
 
   return replica;
