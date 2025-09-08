@@ -56,6 +56,8 @@ class Replica:
     # RDMA/Transport info
     remote_memory_keys: List[str] = field(default_factory=list)
     buffer_sizes: List[int] = field(default_factory=list)
+    # Optional verification metadata in JSON form (e.g., KEY_POINTS/SEGMENT_HASHES)
+    verification_json: str | None = None
 
     # Worker association
     worker_id: str | None = None

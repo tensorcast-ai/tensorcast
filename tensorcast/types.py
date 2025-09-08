@@ -153,6 +153,7 @@ class LeasePlan(PlanBase):
     min_tensor_bytes: int = 64 * 1024
     max_tensor_count: int = 8192
     lease_bytes_limit: int = 0
+    in_place: bool = False
 
     def apply_to_begin_request(
         self, req: store_daemon_pb2.BeginRegisterArtifactRequest
@@ -161,6 +162,7 @@ class LeasePlan(PlanBase):
         lo.min_tensor_bytes = int(self.min_tensor_bytes)
         lo.max_tensor_count = int(self.max_tensor_count)
         lo.lease_bytes_limit = int(self.lease_bytes_limit)
+        lo.in_place = bool(self.in_place)
         req.lease.CopyFrom(lo)
 
 

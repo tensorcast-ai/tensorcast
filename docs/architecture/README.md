@@ -12,7 +12,7 @@ This section contains detailed technical documentation about the system architec
 ### [Architecture Overview](./architecture-overview.md)
 High-level overview of the system architecture, core components, and design principles. Start here to understand how the system works.
 
-### Key-based Loading (RFC‑0015)
+### Key-based Loading (RFC‑0014)
 Recommended client API is key-based: clients call the daemon’s `MaterializeByKey` and reconstruct tensors using canonical indices fetched from Global Store (`GetArtifactIndexById`). The daemon resolves the key, orchestrates P2P transfers, and performs disk fallback when needed. See:
 - [P2P Transfer Strategies](./p2p-transfer-strategies.md)
 - [Internals: Artifact Loading Workflow](../internals/model-loading.md)
@@ -22,6 +22,10 @@ Detailed development guide for the Global Store component, including its layered
 
 ### [Store Daemon Architecture](../../daemon/README.md)
 In-depth documentation of the Store Daemon's internal architecture, component interactions, and C++ core integration.
+
+### VRAM Leased-In-Place (RFC‑0014)
+Lease existing GPU allocations to the daemon with `in_place=true` (no coalescing at commit). Same‑device consumers are rejected; cross‑device consumers are served via a D2D copy to a coalesced replica. P2P remains staged‑only. See the LIP section in [Store Daemon Architecture](../../daemon/README.md).
+
 
 ### [High Availability Design](./high-availability-design.md)
 Comprehensive guide to the system's high availability features, failure recovery mechanisms, and state synchronization protocols.

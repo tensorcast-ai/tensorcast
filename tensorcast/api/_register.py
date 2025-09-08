@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
+import threading
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -121,6 +124,159 @@ class RegisteredArtifact:
     def revoke(self, reason: str = "", timeout_s: float = 10.0) -> bool:
         self.__exit__(None, None, None)
         return self.client.revoke_registered_artifact(self.registration_id, reason)
+
+
+class RegisteredLease:
+    """Post-commit lease keepalive and best-effort revoke helper.
+
+    Use as a context manager to maintain keepalive at ttl/2 cadence. On exit,
+    attempts to revoke immediately; if revoke fails, relies on TTL/pid watcher.
+    """
+
+    _live = None  # weakref.WeakSet[RegisteredLease]
+    _atexit_installed = False
+
+    def __init__(
+        self, registration_id: str, daemon_address: str, ttl_ms: int, owner_pid: int
+    ) -> None:
+        if RegisteredLease._live is None:
+            RegisteredLease._live = weakref.WeakSet()
+
+        self.registration_id = registration_id
+        self._addr = daemon_address
+        self._ttl_ms = int(ttl_ms)
+        self._epoch: int = 0
+        self._owner_pid: int = int(owner_pid)
+        self._ka_thread: threading.Thread | None = None
+        self._ka_stop = threading.Event()
+
+        RegisteredLease._live.add(self)
+        if not RegisteredLease._atexit_installed:
+            atexit.register(RegisteredLease._revoke_all)
+            RegisteredLease._atexit_installed = True
+        # GC finalizer
+        weakref.finalize(self, self._best_effort_revoke)
+
+    def __enter__(self) -> "RegisteredLease":
+        if self._ttl_ms > 0 and self._ka_thread is None:
+            # Jitter ±10%
+            interval = max(1.0, (self._ttl_ms / 2000.0))
+
+            def _keepalive() -> None:
+                import random
+
+                ctl = DaemonCtl(self._addr)
+                while not self._ka_stop.wait(interval * (0.9 + 0.2 * random.random())):
+                    try:
+                        ctl.keep_alive_registered_artifact(
+                            self.registration_id, self._ttl_ms, self._epoch
+                        )
+                        self._epoch += 1
+                    except Exception:  # noqa: BLE001
+                        continue
+
+            t = threading.Thread(target=_keepalive, daemon=True)
+            t.start()
+            self._ka_thread = t
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop_keepalive()
+        self._best_effort_revoke()
+
+    def _stop_keepalive(self) -> None:
+        if self._ka_thread and self._ka_thread.is_alive():
+            self._ka_stop.set()
+            self._ka_thread.join(timeout=1.0)
+
+    def _best_effort_revoke(self) -> None:
+        try:
+            ctl = DaemonCtl(self._addr)
+            ctl.revoke_registered_artifact(self.registration_id)
+        except Exception:  # noqa: BLE001
+            # rely on TTL + pid_watcher
+            pass
+
+    @classmethod
+    def _revoke_all(cls) -> None:
+        if cls._live is None:
+            return
+        for inst in list(cls._live):
+            try:
+                inst._best_effort_revoke()
+            except Exception:  # noqa: BLE001
+                continue
+
+
+def register_artifact_lease_in_place(
+    artifact: dict[str, torch.Tensor],
+    *,
+    options: RegisterArtifactOptions,
+    ttl_ms: int | None = None,
+    daemon_address: str | None = None,
+) -> tuple[ArtifactDescriptor, RegisteredLease]:
+    """Register a CUDA artifact as a Lease-In-Place (LIP) and return a lease handle.
+
+    Returns a content-addressed descriptor and a RegisteredLease context manager
+    that maintains post-Commit keepalives and performs best-effort revoke on exit.
+    """
+    if not artifact:
+        raise TensorCastError("artifact must not be empty")
+
+    # Build context & layout, then index bytes (CUDA input required)
+    ctx = BuildContext.from_artifact(artifact, device_id=None)
+    if ctx.input_mode != "cuda":
+        raise DeviceMismatch(
+            "lease_in_place requires CUDA tensors without explicit device_id"
+        )
+    layout = CoalescedLayout.compute(
+        ctx.tensor_source_index, ctx.device_id, align=DEFAULT_ALIGN
+    )
+    index_bytes = IndexV2.build_bytes(
+        ctx.tensor_meta_index, ctx.tensor_source_index, layout.offsets, ctx.device_id
+    )
+
+    ensure_client_otel("tensorcast-client", role="client")
+    addr = daemon_address or get_daemon_address()
+    # Force in_place regardless of caller option to avoid ambiguity
+    plan = LeasePlan(
+        kind="lease",
+        min_tensor_bytes=options.min_tensor_bytes,
+        max_tensor_count=options.max_tensor_count,
+        lease_bytes_limit=options.lease_bytes_limit,
+        in_place=True,
+    )
+
+    handle, hs = begin_register_artifact_sdk(
+        device_id=ctx.device_id,
+        total_size_bytes=layout.total_size,
+        ttl_ms=ttl_ms,
+        tensor_index_data=index_bytes,
+        plan=plan,
+        daemon_address=addr,
+    )
+
+    registrar = _LeaseUploader()
+    with handle:
+        _ = registrar.upload(
+            artifact=artifact,
+            ctx=ctx,
+            layout=layout,
+            handle=handle,
+            handshake=hs,
+            daemon_address=addr,
+        )
+        desc = handle.commit(timeout_s=60.0)
+        # Create RegisteredLease tied to the same registration id
+        lease = RegisteredLease(
+            registration_id=handle.registration_id,
+            daemon_address=addr,
+            ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
+            owner_pid=DaemonCtl(
+                addr
+            )._get_effective_pid(),  # uses host pid if configured
+        )
+        return desc, lease
 
 
 def begin_register_artifact_sdk(
@@ -367,6 +523,7 @@ def make_plan_model(
             min_tensor_bytes=options.min_tensor_bytes,
             max_tensor_count=options.max_tensor_count,
             lease_bytes_limit=options.lease_bytes_limit,
+            in_place=bool(getattr(options, "lease_in_place", False)),
         )
     raise InvalidPlan(f"Unknown plan: {plan_type}")
 

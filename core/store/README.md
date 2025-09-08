@@ -327,3 +327,4 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU DVMP memor
 - Per-GPU transfer concurrency is limited to 1 active session by design to reduce VRAM fragmentation and pressure.
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
+Note on verification: When the P2P source provides `verification_json` (e.g., via a sender daemon’s LockTransportChunks), `StoreEngine::ingest_from_p2p_internal()` parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a DataLoss error and aborts materialization.

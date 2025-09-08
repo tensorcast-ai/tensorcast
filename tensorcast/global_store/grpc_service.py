@@ -1201,6 +1201,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             device_id=replica.device_id,
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
+            verification_json=replica.verification_json or "",
         )
 
     def _memory_info_to_replica_artifact_id(
@@ -1239,6 +1240,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             remote_memory_keys=remote_keys,
             buffer_sizes=buffer_sizes,
             worker_id=worker_id,
+            verification_json=(
+                mem_info.verification_json
+                if hasattr(mem_info, "verification_json") and mem_info.verification_json
+                else None
+            ),
         )
 
     def _determine_worker_status(

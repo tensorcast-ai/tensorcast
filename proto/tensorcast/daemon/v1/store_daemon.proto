@@ -312,6 +312,12 @@ message LockTransportChunksRequest {
 // Lock chunks response
 message LockTransportChunksResponse {
   string lock_token = 1; // Lock token (UUID)
+  // Optional: When source is a LIP (Lease-In-Place) replica, the daemon may
+  // attach lightweight verification metadata (JSON) to aid receivers in
+  // post-transfer validation (e.g., KEY_POINTS first/middle/last values).
+  // Receivers are encouraged to verify at least key points and may upgrade to
+  // segment-level verification when available.
+  optional string verification_json = 2;
 }
 
 // Unlock chunks request
@@ -331,6 +337,7 @@ message BeginRegisterArtifactRequest {
   int32 device_id = 1; // Target GPU device ID
   uint64 total_size = 2; // Total size in bytes (8-byte aligned)
   optional uint32 ttl_ms = 3; // TTL for registration (milliseconds), used by Lease
+  int32 owner_pid = 6; // REQUIRED: Owner process ID for lease lifecycle (must be > 0)
 
   // Tensor index can be provided as key or data
   oneof index {
@@ -372,6 +379,7 @@ message LeaseOptions {
   uint64 min_tensor_bytes = 1;
   uint32 max_tensor_count = 2;
   uint64 lease_bytes_limit = 3; // 0 = daemon policy
+  bool in_place = 4;            // When true, Commit registers an in-place lease (LIP)
 }
 
 // Begin registration response
@@ -438,6 +446,7 @@ message KeepAliveRegisterArtifactRequest {
   string registration_id = 1;
   uint32 ttl_ms = 2;
   uint64 epoch = 3;
+  int32 owner_pid = 4; // REQUIRED: must equal Begin.owner_pid
 }
 message KeepAliveRegisterArtifactResponse {}
 

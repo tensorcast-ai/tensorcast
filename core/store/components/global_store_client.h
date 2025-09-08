@@ -41,6 +41,7 @@ struct RemoteReplicaInfo {
   uint32_t device_id;
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
+  std::string verification_json; // optional verification metadata (JSON)
 };
 
 // Transport session for P2P transfers
@@ -106,7 +107,8 @@ class GlobalStoreClient {
       const std::optional<std::string>& tensor_index_data = std::nullopt,
       std::string_view encoding = "json",
       std::string_view schema_version = "v2",
-      uint32_t max_concurrency = 1);
+      uint32_t max_concurrency = 1,
+      const std::optional<std::string>& verification_json = std::nullopt);
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id);
 

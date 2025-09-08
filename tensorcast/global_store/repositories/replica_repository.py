@@ -45,6 +45,7 @@ class ReplicaRepository(BaseRepository):
                 mr.is_available,
                 mr.remote_memory_keys,
                 mr.buffer_sizes,
+                mr.verification_json,
                 mr.worker_id,
                 mr.created_at,
                 mr.updated_at
@@ -86,6 +87,7 @@ class ReplicaRepository(BaseRepository):
                 mr.is_available,
                 mr.remote_memory_keys,
                 mr.buffer_sizes,
+                mr.verification_json,
                 mr.worker_id,
                 mr.created_at,
                 mr.updated_at
@@ -188,6 +190,7 @@ class ReplicaRepository(BaseRepository):
                 mr.is_available,
                 mr.remote_memory_keys,
                 mr.buffer_sizes,
+                mr.verification_json,
                 mr.worker_id,
                 mr.created_at,
                 mr.updated_at
@@ -212,8 +215,8 @@ class ReplicaRepository(BaseRepository):
             INSERT INTO artifact_replicas (
                 replica_id, artifact_id, node_id, node_address, node_port,
                 memory_size, memory_type, device_id, max_concurrency,
-                is_available, remote_memory_keys, buffer_sizes, worker_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(replica.replica_id),
@@ -230,6 +233,7 @@ class ReplicaRepository(BaseRepository):
                 replica.is_available,
                 list(replica.remote_memory_keys),
                 list(replica.buffer_sizes),
+                replica.verification_json,
                 replica.worker_id,
             ],
         )
@@ -313,6 +317,7 @@ class ReplicaRepository(BaseRepository):
                     max_concurrency = ?,
                     remote_memory_keys = ?,
                     buffer_sizes = ?,
+                    verification_json = ?,
                     memory_size = ?,
                     worker_id = ?
                 WHERE replica_id = ?
@@ -322,6 +327,7 @@ class ReplicaRepository(BaseRepository):
                     replica.max_concurrency,
                     list(replica.remote_memory_keys),
                     list(replica.buffer_sizes),
+                    replica.verification_json,
                     replica.memory_size,
                     replica.worker_id,
                     str(existing_replica_id),
@@ -335,8 +341,8 @@ class ReplicaRepository(BaseRepository):
                 INSERT INTO artifact_replicas (
                     replica_id, artifact_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
-                    is_available, remote_memory_keys, buffer_sizes, worker_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
@@ -353,6 +359,7 @@ class ReplicaRepository(BaseRepository):
                     replica.is_available,
                     list(replica.remote_memory_keys),
                     list(replica.buffer_sizes),
+                    replica.verification_json,
                     replica.worker_id,
                 ],
             )
@@ -387,6 +394,7 @@ class ReplicaRepository(BaseRepository):
                 max_concurrency = ?,
                 remote_memory_keys = ?,
                 buffer_sizes = ?,
+                verification_json = ?,
                 memory_size = ?,
                 worker_id = ?
             WHERE replica_id = ?
@@ -397,6 +405,7 @@ class ReplicaRepository(BaseRepository):
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),
                 list(replica.buffer_sizes),
+                replica.verification_json,
                 replica.memory_size,
                 replica.worker_id,
                 str(replica.replica_id),
@@ -603,6 +612,7 @@ class ReplicaRepository(BaseRepository):
                 mr.is_available,
                 mr.remote_memory_keys,
                 mr.buffer_sizes,
+                mr.verification_json,
                 mr.worker_id,
                 mr.created_at,
                 mr.updated_at
@@ -815,6 +825,8 @@ class ReplicaRepository(BaseRepository):
         # [replica_id, artifact_id, disk_path, node_id, node_address, node_port, ...]
         # Layout B (without disk_path):
         # [replica_id, artifact_id, node_id, node_address, node_port, ...]
+        # Some queries now include verification_json before worker_id. We detect
+        # presence by row length heuristics.
         has_disk_path = len(row) >= 17
 
         idx = 2
@@ -833,9 +845,25 @@ class ReplicaRepository(BaseRepository):
         is_available = row[idx + 8]
         remote_memory_keys = row[idx + 9] if row[idx + 9] else []
         buffer_sizes = row[idx + 10] if row[idx + 10] else []
-        worker_id = row[idx + 11]
-        created_at = row[idx + 12]
-        updated_at = row[idx + 13]
+        # Verification JSON may be present at idx + 11, depending on SELECT
+        verification_json = None
+        worker_id = None
+        created_at = None
+        updated_at = None
+
+        # Detect if verification_json present by checking remaining length
+        # After buffer_sizes we expect either worker_id at (idx+11) or
+        # verification_json then worker_id.
+        if len(row) >= idx + 14:
+            # Likely layout with verification_json
+            verification_json = row[idx + 11]
+            worker_id = row[idx + 12]
+            created_at = row[idx + 13]
+            updated_at = row[idx + 14] if len(row) > idx + 14 else None
+        else:
+            worker_id = row[idx + 11] if len(row) > idx + 11 else None
+            created_at = row[idx + 12] if len(row) > idx + 12 else None
+            updated_at = row[idx + 13] if len(row) > idx + 13 else None
 
         return Replica(
             replica_id=replica_id,
@@ -853,6 +881,7 @@ class ReplicaRepository(BaseRepository):
             remote_memory_keys=remote_memory_keys,
             buffer_sizes=buffer_sizes,
             worker_id=worker_id,
+            verification_json=verification_json,
             created_at=created_at,
             updated_at=updated_at,
         )

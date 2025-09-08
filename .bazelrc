@@ -63,14 +63,3 @@ common:remote --build_metadata=REPO_URL=https://github.com/tensorcast-ai/tensorc
 
 try-import user.bazelrc
 
-# OpenTelemetry C++ API compile-time enable switch for daemon spans and bridges.
-# Usage:
-#   bazel build --config=otel //daemon:tensorcast_daemon
-build:otel --copt=-DTC_ENABLE_OTEL_CXX=1
-
-# ------------------------------------------------------------
-# Fake CUDA backend (development and tests without GPUs)
-#
-# Most C++ tests construct components that call CUDA APIs (e.g. pinned
-# memory registration, CUDA IPC). To make tests runnable on machines without
-# NVIDIA drivers/GPUs, enable the fake CUDA backend by default for tests.

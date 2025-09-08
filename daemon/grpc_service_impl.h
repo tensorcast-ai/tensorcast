@@ -257,6 +257,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     uint64_t epoch{0};
     uint64_t total_size{0};
     int device_id{0};
+    int owner_pid{0};
+    bool lease_in_place{false};
     std::string index_key_hex; // optional
     std::string index_data; // optional canonical index JSON bytes
   };
@@ -272,6 +274,46 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     uint64_t dst_offset{0}; // destination offset in coalesced buffer
   };
   absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(reg_mu_);
+
+  // LIP Registry (post-Commit leases)
+  struct LipLeaseEntry {
+    std::string registration_id; // original registration id for keepalive/revoke
+    std::string artifact_id;
+    int device_id{0};
+    int owner_pid{0};
+    uint32_t ttl_ms{0};
+    std::chrono::time_point<std::chrono::steady_clock> expiry{};
+    uint64_t epoch{0};
+    uint64_t total_size{0};
+    std::string index_data; // canonical JSON (for verification hashing if needed)
+    std::vector<LeaseSegMeta> segments; // mapped via cuda IPC when used
+    std::string verification_json; // optional stored verification metadata (JSON)
+  };
+  // Keyed by (artifact_id + "@" + device_id)
+  absl::Mutex lip_mu_;
+  absl::flat_hash_map<std::string, LipLeaseEntry> lip_by_key_ ABSL_GUARDED_BY(lip_mu_);
+  // Map registration_id -> key for quick keepalive/revoke
+  absl::flat_hash_map<std::string, std::string> lip_key_by_reg_ ABSL_GUARDED_BY(lip_mu_);
+
+  // LIP P2P export records keyed by transport lock token. These records track
+  // temporary CUDA IPC mappings and corresponding registered tensor keys in the
+  // CommunicateEngine so we can unregister/cleanup on UnlockTransportChunks.
+  struct LipExportRecord {
+    std::string artifact_id;
+    int device_id{0};
+    std::vector<void*> opened_ptrs; // cudaIpcOpenMemHandle() pointers to close
+    std::vector<std::string> tensor_keys; // registered keys to unregister
+  };
+  absl::Mutex lip_export_mu_;
+  absl::flat_hash_map<std::string, LipExportRecord> lip_exports_ ABSL_GUARDED_BY(lip_export_mu_);
+
+  // Helper: D2D copy from LIP segments into a new coalesced destination on target device; returns CUDA IPC handle
+  // bytes.
+  absl::StatusOr<std::vector<uint8_t>> lip_copy_to_new_coalesced_int(
+      int target_device_id,
+      const std::string& canonical_index_json,
+      uint64_t total_size,
+      absl::Span<const LeaseSegMeta> segments);
 
   Options opts_;
 };

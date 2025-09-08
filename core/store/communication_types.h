@@ -39,6 +39,12 @@ struct P2PSource {
   bool enable_checksum = true;
   Location location;
 
+  // Optional verification metadata (JSON) passed from the sender side, e.g.,
+  // via daemon LockTransportChunksResponse.verification_json. When present,
+  // the receiver may verify the loaded replica against this info after
+  // transfer. See core/common/artifact_verification.{h,cc} for the schema.
+  std::string verification_json;
+
   // Optional on-disk fallback directory containing partition files
   // (e.g., tensor.data_0, tensor.data_1, ...). When non-empty, P2PLoader
   // will mux remote source with this disk source for resilience.
