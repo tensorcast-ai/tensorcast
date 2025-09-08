@@ -41,10 +41,10 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     bool allow_high_card_attrs{false};
   };
 
-  explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine)
+  explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
       : StoreDaemonServiceImpl(std::move(engine), Options{}) {}
 
-  explicit StoreDaemonServiceImpl(std::shared_ptr<tensorcast::store::StoreEngine> engine, Options opts)
+  explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine, Options opts)
       : engine_(std::move(engine)), sessions_(opts.sessions_ttl), locks_(opts.locks_ttl), opts_(opts) {
     start_sweepers();
   }
@@ -191,7 +191,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   }
 
  private:
-  std::shared_ptr<tensorcast::store::StoreEngine> engine_;
+  std::shared_ptr<store::StoreEngine> engine_;
   ReplicaSessionManager sessions_;
   TransportLockManager locks_;
   RefTracker refs_;
@@ -208,9 +208,9 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   void stop_sweepers();
 
   // Helpers
-  static tensorcast::store::DeviceKey resolve_device(const v1::MaterializeReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const v1::ConfirmReplicaRequest& req);
-  static tensorcast::store::DeviceKey resolve_device(const v1::UnloadReplicaRequest& req);
+  static store::DeviceKey resolve_device(const v1::MaterializeReplicaRequest& req);
+  static store::DeviceKey resolve_device(const v1::ConfirmReplicaRequest& req);
+  static store::DeviceKey resolve_device(const v1::UnloadReplicaRequest& req);
   static store::loading::ReplicaKey make_replica_key(const std::string& artifact_id);
 
   // Shutdown gating
@@ -251,7 +251,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   enum class RegPlan : uint8_t { COALESCED = 0, DVMP = 1, LEASE = 2 };
   struct RegMeta {
     RegPlan plan{RegPlan::COALESCED};
-    std::chrono::time_point<std::chrono::steady_clock> expiry{};
+    std::chrono::time_point<std::chrono::steady_clock> expiry;
     // Remember TTL duration so stream frames can refresh expiry without extra RPCs
     uint32_t ttl_ms{0};
     uint64_t epoch{0};
@@ -282,7 +282,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     int device_id{0};
     int owner_pid{0};
     uint32_t ttl_ms{0};
-    std::chrono::time_point<std::chrono::steady_clock> expiry{};
+    std::chrono::time_point<std::chrono::steady_clock> expiry;
     uint64_t epoch{0};
     uint64_t total_size{0};
     std::string index_data; // canonical JSON (for verification hashing if needed)

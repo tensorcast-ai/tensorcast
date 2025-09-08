@@ -52,6 +52,20 @@ absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coa
   if (!begin_or.ok())
     return begin_or.status();
   const auto& out = *begin_or;
+  // Ensure pending registration is aborted on any error prior to successful commit
+  struct RegAbortGuard {
+    store::StoreEngine* engine;
+    std::string id;
+    bool active{true};
+    ~RegAbortGuard() {
+      if (active && engine) {
+        (void)engine->abort_registered_artifact(id);
+      }
+    }
+    void release() {
+      active = false;
+    }
+  } abort_guard{.engine = engine_.get(), .id = out.registration_id};
 
   // Build plan and zero PAD regions on destination
   auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size, 8);
@@ -133,6 +147,8 @@ absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coa
   auto commit_or = engine_->commit_registered_artifact(out.registration_id);
   if (!commit_or.ok())
     return commit_or.status();
+  // Successful commit; prevent abort on scope exit
+  abort_guard.release();
   std::vector<uint8_t> bytes(out.cuda_ipc_handle_bytes.size());
   std::memcpy(bytes.data(), out.cuda_ipc_handle_bytes.data(), out.cuda_ipc_handle_bytes.size());
   return bytes;
