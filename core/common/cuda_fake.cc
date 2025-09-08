@@ -420,6 +420,34 @@ void configure_same_process_ipc_fallback(bool /*enabled*/) {
   // No-op for fake backend; semantics already allow same-process opens
 }
 
+absl::Status device_can_access_peer(int* can_access, int device, int peer_device) {
+  (void)device;
+  (void)peer_device;
+  if (can_access == nullptr) {
+    return absl::InvalidArgumentError("can_access pointer is null");
+  }
+  *can_access = 1;
+  return absl::OkStatus();
+}
+
+absl::Status enable_peer_access(int current_device, int peer_device) {
+  (void)current_device;
+  (void)peer_device;
+  return absl::OkStatus();
+}
+
+absl::Status memcpy_peer_async(
+    void* dst,
+    int dst_device,
+    const void* src,
+    int src_device,
+    size_t bytes,
+    cudaStream_t stream) {
+  (void)dst_device;
+  (void)src_device;
+  return memcpy_async(dst, src, bytes, cudaMemcpyDeviceToDevice, stream);
+}
+
 // IPC handle operations (native CUDA handle type)
 absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
   auto& state = get_state();

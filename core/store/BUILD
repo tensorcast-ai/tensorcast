@@ -168,6 +168,7 @@ sc_cc_library(
     deps = [
         ":global_store_client",
         ":loading_spec",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",

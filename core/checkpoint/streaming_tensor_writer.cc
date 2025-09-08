@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 
 #include "absl/log/log.h"
@@ -102,9 +103,21 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
 
     // Copy data to buffer
     if (is_gpu) {
-      auto copy_status = copy_gpu_to_buffer(static_cast<const char*>(data) + processed, chunk_size, buffer_ptr, stream);
-      if (!copy_status.ok()) {
-        return copy_status;
+      // Schedule D2H into the pinned buffer via AsyncCopyManager.
+      tensorcast::common::DeviceRegion src{
+          .device_id = 0, // device inferred by stream; not used here
+          .dev_ptr = const_cast<char*>(static_cast<const char*>(data) + processed),
+          .length = chunk_size};
+      tensorcast::common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
+
+      const size_t this_global_chunk_id = total_bytes_written_.load() / buffer_size_;
+      auto on_done = [spb = streaming_buffer_.get(), slot_id, this_global_chunk_id, chunk_size]() {
+        (void)spb->mark_chunk_ready(slot_id, this_global_chunk_id, chunk_size);
+      };
+      tensorcast::common::CopyOptions opts{.tracing_stage = "D2H/Copy", .callbacks = {.on_copy_done = on_done}};
+      auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_d2h(src, dst, stream, opts);
+      if (!hdl_or.ok()) {
+        return hdl_or.status();
       }
     } else {
       // CPU data - direct memory copy
@@ -115,10 +128,12 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
     size_t global_chunk_id = total_bytes_written_.load() / buffer_size_;
     chunk_offsets_[global_chunk_id] = current_offset_.load();
 
-    // Mark chunk as ready
-    auto ready_status = streaming_buffer_->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
-    if (!ready_status.ok()) {
-      return ready_status;
+    // Mark chunk as ready only for CPU path; GPU path marks ready in D2H callback
+    if (!is_gpu) {
+      auto ready_status = streaming_buffer_->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
+      if (!ready_status.ok()) {
+        return ready_status;
+      }
     }
 
     // If synchronous write mode, write immediately

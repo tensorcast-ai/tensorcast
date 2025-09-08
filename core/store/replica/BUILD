@@ -73,6 +73,7 @@ sc_cc_library(
     deps = [
         ":chunk_meta",
         ":replica_memory_coordinator",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:memory_location_lib",
@@ -151,6 +152,7 @@ sc_cc_library(
         ":replica_memory_coordinator",
         ":transfer_helpers",
         ":transfer_service",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_types_lib",
         "//core/common:distributed_virtual_memory_pool_lib",

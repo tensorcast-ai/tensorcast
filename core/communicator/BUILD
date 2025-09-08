@@ -262,6 +262,7 @@ sc_cc_library(
         ":memory_stager_lib",
         ":partition_tensor_lib",
         ":tcp_lib",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",

@@ -212,6 +212,13 @@ stateDiagram-v2
 - GPU allocations are lazily created via UMA on first use; DVMP CPU region is reserved at construction.
 - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedMemoryPool`.
 
+### Async Copy Manager Integration
+
+- H2D/D2H transfers now submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks.
+- SPB slots are returned in the ACM completion callback; per-chunk `stream_synchronize` calls have been removed.
+- For H2D, UMA state is advanced per DVMP-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
+- ACM lazily creates per-device non-blocking streams per direction (H2D/D2H/D2D) when callers pass `nullptr` for the stream.
+
 ### Chunk States (DVMP/UMA)
 
 ```mermaid

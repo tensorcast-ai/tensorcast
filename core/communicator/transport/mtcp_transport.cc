@@ -6,10 +6,9 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <cerrno>
-#include "core/common/error_handling.h"
-
 #include <algorithm>
+#include <cerrno>
+
 #include <future>
 #include <memory>
 #include <string>
@@ -19,13 +18,11 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 
-#include "core/common/cuda_api.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
-#include "opentelemetry/trace/provider.h"
-#include "opentelemetry/trace/scope.h"
 
 #include <chrono>
 
@@ -130,7 +127,8 @@ misc::result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
     if (bytes <= 0) {
       PLOG(WARNING) << "MTcpTransportTask recv error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
-    } else if (bytes < remain_bytes) {
+    }
+    if (bytes < remain_bytes) {
       remain_bytes -= bytes;
       offset += bytes;
     } else {
@@ -160,14 +158,7 @@ misc::result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
 }
 
 MTcpTransport::MTcpTransport(int conn_count)
-    : listen_fd_(0),
-      retry_count_(0),
-      conn_count_(conn_count),
-      send_queue_(),
-      recv_queue_(),
-      stop_(false),
-      closed_(false),
-      ready_(false) {
+    : listen_fd_(0), retry_count_(0), conn_count_(conn_count), stop_(false), closed_(false), ready_(false) {
   misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
   misc::ASSERT(conn_count <= base::kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
   bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));
@@ -289,7 +280,7 @@ void MTcpTransport::set_conn_count(int conn_count) {
 }
 
 void MTcpTransport::set_memory_pool(std::shared_ptr<common::memory::PinnedMemoryPool> pool) {
-  memory_pool_ = pool;
+  memory_pool_ = std::move(pool);
 }
 
 void MTcpTransport::server_loop() {
@@ -795,9 +786,7 @@ void MTcpTransport::recv_loop() {
 
                 // Copy from staged buffer to GPU
                 int device_id = tensor->get_device_id();
-                if (device_id < 0) {
-                  device_id = 0;
-                }
+                device_id = std::max(device_id, 0);
 
                 tensorcast::common::DeviceGuard guard(device_id);
                 if (!guard.status().ok()) {
@@ -806,25 +795,27 @@ void MTcpTransport::recv_loop() {
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
 
-                // Instrument H2D copy for GPU receive
-                namespace otel = opentelemetry;
-                auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.communicator");
-                auto copy_span = tracer->StartSpan("H2D/Copy");
-                otel::trace::Scope copy_scope(copy_span);
-                copy_span->SetAttribute("tc.device.id", static_cast<int64_t>(device_id));
-                copy_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(sub_chunk_size));
-                auto copy_status = cuda::memcpy(gpu_ptr, staged_ptr, sub_chunk_size, cudaMemcpyHostToDevice);
-                if (!copy_status.ok()) {
-                  LOG(ERROR) << "Failed to copy to GPU: " << copy_status.message();
+                // Schedule async H2D using AsyncCopyManager, wait for completion to respect semantics.
+                tensorcast::common::HostRegion h{
+                    .base = staged_ptr, .length = static_cast<size_t>(sub_chunk_size), .pinned = true};
+                tensorcast::common::DeviceRegion d{
+                    .device_id = device_id, .dev_ptr = gpu_ptr, .length = static_cast<size_t>(sub_chunk_size)};
+                tensorcast::common::CopyOptions opts{
+                    .tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = [recv_buffer, slot_id]() {
+                                                   (void)recv_buffer->return_chunk(slot_id);
+                                                 }}};
+                auto hdl_or =
+                    tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, /*stream=*/nullptr, opts);
+                if (!hdl_or.ok()) {
+                  LOG(ERROR) << "Failed to schedule H2D copy: " << hdl_or.status();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
-                  copy_span->SetAttribute("error", true);
-                  copy_span->AddEvent("h2d_error");
-                  copy_span->End();
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
-
-                CHECK_OK(recv_buffer->return_chunk(slot_id));
-                copy_span->End();
+                auto wait_st = hdl_or->wait();
+                if (!wait_st.ok()) {
+                  LOG(ERROR) << "H2D copy failed: " << wait_st;
+                  return {misc::TRANSPORT_FAILED, result.cost};
+                }
                 return result;
               });
 

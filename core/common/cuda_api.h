@@ -178,6 +178,17 @@ bool is_available();
 // Default is disabled. No-op in the fake backend (always behaves like same-process).
 void configure_same_process_ipc_fallback(bool enabled);
 
+// Peer access and peer copy (for cross-device D2D)
+absl::Status device_can_access_peer(int* can_access, int device, int peer_device);
+absl::Status enable_peer_access(int current_device, int peer_device);
+absl::Status memcpy_peer_async(
+    void* dst,
+    int dst_device,
+    const void* src,
+    int src_device,
+    size_t bytes,
+    cudaStream_t stream = nullptr);
+
 // Helper macro for operations not supported by fake backend
 #ifdef USE_FAKE_CUDA
 #define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation)                                                   \

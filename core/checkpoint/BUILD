@@ -45,6 +45,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":tensor_writer_lib",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "@abseil-cpp//absl/log:check",
