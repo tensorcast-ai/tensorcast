@@ -160,10 +160,24 @@ class DaemonCtl:
         retries: int = 1,
         span: trace.Span | None = None,
     ):
+        # Determine the RPC method name so we can rebind against a fresh stub
+        # after channel refresh. Prefer the grpc MultiCallable "_method" path,
+        # fall back to Python __name__.
+        method_path = getattr(method, "_method", None)
+        resolved_name = (
+            method_path.rsplit("/", 1)[-1] if isinstance(method_path, str) else None
+        ) or getattr(method, "__name__", None)
+
+        cur_method = method
         last_err: Exception | None = None
         for attempt in range(retries + 1):
+            if attempt > 0 and resolved_name:
+                # Rebind the method on the (potentially) refreshed stub
+                reb = getattr(self.stub, resolved_name, None)
+                if reb is not None:
+                    cur_method = reb
             try:
-                return method(request, timeout=timeout)
+                return cur_method(request, timeout=timeout)
             except grpc.RpcError as e:  # noqa: BLE001
                 last_err = e
                 code = e.code()
@@ -184,9 +198,7 @@ class DaemonCtl:
                     and attempt < retries
                 ):
                     # best-effort method name for logging
-                    mname = getattr(method, "_method", None) or getattr(
-                        method, "__name__", "<callable>"
-                    )
+                    mname = method_path or resolved_name or "<callable>"
                     _inc_rpc_retry(self.server_address, str(mname), attempt + 1, code)
                     self._refresh_channel()
                     time.sleep(0.05 + random.random() * 0.1)
