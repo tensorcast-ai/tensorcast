@@ -27,6 +27,7 @@
 #include <sstream>
 
 ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
+ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicasV2");
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
@@ -140,6 +141,8 @@ int main(int argc, char** argv) {
   }
   // Observability high-cardinality attributes: default off (config hook TBD)
   svc_opts.allow_high_card_attrs = false;
+  // Feature flags (override via flags for now)
+  svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
 
   tensorcast::daemon::StoreDaemonServiceImpl service(engine, svc_opts);
 

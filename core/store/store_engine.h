@@ -173,6 +173,13 @@ class StoreEngine {
   [[nodiscard]] std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
 
   /**
+   * @brief Returns a unique GPU device ordinal if the artifact resides on exactly
+   *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
+   *        when the artifact resides on multiple GPUs (ambiguous without a device).
+   */
+  absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+
+  /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */
   [[nodiscard]] std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;

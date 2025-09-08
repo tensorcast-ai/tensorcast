@@ -278,6 +278,22 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
   return result;
 }
 
+absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(std::string_view artifact_id) const {
+  int unique_gpu_device = -2; // -2: unknown, -1: none, >=0: unique device
+  for (const auto& info : get_all_replicas_info()) {
+    if (info.artifact_id == artifact_id && info.gpu_state == common::memory::MemoryLocation::GPU) {
+      if (unique_gpu_device == -2) {
+        unique_gpu_device = info.gpu_device_id;
+      } else if (unique_gpu_device != info.gpu_device_id) {
+        return absl::InvalidArgumentError("ambiguous artifact residency across multiple GPUs; device_id required");
+      }
+    }
+  }
+  if (unique_gpu_device == -2)
+    return -1;
+  return unique_gpu_device;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Internal Implementation - using new unified types
 // ═══════════════════════════════════════════════════════════════════════════

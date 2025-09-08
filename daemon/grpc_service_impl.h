@@ -7,15 +7,26 @@
 #include <deque>
 #include <future>
 #include <memory>
-#include <thread>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/store_engine.h"
+#include "daemon/background_scheduler.h"
+#include "daemon/device_resolver.h"
+#include "daemon/lip_bridge.h"
+#include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
+#include "daemon/registration_manager.h"
 #include "daemon/replica_session_manager.h"
+#include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/status_controller.h"
+#include "daemon/service/controllers/transport_controller.h"
+#include "daemon/sessions_service.h"
+#include "daemon/sweep_tasks.h"
 #include "daemon/transport_lock_manager.h"
+#include "daemon/types.h"
+#include "daemon/verification_tracker.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
@@ -39,6 +50,12 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
     // Observability
     bool allow_high_card_attrs{false};
+
+    // API behavior flags
+    // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
+    // ordering (artifact_id, device_id). If false (default), retains numeric
+    // index tokens for backward compatibility.
+    bool use_cursor_pagination{false};
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
@@ -46,7 +63,36 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine, Options opts)
       : engine_(std::move(engine)), sessions_(opts.sessions_ttl), locks_(opts.locks_ttl), opts_(opts) {
+    lip_mgr_ = std::make_unique<LipManager>(engine_);
+    reg_mgr_ = std::make_unique<RegistrationManager>();
+    verif_tracker_ = std::make_unique<VerificationTracker>();
     start_sweepers();
+    // Wire helper services and controllers (post-scheduler construction)
+    sessions_svc_ = std::make_unique<SessionsService>(sessions_, *verif_tracker_, scheduler_.get());
+    lip_bridge_ = std::make_unique<LipBridge>(*lip_mgr_);
+    MaterializationController::Dep dep{
+        .engine = *engine_,
+        .refs = refs_,
+        .sessions = *sessions_svc_,
+        .lip = *lip_bridge_,
+        .devices = devices_,
+        .is_shutting_down = is_shutting_down_};
+    materialization_controller_ = std::make_unique<MaterializationController>(dep);
+    RegistrationController::Dep rdep{.engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_};
+    registration_controller_ = std::make_unique<RegistrationController>(rdep);
+    TransportController::Dep tdep{.engine = *engine_, .locks = locks_, .lip = *lip_mgr_};
+    transport_controller_ = std::make_unique<TransportController>(tdep);
+    StatusController::Dep sdep{
+        .engine = *engine_,
+        .refs = refs_,
+        .is_shutting_down = is_shutting_down_,
+        .is_registered = [this]() { return this->is_registered(); },
+        .worker_id = [this]() { return this->worker_id(); },
+        .uptime =
+            [this]() {
+              return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
+            }};
+    status_controller_ = std::make_unique<StatusController>(sdep);
   }
 
   ~StoreDaemonServiceImpl() override;
@@ -195,23 +241,15 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   ReplicaSessionManager sessions_;
   TransportLockManager locks_;
   RefTracker refs_;
+  std::unique_ptr<LipManager> lip_mgr_;
 
-  // Background sweepers
-  std::atomic<bool> stop_{false};
-  std::thread sweep_sessions_th_;
-  std::thread sweep_locks_th_;
-  std::thread pid_watcher_th_;
-  std::thread verif_sweeper_th_;
-  std::thread eviction_th_;
+  // Background sweepers (scheduler-driven)
+  std::unique_ptr<BackgroundScheduler> scheduler_;
   std::chrono::time_point<std::chrono::steady_clock> start_time_{std::chrono::steady_clock::now()};
   void start_sweepers();
   void stop_sweepers();
 
-  // Helpers
-  static store::DeviceKey resolve_device(const v1::MaterializeReplicaRequest& req);
-  static store::DeviceKey resolve_device(const v1::ConfirmReplicaRequest& req);
-  static store::DeviceKey resolve_device(const v1::UnloadReplicaRequest& req);
-  static store::loading::ReplicaKey make_replica_key(const std::string& artifact_id);
+  // Helpers (moved into controllers/helpers per RFC‑0016)
 
   // Shutdown gating
   std::atomic<bool> is_shutting_down_{false};
@@ -222,90 +260,19 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   mutable absl::Mutex worker_mu_;
   std::string worker_id_ ABSL_GUARDED_BY(worker_mu_);
 
-  // Lightweight verification registry keyed by replica_uuid. Tracks
-  // verification progress decoupled from ready_future state for parity with
-  // Python daemon semantics.
-  struct VerifEntry {
-    v1::VerificationStatus status{v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
-    std::string err;
-  };
-  absl::Mutex verif_mu_;
-  absl::flat_hash_map<std::string, VerifEntry> verif_ ABSL_GUARDED_BY(verif_mu_);
-  void set_verif_status(const std::string& uuid, v1::VerificationStatus st, std::string err = "");
+  // Verification tracker extracted to its own component
+  std::unique_ptr<VerificationTracker> verif_tracker_;
 
-  // Background task queue for verification completion and auto-registration
-  struct VerifTask {
-    std::string uuid;
-    std::shared_future<absl::Status> ready;
-  };
-  struct AutoRegTask {
-    store::loading::ReplicaKey key;
-    std::string disk_path;
-    std::shared_future<absl::Status> ready;
-  };
+  // Background task queue for auto-registration only (verification queue moved)
   absl::Mutex bg_tasks_mu_;
-  std::deque<VerifTask> verif_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
   std::deque<AutoRegTask> auto_reg_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
 
-  // Lightweight registration metadata for unified Begin/Feed/KeepAlive/Commit lifecycle.
-  enum class RegPlan : uint8_t { COALESCED = 0, DVMP = 1, LEASE = 2 };
-  struct RegMeta {
-    RegPlan plan{RegPlan::COALESCED};
-    std::chrono::time_point<std::chrono::steady_clock> expiry;
-    // Remember TTL duration so stream frames can refresh expiry without extra RPCs
-    uint32_t ttl_ms{0};
-    uint64_t epoch{0};
-    uint64_t total_size{0};
-    int device_id{0};
-    int owner_pid{0};
-    bool lease_in_place{false};
-    std::string index_key_hex; // optional
-    std::string index_data; // optional canonical index JSON bytes
-  };
-  absl::Mutex reg_mu_;
-  absl::flat_hash_map<std::string, RegMeta> reg_meta_ ABSL_GUARDED_BY(reg_mu_);
-  absl::flat_hash_map<std::string, std::vector<uint8_t>> reg_buffers_ ABSL_GUARDED_BY(reg_mu_);
+  // Registration lifecycle state manager (Begin/Feed/KeepAlive/Commit)
+  std::unique_ptr<RegistrationManager> reg_mgr_;
 
-  struct LeaseSegMeta {
-    int device_id{0};
-    std::string handle_bytes; // raw cudaIpcMemHandle_t bytes
-    uint64_t base_offset{0}; // offset within mapped handle
-    uint64_t length{0};
-    uint64_t dst_offset{0}; // destination offset in coalesced buffer
-  };
-  absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(reg_mu_);
+  // LIP registry moved into LipManager
 
-  // LIP Registry (post-Commit leases)
-  struct LipLeaseEntry {
-    std::string registration_id; // original registration id for keepalive/revoke
-    std::string artifact_id;
-    int device_id{0};
-    int owner_pid{0};
-    uint32_t ttl_ms{0};
-    std::chrono::time_point<std::chrono::steady_clock> expiry;
-    uint64_t epoch{0};
-    uint64_t total_size{0};
-    std::string index_data; // canonical JSON (for verification hashing if needed)
-    std::vector<LeaseSegMeta> segments; // mapped via cuda IPC when used
-    std::string verification_json; // optional stored verification metadata (JSON)
-  };
-  // Keyed by (artifact_id + "@" + device_id)
-  absl::Mutex lip_mu_;
-  absl::flat_hash_map<std::string, LipLeaseEntry> lip_by_key_ ABSL_GUARDED_BY(lip_mu_);
-  // Map registration_id -> key for quick keepalive/revoke
-  absl::flat_hash_map<std::string, std::string> lip_key_by_reg_ ABSL_GUARDED_BY(lip_mu_);
-
-  // LIP P2P export records keyed by transport lock token. These records track
-  // temporary CUDA IPC mappings and corresponding registered tensor keys in the
-  // CommunicateEngine so we can unregister/cleanup on UnlockTransportChunks.
-  struct LipExportRecord {
-    std::string artifact_id;
-    int device_id{0};
-    std::vector<void*> opened_ptrs; // cudaIpcOpenMemHandle() pointers to close
-    std::vector<std::string> tensor_keys; // registered keys to unregister
-  };
-  absl::Mutex lip_export_mu_;
-  absl::flat_hash_map<std::string, LipExportRecord> lip_exports_ ABSL_GUARDED_BY(lip_export_mu_);
+  // LIP staged export management moved to LipManager.
 
   // Helper: D2D copy from LIP segments into a new coalesced destination on target device; returns CUDA IPC handle
   // bytes.
@@ -316,6 +283,15 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       absl::Span<const LeaseSegMeta> segments);
 
   Options opts_;
+
+  // New helpers/controllers (RFC-0016)
+  DeviceResolver devices_{store::DeviceRegistry::instance()};
+  std::unique_ptr<SessionsService> sessions_svc_;
+  std::unique_ptr<LipBridge> lip_bridge_;
+  std::unique_ptr<MaterializationController> materialization_controller_;
+  std::unique_ptr<RegistrationController> registration_controller_;
+  std::unique_ptr<TransportController> transport_controller_;
+  std::unique_ptr<StatusController> status_controller_;
 };
 
 } // namespace tensorcast::daemon
