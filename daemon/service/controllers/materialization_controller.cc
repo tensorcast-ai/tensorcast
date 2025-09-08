@@ -10,6 +10,7 @@
 #include "absl/strings/str_format.h"
 #include "core/store/device_registry.h"
 #include "daemon/deadline_utils.h"
+#include "daemon/status_utils.h"
 
 namespace tensorcast::daemon {
 
@@ -17,7 +18,7 @@ using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
-grpc::Status MaterializationController::MaterializeReplica(
+grpc::Status MaterializationController::materialize_replica(
     RpcContext& rctx,
     const v1::MaterializeReplicaRequest& req,
     v1::MaterializeReplicaResponse& resp) {
@@ -110,7 +111,7 @@ grpc::Status MaterializationController::MaterializeReplica(
   return Status::OK;
 }
 
-grpc::Status MaterializationController::MaterializeByKey(
+grpc::Status MaterializationController::materialize_by_key(
     RpcContext& rctx,
     const v1::MaterializeByKeyRequest& req,
     v1::MaterializeByKeyResponse& resp) {
@@ -194,7 +195,7 @@ grpc::Status MaterializationController::MaterializeByKey(
   return Status::OK;
 }
 
-grpc::Status MaterializationController::GetArtifactIndexById(
+grpc::Status MaterializationController::get_artifact_index_by_id(
     RpcContext& rctx,
     const v1::GetArtifactIndexByIdRequest& req,
     v1::GetArtifactIndexByIdResponse& resp) {
@@ -215,7 +216,7 @@ grpc::Status MaterializationController::GetArtifactIndexById(
   return Status::OK;
 }
 
-grpc::Status MaterializationController::Confirm(
+grpc::Status MaterializationController::confirm(
     RpcContext& rctx,
     const v1::ConfirmReplicaRequest& req,
     v1::ConfirmReplicaResponse& resp) {
@@ -254,7 +255,7 @@ grpc::Status MaterializationController::Confirm(
   return to_grpc_status(st);
 }
 
-grpc::Status MaterializationController::Unload(
+grpc::Status MaterializationController::unload(
     RpcContext& rctx,
     const v1::UnloadReplicaRequest& req,
     v1::UnloadReplicaResponse& resp) {
@@ -311,7 +312,7 @@ grpc::Status MaterializationController::Unload(
   return {StatusCode::INTERNAL, absl::StrFormat("unload_replica() returned %d", rc)};
 }
 
-grpc::Status MaterializationController::WaitVerification(
+grpc::Status MaterializationController::wait_verification(
     RpcContext& rctx,
     const v1::WaitReplicaVerificationRequest& req,
     v1::WaitReplicaVerificationResponse& resp) {

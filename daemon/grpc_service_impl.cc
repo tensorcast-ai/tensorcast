@@ -4,26 +4,16 @@
 
 #include <nlohmann/json.hpp>
 #include <unistd.h>
-#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <memory>
-#include <optional>
-#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/device_registry.h"
-#include "core/store/device_types.h"
-#include "core/store/loading/loading_spec.h"
 #include "daemon/grpc_metrics.h"
 #include "daemon/grpc_span.h"
-#include "daemon/replica_listing.h"
 #include "daemon/status_utils.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/types.h"
-#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -44,7 +34,7 @@ Status StoreDaemonServiceImpl::MaterializeReplica(
     const v1::MaterializeReplicaRequest* req,
     v1::MaterializeReplicaResponse* resp) {
   RpcContext rctx{"MaterializeReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->MaterializeReplica(rctx, *req, *resp);
+  return materialization_controller_->materialize_replica(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ConfirmReplica(
@@ -52,7 +42,7 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
     const v1::ConfirmReplicaRequest* req,
     v1::ConfirmReplicaResponse* resp) {
   RpcContext rctx{"ConfirmReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->Confirm(rctx, *req, *resp);
+  return materialization_controller_->confirm(rctx, *req, *resp);
 }
 
 // RFC-0014: Materialize by key using Global Store mapping
@@ -61,7 +51,7 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
     const v1::MaterializeByKeyRequest* req,
     v1::MaterializeByKeyResponse* resp) {
   RpcContext rctx{"MaterializeByKey", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->MaterializeByKey(rctx, *req, *resp);
+  return materialization_controller_->materialize_by_key(rctx, *req, *resp);
 }
 
 // RFC-0014: Publish key mapping – lightweight wrapper to Global Store
@@ -123,7 +113,7 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
     const v1::GetArtifactIndexByIdRequest* req,
     v1::GetArtifactIndexByIdResponse* resp) {
   RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->GetArtifactIndexById(rctx, *req, *resp);
+  return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::UnloadReplica(
@@ -131,7 +121,7 @@ Status StoreDaemonServiceImpl::UnloadReplica(
     const v1::UnloadReplicaRequest* req,
     v1::UnloadReplicaResponse* resp) {
   RpcContext rctx{"UnloadReplica", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->Unload(rctx, *req, *resp);
+  return materialization_controller_->unload(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ClearMem(
@@ -172,7 +162,7 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
     const v1::WaitReplicaVerificationRequest* req,
     v1::WaitReplicaVerificationResponse* resp) {
   RpcContext rctx{"WaitReplicaVerification", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->WaitVerification(rctx, *req, *resp);
+  return materialization_controller_->wait_verification(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::LockTransportChunks(
@@ -197,7 +187,7 @@ Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     const v1::BeginRegisterArtifactRequest* req,
     v1::BeginRegisterArtifactResponse* resp) {
   RpcContext rctx{"BeginRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->Begin(rctx, *req, *resp);
+  return registration_controller_->begin(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
@@ -205,7 +195,7 @@ Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     const v1::CommitRegisteredArtifactRequest* req,
     v1::CommitRegisteredArtifactResponse* resp) {
   RpcContext rctx{"CommitRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->Commit(rctx, *req, *resp);
+  return registration_controller_->commit(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
@@ -213,7 +203,7 @@ Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
     const v1::AbortRegisteredArtifactRequest* req,
     v1::AbortRegisteredArtifactResponse* resp) {
   RpcContext rctx{"AbortRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->Abort(rctx, *req, *resp);
+  return registration_controller_->abort(rctx, *req, *resp);
 }
 
 // Removed unary FeedRegisterArtifact; use streaming variant only
@@ -223,12 +213,12 @@ Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
     ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
     v1::FeedRegisterArtifactStreamResponse* resp) {
   RpcContext rctx{"FeedRegisterArtifactStream", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->FeedStream(rctx, *reader, *resp);
+  return registration_controller_->feed_stream(rctx, *reader, *resp);
 }
 
 grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
     const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
-  return registration_controller_->FeedVector(reqs);
+  return registration_controller_->feed_vector(reqs);
 }
 
 Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
@@ -236,7 +226,7 @@ Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
     const v1::KeepAliveRegisterArtifactRequest* req,
     v1::KeepAliveRegisterArtifactResponse* resp) {
   RpcContext rctx{"KeepAliveRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->KeepAlive(rctx, *req, *resp);
+  return registration_controller_->keep_alive(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
@@ -244,7 +234,7 @@ Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
     const v1::RevokeRegisteredArtifactRequest* req,
     v1::RevokeRegisteredArtifactResponse* resp) {
   RpcContext rctx{"RevokeRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
-  return registration_controller_->Revoke(rctx, *req, *resp);
+  return registration_controller_->revoke(rctx, *req, *resp);
 }
 
 void StoreDaemonServiceImpl::start_sweepers() {

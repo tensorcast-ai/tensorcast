@@ -304,6 +304,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_controller.cc"],
     hdrs = ["service/controllers/materialization_controller.h"],
     deps = [
+        ":deadline_utils_hdr",
         ":device_resolver_hdr",
         ":lip_bridge_lib",
         ":ref_tracker_hdr",

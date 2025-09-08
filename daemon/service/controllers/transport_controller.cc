@@ -9,6 +9,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/store/device_registry.h"
+#include "daemon/status_utils.h"
 
 namespace tensorcast::daemon {
 

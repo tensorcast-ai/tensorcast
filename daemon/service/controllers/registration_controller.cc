@@ -9,6 +9,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/store/loader/segment_plan_source.h"
+#include "daemon/cuda_ipc_raii.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -18,7 +19,7 @@ using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
-grpc::Status RegistrationController::Begin(
+grpc::Status RegistrationController::begin(
     RpcContext& rctx,
     const v1::BeginRegisterArtifactRequest& req,
     v1::BeginRegisterArtifactResponse& resp) {
@@ -141,7 +142,7 @@ grpc::Status RegistrationController::Begin(
   return Status::OK;
 }
 
-grpc::Status RegistrationController::FeedStream(
+grpc::Status RegistrationController::feed_stream(
     RpcContext& rctx,
     ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>& reader,
     v1::FeedRegisterArtifactStreamResponse& /*resp*/) {
@@ -198,7 +199,7 @@ grpc::Status RegistrationController::FeedStream(
   return Status::OK;
 }
 
-grpc::Status RegistrationController::FeedVector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
+grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
   bool saw_last = false;
   for (const auto& req : reqs) {
@@ -252,7 +253,7 @@ grpc::Status RegistrationController::FeedVector(const std::vector<v1::FeedRegist
   return Status::OK;
 }
 
-grpc::Status RegistrationController::KeepAlive(
+grpc::Status RegistrationController::keep_alive(
     RpcContext& rctx,
     const v1::KeepAliveRegisterArtifactRequest& req,
     v1::KeepAliveRegisterArtifactResponse& /*resp*/) {
@@ -282,7 +283,7 @@ KEEPALIVE_OK:
   return Status::OK;
 }
 
-grpc::Status RegistrationController::Commit(
+grpc::Status RegistrationController::commit(
     RpcContext& rctx,
     const v1::CommitRegisteredArtifactRequest& req,
     v1::CommitRegisteredArtifactResponse& resp) {
@@ -518,7 +519,7 @@ grpc::Status RegistrationController::Commit(
   }
 }
 
-grpc::Status RegistrationController::Abort(
+grpc::Status RegistrationController::abort(
     RpcContext& rctx,
     const v1::AbortRegisteredArtifactRequest& req,
     v1::AbortRegisteredArtifactResponse& /*resp*/) {
@@ -536,7 +537,7 @@ grpc::Status RegistrationController::Abort(
   return Status::OK;
 }
 
-grpc::Status RegistrationController::Revoke(
+grpc::Status RegistrationController::revoke(
     RpcContext& rctx,
     const v1::RevokeRegisteredArtifactRequest& req,
     v1::RevokeRegisteredArtifactResponse& /*resp*/) {
