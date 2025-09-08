@@ -8,7 +8,6 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
-#include "core/store/device_registry.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 
@@ -132,7 +131,7 @@ grpc::Status MaterializationController::materialize_by_key(
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return to_grpc_status(mapping_or.status());
   }
-  const auto mapping = *mapping_or;
+  const auto& mapping = *mapping_or;
   span->SetAttribute("tc.artifact.id", mapping.artifact_id);
 
   // Try LIP fast path first
@@ -152,7 +151,12 @@ grpc::Status MaterializationController::materialize_by_key(
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
-      return to_grpc_status(satisfied.status());
+      // If LIP path fails for reasons like same-device denial, fall back to engine path.
+      // Only propagate errors that indicate a broader failure.
+      // For simple parity, we treat FailedPrecondition as a miss and continue.
+      if (!absl::IsFailedPrecondition(satisfied.status())) {
+        return to_grpc_status(satisfied.status());
+      }
     }
     if (*satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
@@ -164,6 +168,10 @@ grpc::Status MaterializationController::materialize_by_key(
   }
 
   // Engine path
+  // Validate device_id
+  if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
+    return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+  }
   const auto dev = store::DeviceKey{.type = DeviceType::GPU, .ordinal = req.device_id(), .uuid = ""};
   store::loading::MaterializeHints hints;
   if (req.pinned_allocation_timeout_ms() > 0) {

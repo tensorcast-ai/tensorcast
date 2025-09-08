@@ -30,7 +30,11 @@ class GrpcSpan {
   }
 
   ~GrpcSpan() {
+    if (span_) {
+      span_->End();
+    }
     scope_.reset();
+    ctx_token_.reset();
   }
 
   opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span() {

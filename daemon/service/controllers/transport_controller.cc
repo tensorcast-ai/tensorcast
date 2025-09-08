@@ -51,8 +51,12 @@ grpc::Status TransportController::lock(
     auto dev_or = d_.engine.get_unique_gpu_residency(req.artifact_id());
     if (!dev_or.ok())
       return to_grpc_status(dev_or.status());
-    if (*dev_or >= 0)
+    if (*dev_or >= 0) {
       key.device = store::DeviceRegistry::instance().gpu_key(*dev_or);
+    } else {
+      // No GPU residency found; do not default to GPU0. Require explicit device_id or pre-load.
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "artifact not resident on any GPU; specify device_id or load");
+    }
   }
 
   std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
@@ -75,9 +79,13 @@ grpc::Status TransportController::unlock(
     span->SetAttribute("tc.lock.token", req.lock_token());
   auto entry = d_.locks.get(req.lock_token());
   if (!entry.has_value()) {
+    // Try staged LIP export unlock; if not found there either, treat as idempotent success.
     auto st = d_.lip.release_staged_export(req.lock_token(), d_.engine);
-    if (!st.ok())
-      return to_grpc_status(st);
+    if (!st.ok()) {
+      // If unknown token in LIP exports, do not fail; return OK for idempotency
+      rctx.mark_success();
+      return Status::OK;
+    }
     rctx.mark_success();
     return Status::OK;
   }
