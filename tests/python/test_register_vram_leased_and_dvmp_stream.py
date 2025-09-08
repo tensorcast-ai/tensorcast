@@ -8,9 +8,10 @@ import pytest
 
 import torch
 
-from tensorcast.torch_util import RegisterArtifactOptions, register_artifact
+from tensorcast.api._config import RegisterArtifactOptions
+from tensorcast.api._register import register_artifact
 from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.torch_util import begin_register_artifact_sdk
+from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast._C import get_cuda_memory_handle
 from tensorcast.types import DVMPPlan, LeasePlan, LeaseSegment, CoalescedHandshake
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
@@ -193,7 +194,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
             )
 
         # Compute coalesced layout and total size
-        from tensorcast.torch_util import calculate_tensor_device_offsets
+        from tensorcast.api._indices import calculate_tensor_device_offsets
         device_offsets, copy_chunks = calculate_tensor_device_offsets(
             tensor_source_index, device
         )
@@ -217,7 +218,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
         index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
         # Begin lease registration via SDK helper (no device_id to force lease path)
-        from tensorcast.torch_util import begin_register_artifact_sdk
+        from tensorcast.api._register import begin_register_artifact_sdk
         handle, _hs = begin_register_artifact_sdk(
             device_id=device.index,
             total_size_bytes=total_size,
@@ -388,7 +389,7 @@ def test_ttl_expiry_on_feed_paths(tmp_path: Path):
         size_bytes = 64
         tensor_index_v2 = {"x": [0, size_bytes, [2, 32], [32, 1], "torch.uint8", 0]}
         index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        from tensorcast.torch_util import begin_register_artifact_sdk
+        from tensorcast.api._register import begin_register_artifact_sdk
         handle, _ = begin_register_artifact_sdk(
             device_id=0,
             total_size_bytes=size_bytes,

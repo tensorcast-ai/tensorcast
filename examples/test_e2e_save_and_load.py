@@ -2,7 +2,7 @@
 
 import torch
 
-from tensorcast.torch_util import load_dict, save_dict
+from tensorcast.api import load_dict_sync, save_dict
 
 # sudo python examples/save_vllm_model.py --artifact-name DeepSeek-R1-0528 --local-artifact-path /mnt/host0/DeepSeek-R1-0528  --storage-path /mnt/host0/tensorcast --tensor-parallel-size 8
 directory = "/mnt/host0/tensorcast/DeepSeek-R1-0528-layer-8-tp-1/rank_0"
@@ -41,8 +41,10 @@ def assert_dict_equal(
 
 tmp_dir = "/mnt/host0/tensorcast/DeepSeek-R1-0528-layer-8-tp-1/rank_test"  # ssd
 # tmp_dir = "/tmp/rank_test" # tmpfs
-save_dict(ori_dict, tmp_dir, use_streaming=True)
-sc_dict = load_dict(tmp_dir, device_id=0, storage_path="", enable_verification=False)
+save_dict(ori_dict, tmp_dir)
+sc_dict = load_dict_sync(
+    disk_path=tmp_dir, device_id=0, storage_path="", enable_verification=False
+)
 
 # Validate that tensors are identical within numerical tolerance.
 assert_dict_equal(ori_dict, sc_dict)

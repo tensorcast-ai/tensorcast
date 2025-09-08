@@ -43,7 +43,7 @@ This document summarizes the lightweight replica integrity verification solution
 
 ## Integration Points Overview
 
-### 1. Replica Saving Phase (`torch_util.py` + `checkpoint.cc`)
+### 1. Replica Saving Phase (`tensorcast/api/_io_disk.py` + `checkpoint_py.cc`)
 
 ```python
 # In save_dict function
@@ -57,7 +57,7 @@ with open(verification_path, "w") as f:
 - Support multi-partition file format (`tensor.data_0`, `tensor.data_1`, ...)
 - Save verification information to `verification.json`
 
-### 2. Replica Loading Phase (`torch_util.py`)
+### 2. Replica Loading Phase (`tensorcast/api/_loader.py`)
 
 ```python
 # In load_dict_non_blocking function

@@ -2,7 +2,7 @@
 
 import torch
 from typing import Any
-from tensorcast.torch_util import load_dict
+from tensorcast.api import load_dict_sync as load_dict
 
 
 def compare_tensor_dicts(
@@ -89,7 +89,12 @@ if __name__ == "__main__":
 
     try:
         torch_state_dict = torch.load(path_to_torch_state_dict)
-        sc_state_dict = load_dict(path_to_sc_model_dir, device_id=0, storage_path="", enable_verification=False)
+        sc_state_dict = load_dict(
+            disk_path=path_to_sc_model_dir,
+            device_id=0,
+            storage_path="",
+            enable_verification=False,
+        )
 
         comparison_results = compare_tensor_dicts(torch_state_dict, sc_state_dict)
         # Optionally, print or process comparison_results further

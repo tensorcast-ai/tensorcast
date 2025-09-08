@@ -541,7 +541,7 @@ class DaemonCtl:
                     raise TimeoutError(str(e)) from e
                 raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
 
-            desc = resp.descriptor
+            desc = resp.artifact_descriptor
             return ArtifactDescriptor(
                 artifact_id=desc.artifact_id,
                 index_multihash=desc.index_multihash,
@@ -761,7 +761,7 @@ class DaemonCtl:
             encoding=descriptor.encoding,
             total_size=int(descriptor.total_size),
         )
-        req.descriptor.CopyFrom(pb)
+        req.artifact_descriptor.CopyFrom(pb)
 
         with self._client_span("Client/PublishReplicaKey"):
             try:
@@ -770,3 +770,34 @@ class DaemonCtl:
             except grpc.RpcError as e:
                 logger.error(f"PublishReplicaKey failed: {e}")
                 return False
+
+    # ------------------------------------------------------------------
+    # RFC-0014 helpers to keep API layer decoupled from Global Store
+    # ------------------------------------------------------------------
+
+    def resolve_key_mapping(
+        self, key: str, *, timeout_s: float = 10.0
+    ) -> tuple[str, str]:
+        """Resolve a human-friendly key to (artifact_id, used_disk_path) via daemon.
+
+        Returns a tuple (artifact_id, used_disk_path). Raises on RPC errors.
+        """
+        if not key:
+            raise ValueError("key is required")
+        with self._client_span("Client/ResolveKeyMapping"):
+            request = store_daemon_pb2.ResolveKeyMappingRequest(key=key)
+            resp = self.stub.ResolveKeyMapping(request, timeout=timeout_s)
+            return resp.artifact_id, resp.used_disk_path
+
+    def get_artifact_index_by_id(
+        self, artifact_id: str, *, timeout_s: float = 10.0
+    ) -> bytes:
+        """Fetch canonical tensor index bytes by artifact_id via daemon."""
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        with self._client_span("Client/GetArtifactIndexById"):
+            request = store_daemon_pb2.GetArtifactIndexByIdRequest(
+                artifact_id=artifact_id
+            )
+            resp = self.stub.GetArtifactIndexById(request, timeout=timeout_s)
+            return resp.tensor_index_data

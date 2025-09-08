@@ -113,7 +113,7 @@ Example (DVMP streaming, single CPU tensor):
 ```python
 import json
 import numpy as np
-from tensorcast.torch_util import begin_register_artifact_sdk
+from tensorcast.api import begin_register_artifact_sdk
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.types import DVMPPlan
 
@@ -179,6 +179,11 @@ bazel test //core/... --test_tag_filters="+rdma"
 
 # Run only multi_gpu tests
 bazel test //core/... --test_tag_filters="+multi_gpu"
+
+# By default, C++ tests run with the Fake CUDA backend so they pass on CPU-only machines.
+# You can override explicitly with a single define:
+#   - Fake CUDA:  bazel test --define=use_fake_cuda=true  //daemon:grpc_service_impl_registration_test
+#   - Real CUDA:  bazel test --define=use_fake_cuda=false //daemon:grpc_service_impl_registration_test
 ```
 
 ### Communicator P2P Test
@@ -279,9 +284,9 @@ sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/tensorc
 
 ### Observability (OpenTelemetry)
 
-通过配置文件启用（无环境变量）。在 Daemon/Global Store 的配置文件中设置 `observability.otel.*`。
+Enable by configuration file (no environment variables). Set `observability.otel.*` in the Daemon/Global Store config file.
 
-示例（Global Store）:
+Example (Global Store):
 
 ```yaml
 observability:

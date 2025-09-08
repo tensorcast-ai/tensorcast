@@ -107,8 +107,8 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
     - `inspect_or_generate_descriptor(path) -> descriptor`
   - Python:
     - `save_dict(...)` now calls `save_model_to_disk(...)` to emit `tensor_index.(cbor|json)` + `artifact_descriptor.json` in one shot and returns the `descriptor`; removed redundant Python-side multihash/tree-hash/base32 logic.
-    - `load_dict(...)` calls `inspect_or_generate_descriptor(...)` after loading; if missing, computes and writes `artifact_descriptor.json`; retains background KEY_POINTS/SEGMENT verification.
-    - Removed `load_dict_pure_local(...)`; tests call `load_dict(...)` directly.
+    - `load_dict_sync(...)` calls `inspect_or_generate_descriptor(...)` after loading; if missing, computes and writes `artifact_descriptor.json`; retains background KEY_POINTS/SEGMENT verification.
+    - Removed `load_dict_pure_local(...)`; tests call `load_dict_sync(...)` directly.
   - Tools and tests:
     - `tensorcast/tools/backfill_descriptor.py` delegates to `_C.inspect_or_generate_descriptor`; removed the redundant `--write-index` placeholder.
     - `core/testing/common.cc` and C++ tests call the unified loader pipeline (`loader::compute_data_multihash_from_disk_dir`).
@@ -144,7 +144,7 @@ Stable grouping and layout (replacing unstable pointer-based grouping):
 ### 10. Examples
 
 ```python
-from tensorcast.torch_util import register_artifact
+from tensorcast.api import register_artifact
 
 sd, info = register_artifact(artifact.state_dict(), "name", device_id=0)
 assert info["artifact_id"].startswith("mi2:")
@@ -207,7 +207,7 @@ store.materialize_replica(device_key, mode="AUTO", artifact_id=info["artifact_id
 ### 14. Code-level Implementation Plan (Aligned with Current Repo)
 
 - Save side (Python via unified C++ pipeline) — completed
-  - File: `tensorcast/torch_util.py`
+  - Module: `tensorcast/api`
     - `save_dict(...)` prepares inputs and calls `_C.save_model_to_disk(...)` to emit `tensor_index.(cbor|json)` and `artifact_descriptor.json`, returning the `descriptor`.
     - Python no longer implements multihash/tree-hash/base32.
   - Files: `tensorcast/_C.pyi` / `tensorcast/csrc/checkpoint_py.cc`

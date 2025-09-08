@@ -11,7 +11,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT
-  - Entrypoint: `torch_util.py::load_dict`
+  - Entrypoint: `tensorcast/api/_loader.py::load_dict_sync` (and `load_dict_async`)
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
@@ -111,8 +111,39 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 
 ### SDK Helpers
 
-- High-level one-shot helper: `tensorcast.torch_util.register_artifact(state_dict, options=..., ttl_ms=..., daemon_address=...)` handles Begin → (Feed/Copy) → Commit and returns the destination tensors (coalesced when applicable) and the RFC‑0007 descriptor.
-- Lifecycle handle: `tensorcast.torch_util.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
+- High-level one-shot helper: `tensorcast.api.register_artifact(state_dict, options=..., ttl_ms=..., daemon_address=...)` handles Begin → (Feed/Copy) → Commit and returns the destination tensors (coalesced when applicable) and the RFC‑0007 descriptor.
+- Lifecycle handle: `tensorcast.api.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
   - Auto-sends keepalive when `ttl_ms` is provided
   - Exposes `commit()`, `abort()`, `revoke()` and context manager semantics
   - Allows advanced callers to perform manual feed (e.g., DVMP chunks) before commit
+
+### Python SDK Updates
+
+- Plan selection uses a typed enum `PlanType` instead of raw strings to avoid typos:
+  - `PlanType.VRAM_COALESCED` (aliases: `"coalesced"`)
+  - `PlanType.DVMP` (aliases: `"uma"`, `"cpu"`)
+  - `PlanType.VRAM_LEASED` (aliases: `"lease"`)
+  - Backwards‑compatible: `RegisterArtifactOptions(plan="dvmp")` etc. are accepted and normalized.
+- `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability. DVMP knobs `dvmp_preferred_channel` and `dvmp_ring_bytes` are surfaced here.
+- Loading helpers with fixed return types:
+  - Synchronous: `load_dict_sync(...) -> dict[str, torch.Tensor]` and `get_artifact_sync(...) -> dict[str, torch.Tensor]`
+  - Asynchronous: `load_dict_async(...) -> LoadHandle` and `get_artifact_async(...) -> LoadHandle`
+  - `LoadHandle.ready() / wait(timeout) / result()`; accessing tensors before `wait()` raises an error to prevent premature reads.
+
+Note: Legacy `load_dict(...)`, `load_dict_handle(...)`, `get_artifact(...)`, and `get_artifact_handle(...)` have been removed. Use the fixed-type helpers above.
+- Unified error model under `TensorCastError` with readable subclasses like `DaemonUnavailable`, `DeviceMismatch`, and `IndexParseError`.
+
+### SDK Module Layout
+
+The SDK is organized under `tensorcast/api`. New internal modules:
+
+- `tensorcast/api/_config.py` — constants, PlanType, options, global addresses
+- `tensorcast/api/_errors.py` — custom exceptions
+- `tensorcast/api/_otel.py` — observability helpers
+- `tensorcast/api/_device.py` — device resolution and UUID mapping
+- `tensorcast/api/_indices.py` — index build/parse helpers
+- `tensorcast/api/_io_disk.py` — disk save/load helpers
+- `tensorcast/api/_loader.py` — Loader strategy and LoadHandle
+- `tensorcast/api/_register.py` — RegisteredArtifact + plan registrars
+
+Public entry points are exported from `tensorcast/api/__init__.py` and should be imported via `tensorcast.api`.

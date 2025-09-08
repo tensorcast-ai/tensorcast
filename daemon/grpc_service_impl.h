@@ -157,6 +157,16 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::PublishReplicaKeyRequest* req,
       v1::PublishReplicaKeyResponse* resp) override;
 
+  grpc::Status ResolveKeyMapping(
+      grpc::ServerContext* ctx,
+      const v1::ResolveKeyMappingRequest* req,
+      v1::ResolveKeyMappingResponse* resp) override;
+
+  grpc::Status GetArtifactIndexById(
+      grpc::ServerContext* ctx,
+      const v1::GetArtifactIndexByIdRequest* req,
+      v1::GetArtifactIndexByIdResponse* resp) override;
+
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,

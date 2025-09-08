@@ -6,7 +6,8 @@ import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 from tensorcast import init
-from tensorcast.torch_util import RegisterArtifactOptions, register_artifact
+from tensorcast.api._config import RegisterArtifactOptions
+from tensorcast.api._register import register_artifact
 from tensorcast.types import ArtifactDescriptor
 
 init()

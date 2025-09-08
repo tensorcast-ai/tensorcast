@@ -15,7 +15,9 @@ This document explains how **tensorcast** persists a PyTorch `state_dict` using 
 `save_dict` serialises the in-memory tensors into **partitioned binary files** on disk and creates a `tensor_index.json` that records each tensor's metadata. Key characteristics:
 - Individual tensor records are **64-bit (8-byte) aligned** within the files
 - File I/O uses **4K-aligned buffers** for optimal performance (currently without O_DIRECT)
-- When `use_streaming=True` (default), an asynchronous producer–consumer pipeline overlaps GPU→CPU copies with disk I/O to maximise throughput
+- The writer is streaming-based: an asynchronous producer–consumer pipeline overlaps GPU→CPU copies with disk I/O to maximise throughput. You can tune behavior via `streaming_config`.
+
+The unified writer path (`save_model_to_disk`) is used for all saves. There is no separate non-streaming path.
 
 ---
 
@@ -23,9 +25,9 @@ This document explains how **tensorcast** persists a PyTorch `state_dict` using 
 
 | Layer | Function | File |
 |-------|----------|------|
-| Python API | `save_dict` | `tensorcast/torch_util.py` |
-| PyBind11 wrapper | `save_tensors_streaming_wrapper` (or `save_tensors_wrapper`) | `tensorcast/csrc/checkpoint_py.cc` |
-| C++ Checkpoint API | `save_tensors_streaming` / `save_tensors` | `core/checkpoint/checkpoint.h` |
+| Python API | `save_dict` | `tensorcast/api/_io_disk.py` |
+| PyBind11 wrapper | `save_model_to_disk_wrapper` | `tensorcast/csrc/checkpoint_py.cc` |
+| C++ Checkpoint API | `save_tensors_streaming` | `core/checkpoint/checkpoint_streaming.h` |
 | Streaming writer | `StreamingTensorWriter::write_tensor` | `core/checkpoint/streaming_tensor_writer.h` |
 | Low-level I/O | `AlignedBuffer::write_data` | `core/checkpoint/aligned_buffer.h` |
 | Tensor alignment | `TensorWriter::aligned_size` | `core/checkpoint/tensor_writer.h` |
@@ -38,7 +40,7 @@ This document explains how **tensorcast** persists a PyTorch `state_dict` using 
 sequenceDiagram
     autonumber
     participant U as "User code"
-    participant PY as "save_dict()\ntensorcast/torch_util.py"
+    participant PY as "save_dict()\ntensorcast/api/_io_disk.py"
     participant CPP as "save_tensors_streaming_wrapper\ncheckpoint_py.cc"
     participant API as "save_tensors_streaming\ncheckpoint.h"
     participant TW as "StreamingTensorWriter"
@@ -46,11 +48,7 @@ sequenceDiagram
 
     U->>PY: call save_dict(state_dict, disk_path)
     PY->>PY: Collect tensor_names & data_ptr/size
-    alt use_streaming = True
-        PY->>CPP: save_tensors_streaming(...)
-    else traditional path
-        PY->>CPP: save_tensors(...)
-    end
+    PY->>CPP: save_model_to_disk(...)
     CPP->>API: forward call
     API->>TW: write_tensor(data, size)
     loop For each chunk
@@ -76,9 +74,9 @@ sequenceDiagram
 
 ---
 
-## 5. Streaming Configuration
+## 5. Writer Configuration
 
-When `use_streaming=True`, you can pass a `streaming_config` dict with:
+You can pass a `streaming_config` dict with:
 - `num_buffers`: Number of circular buffers (default: 4)
 - `buffer_size_mb`: Size of each buffer in MB (default: 256)
 - `enable_async_write`: Enable asynchronous disk writing (default: True)

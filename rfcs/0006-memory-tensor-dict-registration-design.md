@@ -179,7 +179,7 @@ Daemon:
 
 ## 5. API Changes
 
-- External (Python): new `tensorcast.torch_util.register_artifact(...)` returning `RegisteredTensorDict`.
+- External (Python): new `tensorcast.api.register_artifact(...)` returning `RegisteredTensorDict`.
 - Internal:
   - `proto/store_daemon.proto`: Begin/Commit/Abort with oneof index and metadata.
   - `proto/global_store.proto`: add `tensor_index_key`, add `GetArtifactIndex`, remove per-replica index BLOBs.
@@ -282,5 +282,4 @@ sequenceDiagram
 
 - Documentation:
   - `web-docs/docs/developer-guides/core/store/architecture.md`: CUDA operations section updates; design principles section cleanup.
-
 

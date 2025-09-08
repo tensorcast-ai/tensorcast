@@ -832,4 +832,23 @@ absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::string_view artifact_id) {
+  global_store::GetArtifactIndexByIdRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+
+  global_store::GetArtifactIndexByIdResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactIndexById(ctx, req, resp); },
+      "GetArtifactIndexById");
+  if (!status.ok())
+    return status;
+  // In proto3, singular bytes fields do not have presence; check emptiness instead.
+  if (response.status() != global_store::STATUS_OK || response.tensor_index_data().empty()) {
+    return absl::NotFoundError("artifact index not found");
+  }
+  return response.tensor_index_data();
+}
+
 } // namespace tensorcast::store::components

@@ -54,6 +54,10 @@ service StoreDaemonService {
   // ========== RFC-0014: Key-based materialization and publish ==========
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
+  // Resolve a human-friendly key to an artifact id and optional disk hint.
+  rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  // Fetch canonical tensor index bytes by artifact_id.
+  rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -490,4 +494,20 @@ message PublishReplicaKeyRequest {
 message PublishReplicaKeyResponse {
   bool ok = 1;
   string conflict_reason = 2;
+}
+
+// RFC-0014 helpers exposed via daemon to keep API clients decoupled from Global Store.
+message ResolveKeyMappingRequest {
+  string key = 1;
+}
+message ResolveKeyMappingResponse {
+  string artifact_id = 1;
+  string used_disk_path = 2;
+}
+
+message GetArtifactIndexByIdRequest {
+  string artifact_id = 1;
+}
+message GetArtifactIndexByIdResponse {
+  bytes tensor_index_data = 1;
 }

@@ -6,7 +6,7 @@ from typing import Sequence, cast
 
 import torch
 
-from tensorcast.torch_util import save_dict, load_dict
+from tensorcast.api import save_dict, load_dict_sync
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -44,12 +44,11 @@ def test_shared_storage_roundtrip(tmp_path):
     }
 
     save_path = tmp_path / "artifact"
-    # Use non-streaming path to target save_tensors directly; streaming path is tested elsewhere.
-    save_dict(state_dict, str(save_path), use_streaming=False)
+    # Save using the unified writer
+    save_dict(state_dict, str(save_path))
 
-    loaded_state_dict = cast(
-        dict[str, torch.Tensor],
-        load_dict(str(save_path), device_id=0, storage_path="", enable_verification=False),
+    loaded_state_dict = load_dict_sync(
+        disk_path=str(save_path), device_id=0, storage_path="", enable_verification=False,
     )
 
     # For value comparisons, normalize to CPU to avoid device mismatch errors

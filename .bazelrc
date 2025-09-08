@@ -67,3 +67,10 @@ try-import user.bazelrc
 # Usage:
 #   bazel build --config=otel //daemon:tensorcast_daemon
 build:otel --copt=-DTC_ENABLE_OTEL_CXX=1
+
+# ------------------------------------------------------------
+# Fake CUDA backend (development and tests without GPUs)
+#
+# Most C++ tests construct components that call CUDA APIs (e.g. pinned
+# memory registration, CUDA IPC). To make tests runnable on machines without
+# NVIDIA drivers/GPUs, enable the fake CUDA backend by default for tests.

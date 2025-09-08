@@ -26,7 +26,7 @@ alwaysApply: false
 │ User Process    │     │ User Process    │ (Application Layer)
 │ - Model Loading │     │ - Model Loading │
 │ - Inference     │     │ - Inference     │
-│ - torch_util.py │     │ - torch_util.py │
+│ -               │     |-                │
 └─────────────────┘     └─────────────────┘
 ```
 
@@ -51,7 +51,7 @@ alwaysApply: false
 - **Implementation**: Python service with C++ core
 
 ### User Process Worker (Application Layer)
-- **Interface**: `tensorcast.torch_util` module
+- **Interface**: `tensorcast.api` module
 - **Operations**:
   - `load_dict()`: Load models from Store Daemon
   - Direct tensor operations

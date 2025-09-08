@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file as st_save
 
-from tensorcast.torch_util import build_indices_from_safetensors
+from tensorcast.api._indices import build_indices_from_safetensors
 from tests.python.utils.artifact_utils import create_dummy_safetensors
 
 
@@ -45,4 +45,3 @@ def test_build_indices_from_safetensors_single_and_multi(tmp_path: Path):
     # So offsets: u at 0 (length 16), t at 16 (length 256)
     assert data2["u"] == (0, 16)
     assert data2["t"] == (16, 256)
-
