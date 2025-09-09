@@ -69,7 +69,7 @@ absl::StatusOr<cudaStream_t> AsyncCopyManager::get_h2d_stream_(int device_id) {
   auto st = cuda::set_device(device_id);
   if (!st.ok())
     return st;
-  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
   if (!st.ok())
     return st;
   h2d_streams_.emplace(device_id, s);
@@ -87,7 +87,7 @@ absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2h_stream_(int device_id) {
   auto st = cuda::set_device(device_id);
   if (!st.ok())
     return st;
-  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
   if (!st.ok())
     return st;
   d2h_streams_.emplace(device_id, s);
@@ -105,7 +105,7 @@ absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2d_stream_(int device_id) {
   auto st = cuda::set_device(device_id);
   if (!st.ok())
     return st;
-  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
   if (!st.ok())
     return st;
   d2d_streams_.emplace(device_id, s);
@@ -138,6 +138,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
   if (!s_or.ok())
     return s_or.status();
   cudaStream_t stream_to_use = *s_or;
+  // Ensure correct device context before enqueuing work
+  {
+    auto set_dev_status = cuda::set_device(dst.device_id);
+    if (!set_dev_status.ok()) {
+      return set_dev_status;
+    }
+  }
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
@@ -145,8 +152,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       [p, cb = opts.callbacks.on_copy_done]() {
         if (cb)
           cb();
+        absl::Status st = cuda::get_last_error();
         absl::MutexLock lock(&p->mu);
-        p->status = absl::OkStatus();
+        p->status = st;
         p->done = true;
         p->cv.SignalAll();
       });
@@ -190,6 +198,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   if (!s_or.ok())
     return s_or.status();
   cudaStream_t stream_to_use = *s_or;
+  // Ensure correct device context before enqueuing work
+  {
+    auto set_dev_status = cuda::set_device(dst.device_id);
+    if (!set_dev_status.ok()) {
+      return set_dev_status;
+    }
+  }
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
@@ -197,8 +212,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       [p, cb = opts.callbacks.on_copy_done]() {
         if (cb)
           cb();
+        absl::Status st = cuda::get_last_error();
         absl::MutexLock lock(&p->mu);
-        p->status = absl::OkStatus();
+        p->status = st;
         p->done = true;
         p->cv.SignalAll();
       });
@@ -239,6 +255,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
   if (!s_or.ok())
     return s_or.status();
   cudaStream_t stream_to_use = *s_or;
+  // Ensure correct device context before enqueuing work
+  {
+    auto set_dev_status = cuda::set_device(src.device_id);
+    if (!set_dev_status.ok()) {
+      return set_dev_status;
+    }
+  }
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
@@ -246,8 +269,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       [p, cb = opts.callbacks.on_copy_done]() {
         if (cb)
           cb();
+        absl::Status st = cuda::get_last_error();
         absl::MutexLock lock(&p->mu);
-        p->status = absl::OkStatus();
+        p->status = st;
         p->done = true;
         p->cv.SignalAll();
       });

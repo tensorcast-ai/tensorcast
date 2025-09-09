@@ -62,6 +62,7 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
     size_t size,
     bool is_gpu,
     cudaStream_t stream) {
+  (void)stream;
   if (!initialized_) {
     return absl::FailedPreconditionError("StreamingTensorWriter not initialized");
   }
@@ -103,14 +104,19 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
 
     // Copy data to buffer
     if (is_gpu) {
-      // Schedule D2H into the pinned buffer via AsyncCopyManager.
-      common::DeviceRegion src{
-          .device_id = 0, // device inferred by stream; not used here
-          .dev_ptr = const_cast<char*>(static_cast<const char*>(data) + processed),
-          .length = chunk_size};
+      // Detect device id from the GPU pointer and schedule D2H via ACM.
+      const void* gpu_ptr = static_cast<const char*>(data) + processed;
+      cudaPointerAttributes attrs{};
+      auto attr_status = tensorcast::cuda::pointer_get_attributes_full(gpu_ptr, &attrs);
+      if (!attr_status.ok()) {
+        return absl::InternalError(absl::StrCat("Failed to query CUDA pointer attributes: ", attr_status.message()));
+      }
+      const int device_id = attrs.device;
+
+      common::DeviceRegion src{.device_id = device_id, .dev_ptr = const_cast<void*>(gpu_ptr), .length = chunk_size};
       common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
 
-      const size_t this_global_chunk_id = total_bytes_written_.load() / buffer_size_;
+      const size_t this_global_chunk_id = next_chunk_id_.fetch_add(1, std::memory_order_relaxed);
       auto on_done = [spb = streaming_buffer_.get(), slot_id, this_global_chunk_id, chunk_size]() {
         (void)spb->mark_chunk_ready(slot_id, this_global_chunk_id, chunk_size);
       };
@@ -124,8 +130,12 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
       std::memcpy(buffer_ptr, static_cast<const char*>(data) + processed, chunk_size);
     }
 
-    // Track chunk offset for this global chunk
-    size_t global_chunk_id = total_bytes_written_.load() / buffer_size_;
+    // Track chunk offset for this global chunk (use stable id)
+    size_t global_chunk_id = next_chunk_id_.load(std::memory_order_relaxed);
+    // For CPU path we incremented chunk id only after we marked ready; ensure consistent mapping here.
+    if (!is_gpu) {
+      global_chunk_id = next_chunk_id_.fetch_add(1, std::memory_order_relaxed);
+    }
     chunk_offsets_[global_chunk_id] = current_offset_.load();
 
     // Mark chunk as ready only for CPU path; GPU path marks ready in D2H callback

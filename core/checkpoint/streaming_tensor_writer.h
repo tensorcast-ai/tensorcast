@@ -99,6 +99,8 @@ class StreamingTensorWriter {
   // Statistics
   std::atomic<uint64_t> total_bytes_written_{0};
   std::atomic<uint64_t> current_offset_{0};
+  // Stable, monotonic global chunk id assigned at production time
+  std::atomic<size_t> next_chunk_id_{0};
 
   // Offset tracking for chunks
   std::unordered_map<size_t, uint64_t> chunk_offsets_;
