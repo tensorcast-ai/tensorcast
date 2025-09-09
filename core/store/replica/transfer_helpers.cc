@@ -12,8 +12,6 @@
 #include "core/common/async_copy_manager.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/replica/chunk_meta.h"
-#include "opentelemetry/trace/provider.h"
-#include "opentelemetry/trace/scope.h"
 
 namespace tensorcast::store::replica {
 
@@ -165,11 +163,16 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
   size_t chunk_size = streaming_buf->chunk_size();
   size_t offset = 0;
 
+  // Track first error observed in host callbacks (e.g., DVMP write failures)
+  auto first_error = std::make_shared<absl::Status>(absl::OkStatus());
+  auto first_error_mu = std::make_shared<absl::Mutex>();
+
   auto device_status = cuda::set_device(device_id);
   if (!device_status.ok()) {
     return device_status;
   }
 
+  std::vector<common::CopyHandle> handles;
   while (offset < total_size) {
     size_t current_chunk_size = std::min(chunk_size, total_size - offset);
 
@@ -194,9 +197,23 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     common::CopyOptions opts{
         .tracing_stage = "D2H/Copy",
         .callbacks = {
-            .on_copy_done = [dvmp, artifact_id, streaming_buf, slot_id, host_ptr, chunk_offset, current_chunk_size]() {
-              // Write to DVMP then return slot
-              (void)dvmp->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
+            .on_copy_done = [dvmp,
+                             artifact_id,
+                             streaming_buf,
+                             slot_id,
+                             host_ptr,
+                             chunk_offset,
+                             current_chunk_size,
+                             first_error,
+                             first_error_mu]() {
+              // Write to DVMP then return slot; record first DVMP error if any
+              absl::Status st = dvmp->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
+              if (!st.ok()) {
+                absl::MutexLock lk(first_error_mu.get());
+                if (first_error->ok()) {
+                  *first_error = st;
+                }
+              }
               (void)streaming_buf->return_chunk(slot_id);
             }}};
     auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(s, h, opts);
@@ -204,8 +221,23 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
       ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
       return hdl_or.status();
     }
+    handles.emplace_back(std::move(*hdl_or));
 
     offset += current_chunk_size;
+  }
+
+  // Ensure all DMA operations and host callbacks have completed
+  for (auto& h : handles) {
+    auto wst = h.wait();
+    if (!wst.ok()) {
+      return wst;
+    }
+  }
+  {
+    absl::MutexLock lk(first_error_mu.get());
+    if (!first_error->ok()) {
+      return *first_error;
+    }
   }
 
   return absl::OkStatus();
