@@ -3,6 +3,7 @@
 #include "core/store/loader/gpu_memory_sink.h"
 
 #include "absl/log/log.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
 
 namespace tensorcast::store::loader {
@@ -65,22 +66,57 @@ absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t by
     return overall_status_;
   }
 
-  // Calculate destination GPU pointer
+  // Submit H2D via AsyncCopyManager and wait for completion to preserve
+  // synchronous write_at semantics for non-pump callers. Pump will use
+  // write_at_async to avoid per-chunk waits and achieve overlap.
   char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
-
-  // Perform async H2D transfer
-  auto copy_status = cuda::memcpy_async(gpu_dest, src, bytes, cudaMemcpyHostToDevice, h2d_stream_);
-
-  if (!copy_status.ok()) {
-    overall_status_ = copy_status;
-    LOG(ERROR) << "Failed to copy data to GPU: " << copy_status;
-    return copy_status;
+  common::HostRegion h{.base = src, .length = bytes, .pinned = true};
+  common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
+  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
+  if (!hdl_or.ok()) {
+    overall_status_ = hdl_or.status();
+    LOG(ERROR) << "Failed to schedule H2D copy: " << overall_status_;
+    return overall_status_;
+  }
+  auto st = hdl_or->wait();
+  if (!st.ok()) {
+    overall_status_ = st;
+    LOG(ERROR) << "H2D copy failed: " << st;
+    return st;
   }
 
   total_bytes_written_ += bytes;
   VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << offset;
-
   return absl::OkStatus();
+}
+
+absl::StatusOr<common::CopyHandle> GPUMemorySink::write_at_async(uint64_t offset, const void* src, size_t bytes) {
+  if (!overall_status_.ok()) {
+    return overall_status_;
+  }
+  if (offset + bytes > options_.total_size) {
+    return absl::InvalidArgumentError("Write would exceed total GPU memory size");
+  }
+  // Set device context
+  common::DeviceGuard guard(options_.device_id);
+  if (!guard.status().ok()) {
+    overall_status_ = guard.status();
+    return overall_status_;
+  }
+
+  // Submit H2D via ACM; caller is responsible for waiting before reusing src
+  // memory (e.g., pump will defer returning SPB slot until handle completes).
+  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
+  common::HostRegion h{.base = src, .length = bytes, .pinned = true};
+  common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
+  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
+  if (!hdl_or.ok()) {
+    overall_status_ = hdl_or.status();
+    LOG(ERROR) << "Failed to schedule H2D async copy: " << overall_status_;
+    return overall_status_;
+  }
+  total_bytes_written_ += bytes;
+  return hdl_or;
 }
 
 absl::Status GPUMemorySink::close() {

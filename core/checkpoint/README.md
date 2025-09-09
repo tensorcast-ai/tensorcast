@@ -95,6 +95,11 @@ cfg = {
 offsets = scs.save_tensors_streaming(tensor_names, tensor_data, "/path/to/replica", cfg)
 ```
 
+### Async Copy Manager (ACM) Usage
+
+`StreamingTensorWriter` uses `AsyncCopyManager` to perform GPU→Host (D2H) copies into pinned slots without per-chunk synchronizations.
+The ACM schedules a host callback that marks the slot ready for the disk writer thread, improving overlap and throughput.
+
 ## File Format Overview
 
 The checkpoint system generates:

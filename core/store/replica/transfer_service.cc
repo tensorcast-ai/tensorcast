@@ -97,16 +97,7 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
     return init_status;
   }
   return perform_copy_cpu_to_gpu_streaming(
-      replica_key_.artifact_id,
-      device_id,
-      session_spb,
-      gpu_ptr,
-      total_bytes,
-      stream,
-      dvmp_base,
-      dvmp_,
-      uma_,
-      replica_key_);
+      replica_key_.artifact_id, device_id, session_spb, gpu_ptr, total_bytes, dvmp_base, dvmp_, uma_, replica_key_);
 }
 
 absl::Status TransferService::copy_gpu_to_cpu_streaming(
@@ -131,7 +122,7 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
     return absl::FailedPreconditionError("DVMP base not available via UMA");
   }
   return perform_copy_gpu_to_cpu_streaming(
-      replica_key_.artifact_id, device_id, spb, gpu_ptr, total_bytes, stream, dvmp_base, dvmp_);
+      replica_key_.artifact_id, device_id, spb, gpu_ptr, total_bytes, dvmp_base, dvmp_);
 }
 
 std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(

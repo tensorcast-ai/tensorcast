@@ -358,6 +358,48 @@ absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsi
   return absl::OkStatus();
 }
 
+// Peer access and memcpyPeer wrappers
+absl::Status device_can_access_peer(int* can_access, int device, int peer_device) {
+  if (can_access == nullptr) {
+    return absl::InvalidArgumentError("can_access pointer is null");
+  }
+  int value = 0;
+  cudaError_t err = cudaDeviceCanAccessPeer(&value, device, peer_device);
+  if (err != cudaSuccess) {
+    return common::cuda_as_status(err, "cudaDeviceCanAccessPeer");
+  }
+  *can_access = value;
+  return absl::OkStatus();
+}
+
+absl::Status enable_peer_access(int current_device, int peer_device) {
+  SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(current_device));
+  cudaError_t err = cudaDeviceEnablePeerAccess(peer_device, 0);
+  if (err == cudaErrorPeerAccessAlreadyEnabled) {
+    (void)cudaGetLastError();
+    return absl::OkStatus();
+  }
+  if (err != cudaSuccess) {
+    return common::cuda_as_status(err, "cudaDeviceEnablePeerAccess");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status memcpy_peer_async(
+    void* dst,
+    int dst_device,
+    const void* src,
+    int src_device,
+    size_t bytes,
+    cudaStream_t stream) {
+  SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(dst_device));
+  cudaError_t err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, stream);
+  if (err != cudaSuccess) {
+    return common::cuda_as_status(err, "cudaMemcpyPeerAsync");
+  }
+  return absl::OkStatus();
+}
+
 absl::Status close_ipc_mem_handle(void* dev_ptr) {
   SC_RETURN_IF_CUDA_ERROR(cudaIpcCloseMemHandle(dev_ptr));
   return absl::OkStatus();

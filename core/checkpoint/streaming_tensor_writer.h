@@ -7,12 +7,13 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/common/cuda_api.h"
-
+#include "absl/synchronization/mutex.h"
 #include "core/checkpoint/tensor_writer.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 
 namespace tensorcast::checkpoint {
@@ -81,9 +82,6 @@ class StreamingTensorWriter {
   // Worker thread for disk writing
   void disk_writer_thread();
 
-  // Helper to copy data from GPU to pinned buffer
-  static absl::Status copy_gpu_to_buffer(const void* gpu_data, size_t size, char* buffer, cudaStream_t stream);
-
   // Configuration
   const std::string filename_;
   const Config config_;
@@ -102,9 +100,16 @@ class StreamingTensorWriter {
   // Statistics
   std::atomic<uint64_t> total_bytes_written_{0};
   std::atomic<uint64_t> current_offset_{0};
+  // Stable, monotonic global chunk id assigned at production time
+  std::atomic<size_t> next_chunk_id_{0};
 
   // Offset tracking for chunks
   std::unordered_map<size_t, uint64_t> chunk_offsets_;
+
+  // Track in-flight GPU copy handles so we can wait in finalize() and avoid
+  // use-after-free of the streaming buffer.
+  absl::Mutex pending_mu_;
+  std::vector<common::CopyHandle> pending_copies_ ABSL_GUARDED_BY(pending_mu_);
 
   // State
   bool initialized_{false};

@@ -14,9 +14,11 @@
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 
+#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/direct_write.h"
 #include "core/store/replica/chunk_export_service.h"
@@ -775,21 +777,100 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
     return absl::FailedPreconditionError("Artifact size mismatch between source and destination");
   }
 
-  // Launch async peer copy.
-  auto st = cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice, stream_to_use);
-  if (!st.ok()) {
-    ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
-    return st;
-  }
-
-  // Update state to LOADING then LOADED when stream sync completes.
+  // Launch async peer copy: same-device uses D2D; cross-device falls back to staged D2H+H2D via pinned slots
   ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADING));
-  auto sync_status = cuda::stream_synchronize(stream_to_use);
-  if (!sync_status.ok()) {
-    LOG(ERROR) << "MemoryManager(" << replica_key_.artifact_id
-               << "): CUDA stream synchronization failed: " << sync_status;
-    ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
-    return sync_status;
+  const int dst_dev_id = get_local_device_id();
+  const int src_dev_id = source.get_local_device_id();
+  if (dst_dev_id == src_dev_id) {
+    common::DeviceRegion s{.device_id = dst_dev_id, .dev_ptr = src_ptr, .length = static_cast<size_t>(bytes)};
+    common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = dst_ptr, .length = static_cast<size_t>(bytes)};
+    auto hdl_or = common::AsyncCopyManager::instance().submit_d2d(s, d, {.tracing_stage = "D2D/Copy"});
+    if (!hdl_or.ok()) {
+      ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+      return hdl_or.status();
+    }
+    auto wait_st = hdl_or->wait();
+    if (!wait_st.ok()) {
+      LOG(ERROR) << "MemoryManager(" << replica_key_.artifact_id << "): D2D copy failed: " << wait_st;
+      ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+      return wait_st;
+    }
+  } else {
+    // Try peer access first; if not available, fall back to staged copy via pinned host
+    int can = 0;
+    auto can_st = cuda::device_can_access_peer(&can, dst_dev_id, src_dev_id);
+    if (can_st.ok() && can) {
+      (void)cuda::enable_peer_access(dst_dev_id, src_dev_id);
+      (void)cuda::enable_peer_access(src_dev_id, dst_dev_id);
+      auto st = cuda::memcpy_peer_async(dst_ptr, dst_dev_id, src_ptr, src_dev_id, bytes, stream_to_use);
+      if (!st.ok()) {
+        LOG(WARNING) << "Peer copy failed, falling back to staged: " << st.message();
+      } else {
+        auto sync_st = cuda::stream_synchronize(stream_to_use);
+        if (!sync_st.ok()) {
+          ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+          return sync_st;
+        }
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADED));
+        ABSL_CHECK_OK(finalize_load(MemoryLocation::GPU));
+        return absl::OkStatus();
+      }
+    }
+
+    // Staged fallback using StreamingPinnedBuffer
+    auto spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+        /*num_chunks=*/4, pinned_pool_->chunk_size(), pinned_pool_);
+    auto init_status = spb->initialize(pinned_memory_timeout_);
+    if (!init_status.ok()) {
+      ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+      return init_status;
+    }
+    uint64_t offset = 0;
+    while (offset < bytes) {
+      size_t step = std::min<size_t>(pinned_pool_->chunk_size(), static_cast<size_t>(bytes - offset));
+      auto slot_or = spb->get_free_chunk();
+      if (!slot_or.ok()) {
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return slot_or.status();
+      }
+      const int slot_id = *slot_or;
+      char* host_ptr = spb->get_chunk_ptr(slot_id);
+      if (host_ptr == nullptr) {
+        (void)spb->return_chunk(slot_id);
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return absl::InternalError("SPB returned null chunk pointer");
+      }
+      // D2H from source device
+      common::DeviceRegion s{.device_id = src_dev_id, .dev_ptr = static_cast<char*>(src_ptr) + offset, .length = step};
+      common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
+      auto d2h_hdl = common::AsyncCopyManager::instance().submit_d2h(s, h, {.tracing_stage = "D2H/Copy"});
+      if (!d2h_hdl.ok()) {
+        (void)spb->return_chunk(slot_id);
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return d2h_hdl.status();
+      }
+      auto d2h_wait = d2h_hdl->wait();
+      if (!d2h_wait.ok()) {
+        (void)spb->return_chunk(slot_id);
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return d2h_wait;
+      }
+      // H2D to destination device
+      common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = static_cast<char*>(dst_ptr) + offset, .length = step};
+      auto h2d_hdl = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
+      if (!h2d_hdl.ok()) {
+        (void)spb->return_chunk(slot_id);
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return h2d_hdl.status();
+      }
+      auto h2d_wait = h2d_hdl->wait();
+      (void)spb->return_chunk(slot_id);
+      if (!h2d_wait.ok()) {
+        ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
+        return h2d_wait;
+      }
+      offset += step;
+    }
   }
   ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADED));
 

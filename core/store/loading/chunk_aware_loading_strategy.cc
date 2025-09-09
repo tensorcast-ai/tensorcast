@@ -12,6 +12,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/match.h"
 #include "absl/types/span.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
@@ -283,16 +284,13 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     return size_or.status();
   }
 
-  // Create CUDA stream for async transfers
-  cudaStream_t stream;
-  auto stream_status = cuda::stream_create(&stream);
-  if (!stream_status.ok()) {
-    return stream_status;
-  }
-
-  // Copy each chunk
+  // Copy each chunk using ACM with UMA advancement in callbacks
   size_t completed = 0;
   absl::Status copy_status = absl::OkStatus();
+  absl::Mutex first_err_mu;
+  absl::Status first_err = absl::OkStatus();
+  common::CopyHandle last_handle;
+  bool last_set = false;
 
   for (uint32_t chunk_idx : chunks) {
     size_t offset = chunk_idx * chunk_size;
@@ -301,54 +299,52 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     void* src = static_cast<char*>(cpu_base) + offset;
     void* dst = static_cast<char*>(gpu_base) + offset;
 
-    // Emit OTel event for H2D copy per chunk
-    namespace otel = opentelemetry;
-    auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
-    auto evt_span = tracer->StartSpan("H2D/Copy");
-    otel::trace::Scope evt_scope(evt_span);
-    evt_span->SetAttribute("event", "h2d_copy");
-    evt_span->SetAttribute("tc.device.id", static_cast<int64_t>(mem_manager->get_local_device_id()));
-    evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(size));
-    evt_span->SetAttribute("tc.chunk.index", static_cast<int64_t>(chunk_idx));
-
-    auto cuda_status = cuda::memcpy_async(dst, src, size, cudaMemcpyHostToDevice, stream);
-
-    if (!cuda_status.ok()) {
-      copy_status = cuda_status;
-      LOG(ERROR) << "Failed to copy chunk " << chunk_idx << ": " << cuda_status;
-      evt_span->SetAttribute("error", true);
-      evt_span->AddEvent("h2d_error", {{"message", cuda_status.message()}});
-      evt_span->End();
+    // Schedule H2D via ACM; UMA state advanced in callback for this chunk
+    common::HostRegion h{.base = src, .length = size, .pinned = false};
+    common::DeviceRegion d{.device_id = mem_manager->get_local_device_id(), .dev_ptr = dst, .length = size};
+    auto on_done = [&memory,
+                    key = mem_manager->replica_key(),
+                    dev = mem_manager->get_local_device_id(),
+                    chunk_idx,
+                    &first_err_mu,
+                    &first_err]() {
+      auto st = memory.update_chunk_states(
+          key,
+          common::memory::MemoryLocation::GPU,
+          std::vector<uint32_t>{chunk_idx},
+          replica::ChunkState::COPIED_GPU,
+          dev);
+      if (!st.ok()) {
+        absl::MutexLock lk(&first_err_mu);
+        if (first_err.ok())
+          first_err = st;
+      }
+    };
+    common::CopyOptions opts{.tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = on_done}};
+    auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
+    if (!hdl_or.ok()) {
+      copy_status = hdl_or.status();
+      LOG(ERROR) << "Failed to schedule H2D for chunk " << chunk_idx << ": " << copy_status;
       break;
     }
+    last_handle = std::move(*hdl_or);
+    last_set = true;
 
     completed++;
     progress_cb(completed, chunks.size());
-
-    evt_span->End();
   }
 
-  // Synchronize stream
-  if (copy_status.ok()) {
-    auto sync_status = cuda::stream_synchronize(stream);
-    if (!sync_status.ok()) {
-      copy_status = sync_status;
+  // Wait for the last submitted copy to complete and propagate any UMA callback error
+  if (copy_status.ok() && last_set) {
+    auto wst = last_handle.wait();
+    if (!wst.ok()) {
+      copy_status = wst;
+    } else {
+      absl::MutexLock lk(&first_err_mu);
+      if (!first_err.ok()) {
+        copy_status = first_err;
+      }
     }
-  }
-
-  // Cleanup stream
-  auto destroy_status = cuda::stream_destroy(stream);
-  if (!destroy_status.ok() && copy_status.ok()) {
-    copy_status = destroy_status;
-  }
-
-  // Update chunk states
-  auto state = copy_status.ok() ? replica::ChunkState::COPIED_GPU : replica::ChunkState::HOT;
-  // Update chunk states; ignore failure unless copy_status was ok
-  auto upd_status = memory.update_chunk_states(
-      mem_manager->replica_key(), target, chunks, state, std::optional<int>(mem_manager->get_local_device_id()));
-  if (!upd_status.ok() && copy_status.ok()) {
-    copy_status = upd_status;
   }
 
   return copy_status;

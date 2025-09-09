@@ -26,6 +26,7 @@ sc_header_only_library(
     hdrs = ["sink.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:async_copy_manager_lib",
         "//core/store:direct_write",
         "@abseil-cpp//absl/types:span",
     ],
@@ -187,6 +188,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":sink",
+        "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
     ],
@@ -548,6 +550,24 @@ cc_test(
     deps = [
         ":pump",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "pump_async_test",
+    size = "small",
+    srcs = [
+        "pump_async_test.cc",
+    ],
+    deps = [
+        ":buffer_pool",
+        ":pump",
+        ":sink",
+        ":source",
+        "//core/common:async_copy_manager_lib",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
     ],
 )

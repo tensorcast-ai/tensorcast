@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 
 #include "absl/log/log.h"
@@ -14,13 +15,13 @@ namespace tensorcast::checkpoint {
 StreamingTensorWriter::StreamingTensorWriter(
     std::string filename,
     Config config,
-    std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool)
+    std::shared_ptr<common::memory::PinnedMemoryPool> pool)
     : filename_(std::move(filename)),
       config_(std::move(config)),
       buffer_size_(config_.buffer_size_mb << 20) { // Convert MB to bytes
 
-  streaming_buffer_ = std::make_unique<tensorcast::common::memory::StreamingPinnedBuffer>(
-      config_.num_buffers, buffer_size_, std::move(pool));
+  streaming_buffer_ =
+      std::make_unique<common::memory::StreamingPinnedBuffer>(config_.num_buffers, buffer_size_, std::move(pool));
   tensor_writer_ = std::make_unique<TensorWriter>(filename_);
 }
 
@@ -61,6 +62,7 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
     size_t size,
     bool is_gpu,
     cudaStream_t stream) {
+  (void)stream;
   if (!initialized_) {
     return absl::FailedPreconditionError("StreamingTensorWriter not initialized");
   }
@@ -100,25 +102,48 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
       return absl::InternalError("Invalid buffer pointer");
     }
 
+    // Allocate a single consistent global chunk id for both CPU and GPU paths.
+    const size_t global_chunk_id = next_chunk_id_.fetch_add(1, std::memory_order_relaxed);
+
+    // Track chunk offset for this global chunk using the same id
+    chunk_offsets_[global_chunk_id] = current_offset_.load();
+
     // Copy data to buffer
     if (is_gpu) {
-      auto copy_status = copy_gpu_to_buffer(static_cast<const char*>(data) + processed, chunk_size, buffer_ptr, stream);
-      if (!copy_status.ok()) {
-        return copy_status;
+      // Detect device id from the GPU pointer and schedule D2H via ACM.
+      const void* gpu_ptr = static_cast<const char*>(data) + processed;
+      cudaPointerAttributes attrs{};
+      auto attr_status = tensorcast::cuda::pointer_get_attributes_full(gpu_ptr, &attrs);
+      if (!attr_status.ok()) {
+        return absl::InternalError(absl::StrCat("Failed to query CUDA pointer attributes: ", attr_status.message()));
+      }
+      const int device_id = attrs.device;
+
+      common::DeviceRegion src{.device_id = device_id, .dev_ptr = const_cast<void*>(gpu_ptr), .length = chunk_size};
+      common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
+
+      // Use a callback that marks the chunk ready with the same global id.
+      auto on_done = [spb = streaming_buffer_.get(), slot_id, global_chunk_id, chunk_size]() {
+        (void)spb->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
+      };
+      common::CopyOptions opts{.tracing_stage = "D2H/Copy", .callbacks = {.on_copy_done = on_done}};
+      auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(src, dst, opts);
+      if (!hdl_or.ok()) {
+        return hdl_or.status();
+      }
+      // Record the in-flight copy handle to wait on during finalize().
+      {
+        absl::MutexLock lock(&pending_mu_);
+        pending_copies_.emplace_back(std::move(hdl_or.value()));
       }
     } else {
       // CPU data - direct memory copy
       std::memcpy(buffer_ptr, static_cast<const char*>(data) + processed, chunk_size);
-    }
-
-    // Track chunk offset for this global chunk
-    size_t global_chunk_id = total_bytes_written_.load() / buffer_size_;
-    chunk_offsets_[global_chunk_id] = current_offset_.load();
-
-    // Mark chunk as ready
-    auto ready_status = streaming_buffer_->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
-    if (!ready_status.ok()) {
-      return ready_status;
+      // Mark chunk as ready for CPU path immediately.
+      auto ready_status = streaming_buffer_->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
+      if (!ready_status.ok()) {
+        return ready_status;
+      }
     }
 
     // If synchronous write mode, write immediately
@@ -147,27 +172,7 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
   return tensor_offset;
 }
 
-absl::Status StreamingTensorWriter::copy_gpu_to_buffer(
-    const void* gpu_data,
-    size_t size,
-    char* buffer,
-    cudaStream_t stream) {
-  absl::Status copy_status;
-  if (stream) {
-    copy_status = cuda::memcpy_async(buffer, gpu_data, size, cudaMemcpyDeviceToHost, stream);
-    if (copy_status.ok()) {
-      copy_status = cuda::stream_synchronize(stream); // Wait for copy to complete
-    }
-  } else {
-    copy_status = cuda::memcpy(buffer, gpu_data, size, cudaMemcpyDeviceToHost);
-  }
-
-  if (!copy_status.ok()) {
-    return absl::InternalError(absl::StrCat("CUDA memcpy failed: ", copy_status.message()));
-  }
-
-  return absl::OkStatus();
-}
+// Removed copy_gpu_to_buffer helper in favor of ACM-driven D2H
 
 void StreamingTensorWriter::disk_writer_thread() {
   LOG(INFO) << "Disk writer thread started";
@@ -214,7 +219,22 @@ absl::Status StreamingTensorWriter::finalize() {
     return absl::FailedPreconditionError("StreamingTensorWriter not initialized");
   }
 
-  // Signal no more data will be produced
+  // Ensure all GPU D2H copies have completed and invoked their callbacks
+  // before signaling production complete to the consumer. This prevents
+  // premature termination and avoids use-after-free of the buffer in callbacks.
+  std::vector<common::CopyHandle> handles_to_wait;
+  {
+    absl::MutexLock lock(&pending_mu_);
+    handles_to_wait.swap(pending_copies_);
+  }
+  for (const auto& h : handles_to_wait) {
+    absl::Status st = h.wait();
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  // Signal no more data will be produced only after pending copies are done.
   streaming_buffer_->signal_production_complete();
 
   // Wait for disk writer thread to finish

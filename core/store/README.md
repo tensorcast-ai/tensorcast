@@ -212,6 +212,40 @@ stateDiagram-v2
 - GPU allocations are lazily created via UMA on first use; DVMP CPU region is reserved at construction.
 - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedMemoryPool`.
 
+### Async Copy Manager Integration
+
+- H2D/D2H transfers now submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks.
+- SPB slots are returned in the ACM completion callback; per-chunk `stream_synchronize` calls have been removed.
+- For H2D, UMA state is advanced per DVMP-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
+- ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
+
+#### ACM Usage Quick Guide
+
+- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots inside the host callback. Do not `stream_synchronize()` per chunk.
+- H2D example (return slot + optional UMA advancement in callback):
+  ```cpp
+  using common::AsyncCopyManager;
+  common::HostRegion h{.base = host_ptr, .length = bytes, .pinned = true};
+  common::DeviceRegion d{.device_id = device_id, .dev_ptr = dst_dev, .length = bytes};
+  auto hdl_or = AsyncCopyManager::instance().submit_h2d(
+      h, d, {.tracing_stage = "H2D/Copy",
+             .callbacks = {.on_copy_done = [spb, slot_id, maybe_uma]() {
+               (void)spb->return_chunk(slot_id);
+               if (maybe_uma) maybe_uma();
+             }}});
+  RETURN_IF_ERROR(hdl_or.status());
+  ```
+- D2H example (stage into SPB, mark ready in callback for writer thread):
+  ```cpp
+  auto hdl_or = AsyncCopyManager::instance().submit_d2h(
+      src_dev, dst_host, {.tracing_stage = "D2H/Copy",
+                          .callbacks = {.on_copy_done = [spb, slot_id, gid, bytes]() {
+                            (void)spb->mark_chunk_ready(slot_id, gid, bytes);
+                          }}});
+  ```
+- Same-device D2D: use `submit_d2d` and wait on handles as needed. Cross-device D2D remains under `MemoryManager` (peer or staged fallback).
+- Tests and CPU-only flows can use `submit_h2h` to exercise the async pump path without CUDA.
+
 ### Chunk States (DVMP/UMA)
 
 ```mermaid

@@ -266,6 +266,22 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
+        ":trace_manager_lib",
+    ],
+)
+
+# Async Copy Manager (minimal RFC-0018 core)
+sc_cc_library(
+    name = "async_copy_manager_lib",
+    srcs = ["async_copy_manager.cc"],
+    hdrs = ["async_copy_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        ":trace_cuda_async_fn_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -370,6 +386,7 @@ sc_cc_library(
     deps = [
         ":artifact_hash_lib",
         ":artifact_verification_lib",
+        ":async_copy_manager_lib",
         ":cuda_api_lib",
         ":cuda_memory_lib",
         ":device_guard_lib",
