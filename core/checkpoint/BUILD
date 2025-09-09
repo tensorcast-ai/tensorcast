@@ -49,6 +49,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/synchronization",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": [
