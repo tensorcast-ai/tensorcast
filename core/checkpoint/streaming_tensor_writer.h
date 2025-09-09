@@ -81,9 +81,6 @@ class StreamingTensorWriter {
   // Worker thread for disk writing
   void disk_writer_thread();
 
-  // Helper to copy data from GPU to pinned buffer
-  static absl::Status copy_gpu_to_buffer(const void* gpu_data, size_t size, char* buffer, cudaStream_t stream);
-
   // Configuration
   const std::string filename_;
   const Config config_;

@@ -39,16 +39,91 @@ inline const char* stage_or(const CopyOptions& opts, const char* def_stage) {
 
 } // namespace
 
+AsyncCopyManager::~AsyncCopyManager() {
+  shutdown();
+}
+
+void AsyncCopyManager::shutdown() {
+  absl::MutexLock lock(&mu_);
+  auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
+    for (auto& kv : m) {
+      if (kv.second != nullptr) {
+        (void)cuda::stream_destroy(kv.second);
+      }
+    }
+    m.clear();
+  };
+  destroy_map(h2d_streams_);
+  destroy_map(d2h_streams_);
+  destroy_map(d2d_streams_);
+}
+
+absl::StatusOr<cudaStream_t> AsyncCopyManager::get_h2d_stream_(int device_id) {
+  if (device_id < 0)
+    return absl::InvalidArgumentError("invalid device_id for H2D stream");
+  absl::MutexLock lock(&mu_);
+  auto it = h2d_streams_.find(device_id);
+  if (it != h2d_streams_.end())
+    return it->second;
+  cudaStream_t s = nullptr;
+  auto st = cuda::set_device(device_id);
+  if (!st.ok())
+    return st;
+  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  if (!st.ok())
+    return st;
+  h2d_streams_.emplace(device_id, s);
+  return s;
+}
+
+absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2h_stream_(int device_id) {
+  if (device_id < 0)
+    return absl::InvalidArgumentError("invalid device_id for D2H stream");
+  absl::MutexLock lock(&mu_);
+  auto it = d2h_streams_.find(device_id);
+  if (it != d2h_streams_.end())
+    return it->second;
+  cudaStream_t s = nullptr;
+  auto st = cuda::set_device(device_id);
+  if (!st.ok())
+    return st;
+  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  if (!st.ok())
+    return st;
+  d2h_streams_.emplace(device_id, s);
+  return s;
+}
+
+absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2d_stream_(int device_id) {
+  if (device_id < 0)
+    return absl::InvalidArgumentError("invalid device_id for D2D stream");
+  absl::MutexLock lock(&mu_);
+  auto it = d2d_streams_.find(device_id);
+  if (it != d2d_streams_.end())
+    return it->second;
+  cudaStream_t s = nullptr;
+  auto st = cuda::set_device(device_id);
+  if (!st.ok())
+    return st;
+  st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
+  if (!st.ok())
+    return st;
+  d2d_streams_.emplace(device_id, s);
+  return s;
+}
+
 absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
     const HostRegion& src,
     const DeviceRegion& dst,
-    cudaStream_t stream,
     const CopyOptions& opts) {
   if (src.base == nullptr || dst.dev_ptr == nullptr || src.length == 0 || dst.length == 0) {
     return absl::InvalidArgumentError("invalid region(s) for submit_h2d");
   }
   if (src.length != dst.length) {
     return absl::InvalidArgumentError("length mismatch in submit_h2d");
+  }
+  if (dst.device_id < 0) {
+    return absl::InvalidArgumentError("invalid device_id in submit_h2d");
   }
 
   CopyHandle handle;
@@ -58,27 +133,11 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
   const size_t bytes = src.length;
   void* dst_ptr = dst.dev_ptr;
   const void* src_ptr = src.base;
-  // Resolve stream if not provided (per-device H2D)
-  cudaStream_t stream_to_use = stream;
-  if (stream_to_use == nullptr && dst.device_id >= 0) {
-    static absl::Mutex mu(absl::kConstInit);
-    static absl::flat_hash_map<int, cudaStream_t> h2d_streams ABSL_GUARDED_BY(mu);
-    {
-      absl::MutexLock lock(&mu);
-      auto it = h2d_streams.find(dst.device_id);
-      if (it == h2d_streams.end()) {
-        cudaStream_t s = nullptr;
-        auto st = cuda::set_device(dst.device_id);
-        if (!st.ok())
-          return st;
-        st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
-        if (!st.ok())
-          return st;
-        it = h2d_streams.emplace(dst.device_id, s).first;
-      }
-      stream_to_use = it->second;
-    }
-  }
+  // Resolve per-device H2D stream from ACM
+  auto s_or = get_h2d_stream_(dst.device_id);
+  if (!s_or.ok())
+    return s_or.status();
+  cudaStream_t stream_to_use = *s_or;
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
@@ -106,7 +165,6 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
 absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
     const DeviceRegion& src,
     const DeviceRegion& dst,
-    cudaStream_t stream,
     const CopyOptions& opts) {
   if (src.dev_ptr == nullptr || dst.dev_ptr == nullptr || src.length == 0 || dst.length == 0) {
     return absl::InvalidArgumentError("invalid region(s) for submit_d2d");
@@ -117,6 +175,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   if (src.device_id != dst.device_id) {
     return absl::UnimplementedError("cross-device D2D not yet implemented in ACM");
   }
+  if (dst.device_id < 0) {
+    return absl::InvalidArgumentError("invalid device_id in submit_d2d");
+  }
 
   CopyHandle handle;
   auto p = handle.p_;
@@ -124,27 +185,11 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   const size_t bytes = src.length;
   const void* src_ptr = src.dev_ptr;
   void* dst_ptr = dst.dev_ptr;
-  // Resolve stream if not provided (per-device D2D)
-  cudaStream_t stream_to_use = stream;
-  if (stream_to_use == nullptr && dst.device_id >= 0) {
-    static absl::Mutex mu(absl::kConstInit);
-    static absl::flat_hash_map<int, cudaStream_t> d2d_streams ABSL_GUARDED_BY(mu);
-    {
-      absl::MutexLock lock(&mu);
-      auto it = d2d_streams.find(dst.device_id);
-      if (it == d2d_streams.end()) {
-        cudaStream_t s = nullptr;
-        auto st = cuda::set_device(dst.device_id);
-        if (!st.ok())
-          return st;
-        st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
-        if (!st.ok())
-          return st;
-        it = d2d_streams.emplace(dst.device_id, s).first;
-      }
-      stream_to_use = it->second;
-    }
-  }
+  // Resolve per-device D2D stream from ACM
+  auto s_or = get_d2d_stream_(dst.device_id);
+  if (!s_or.ok())
+    return s_or.status();
+  cudaStream_t stream_to_use = *s_or;
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
@@ -172,13 +217,15 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
 absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
     const DeviceRegion& src,
     const HostRegion& dst,
-    cudaStream_t stream,
     const CopyOptions& opts) {
   if (src.dev_ptr == nullptr || dst.base == nullptr || src.length == 0 || dst.length == 0) {
     return absl::InvalidArgumentError("invalid region(s) for submit_d2h");
   }
   if (src.length != dst.length) {
     return absl::InvalidArgumentError("length mismatch in submit_d2h");
+  }
+  if (src.device_id < 0) {
+    return absl::InvalidArgumentError("invalid device_id in submit_d2h");
   }
 
   CopyHandle handle;
@@ -187,27 +234,11 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
   const size_t bytes = src.length;
   const void* src_ptr = src.dev_ptr;
   void* dst_ptr = const_cast<void*>(dst.base);
-  // Resolve stream if not provided (per-device D2H)
-  cudaStream_t stream_to_use = stream;
-  if (stream_to_use == nullptr && src.device_id >= 0) {
-    static absl::Mutex mu(absl::kConstInit);
-    static absl::flat_hash_map<int, cudaStream_t> d2h_streams ABSL_GUARDED_BY(mu);
-    {
-      absl::MutexLock lock(&mu);
-      auto it = d2h_streams.find(src.device_id);
-      if (it == d2h_streams.end()) {
-        cudaStream_t s = nullptr;
-        auto st = cuda::set_device(src.device_id);
-        if (!st.ok())
-          return st;
-        st = cuda::stream_create_with_flags(&s, /*flags=*/1 /*cudaStreamNonBlocking*/);
-        if (!st.ok())
-          return st;
-        it = d2h_streams.emplace(src.device_id, s).first;
-      }
-      stream_to_use = it->second;
-    }
-  }
+  // Resolve per-device D2H stream from ACM
+  auto s_or = get_d2h_stream_(src.device_id);
+  if (!s_or.ok())
+    return s_or.status();
+  cudaStream_t stream_to_use = *s_or;
   auto status = tensorcast::common::trace::trace_cuda_async(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,

@@ -10,6 +10,7 @@
 
 #include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "core/store/direct_write.h"
 
 namespace tensorcast::store::loader {
@@ -51,9 +52,16 @@ class SlotLease {
   bool active_;
 };
 
-void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
+void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   LOG(INFO) << "Consumer thread started";
   bool draining = false;
+  // Track in-flight async copies when destination supports async writes
+  struct InFlight {
+    tensorcast::common::CopyHandle handle;
+    int slot_id;
+  };
+  std::vector<InFlight> inflight;
+  auto* async = dynamic_cast<AsyncPositionedSink*>(&dst);
   while (!state.should_stop.load(std::memory_order_acquire) || draining) {
     auto chunk_result = pool.get_ready_chunk();
     if (!chunk_result.ok()) {
@@ -93,24 +101,81 @@ void RunConsumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       state.chunk_offsets.erase(it);
     }
 
-    auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
-    pool.return_chunk(chunk.slot_id);
+    if (async != nullptr) {
+      // Submit async write and defer returning the slot until completion.
+      auto hdl_or = async->write_at_async(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
+      if (!hdl_or.ok()) {
+        absl::MutexLock lock(&state.status_mutex);
+        if (state.consumer_status.ok()) {
+          state.consumer_status = hdl_or.status();
+        }
+        // Return the slot and request shutdown
+        pool.return_chunk(chunk.slot_id);
+        state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
+        // Switch to drain mode to return remaining ready chunks
+        draining = true;
+      } else {
+        inflight.push_back(InFlight{.handle = std::move(*hdl_or), .slot_id = chunk.slot_id});
+      }
+    } else {
+      auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
+      pool.return_chunk(chunk.slot_id);
+      if (!status.ok()) {
+        absl::MutexLock lock(&state.status_mutex);
+        if (state.consumer_status.ok()) {
+          state.consumer_status = status;
+        }
+        state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
+        draining = true;
+      }
+    }
 
-    if (!status.ok()) {
+    // Sweep completed in-flight operations and return their slots.
+    if (!inflight.empty()) {
+      std::vector<size_t> done_idx;
+      done_idx.reserve(inflight.size());
+      for (size_t i = 0; i < inflight.size(); ++i) {
+        auto st = inflight[i].handle.wait(absl::ZeroDuration());
+        if (absl::IsDeadlineExceeded(st)) {
+          continue; // not yet complete
+        }
+        // Return slot regardless of status; propagate first error
+        pool.return_chunk(inflight[i].slot_id);
+        if (!st.ok()) {
+          absl::MutexLock lock(&state.status_mutex);
+          if (state.consumer_status.ok()) {
+            state.consumer_status = st;
+          }
+          state.should_stop.store(true, std::memory_order_release);
+          pool.shutdown();
+          draining = true;
+        }
+        done_idx.push_back(i);
+      }
+      // Erase completed entries from inflight vector (from back to front)
+      for (size_t k = 0; k < done_idx.size(); ++k) {
+        size_t idx = done_idx[done_idx.size() - 1 - k];
+        inflight.erase(inflight.begin() + idx);
+      }
+    }
+  }
+
+  // Drain any remaining in-flight operations at shutdown
+  for (auto& item : inflight) {
+    auto st = item.handle.wait();
+    pool.return_chunk(item.slot_id);
+    if (!st.ok()) {
       absl::MutexLock lock(&state.status_mutex);
       if (state.consumer_status.ok()) {
-        state.consumer_status = status;
+        state.consumer_status = st;
       }
-      state.should_stop.store(true, std::memory_order_release);
-      // Request pool to wake up any waiters so producers can exit
-      pool.shutdown();
-      // Switch to drain mode to return remaining ready chunks
-      draining = true;
     }
   }
 }
 
-void RunRangeProducer(
+void run_range_producer(
     SeekableSource& src,
     BufferPool& pool,
     absl::Span<const std::pair<uint64_t, size_t>> ranges,
@@ -291,11 +356,11 @@ absl::Status pump_ranges(
   // Start producer threads
   for (int i = 0; i < concurrency; ++i) {
     producers.emplace_back(
-        RunRangeProducer, std::ref(src), std::ref(pool), ranges, std::ref(range_index), std::ref(state));
+        run_range_producer, std::ref(src), std::ref(pool), ranges, std::ref(range_index), std::ref(state));
   }
 
   // Start consumer thread
-  std::thread consumer(RunConsumer, std::ref(dst), std::ref(pool), std::ref(state));
+  std::thread consumer(run_consumer, std::ref(dst), std::ref(pool), std::ref(state));
 
   // Wait for all producers to finish
   for (auto& t : producers) {

@@ -804,8 +804,7 @@ void MTcpTransport::recv_loop() {
                     .tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = [recv_buffer, slot_id]() {
                                                    (void)recv_buffer->return_chunk(slot_id);
                                                  }}};
-                auto hdl_or =
-                    tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, /*stream=*/nullptr, opts);
+                auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
                 if (!hdl_or.ok()) {
                   LOG(ERROR) << "Failed to schedule H2D copy: " << hdl_or.status();
                   CHECK_OK(recv_buffer->return_chunk(slot_id));

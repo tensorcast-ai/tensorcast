@@ -217,7 +217,7 @@ stateDiagram-v2
 - H2D/D2H transfers now submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks.
 - SPB slots are returned in the ACM completion callback; per-chunk `stream_synchronize` calls have been removed.
 - For H2D, UMA state is advanced per DVMP-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
-- ACM lazily creates per-device non-blocking streams per direction (H2D/D2H/D2D) when callers pass `nullptr` for the stream.
+- ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
 
 ### Chunk States (DVMP/UMA)
 

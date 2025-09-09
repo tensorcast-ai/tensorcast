@@ -23,7 +23,6 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
-    cudaStream_t stream,
     void* dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
@@ -122,7 +121,7 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
                   }
                 }
               }}};
-      auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, stream, opts);
+      auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
       if (!hdl_or.ok()) {
         // Return the slot immediately on submission failure
         ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
@@ -156,7 +155,6 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
-    cudaStream_t stream,
     void* dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
@@ -201,7 +199,7 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
               (void)dvmp->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
               (void)streaming_buf->return_chunk(slot_id);
             }}};
-    auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(s, h, stream, opts);
+    auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(s, h, opts);
     if (!hdl_or.ok()) {
       ABSL_CHECK_OK(streaming_buf->return_chunk(slot_id));
       return hdl_or.status();

@@ -321,7 +321,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
       }
     };
     common::CopyOptions opts{.tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = on_done}};
-    auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, /*stream=*/nullptr, opts);
+    auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
     if (!hdl_or.ok()) {
       copy_status = hdl_or.status();
       LOG(ERROR) << "Failed to schedule H2D for chunk " << chunk_idx << ": " << copy_status;

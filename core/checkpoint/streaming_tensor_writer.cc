@@ -15,13 +15,13 @@ namespace tensorcast::checkpoint {
 StreamingTensorWriter::StreamingTensorWriter(
     std::string filename,
     Config config,
-    std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool)
+    std::shared_ptr<common::memory::PinnedMemoryPool> pool)
     : filename_(std::move(filename)),
       config_(std::move(config)),
       buffer_size_(config_.buffer_size_mb << 20) { // Convert MB to bytes
 
-  streaming_buffer_ = std::make_unique<tensorcast::common::memory::StreamingPinnedBuffer>(
-      config_.num_buffers, buffer_size_, std::move(pool));
+  streaming_buffer_ =
+      std::make_unique<common::memory::StreamingPinnedBuffer>(config_.num_buffers, buffer_size_, std::move(pool));
   tensor_writer_ = std::make_unique<TensorWriter>(filename_);
 }
 
@@ -104,18 +104,18 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
     // Copy data to buffer
     if (is_gpu) {
       // Schedule D2H into the pinned buffer via AsyncCopyManager.
-      tensorcast::common::DeviceRegion src{
+      common::DeviceRegion src{
           .device_id = 0, // device inferred by stream; not used here
           .dev_ptr = const_cast<char*>(static_cast<const char*>(data) + processed),
           .length = chunk_size};
-      tensorcast::common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
+      common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
 
       const size_t this_global_chunk_id = total_bytes_written_.load() / buffer_size_;
       auto on_done = [spb = streaming_buffer_.get(), slot_id, this_global_chunk_id, chunk_size]() {
         (void)spb->mark_chunk_ready(slot_id, this_global_chunk_id, chunk_size);
       };
-      tensorcast::common::CopyOptions opts{.tracing_stage = "D2H/Copy", .callbacks = {.on_copy_done = on_done}};
-      auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_d2h(src, dst, stream, opts);
+      common::CopyOptions opts{.tracing_stage = "D2H/Copy", .callbacks = {.on_copy_done = on_done}};
+      auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(src, dst, opts);
       if (!hdl_or.ok()) {
         return hdl_or.status();
       }
@@ -162,27 +162,7 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
   return tensor_offset;
 }
 
-absl::Status StreamingTensorWriter::copy_gpu_to_buffer(
-    const void* gpu_data,
-    size_t size,
-    char* buffer,
-    cudaStream_t stream) {
-  absl::Status copy_status;
-  if (stream) {
-    copy_status = cuda::memcpy_async(buffer, gpu_data, size, cudaMemcpyDeviceToHost, stream);
-    if (copy_status.ok()) {
-      copy_status = cuda::stream_synchronize(stream); // Wait for copy to complete
-    }
-  } else {
-    copy_status = cuda::memcpy(buffer, gpu_data, size, cudaMemcpyDeviceToHost);
-  }
-
-  if (!copy_status.ok()) {
-    return absl::InternalError(absl::StrCat("CUDA memcpy failed: ", copy_status.message()));
-  }
-
-  return absl::OkStatus();
-}
+// Removed copy_gpu_to_buffer helper in favor of ACM-driven D2H
 
 void StreamingTensorWriter::disk_writer_thread() {
   LOG(INFO) << "Disk writer thread started";

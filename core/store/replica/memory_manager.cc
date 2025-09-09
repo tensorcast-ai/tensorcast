@@ -784,7 +784,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
   if (dst_dev_id == src_dev_id) {
     common::DeviceRegion s{.device_id = dst_dev_id, .dev_ptr = src_ptr, .length = static_cast<size_t>(bytes)};
     common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = dst_ptr, .length = static_cast<size_t>(bytes)};
-    auto hdl_or = common::AsyncCopyManager::instance().submit_d2d(s, d, stream_to_use, {.tracing_stage = "D2D/Copy"});
+    auto hdl_or = common::AsyncCopyManager::instance().submit_d2d(s, d, {.tracing_stage = "D2D/Copy"});
     if (!hdl_or.ok()) {
       ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
       return hdl_or.status();
@@ -843,8 +843,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
       // D2H from source device
       common::DeviceRegion s{.device_id = src_dev_id, .dev_ptr = static_cast<char*>(src_ptr) + offset, .length = step};
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
-      auto d2h_hdl =
-          common::AsyncCopyManager::instance().submit_d2h(s, h, /*stream=*/nullptr, {.tracing_stage = "D2H/Copy"});
+      auto d2h_hdl = common::AsyncCopyManager::instance().submit_d2h(s, h, {.tracing_stage = "D2H/Copy"});
       if (!d2h_hdl.ok()) {
         (void)spb->return_chunk(slot_id);
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
@@ -858,8 +857,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
       }
       // H2D to destination device
       common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = static_cast<char*>(dst_ptr) + offset, .length = step};
-      auto h2d_hdl =
-          common::AsyncCopyManager::instance().submit_h2d(h, d, /*stream=*/nullptr, {.tracing_stage = "H2D/Copy"});
+      auto h2d_hdl = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
       if (!h2d_hdl.ok()) {
         (void)spb->return_chunk(slot_id);
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));

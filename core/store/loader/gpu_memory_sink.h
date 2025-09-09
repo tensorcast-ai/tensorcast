@@ -5,12 +5,11 @@
 #include <cstdint>
 
 #include "absl/status/status.h"
-#include "core/common/cuda_api.h"
 #include "core/store/loader/sink.h"
 
 namespace tensorcast::store::loader {
 
-class GPUMemorySink : public Sink, public PositionedSink {
+class GPUMemorySink : public Sink, public PositionedSink, public AsyncPositionedSink {
  public:
   struct Options {
     void* gpu_base_ptr = nullptr;
@@ -26,6 +25,8 @@ class GPUMemorySink : public Sink, public PositionedSink {
 
   // Positioned write into GPU base + offset
   absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override;
+
+  absl::StatusOr<common::CopyHandle> write_at_async(uint64_t offset, const void* src, size_t bytes) override;
 
   absl::Status close() override;
 

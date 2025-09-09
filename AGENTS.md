@@ -195,6 +195,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - Tests (`*_test.cc`): allow narrowly scoped `using`; prefer `using a::b::Symbol;` over broad imports.
   - Qualification elision:
     - Most sources sit under outer `tensorcast`; inside it, omit the `tensorcast::` prefix (e.g., `communicator::misc::GB`).
+    - You can always omit the outer `tensorcast::` qualifier inside `core/` and `daemon/`; for example, use `common::` rather than `tensorcast::common`.
     - `core/store/**` is `tensorcast::store`; inside these files, also omit `store::` and refer directly to sub-namespaces (consistent with `core/store/store_engine.cc`): `loading::ReplicaHandle`, `replica::Replica`, `components::DeviceManager`.
     - Fully qualify with `tensorcast::...` only when leaving the implicit root or to resolve ambiguity. Never add `using namespace` at file scope.
   - Examples:
@@ -233,7 +234,8 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - **Parameters**: Use structs for multiple params/returns
 - **Immutability**: Prefer `const` and `constexpr`
 - **RAII**: Always use for resource management
-- **Logging**: Use `LOG` for logging, `CHECK` for assertions, `VLOG` for verbose logging, `PLOG` for error messages with `errno`
+- **Logging**: Use `LOG` for logging, `VLOG` for verbose logging, `PLOG` for error messages with `errno`
+- **Assertions**: Use `ABSL_CHECK` for assertions, `ABSL_CHECK_OK` for assertions that return statuses
 - Statement should be inside braces
 
 #### Best Practices

@@ -11,6 +11,8 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
+#include "absl/container/flat_hash_map.h"
+
 #include "core/common/cuda_api.h"
 #include "core/common/trace/trace_cuda_async_fn.h"
 
@@ -68,30 +70,31 @@ class AsyncCopyManager {
  public:
   static AsyncCopyManager& instance();
 
-  absl::StatusOr<CopyHandle> submit_h2d(
-      const HostRegion& src,
-      const DeviceRegion& dst,
-      cudaStream_t stream = nullptr,
-      const CopyOptions& opts = {});
+  absl::StatusOr<CopyHandle> submit_h2d(const HostRegion& src, const DeviceRegion& dst, const CopyOptions& opts = {});
 
-  absl::StatusOr<CopyHandle> submit_d2h(
-      const DeviceRegion& src,
-      const HostRegion& dst,
-      cudaStream_t stream = nullptr,
-      const CopyOptions& opts = {});
+  absl::StatusOr<CopyHandle> submit_d2h(const DeviceRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
 
   // Minimal D2D support: same-device only for this phase.
-  absl::StatusOr<CopyHandle> submit_d2d(
-      const DeviceRegion& src,
-      const DeviceRegion& dst,
-      cudaStream_t stream = nullptr,
-      const CopyOptions& opts = {});
+  absl::StatusOr<CopyHandle> submit_d2d(const DeviceRegion& src, const DeviceRegion& dst, const CopyOptions& opts = {});
 
   absl::StatusOr<CopyHandle> submit_h2h(const HostRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
 
+  // Destroy all lazily-created per-device streams. Safe to call multiple times.
+  void shutdown();
+
  private:
   AsyncCopyManager() = default;
-  ~AsyncCopyManager() = default;
+  ~AsyncCopyManager();
+
+  // Internal helpers to lazily create and cache per-device non-blocking streams
+  absl::StatusOr<cudaStream_t> get_h2d_stream_(int device_id);
+  absl::StatusOr<cudaStream_t> get_d2h_stream_(int device_id);
+  absl::StatusOr<cudaStream_t> get_d2d_stream_(int device_id);
+
+  absl::Mutex mu_;
+  absl::flat_hash_map<int, cudaStream_t> h2d_streams_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<int, cudaStream_t> d2h_streams_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<int, cudaStream_t> d2d_streams_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::common

@@ -39,7 +39,6 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
-    cudaStream_t stream,
     void* dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
@@ -68,7 +67,6 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     void* gpu_ptr,
     size_t total_size,
-    cudaStream_t stream,
     void* dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp);
 

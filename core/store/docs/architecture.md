@@ -218,7 +218,7 @@ classDiagram
 2. Create `FilePartitionSource` implementing `SeekableSource` — `core/store/loader/file_partition_source.{h,cc}`
 3. Return source handle for pump-based streaming — `DiskLoader::open_source()`
 4. Actual loading handled by `MemoryManager::load_async_from_source()` using `TransferService` + `pump_ranges()`
-5. Data flows: FilePartitionSource → Pump → MemorySink (`DVMPRegionSink` for CPU or `GPUMemorySink` for GPU)
+5. Data flows: FilePartitionSource → Pump → MemorySink (`DVMPRegionSink` for CPU or `GPUMemorySink` for GPU). For GPU targets, the pump detects sinks that implement `AsyncPositionedSink` and uses `AsyncCopyManager` to submit H2D copies; pinned slots are returned only after GPU DMA completion, enabling I/O–copy overlap without per-chunk synchronizations.
 
 **P2PLoader Workflow**:
 1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/loader/p2p_loader.{h,cc}`
@@ -287,13 +287,14 @@ graph TB
 
     subgraph "Data Transfer Components"
         SS[SeekableSource]
-        Sink[MemorySink]
+        Sink[MemorySink\n(AsyncPositionedSink for GPU)]
         P[Pump]
         BP[BufferPool]
 
-        SS -->|Reads from| P
-        P -->|Writes to| Sink
-        P -->|Uses| BP
+    SS -->|Reads from| P
+    P -->|Writes to| Sink
+    P -->|Uses| BP
+    Sink -->|Schedules H2D via ACM| CS
     end
 
     subgraph "Service Layer"
