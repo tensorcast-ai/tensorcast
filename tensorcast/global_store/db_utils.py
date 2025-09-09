@@ -2,6 +2,8 @@
 
 import os
 import re
+from contextlib import suppress
+from importlib import resources
 
 import duckdb
 from duckdb import DuckDBPyConnection
@@ -49,6 +51,32 @@ def parse_sql_file(file_path):
     return statements
 
 
+def _resolve_schema_path() -> str:
+    """Resolve path to canonical schema.sql without env overrides.
+
+    Policy:
+    - When running from source, use repo-root schema.sql (../../schema.sql).
+    - When running from an installed wheel, use packaged tensorcast/schema.sql.
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    root_schema = os.path.abspath(os.path.join(current_dir, "..", "..", "schema.sql"))
+    if os.path.isfile(root_schema):
+        logger.info("Using canonical schema at repo root: schema.sql")
+        return root_schema
+
+    # Packaged resource fallback (installed wheel)
+    with suppress(Exception):
+        res = resources.files("tensorcast").joinpath("schema.sql")
+        if res.is_file():
+            with resources.as_file(res) as p:
+                logger.info("Using packaged schema: tensorcast/schema.sql")
+                return str(p)
+
+    raise FileNotFoundError(
+        "schema.sql not found. Ensure repo-root schema.sql exists or install a wheel that ships tensorcast/schema.sql."
+    )
+
+
 def init_db(db: DuckDBPyConnection):
     # Check if tables already exist in this specific connection
     res = db.execute("SHOW TABLES").fetchall()
@@ -56,8 +84,7 @@ def init_db(db: DuckDBPyConnection):
         logger.info("Database already initialized")
         return
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    sql_file_path = os.path.join(current_dir, "init.sql")
+    sql_file_path = _resolve_schema_path()
     statements = parse_sql_file(sql_file_path)
     for statement in statements:
         if statement.strip():  # 只执行非空语句

@@ -382,6 +382,30 @@ def copy_libstore_engine(debug: bool):
 
     _place_artifact(src, dst, prefer_copy=prefer_copy, name="libstore_engine.so", make_executable=False)
 
+
+def copy_schema_sql() -> None:
+    """Copy canonical repo-root schema.sql into the tensorcast package.
+
+    This allows installed wheels to access schema at runtime without a repo checkout.
+    """
+    src = Path(dir_path) / "schema.sql"
+    dst = Path(dir_path) / "tensorcast" / "schema.sql"
+    if not src.exists():
+        print("Warning: schema.sql not found at repo root; package will not include schema.")
+        return
+    try:
+        if dst.exists() or dst.is_symlink():
+            try:
+                dst.unlink()
+            except Exception:
+                pass
+        copyfile(str(src), str(dst))
+        print(f"Copied schema.sql to {dst}")
+    except Exception as e:
+        print(f"Warning: Failed to copy schema.sql into package: {e}")
+
+
+
 def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
     return candidate if candidate.exists() else None
@@ -435,6 +459,7 @@ class DevelopCommand(develop):
         )
         copy_libstore_engine(debug=True)
         copy_daemon_binary()
+        copy_schema_sql()
 
         gen_version_file()
         develop.run(self)
@@ -456,6 +481,7 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.run(self)
         copy_extensions()
         copy_daemon_binary()
+        copy_schema_sql()
 
 
 class InstallCommand(install):
@@ -476,6 +502,7 @@ class InstallCommand(install):
         )
         copy_libstore_engine(debug=False)
         copy_daemon_binary()
+        copy_schema_sql()
 
         gen_version_file()
         install.run(self)
@@ -499,6 +526,7 @@ class BdistCommand(bdist_wheel):
         )
         copy_libstore_engine(debug=False)
         copy_daemon_binary()
+        copy_schema_sql()
 
         gen_version_file()
         bdist_wheel.run(self)
@@ -523,6 +551,7 @@ class EditableWheelCommand(editable_wheel):
         gen_version_file()
         copy_libstore_engine(debug=True)
         copy_daemon_binary()
+        copy_schema_sql()
         editable_wheel.run(self)
 
 
@@ -541,6 +570,7 @@ class CleanCommand(Command):
     PY_CLEAN_FILES = [
         os.path.join(".", "tensorcast", "*.so"),
         os.path.join(".", "tensorcast", "_version.py"),
+        os.path.join(".", "tensorcast", "schema.sql"),
     ]
     description = "Command to tidy up the project root"
     user_options = []
@@ -736,8 +766,7 @@ setup(
     cmdclass=cmd_class,
     zip_safe=False,
     packages=find_packages(exclude=["*.csrc.*"]),
-    # include_package_data=False,
-    package_data={"": ["*.so", "lib/*.so", "bin/*"]},
+    package_data={"tensorcast": ["schema.sql", "*.so", "lib/*.so", "bin/*"]},
     exclude_package_data={
         # "tensorcast": [
         #     "tensorcast/csrc/*.cc",
