@@ -5,7 +5,6 @@
 
 #include <cstdlib>
 #include <mutex>
-#include <string>
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
 

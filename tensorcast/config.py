@@ -7,9 +7,8 @@ This module handles the centralized configuration and initialization
 of the tensorcast system, including daemon management.
 """
 
+import tempfile
 from pathlib import Path
-
-from pydantic import ByteSize
 
 initialized = False
 
@@ -59,31 +58,48 @@ def init(
 
     # Import here to avoid circular imports
     from tensorcast.api import set_daemon_address
-    from tensorcast.daemon_config import ServerConfig, StoreDaemonConfig
-    from tensorcast.daemon_manager import ensure_daemon_running, get_daemon_manager
+    from tensorcast.daemon_manager import get_daemon_manager
+    from tensorcast.daemon_runtime_config import dump_daemon_config
     from tensorcast.logger import init_logger
+    from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
     from tensorcast.utils import to_num_bytes
 
     logger = init_logger(__name__)
 
     # No environment overrides in final scheme
 
-    # Create StoreDaemonConfig from parameters
-
-    server_config = ServerConfig(
-        host=daemon_host,
-        port=daemon_port,
-        storage_path=Path(storage_path),
-        num_threads=daemon_num_thread,
-        chunk_size=ByteSize(to_num_bytes(daemon_chunk_size)),
-        mem_pool_size=ByteSize(to_num_bytes(daemon_mem_pool_size)),
-        enable_p2p_access=daemon_enable_p2p_access,
-        enable_p2p_engine=daemon_comm_enabled,
+    # Programmatically build a minimal DaemonConfig proto and write a temp config file
+    cfg = cfg_pb.DaemonConfig()
+    cfg.server.listen.host = daemon_host
+    cfg.server.listen.port = daemon_port
+    cfg.server.storage_path = (
+        str(Path(storage_path)) if storage_path else str(Path("/tmp/models"))
     )
+    cfg.server.num_threads = daemon_num_thread
+    cfg.engine.mem_pool_size_bytes = int(to_num_bytes(daemon_mem_pool_size))
+    cfg.engine.chunk_bytes = int(to_num_bytes(daemon_chunk_size))
+    # communicator defaults
+    cfg.communicator.enable_rdma = bool(daemon_comm_enabled)
+    # compatibility block for old toggles mapping
+    cfg.compatibility.auto_register_disk_loads = False
+    cfg.compatibility.confirm_requires_disk_path = False
+    cfg.compatibility.force_full_digest_on_load = False
 
-    config = StoreDaemonConfig(
-        server=server_config,
-    )
+    # Inline config support: we can now pass JSON/YAML text directly. Keep
+    # ability to write a temp file only when connect_only path needs it.
+    tmp_path: Path | None = None
+    cfg_text = None
+    if connect_only:
+        with tempfile.NamedTemporaryFile(
+            prefix="tc_daemon_", suffix=".yaml", delete=False
+        ) as tmp_cfg:
+            tmp_path = Path(tmp_cfg.name)
+        dump_daemon_config(cfg, tmp_path)
+    else:
+        # Produce compact JSON for inline CLI flag
+        from google.protobuf.json_format import MessageToJson
+
+        cfg_text = MessageToJson(cfg, always_print_fields_with_no_presence=True)
 
     daemon_address = f"{daemon_host}:{daemon_port}"
 
@@ -91,8 +107,11 @@ def init(
         # Only try to connect to existing daemon
         logger.info(f"Connecting to existing daemon at {daemon_address}...")
         manager = get_daemon_manager(
-            config=config,
-            auto_start=False,  # Don't auto-start in connect-only mode
+            host=daemon_host,
+            port=daemon_port,
+            auto_start=False,
+            config_path=str(tmp_path) if tmp_path else None,
+            config_text=cfg_text if not tmp_path else None,
         )
 
         if manager.is_daemon_running():
@@ -106,9 +125,15 @@ def init(
     elif auto_start:
         # Auto-manage daemon lifecycle
         logger.info("Initializing tensorcast with auto daemon management...")
-        success = ensure_daemon_running(
-            config=config,
+        # Pass inline config JSON directly; daemon now supports --config_text
+        from tensorcast.daemon_manager import ensure_daemon_running as _ensure
+
+        success = _ensure(
+            daemon_host,
+            daemon_port,
             auto_start=True,
+            config_path=None,
+            config_text=cfg_text,
         )
 
         if success:

@@ -195,24 +195,40 @@ class RecoveryService:
             # Compare states and generate changes
             state_changes = self._compute_state_changes(local_state, global_replicas)
 
-            # Apply state changes
-            self._apply_state_changes(worker_id, state_changes)
+            current_version = self.worker_state_versions.get(worker_id, 0)
 
-            # Update state version
-            new_version = self.worker_state_versions.get(worker_id, 0) + 1
-            self.worker_state_versions[worker_id] = new_version
+            if state_changes:
+                # Apply state changes and bump version
+                self._apply_state_changes(worker_id, state_changes)
 
-            # Compute new state checksum
-            updated_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
-            new_checksum = self._compute_state_checksum(updated_replicas)
+                updated_replicas = self.replica_repository.get_replicas_by_worker(
+                    worker_id
+                )
+                new_checksum = self._compute_state_checksum(updated_replicas)
+
+                new_version = current_version + 1
+                self.worker_state_versions[worker_id] = new_version
+            else:
+                # No-op sync: do not change version; recompute checksum from current global state
+                new_version = current_version
+                # Ensure dictionary has an entry for this worker
+                if worker_id not in self.worker_state_versions:
+                    self.worker_state_versions[worker_id] = current_version
+                new_checksum = self._compute_state_checksum(global_replicas)
 
             duration = time.time() - _start
             observe_state_sync(duration, success=True)
 
-            logger.info(
-                f"State synchronization completed for worker {worker_id}: "
-                f"{len(state_changes)} changes, version {new_version}"
-            )
+            if state_changes:
+                logger.info(
+                    f"State synchronization completed for worker {worker_id}: "
+                    f"{len(state_changes)} changes, version {new_version}"
+                )
+            else:
+                logger.info(
+                    f"State synchronization no-op for worker {worker_id}: "
+                    f"0 changes, version unchanged ({new_version})"
+                )
 
             return True, state_changes, new_version, new_checksum
 
@@ -461,11 +477,10 @@ class RecoveryService:
                 self._convert_replica_to_proto(replica) for replica in replicas
             ]
 
-            # Update state version
-            new_version = self.worker_state_versions.get(worker_id, 0) + 1
-            self.worker_state_versions[worker_id] = new_version
+            # Full-state sync is informational; do NOT bump version.
+            current_version = self.worker_state_versions.get(worker_id, 0)
 
-            # Compute checksum
+            # Compute checksum for current global state
             new_checksum = self._compute_state_checksum(replicas)
 
             duration = time.time() - _start
@@ -475,7 +490,7 @@ class RecoveryService:
                 f"Full state sync requested for worker {worker_id}: {len(replicas)} replicas"
             )
 
-            return True, proto_replicas, new_version, new_checksum
+            return True, proto_replicas, current_version, new_checksum
 
         except Exception as e:
             duration = time.time() - _start if "_start" in locals() else 0.0

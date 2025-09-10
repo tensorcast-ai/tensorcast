@@ -13,7 +13,6 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast.daemon_config import StoreDaemonConfig
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 from tensorcast.proto.daemon.v1 import (
@@ -37,8 +36,12 @@ class DaemonManager:
 
     def __init__(
         self,
-        config: StoreDaemonConfig,
+        *,
+        host: str,
+        port: int,
         auto_start: bool = True,
+        config_path: str | None = None,
+        config_text: str | None = None,
     ):
         # Initialize OTel in a library-friendly manner; if instrumentation is
         # unavailable in the environment (e.g., minimal test env), proceed
@@ -51,12 +54,13 @@ class DaemonManager:
                 exc,
             )
 
-        self.config = config
         self.auto_start = auto_start
 
-        self.server_address = f"{config.server.host}:{config.server.port}"
+        self.server_address = f"{host}:{port}"
         self.daemon_process: Optional[subprocess.Popen] = None
         self._daemon_started_by_us = False
+        self._config_path = config_path
+        self._config_text = config_text
 
         # Register cleanup function
         atexit.register(self.cleanup)
@@ -93,24 +97,12 @@ class DaemonManager:
             "-m",
             "tensorcast.cli",
             "start",
-            "--host",
-            self.config.server.host,
-            "--port",
-            str(self.config.server.port),
-            "--storage-path",
-            str(self.config.server.storage_path),
-            "--num-thread",
-            str(self.config.server.num_threads),
-            "--chunk-size",
-            f"{self.config.server.chunk_size}B",
-            "--mem-pool-size",
-            f"{self.config.server.mem_pool_size}B",
             "--non-blocking",
         ]
-        if self.config.server.enable_p2p_access:
-            cmd.extend(["--enable-p2p-access", "True"])
-        if self.config.server.enable_p2p_engine:
-            cmd.extend(["--enable-p2p-engine", "True"])
+        if self._config_text is not None:
+            cmd.extend(["--config-text", self._config_text])
+        else:
+            cmd.extend(["--config", str(self._config_path or "")])
         return cmd
 
     def _wait_until_ready(
@@ -212,10 +204,7 @@ class DaemonManager:
             return self.start_daemon()
         else:
             logger.error(
-                f"No daemon found at {self.server_address} and auto-start is disabled. "
-                f"Please start the daemon manually with: "
-                f"python -m tensorcast.cli start --storage-path {self.config.server.storage_path} "
-                f"--mem-pool-size {self.config.server.mem_pool_size}"
+                "No daemon found and auto-start is disabled. Please start the daemon manually with: python -m tensorcast.cli start --config /path/to/config.yaml"
             )
             return False
 
@@ -250,18 +239,42 @@ _global_daemon_manager: Optional[DaemonManager] = None
 
 
 def get_daemon_manager(
-    config: StoreDaemonConfig, auto_start: bool = True
+    *,
+    host: str,
+    port: int,
+    auto_start: bool = True,
+    config_path: str | None = None,
+    config_text: str | None = None,
 ) -> DaemonManager:
     """Get or create the global daemon manager instance."""
     global _global_daemon_manager
 
     if _global_daemon_manager is None:
-        _global_daemon_manager = DaemonManager(config, auto_start)
+        _global_daemon_manager = DaemonManager(
+            host=host,
+            port=port,
+            auto_start=auto_start,
+            config_path=config_path,
+            config_text=config_text,
+        )
 
     return _global_daemon_manager
 
 
-def ensure_daemon_running(config: StoreDaemonConfig, auto_start: bool = True) -> bool:
+def ensure_daemon_running(
+    host: str,
+    port: int,
+    *,
+    auto_start: bool = True,
+    config_path: str | None = None,
+    config_text: str | None = None,
+) -> bool:
     """Convenience function to ensure daemon is running."""
-    manager = get_daemon_manager(config, auto_start)
+    manager = get_daemon_manager(
+        host=host,
+        port=port,
+        auto_start=auto_start,
+        config_path=config_path,
+        config_text=config_text,
+    )
     return manager.ensure_daemon_running()

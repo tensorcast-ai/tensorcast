@@ -16,7 +16,7 @@ uv tool install pre-commit --with pre-commit-uv
 ./tools/install-bazel.sh
 
 # Dependency that need for compile
-sudo apt-get install -y libxml2
+sudo apt-get install -y libxml2 libstdc++-12-dev
 
 pre-commit install
 ```
@@ -39,8 +39,11 @@ uv venv
 
 uv sync --all-extras --all-groups --verbose
 
+# Generate proto Python code
+./tools/build_proto_python.sh
+
 # Install dependencies
-#   - BUILD_CORE means cxx files in core/
+#   - BUILD_CORE means cxx files in core/ and daemon/
 #   - BUILD_EXTENSION means cxx files in tensorcast/csrc
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
@@ -94,7 +97,7 @@ communicator:
     tcp_tos: 0
 ```
 
-Pass this to the StoreDaemon via the Python loader (see `tensorcast.daemon_config`). When `communicator` is present,
+Pass this file via `--config` when starting the daemon. When `communicator` is present,
 the daemon initializes the communication engine using these typed settings (no environment variables).
 
 

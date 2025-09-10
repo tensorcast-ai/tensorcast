@@ -2,12 +2,6 @@
 
 """CLI utilities for tensorcast."""
 
-from tensorcast.cli_utils.config_loader import (
-    ConfigError,
-    load_config,
-    print_config_summary,
-    validate_config,
-)
 from tensorcast.cli_utils.daemon import DaemonizationError, daemonize
 from tensorcast.cli_utils.pid_manager import (
     PidManagerError,
@@ -31,14 +25,10 @@ DEFAULT_LOG_FILE = "/tmp/tensorcast-daemon.log"
 
 __all__ = [
     # Exceptions
-    "ConfigError",
     "DaemonizationError",
     "PidManagerError",
     "ServiceError",
     # Config functions
-    "load_config",
-    "validate_config",
-    "print_config_summary",
     # Daemon functions
     "daemonize",
     # PID functions

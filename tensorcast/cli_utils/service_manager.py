@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -15,7 +16,6 @@ from typing import Any
 import click
 import grpc
 
-from tensorcast.cli_utils.config_loader import load_config
 from tensorcast.cli_utils.pid_manager import (
     cleanup_pid_file,
     get_process_info,
@@ -23,7 +23,7 @@ from tensorcast.cli_utils.pid_manager import (
     read_pid_file,
     stop_process,
 )
-from tensorcast.daemon_config import StoreDaemonConfig
+from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
 from tensorcast.proto.daemon.v1 import (
     store_daemon_pb2,
@@ -41,6 +41,7 @@ class ServiceError(Exception):
 
 def start_service(
     config_file: Path | None,
+    config_text: str | None,
     cli_args: dict[str, Any],
     pid_file: Path,
     log_file: Path,
@@ -76,24 +77,28 @@ def start_service(
         log_file=log_file,
     )
 
-    # Unified config is required in the final scheme (no legacy flags)
-    if config_file is None:
-        raise ServiceError("--config is required")
-    config = None
+    # Unified config is required: exactly one of file or text
+    if bool(config_file) == bool(config_text):
+        raise ServiceError(
+            "Exactly one of --config (path) or --config-text (inline) must be provided"
+        )
 
     # Check for existing daemon
     _check_existing_daemon(pid_file)
 
     # Print configuration summary
-    click.echo(f"Starting StoreDaemon with unified config: {config_file}")
+    click.echo(
+        f"Starting StoreDaemon with unified config: "
+        f"{'<inline-text>' if config_text else config_file}"
+    )
 
     # Setup signal handlers
     _setup_signal_handlers(pid_file)
 
     # Start the C++ daemon service
     _start_cpp_daemon_service(
-        config=config,
         config_path=config_file,
+        config_text=config_text,
         pid_file=pid_file,
         log_file=log_file,
         blocking=blocking,
@@ -298,11 +303,26 @@ def check_service_status(
 
     # Try to connect to the StoreDaemon and get detailed status
     try:
-        # Resolve address preference: explicit host/port -> config default
+        # Resolve address preference: explicit host/port -> stored config meta -> defaults
         if host is None or port is None:
-            config = load_config(None, {})  # default config
-            host = host or "127.0.0.1"
-            port = port or config.server.port
+            meta_path = pid_file.with_suffix(".meta.json")
+            derived_host = None
+            derived_port: int | None = None
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                cfg_path = meta.get("config_path")
+                if cfg_path:
+                    cfg = load_daemon_config(cfg_path)
+                    if getattr(cfg.server, "listen", None) is not None:
+                        if cfg.server.listen.host:
+                            derived_host = cfg.server.listen.host
+                        if cfg.server.listen.port:
+                            derived_port = int(cfg.server.listen.port)
+            except Exception:
+                pass
+
+            host = host or derived_host or "127.0.0.1"
+            port = port or derived_port or 50052
 
         # Connect to the daemon
         channel = grpc.insecure_channel(f"{host}:{port}")
@@ -346,24 +366,6 @@ def _check_existing_daemon(pid_file: Path) -> None:
     elif existing_pid:
         # Clean up stale PID file
         cleanup_pid_file(pid_file)
-
-
-def _print_startup_info(
-    config: StoreDaemonConfig,
-    blocking: bool,
-    pid_file: Path,
-    log_file: Path,
-) -> None:
-    """Print startup information."""
-    click.echo("=" * 60)
-    click.echo("StoreDaemon Starting")
-    click.echo("=" * 60)
-    click.echo(
-        f"Mode: {'Blocking (Foreground)' if blocking else 'Non-blocking (Background)'}"
-    )
-    if not blocking:
-        click.echo(f"PID File: {pid_file}")
-        click.echo(f"Log File: {log_file}")
 
 
 def _setup_signal_handlers(pid_file: Path) -> None:
@@ -416,78 +418,6 @@ def _ensure_cpp_daemon_binary() -> Path:
     )
 
 
-def _cpp_daemon_args(config: StoreDaemonConfig) -> list[str]:
-    """Translate StoreDaemonConfig to C++ daemon flags."""
-    listen = f"{config.server.host}:{config.server.port}"
-    mem_pool = int(config.server.mem_pool_size)
-    chunk = int(config.server.chunk_size)
-    args: list[str] = [
-        f"--listen_addr={listen}",
-        f"--storage_path={str(config.server.storage_path)}",
-        f"--p2p_port={config.network.p2p_port}",
-        f"--mem_pool_size={mem_pool}",
-        f"--chunk_size={chunk}",
-        f"--io_threads={config.server.num_threads}",
-    ]
-    # P2P engine toggles via file-only communicator config
-    if config.server.enable_p2p_engine:
-        # Prefer explicit communicator sub-config if provided, otherwise synthesize minimal YAML
-        import tempfile
-
-        import yaml as _yaml
-
-        comm_cfg = (
-            config.communicator.model_dump(mode="python", by_alias=False)
-            if config.communicator is not None
-            else {"enable_rdma": bool(config.server.enable_rdma)}
-        )
-        # Write to a temporary file that lives for the duration of the daemon process
-        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-            prefix="tc_comm_", suffix=".yaml", delete=False
-        )
-        tmp.write(_yaml.safe_dump(comm_cfg, sort_keys=False).encode("utf-8"))
-        tmp.flush()
-        args.append(f"--comm_config_path={tmp.name}")
-    # Global access policy for P2P
-    args.append(
-        f"--enable_p2p_access={'true' if config.server.enable_p2p_access else 'false'}"
-    )
-    # Verification & registration toggles
-    if config.server.force_full_digest_on_load:
-        args.append("--force_full_digest_on_load=true")
-    if config.server.auto_register_disk_loads:
-        args.append("--auto_register_disk_loads=true")
-    if config.server.confirm_requires_disk_path:
-        args.append("--confirm_requires_disk_path=true")
-    # Verification timeout mapping
-    if config.server.verification_timeout_status:
-        args.append(
-            f"--verification_timeout_status={config.server.verification_timeout_status}"
-        )
-    # Heartbeats and chunk sync
-    if config.global_store_address:
-        args.append(f"--global_store_addr={config.global_store_address}")
-        args.append(
-            f"--heartbeat_interval_ms={config.high_availability.heartbeat_interval_ms}"
-        )
-        args.append(
-            f"--chunk_sync_interval_ms={config.high_availability.chunk_sync_interval_ms}"
-        )
-    # PID eviction policy
-    if config.lifecycle.evict_on_dead_pid:
-        args.append("--evict_on_dead_pid=true")
-    # Optional periodic eviction policy
-    if config.lifecycle.enable_periodic_eviction:
-        args.append("--enable_periodic_eviction=true")
-        args.append(
-            f"--eviction_check_interval_ms={int(config.lifecycle.eviction_check_interval_s * 1000)}"
-        )
-        args.append(
-            f"--gpu_memory_limit_fraction={config.lifecycle.gpu_memory_limit_fraction}"
-        )
-    return args
-
-
 def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:
     """Poll GetServerConfig until the daemon responds or times out."""
     deadline = time.time() + timeout_s
@@ -506,8 +436,8 @@ def _wait_grpc_ready(host: str, port: int, timeout_s: float = 20.0) -> bool:
 
 def _start_cpp_daemon_service(
     *,
-    config: StoreDaemonConfig | None,
     config_path: Path | None,
+    config_text: str | None,
     pid_file: Path,
     log_file: Path,
     blocking: bool,
@@ -515,8 +445,12 @@ def _start_cpp_daemon_service(
 ) -> None:
     """Start the C++ daemon binary in foreground or background without waiting for readiness."""
     bin_path = _ensure_cpp_daemon_binary()
-    assert config_path is not None
-    args = [str(bin_path), f"--config={config_path}"]
+    args = [str(bin_path)]
+    if config_text is not None:
+        args.append(f"--config_text={config_text}")
+    else:
+        assert config_path is not None
+        args.append(f"--config={config_path}")
 
     if blocking:
         # Foreground: run binary attached to this terminal, write child PID, wait, cleanup.
@@ -529,6 +463,7 @@ def _start_cpp_daemon_service(
             try:
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
                 pid_file.write_text(str(proc.pid))
+                _write_meta(pid_file, config_path, config_text)
                 logger.info("PID %d written to %s", proc.pid, pid_file)
             except Exception as e:
                 proc.terminate()
@@ -552,6 +487,7 @@ def _start_cpp_daemon_service(
     try:
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(proc.pid))
+        _write_meta(pid_file, config_path, config_text)
         logger.info("(bg) PID %d written to %s", proc.pid, pid_file)
     except Exception as e:
         click.echo(f"Warning: failed to write PID file: {e}", err=True)
@@ -563,3 +499,24 @@ def _start_cpp_daemon_service(
 
 def _metrics_pid_file(pid_file: Path) -> Path:  # Deprecated; kept for import stability
     return pid_file  # No-op; auxiliary metrics server removed
+
+
+def _write_meta(
+    pid_file: Path, config_path: Path | None, config_text: str | None
+) -> None:
+    """Write a small metadata file adjacent to PID with the config reference."""
+    try:
+        import json
+
+        meta_path = pid_file.with_suffix(".meta.json")
+        meta = {}
+        if config_path is not None:
+            meta["config_path"] = str(config_path)
+        if config_text is not None:
+            # Do not store full text (could be large); store a marker and length
+            meta["config_inline"] = True  # type: ignore[assignment]
+            meta["config_inline_len"] = len(config_text)  # type: ignore[assignment]
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    except Exception:
+        # Non-fatal
+        pass

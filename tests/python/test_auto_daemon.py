@@ -11,38 +11,29 @@ This module tests the automatic daemon lifecycle management:
 """
 
 import time
-import pytest
+from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from tensorcast.daemon_manager import DaemonManager, ensure_daemon_running
-from tensorcast.daemon_config import StoreDaemonConfig, ServerConfig
 from tensorcast.logger import init_logger
-from pathlib import Path
-from pydantic import ByteSize
+from google.protobuf.json_format import MessageToJson
+from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
 
 logger = init_logger(__name__)
 
 
 @pytest.fixture
 def test_storage_path(tmp_path):
-    """Provide a temporary storage path for testing."""
+    """Provide a temporary storage path for testing (not used by new API)."""
     return str(tmp_path / "test-models")
 
 
 @pytest.fixture
-def daemon_manager(test_storage_path):
+def daemon_manager():
     """Create a DaemonManager instance for testing."""
-    config = StoreDaemonConfig(
-        server=ServerConfig(
-            storage_path=Path(test_storage_path),
-            mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),  # 4GB for testing
-        ),
-        global_store_address=None,
-    )
-    manager = DaemonManager(
-        config=config,
-        auto_start=True,
-    )
+    manager = DaemonManager(host="127.0.0.1", port=65000, auto_start=False)
     yield manager
     # Cleanup is handled automatically by DaemonManager
 
@@ -52,12 +43,8 @@ class TestDaemonManager:
 
     def test_daemon_manager_initialization(self, daemon_manager, test_storage_path):
         """Test DaemonManager initialization with proper parameters."""
-        assert str(daemon_manager.config.server.storage_path) == test_storage_path
-        assert daemon_manager.config.server.mem_pool_size == ByteSize(
-            4 * 1024 * 1024 * 1024
-        )
-        assert daemon_manager.auto_start is True
-        assert daemon_manager.server_address is not None
+        assert isinstance(daemon_manager.auto_start, bool)
+        assert daemon_manager.server_address == "127.0.0.1:65000"
 
     def test_daemon_not_running_initially(self, daemon_manager):
         """Test that daemon is not running initially in a clean test environment."""
@@ -105,6 +92,7 @@ class TestDaemonManager:
     ):
         """Test ensuring daemon running when it's not initially running."""
         # Mock daemon as not running initially
+        daemon_manager.auto_start = True
         mock_is_running.return_value = False
         mock_start_daemon.return_value = True
 
@@ -134,16 +122,22 @@ class TestConvenienceFunction:
 
     def test_ensure_daemon_running_convenience_function(self, test_storage_path):
         """Test the ensure_daemon_running convenience function."""
-        config = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(test_storage_path),
-                mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
+        # Build minimal DaemonConfig per unified config design
+        host = "127.0.0.1"
+        port = 65010
+        cfg = cfg_pb.DaemonConfig()
+        cfg.server.listen.host = host
+        cfg.server.listen.port = port
+        cfg.server.storage_path = str(Path(test_storage_path))
+        cfg.engine.mem_pool_size_bytes = 4 * 1024 * 1024 * 1024
+
+        cfg_json = MessageToJson(cfg, always_print_fields_with_no_presence=True)
+
         success = ensure_daemon_running(
-            config=config,
+            host,
+            port,
             auto_start=True,
+            config_text=cfg_json,
         )
 
         assert isinstance(success, bool)
@@ -159,35 +153,14 @@ class TestConvenienceFunction:
         # Mock ensure_daemon_running to return True
         mock_ensure_running.return_value = True
 
-        config = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(test_storage_path),
-                mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        success = ensure_daemon_running(
-            config=config,
-            auto_start=True,
-        )
+        success = ensure_daemon_running("127.0.0.1", 65001, auto_start=True)
 
         assert success is True
         mock_ensure_running.assert_called_once()
 
     def test_convenience_function_with_different_params(self, test_storage_path):
         """Test convenience function with different parameter combinations."""
-        # Test with different memory pool size
-        config = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(test_storage_path),
-                mem_pool_size=ByteSize(2 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        success = ensure_daemon_running(
-            config=config,
-            auto_start=False,
-        )
+        success = ensure_daemon_running("127.0.0.1", 65002, auto_start=False)
         assert isinstance(success, bool)
 
 
@@ -240,6 +213,7 @@ class TestErrorHandling:
     ):
         """Test handling of daemon start failure."""
         # Mock daemon as not running and start failing
+        daemon_manager.auto_start = True
         mock_is_running.return_value = False
         mock_start_daemon.return_value = False
 
@@ -248,43 +222,7 @@ class TestErrorHandling:
         assert success is False
         mock_start_daemon.assert_called_once()
 
-    def test_invalid_storage_path(self, tmp_path):
-        """Test DaemonManager with invalid storage path."""
-        # Use a path that doesn't exist and can't be created
-        invalid_path = "/invalid/path/that/cannot/be/created"
-
-        config = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(invalid_path),
-                mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        manager = DaemonManager(
-            config=config,
-            auto_start=True,
-        )
-
-        # The manager should be created but may fail when trying to ensure daemon is running
-        assert str(manager.config.server.storage_path) == str(
-            Path(invalid_path).resolve()
-        )
-
-    def test_invalid_memory_size(self, test_storage_path):
-        """Test DaemonManager with invalid memory size."""
-        # Test with invalid memory size format - this should raise a validation error
-        with pytest.raises(ValueError):
-            config = StoreDaemonConfig(
-                server=ServerConfig(
-                    storage_path=Path(test_storage_path),
-                    mem_pool_size="invalid_size",  # This will trigger validation error
-                ),
-                global_store_address=None,
-            )
-            DaemonManager(
-                config=config,
-                auto_start=True,
-            )
+    # Removed tests relying on legacy Pydantic daemon_config validation
 
 
 class TestIntegration:
@@ -293,26 +231,13 @@ class TestIntegration:
     def test_full_integration_workflow(self, test_storage_path):
         """Test the full integration workflow using both manager and convenience function."""
         # Test with DaemonManager
-        config = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(test_storage_path),
-                mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        manager = DaemonManager(
-            config=config,
-            auto_start=True,
-        )
+        manager = DaemonManager(host="127.0.0.1", port=65003, auto_start=False)
 
         manager_success = manager.ensure_daemon_running()
         assert isinstance(manager_success, bool)
 
         # Test with convenience function
-        convenience_success = ensure_daemon_running(
-            config=config,
-            auto_start=True,
-        )
+        convenience_success = ensure_daemon_running("127.0.0.1", 65003, auto_start=False)
         assert isinstance(convenience_success, bool)
 
         # Both should work consistently
@@ -324,29 +249,25 @@ class TestIntegration:
         path1 = str(tmp_path / "models1")
         path2 = str(tmp_path / "models2")
 
-        config1 = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(path1),
-                mem_pool_size=ByteSize(2 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        manager1 = DaemonManager(
-            config=config1,
-            auto_start=True,
-        )
+        # Manager 1 config
+        host1, port1 = "127.0.0.1", 65011
+        cfg1 = cfg_pb.DaemonConfig()
+        cfg1.server.listen.host = host1
+        cfg1.server.listen.port = port1
+        cfg1.server.storage_path = path1
+        cfg1.engine.mem_pool_size_bytes = 2 * 1024 * 1024 * 1024
+        cfg1_json = MessageToJson(cfg1, always_print_fields_with_no_presence=True)
+        manager1 = DaemonManager(host=host1, port=port1, auto_start=True, config_text=cfg1_json)
 
-        config2 = StoreDaemonConfig(
-            server=ServerConfig(
-                storage_path=Path(path2),
-                mem_pool_size=ByteSize(4 * 1024 * 1024 * 1024),
-            ),
-            global_store_address=None,
-        )
-        manager2 = DaemonManager(
-            config=config2,
-            auto_start=True,
-        )
+        # Manager 2 config
+        host2, port2 = "127.0.0.1", 65012
+        cfg2 = cfg_pb.DaemonConfig()
+        cfg2.server.listen.host = host2
+        cfg2.server.listen.port = port2
+        cfg2.server.storage_path = path2
+        cfg2.engine.mem_pool_size_bytes = 4 * 1024 * 1024 * 1024
+        cfg2_json = MessageToJson(cfg2, always_print_fields_with_no_presence=True)
+        manager2 = DaemonManager(host=host2, port=port2, auto_start=True, config_text=cfg2_json)
 
         success1 = manager1.ensure_daemon_running()
         success2 = manager2.ensure_daemon_running()
@@ -355,9 +276,4 @@ class TestIntegration:
         assert isinstance(success2, bool)
 
         # Both managers should be independent
-        assert (
-            manager1.config.server.storage_path != manager2.config.server.storage_path
-        )
-        assert (
-            manager1.config.server.mem_pool_size != manager2.config.server.mem_pool_size
-        )
+        assert manager1.server_address != manager2.server_address

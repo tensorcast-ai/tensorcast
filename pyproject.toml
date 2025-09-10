@@ -37,6 +37,7 @@ dev = [
     "einops>=0.8.1",
     "grpcio-tools<=1.73.1",
     "httpx>=0.28.1",
+    "huggingface-hub[hf-xet]>=0.30.2",
     "hypothesis>=6.135.26",
     "ipdb>=0.13.13",
     "ipynb>=0.5.1",
