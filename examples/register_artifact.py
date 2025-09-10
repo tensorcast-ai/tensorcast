@@ -10,7 +10,7 @@ from tensorcast.api import register_artifact
 from tensorcast.api._config import RegisterArtifactOptions
 from tensorcast.types import ArtifactDescriptor
 
-init()
+init(daemon_port=50052, connect_only=True)
 
 hf_model_name = "Qwen/Qwen3-0.6B"
 # Load a artifact from HuggingFace artifact hub.
