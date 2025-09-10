@@ -1,5 +1,5 @@
 database:
-  db_file: /var/lib/tensorcast/global_store.db
+  db_file: null
 server:
   listen:
     host: 0.0.0.0
@@ -19,7 +19,7 @@ web_ui:
   cors_allowed_origins: ["*"]
 observability:
   otel:
-    enabled: true
+    enabled: false
     exporter_otlp_endpoint: http://127.0.0.1:4317
     exporter_protocol: grpc
     service_name: tensorcast-global-store

@@ -21,6 +21,7 @@
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src
 -Iexternal/gsl+
+-Iexternal/yaml-cpp+/include
 -Iexternal/opentelemetry-cpp+/api/include
 -Iexternal/opentelemetry-cpp+/sdk/include
 -Iexternal/opentelemetry-cpp+/exporters/otlp/include

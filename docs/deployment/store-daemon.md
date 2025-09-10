@@ -35,6 +35,7 @@ Metrics are exposed via the unified system; the daemon no longer provides an HTT
 ## Configuration
 
 All runtime parameters are configured via the unified config. See `examples/config/store_daemon_config.yaml`.
+Enum fields accept friendly values and are normalized (case-insensitive): `observability.otel.exporter_protocol: grpc | http/protobuf`, `observability.logging.level: debug|info|warn|error`.
 ```yaml
 network:
 high_availability:

@@ -16,6 +16,11 @@ namespace tensorcast::common::config {
 // - Normalizes enums from convenient strings (e.g., logging.level: INFO)
 absl::StatusOr<tensorcast::config::v1::DaemonConfig> load_daemon_config_from_file(const std::string& path);
 
+// Load DaemonConfig from inline YAML/JSON text and normalize defaults.
+// Content may be provided in either YAML or JSON; YAML parser is attempted first
+// and falls back to JSON parsing. Unknown fields are rejected strictly.
+absl::StatusOr<tensorcast::config::v1::DaemonConfig> load_daemon_config_from_text(const std::string& content);
+
 // Apply runtime defaults to partially filled config (proto3 has no field defaults).
 // Only numeric/time-like defaults are applied to avoid overriding explicit false booleans.
 void normalize_defaults(tensorcast::config::v1::DaemonConfig* cfg);

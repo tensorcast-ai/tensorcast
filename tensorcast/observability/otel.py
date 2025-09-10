@@ -195,6 +195,10 @@ def setup_otel_from_observability(obs: Any, role: str) -> bool:
         if _OTEL_INITIALIZED:
             return True
 
+        # Respect explicit disable: do nothing when not enabled
+        if not getattr(obs.otel, "enabled", False):
+            return False
+
         # Resource
         service_name = obs.otel.service_name or "tensorcast"
         try:
@@ -235,20 +239,17 @@ def setup_otel_from_observability(obs: Any, role: str) -> bool:
         provider = TracerProvider(resource=resource, sampler=sampler)
 
         # Exporter
-        exporter = None
-        if obs.otel.enabled:
-            proto = obs.otel.exporter_protocol
-            endpoint = obs.otel.exporter_otlp_endpoint or "http://127.0.0.1:4317"
-            if (
-                proto == obs.OTelProtocol.O_TEL_PROTOCOL_HTTP_PROTOBUF
-                and HttpExporter is not None
-            ):
-                exporter = HttpExporter(endpoint=endpoint)
-            else:
-                exporter = GrpcExporter(endpoint=endpoint)
+        proto = obs.otel.exporter_protocol
+        endpoint = obs.otel.exporter_otlp_endpoint or "http://127.0.0.1:4317"
+        if (
+            proto == obs.OTelProtocol.O_TEL_PROTOCOL_HTTP_PROTOBUF
+            and HttpExporter is not None
+        ):
+            exporter = HttpExporter(endpoint=endpoint)
+        else:
+            exporter = GrpcExporter(endpoint=endpoint)
 
-        if exporter is not None:
-            provider.add_span_processor(BatchSpanProcessor(exporter))
+        provider.add_span_processor(BatchSpanProcessor(exporter))
 
         trace.set_tracer_provider(provider)
         _instrument_grpc()
@@ -276,17 +277,13 @@ def _has_active_sdk_provider() -> bool:
 def ensure_client_otel(
     service_default: str = "tensorcast-client", role: str = "client"
 ) -> None:
-    """Ensure OTel is active with strict behavior and auto-init by default.
+    """Ensure OTel is configured for client SDK when explicitly enabled.
 
-    Behavior (strict):
-    - If an SDK TracerProvider is already installed, ensure gRPC instrumentation
-      is active (idempotent) and return.
-    - Otherwise, auto-initialize the SDK + exporter by default (as if
-      `TC_OTEL_CLIENT_AUTO_INIT=1`). Set `TC_OTEL_CLIENT_AUTO_INIT=0` to disable
-      auto-init explicitly; in that case we raise a clear error.
-
-    Fail fast on configuration/instrumentation errors to avoid silently losing
-    observability in environments where OTel is expected to be present.
+    Default behavior: do not auto-initialize OpenTelemetry for the client SDK.
+    - If an SDK TracerProvider is already installed by the application, ensure
+      gRPC instrumentation is active (idempotent) and return.
+    - Otherwise, initialize only when client config provides
+      `observability.otel.enabled: true`.
     """
     if _has_active_sdk_provider():
         # Respect the application's provider; just ensure instrumentation.
@@ -300,10 +297,11 @@ def ensure_client_otel(
     cfg = get_client_config()
     if cfg is not None and cfg.HasField("observability"):
         obs: commonpb.Observability = cfg.observability
-        setup_otel_from_observability(obs, role)
+        # Initialize only when explicitly enabled
+        if getattr(obs.otel, "enabled", False):
+            setup_otel_from_observability(obs, role)
         return
-    # Default to programmatic init (no env): set up SDK with default resource
-    setup_otel(service_default, role)
+    # No client config or observability not provided → default off (no-op)
 
 
 def set_span_attributes(attrs: dict[str, Any]) -> None:

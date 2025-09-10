@@ -7,6 +7,7 @@ llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
 llvm.toolchain(
     llvm_version = "19.1.1",
     sha256 = {"linux-x86_64": "8204de000b6a6921f0572e038336601e3225898e9a253c8aaa43b0a5fae8a4ce"},
+    stdlib = {"linux-x86_64": "stdc++"},
     strip_prefix = {
         "linux-x86_64": "LLVM-19.1.1-Linux-X64",
     },

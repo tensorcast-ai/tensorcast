@@ -37,7 +37,7 @@ Components & Entry Points
 - Python
   - Initialization: `tensorcast/observability/otel.py` sets Tracer/Meter/Logger providers and gRPC instrumentation.
   - Global Store: initialize OTel at process start and instrument RPC handlers in `tensorcast/global_store/grpc_service.py`.
-  - Clients & APIs: client init in `tensorcast/daemon_ctl.py` and high-level APIs in `tensorcast/api` create parent spans and attach low-cardinality `tc.*` attributes.
+  - Clients & APIs: client init in `tensorcast/daemon_ctl.py` and high-level APIs in `tensorcast/api` create parent spans and attach low-cardinality `tc.*` attributes. Client SDK defaults to OTel disabled; enable by setting `observability.otel.enabled: true` in `ClientConfig`.
   - Logs/Metrics: `tensorcast/logger.py` injects `trace_id`/`span_id`; `tensorcast/global_store/metrics.py` defines `tc_*` metrics.
 - C++
   - Initialization: `core/common/otel/init.h/.cc` provides `init_from_config(obs, role)`; call from daemon/server entry.
@@ -92,6 +92,7 @@ None. This design does not introduce or modify persistent data schemas.
 # Compatibility & Acceptance Criteria
 
 Compatibility
+- Client SDK default: OTel is disabled unless explicitly enabled via `ClientConfig` (`observability.otel.enabled: true`).
 - Default behavior is no-op if exporters are disabled or sampling=0.
 - Existing `SC_TRACE_*` macro semantics are preserved via the bridge.
 - Cross-language propagation uses W3C Trace Context; legacy code without OTel remains functional.

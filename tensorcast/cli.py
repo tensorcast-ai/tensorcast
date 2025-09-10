@@ -2,6 +2,7 @@
 
 """tensorcast command-line interface."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,9 +31,15 @@ def cli():
 @click.option(
     "--config",
     "-c",
-    required=True,
+    required=False,
     type=click.Path(exists=True, path_type=Path),
     help="Path to unified daemon config (YAML/JSON)",
+)
+@click.option(
+    "--config-text",
+    required=False,
+    type=str,
+    help="Inline daemon config as YAML/JSON text (mutually exclusive with --config)",
 )
 @click.option(
     "--verbose",
@@ -61,8 +68,14 @@ def cli():
 def start(**kwargs):
     """Start the StoreDaemon service."""
     try:
-        # Extract config file if provided
+        # Extract config file/text if provided
         config_file = kwargs.pop("config")
+        config_text = kwargs.pop("config_text")
+
+        if bool(config_file) == bool(config_text):
+            raise ServiceError(
+                "Exactly one of --config or --config-text must be provided"
+            )
 
         # Extract service management options
         pid_file = kwargs.pop("pid_file")
@@ -73,6 +86,7 @@ def start(**kwargs):
         # Start the service
         start_service(
             config_file=config_file,
+            config_text=config_text,
             cli_args={},
             pid_file=pid_file,
             log_file=log_file,
@@ -162,7 +176,13 @@ def restart(ctx: click.Context, pid_file: Path, force: bool):
     # Note: This assumes the service will use the same configuration
     # as before. For full restart with new options, use stop then start.
     click.echo("Starting service...")
-    ctx.invoke(start, pid_file=pid_file)
+
+    meta_path = pid_file.with_suffix(".meta.json")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    cfg_path = meta.get("config_path")
+    if not cfg_path:
+        raise FileNotFoundError("config_path missing in meta")
+    ctx.invoke(start, pid_file=pid_file, config=Path(cfg_path))
 
 
 def main():

@@ -15,7 +15,7 @@ engine:
   pinned_allocation_timeout: 30s
   p2p_fallback_disk_dir: ""
 high_availability:
-  enabled: false
+  enabled: true
   global_store_endpoints:
     - host: 127.0.0.1
       port: 50051

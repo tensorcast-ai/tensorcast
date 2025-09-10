@@ -12,6 +12,7 @@ except Exception:  # noqa: BLE001
 
 from google.protobuf import json_format as _pb_json
 
+from tensorcast.common.config.normalize import normalize_enum_aliases_inplace
 from tensorcast.proto.config.v1 import client_config_pb2 as cc_pb2
 
 
@@ -26,5 +27,7 @@ def load_client_config(path: str) -> cc_pb2.ClientConfig:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     pb = cc_pb2.ClientConfig()
+    if isinstance(data, dict):
+        normalize_enum_aliases_inplace(data, cc_pb2.ClientConfig.DESCRIPTOR)
     _pb_json.ParseDict(data, pb, ignore_unknown_fields=False)
     return pb

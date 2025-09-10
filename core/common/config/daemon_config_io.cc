@@ -361,4 +361,47 @@ absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_file(const std::strin
   return cfg;
 }
 
+absl::StatusOr<tcfg::DaemonConfig> load_daemon_config_from_text(const std::string& content) {
+  tcfg::DaemonConfig cfg;
+
+  if (content.empty()) {
+    return absl::InvalidArgumentError("Inline config text is empty");
+  }
+
+  nlohmann::json root_json;
+  // Try YAML first, then fall back to JSON
+  try {
+    YAML::Node root = YAML::Load(content);
+    if (!root.IsNull()) {
+      root_json = yaml_node_to_json(root);
+    } else {
+      // Empty YAML treated as empty object
+      root_json = nlohmann::json::object();
+    }
+  } catch (const std::exception&) {
+    try {
+      root_json = nlohmann::json::parse(content);
+    } catch (const std::exception& e) {
+      return absl::InvalidArgumentError(absl::StrCat("Parse error (YAML/JSON): ", e.what()));
+    }
+  }
+
+  // Normalize before protobuf parsing
+  normalize_enum_aliases(root_json);
+  normalize_size_fields(root_json);
+  normalize_duration_fields(root_json);
+
+  const std::string json_text = root_json.dump();
+
+  google::protobuf::util::JsonParseOptions opts;
+  opts.ignore_unknown_fields = false; // strict
+  auto status = google::protobuf::util::JsonStringToMessage(json_text, &cfg, opts);
+  if (!status.ok()) {
+    return absl::InvalidArgumentError(absl::StrCat("JSON->Proto parse error: ", status.message()));
+  }
+
+  normalize_defaults(&cfg);
+  return cfg;
+}
+
 } // namespace tensorcast::common::config

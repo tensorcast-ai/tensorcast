@@ -12,7 +12,6 @@
 #include "core/common/otel/init.h"
 #include "core/common/otel/logging_sink.h"
 #include "core/common/trace/trace_manager.h"
-#include "core/communicator/config_io.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
@@ -27,20 +26,26 @@
 #include <sstream>
 
 ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
+ABSL_FLAG(std::string, config_text, "", "Inline daemon config as YAML/JSON text (mutually exclusive with --config)");
 ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicasV2");
+
+using namespace tensorcast;
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
 
   // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
-  // Load unified config
+  // Load unified config from either --config (file) or --config_text (inline)
   const std::string cfg_path = absl::GetFlag(FLAGS_config);
-  if (cfg_path.empty()) {
-    LOG(ERROR) << "--config is required (path to daemon YAML/JSON). See examples/config/store_daemon_config.yaml";
+  const std::string cfg_text = absl::GetFlag(FLAGS_config_text);
+  if (cfg_path.empty() == cfg_text.empty()) {
+    LOG(ERROR) << "Exactly one of --config (path) or --config_text (inline YAML/JSON) must be provided";
     return 2;
   }
-  auto cfg_or = tensorcast::common::config::load_daemon_config_from_file(cfg_path);
+  absl::StatusOr<config::v1::DaemonConfig> cfg_or = cfg_text.empty()
+      ? common::config::load_daemon_config_from_file(cfg_path)
+      : common::config::load_daemon_config_from_text(cfg_text);
   if (!cfg_or.ok()) {
     LOG(ERROR) << "Failed to load config: " << cfg_or.status();
     return 2;
@@ -48,10 +53,10 @@ int main(int argc, char** argv) {
   const auto& cfg = *cfg_or;
 
   // Configure CUDA debug toggles
-  tensorcast::cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
+  cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
 
   // Map config to StoreEngineOptions
-  tensorcast::store::StoreEngineOptions opts;
+  store::StoreEngineOptions opts;
   opts.storage_path = cfg.server().storage_path();
   opts.num_thread = static_cast<int>(cfg.server().num_threads());
   opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
@@ -66,17 +71,16 @@ int main(int argc, char** argv) {
   }
   opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
 
-  // Communicator setup (optional)
-  std::shared_ptr<tensorcast::store::components::CommunicationManager> comm_mgr;
-  const bool enable_rdma = cfg.communicator().enable_rdma();
+  // Communicator setup (always create; RDMA enable is a config toggle inside engine)
+  std::shared_ptr<store::components::CommunicationManager> comm_mgr;
   uint16_t p2p_port = 0;
   std::string p2p_host = cfg.server().listen().host();
   if (cfg.server().has_p2p_listen()) {
     p2p_host = cfg.server().p2p_listen().host().empty() ? p2p_host : cfg.server().p2p_listen().host();
     p2p_port = static_cast<uint16_t>(cfg.server().p2p_listen().port());
   }
-  if (enable_rdma) {
-    comm_mgr = std::make_shared<tensorcast::store::components::CommunicationManager>();
+  comm_mgr = std::make_shared<store::components::CommunicationManager>();
+  {
     auto st = comm_mgr->initialize_with_config(p2p_host, p2p_port, cfg.communicator());
     if (!st.ok()) {
       LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
@@ -96,19 +100,19 @@ int main(int argc, char** argv) {
   opts.force_full_digest_on_load = cfg.compatibility().force_full_digest_on_load();
 
   // Apply logging level/VLOG, install optional sinks, then initialize OTel
-  tensorcast::common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
-  tensorcast::common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
-  (void)tensorcast::common::otel::init_from_config(cfg.observability(), "store-daemon");
-  tensorcast::common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
+  common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
+  common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
+  (void)common::otel::init_from_config(cfg.observability(), "store-daemon");
+  common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
   // Configure Chrome trace directory (optional)
   if (!cfg.observability().tracing().chrome_trace_dir().empty()) {
-    tensorcast::common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
+    common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
   }
 
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(opts);
+  auto engine = std::make_shared<store::StoreEngine>(opts);
 
   // Map lifecycle options into service options
-  tensorcast::daemon::StoreDaemonServiceImpl::Options svc_opts;
+  daemon::StoreDaemonServiceImpl::Options svc_opts;
   if (cfg.lifecycle().has_sessions_ttl()) {
     const auto& d = cfg.lifecycle().sessions_ttl();
     svc_opts.sessions_ttl = std::chrono::seconds(d.seconds());
@@ -144,7 +148,7 @@ int main(int argc, char** argv) {
   // Feature flags (override via flags for now)
   svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
 
-  tensorcast::daemon::StoreDaemonServiceImpl service(engine, svc_opts);
+  daemon::StoreDaemonServiceImpl service(engine, svc_opts);
 
   // gRPC server
   const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
@@ -209,9 +213,9 @@ int main(int argc, char** argv) {
   LOG(INFO) << "tensorcast-daemon listening on " << listen_addr;
 
   // Start worker lifecycle if configured
-  std::unique_ptr<tensorcast::daemon::WorkerLifecycleManager> lifecycle;
+  std::unique_ptr<daemon::WorkerLifecycleManager> lifecycle;
   if (!gs_addr.empty() && cfg.high_availability().enabled()) {
-    tensorcast::daemon::WorkerLifecycleManager::Options lopts;
+    daemon::WorkerLifecycleManager::Options lopts;
     lopts.global_store_addr = gs_addr;
     lopts.listen_addr = listen_addr;
     lopts.p2p_port = p2p_port;
@@ -223,7 +227,7 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().periodic_sync_interval();
       lopts.chunk_sync_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
-    lifecycle = std::make_unique<tensorcast::daemon::WorkerLifecycleManager>(engine, &service, lopts);
+    lifecycle = std::make_unique<daemon::WorkerLifecycleManager>(engine, &service, lopts);
     auto st = lifecycle->start();
     if (!st.ok()) {
       LOG(WARNING) << "Worker lifecycle start failed: " << st.message();

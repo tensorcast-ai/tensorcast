@@ -30,8 +30,8 @@ build --cxxopt="-Werror=switch"
 build --cxxopt="-fdiagnostics-color=always"
 build --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
-build --cxxopt="-stdlib=libstdc++"
-build --linkopt=-lstdc++
+build --cxxopt="-Xclang"
+build --cxxopt="-fno-cxx-modules"
 
 build:asan --copt=-fsanitize=address
 build:asan --linkopt=-fsanitize=address

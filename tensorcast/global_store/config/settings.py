@@ -10,6 +10,7 @@ import yaml
 from google.protobuf import json_format as _pb_json
 from pydantic import BaseModel
 
+from tensorcast.common.config.normalize import normalize_enum_aliases_inplace
 from tensorcast.proto.config.v1 import (
     global_store_config_pb2 as gsc_pb2,
 )
@@ -80,6 +81,9 @@ class GlobalStoreConfig(BaseModel):
 
         # Parse into proto (strict)
         pb = gsc_pb2.GlobalStoreConfig()
+        # Normalize user-friendly enum strings (e.g., grpc, INFO) before parsing
+        if isinstance(data, dict):
+            normalize_enum_aliases_inplace(data, gsc_pb2.GlobalStoreConfig.DESCRIPTOR)
         _pb_json.ParseDict(data, pb, ignore_unknown_fields=False)
 
         # Map to Pydantic
@@ -160,6 +164,8 @@ class GlobalStoreConfig(BaseModel):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         pb = gsc_pb2.GlobalStoreConfig()
+        if isinstance(data, dict):
+            normalize_enum_aliases_inplace(data, gsc_pb2.GlobalStoreConfig.DESCRIPTOR)
         _pb_json.ParseDict(data, pb, ignore_unknown_fields=False)
         return pb
 
