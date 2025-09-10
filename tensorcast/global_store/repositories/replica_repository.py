@@ -76,6 +76,7 @@ class ReplicaRepository(BaseRepository):
             SELECT
                 mr.replica_id,
                 mr.artifact_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -524,10 +525,10 @@ class ReplicaRepository(BaseRepository):
         # Build dynamic query joining with replica_counters
         query = (
             "SELECT "
-            "mr.replica_id, mr.artifact_id, mr.node_id, mr.node_address, mr.node_port, "
+            "mr.replica_id, mr.artifact_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
             "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
             "COALESCE(rc.current_requests, 0) AS current_requests, "
-            "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.worker_id, "
+            "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.verification_json, mr.worker_id, "
             "mr.created_at, mr.updated_at "
             "FROM artifact_replicas mr "
             "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
@@ -601,6 +602,7 @@ class ReplicaRepository(BaseRepository):
             SELECT
                 mr.replica_id,
                 mr.artifact_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -673,6 +675,7 @@ class ReplicaRepository(BaseRepository):
             SELECT
                 mr.replica_id,
                 mr.artifact_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -708,6 +711,7 @@ class ReplicaRepository(BaseRepository):
             SELECT
                 mr.replica_id,
                 mr.artifact_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
@@ -761,6 +765,7 @@ class ReplicaRepository(BaseRepository):
             SELECT
                 mr.replica_id,
                 mr.artifact_id,
+                mr.disk_path,
                 mr.node_id,
                 mr.node_address,
                 mr.node_port,
