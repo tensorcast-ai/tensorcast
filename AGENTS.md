@@ -183,6 +183,8 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
   - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
 
+- When authoring any design or plan document, follow the repository’s documentation system specification in [0001-docs-system-reorg-design](./docs/designs/0001-docs-system-reorg-design.md) for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
+
 
 ## Coding Standards
 
@@ -315,25 +317,6 @@ if (fd < 0) {
 
 
 ## Development Principles
-
-### Software Design Philosophy
-
-#### Complexity Reduction
-- **Strategic Programming**: Work for the team and future maintainers, not just yourself. Always prioritize code that is easy to understand, modify, and extend over clever or overly optimized solutions.
-- **Deep Modules**: Create modules with simple interfaces but powerful functionality. Avoid shallow modules/functions/classes that only a simple wrapper over a few lines of code.
-- **Minimize Optional Types**: Avoid Optional[T] and Result[T, E] unless absolutely necessary
-- **Layer Architecture**: Each layer should only import from layers below it.
-- **Information Hiding**: Keep implementation details private, expose only what's necessary
-
-#### Comment-First Development
-1. Write the interface comment first
-2. Comments should describe the "what" and "why", not the "how"
-
-#### Error Handling Philosophy
-- Define errors out of existence when possible
-- Use exceptions for exceptional cases
-- Always make common errors impossible through API design
-- Avoid partial failures - operations should be atomic
 
 ### Code Fixing and Testing
 - When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.

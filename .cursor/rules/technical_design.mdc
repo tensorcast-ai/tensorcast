@@ -2,57 +2,10 @@
 description: Technical design guidelines
 alwaysApply: false
 ---
-# Technical Design Document Guidelines
 
-## Document Naming & Location
-- **Path**: `rfcs/`
-- **Format**: `NNNN-feature-name.md` (e.g., `0001-p2p-optimization.md`)
+# Technical Design Index
 
-## Document Structure
-
-### 1. Title
-```markdown
-# NNNN-Feature Technical Design
-```
-
-### 2. Overview
-- Problem statement
-- Goals and success criteria
-- High-level solution summary
-
-### 3. Current Architecture Analysis
-- Existing components and pain points
-- Performance bottlenecks
-- Files and modules affected
-
-### 4. Proposed Solution
-- Core architectural changes
-- Implementation approach
-- Trade-offs and alternatives considered
-
-### 5. Implementation Plan
-- Phased approach with milestones
-- File modification table
-- API changes (internal vs external)
-
-### 6. Progress Tracking
-```markdown
-| Phase | Task | Status | Notes |
-|-------|------|--------|-------|
-| 1 | Core refactor | ✅ Done | PR #123 |
-| 2 | API migration | 🚧 In Progress | |
-| 3 | Testing | ⏳ Pending | |
-```
-
-## Key Requirements
-- **Specific**: List exact files and changes
-- **Actionable**: Clear implementation steps
-- **Measurable**: Define success metrics
-- **Code References**: Use `\`\`\`startLine:endLine:filepath` format
-- **Visual**: Include Mermaid diagrams
-- **Timeline Agnostic**: Focus on implementation phases, not time estimates
-
-## Update Practices
-- Keep status current during implementation
-- Document blockers and solutions
-- Link to relevant PRs and issues
+- Canonical rules and structure: `docs/designs/0001-docs-system-reorg-design.md`
+- Designs (why/what): `docs/designs/`
+- Plans (how): `docs/plans/` (1:1 with designs via frontmatter links)
+- Guides: `docs/guides/`

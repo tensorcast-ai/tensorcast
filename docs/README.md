@@ -77,9 +77,9 @@ bazel build //tests/cpp:replica_p2p_transfer_test --compilation_mode=dbg
 
 ## Development Topics by Area
 
-| Area | Key Documents |
-|------|---------------|
-| **Architecture** | [Component Interactions](architecture/README.md), [HA Design](architecture/high-availability-design.md) |
-| **Python Services** | [Global Store Development](../tensorcast/global_store/README.md), [Store Daemon Development](../daemon/README.md) |
-| **C++ Core** | [Checkpoint Architecture](../core/checkpoint/docs/architecture.md), [Store Architecture](../core/store/docs/architecture.md) |
-| **Data Integrity** | [Verification Integration](../core/checkpoint/docs/verification-integration.md) |
+| Area                | Key Documents                                                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Architecture**    | [Component Interactions](architecture/README.md), [HA Design](architecture/high-availability-design.md)                      |
+| **Python Services** | [Global Store Development](../tensorcast/global_store/README.md), [Store Daemon Development](../daemon/README.md)            |
+| **C++ Core**        | [Checkpoint Architecture](../core/checkpoint/docs/architecture.md), [Store Architecture](../core/store/docs/architecture.md) |
+| **Data Integrity**  | [Verification Integration](../core/checkpoint/docs/verification-integration.md)                                              |

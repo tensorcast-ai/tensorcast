@@ -15,8 +15,7 @@ This document explains the internal implementation of the Global Store (central 
 tensorcast/global_store/
 ├── __main__.py                 # CLI entry: bootstraps server + metrics + Web UI
 ├── grpc_service.py             # gRPC facade + wiring + maintenance thread
-├── db_utils.py                 # Schema bootstrap (init.sql) + maintenance (VACUUM)
-├── init.sql                    # Full DuckDB schema
+├── db_utils.py                 # Schema bootstrap (prefers repo-root schema.sql) + maintenance (VACUUM)
 ├── metrics.py                  # Prometheus metrics + gRPC interceptor
 ├── config/
 │   └── settings.py             # Pydantic-based config (env-driven)
@@ -158,6 +157,14 @@ erDiagram
 ```
 
 Note: `chunk_directory` has a composite primary key: `(artifact_id, device_uuid, replica, chunk_idx, node_id)`.
+
+## Schema Source of Truth
+
+- Canonical schema lives at repo root: `schema.sql` (single source of truth per design-0001).
+- Global Store initialization always uses the repo-root `schema.sql`. No environment overrides or packaged fallbacks are supported.
+
+Migration guidance
+- If you add or change tables/columns, update `schema.sql` and reference the change from the relevant design document under `docs/designs/`.
 
 ## Repository Layer
 
