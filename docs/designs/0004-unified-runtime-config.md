@@ -7,11 +7,13 @@ areas: ["daemon", "global_store", "sdk", "core"]
 related_code:
   - proto/tensorcast/config/v1/*.proto
   - core/communicator/config_io.*
+  - core/common/config/daemon_config_io.cc
   - tensorcast/global_store/config/settings.py
   - tensorcast/client_config_loader.py
   - tensorcast/daemon_config.py
+  - tensorcast/common/config/normalize.py
 created: 2025-09-09
-last_updated: 2025-09-09
+last_updated: 2025-09-10
 ---
 
 # Summary
@@ -66,6 +68,33 @@ Common types live in `proto/tensorcast/config/v1/common.proto` (e.g., `SocketAdd
 - Units: `*_bytes` accept plain integers; loaders may support `KB/MB/GB` suffixes. Durations use `google.protobuf.Duration` or loaders accept `ms/s/m` with strict parsing.
 - Single flag: processes accept only `--config=/path/to/file`; if missing, the process exits with a clear error and sample path.
 
+## Normalization & Aliases (Cross‑Language)
+
+To improve operator ergonomics while keeping Protobuf as the single source of truth, loaders normalize a small set of user‑friendly values into canonical enum names and duration/size formats before Protobuf parsing.
+
+- Enum aliases
+  - Accepted friendly values (case‑insensitive):
+    - Observability.OTelProtocol: `grpc`, `http/protobuf`
+    - Observability.LogLevel: `debug`, `info`, `warn`, `warning`, `error`
+  - Canonicalization:
+    - C++: `core/common/config/daemon_config_io.cc::normalize_enum_aliases()` maps aliases to enum names (e.g., `O_TEL_PROTOCOL_GRPC`).
+    - Python: `tensorcast/common/config/normalize.py` performs descriptor‑driven, generic enum normalization and is used by
+      - `tensorcast/global_store/config/settings.py`
+      - `tensorcast/client_config_loader.py`
+  - Strictness: after normalization, parsing still rejects unknown keys and invalid enum values.
+
+- Durations
+  - Protobuf canonical JSON: strings like `"120s"`, `"0.5s"` are accepted everywhere.
+  - C++ convenience: the daemon loader accepts `ms/s/m/h` inputs (e.g., `2m`) and rewrites them to canonical Protobuf JSON (`120s`).
+  - Python (current): relies on canonical Protobuf JSON duration strings. Inputs like `2m` are not yet normalized; use `120s` for portability.
+  - Follow‑up: extend the shared Python normalizer to add duration parsing for full parity with C++.
+
+- Byte sizes
+  - C++ daemon loader normalizes humanized sizes (e.g., `256MB`, `8GB`) into bytes for `*_bytes` fields.
+  - Python Global Store currently has no byte‑size fields; if introduced, reuse a shared helper for parity.
+
+Tests cover normalization of enum aliases in both Global Store and Client loaders (`tests/python/test_config_enum_normalization.py`).
+
 # Invariants & Error Model
 
 - Single source of truth: only the configuration file influences runtime behavior for covered areas; ENV and ad‑hoc flags are not read.
@@ -115,7 +144,9 @@ Common types live in `proto/tensorcast/config/v1/common.proto` (e.g., `SocketAdd
 
 - Daemon and Global Store start with only `--config` and reject unknown keys in the file.
 - Protobuf schemas exist for `DaemonConfig`, `GlobalStoreConfig`, `ClientConfig` under `tensorcast.config.v1` with common types extracted.
-- Loaders in C++ and Python apply the same defaults and unit/duration parsing.
+- Loaders in C++ and Python apply the same defaults and equivalent normalization rules:
+  - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.
+  - Durations use canonical Protobuf strings; C++ additionally accepts `ms/s/m/h` shorthand.
 - Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields.
 - Example configurations are available under `examples/config/` for each process.
 - Documentation for daemon, global store, and client reflects the single‑file configuration model.
@@ -125,4 +156,3 @@ Common types live in `proto/tensorcast/config/v1/common.proto` (e.g., `SocketAdd
 - Communicator config unification (prior art): `tensorcast.communicator.v1.CommunicatorConfig` and `core/communicator/config_io.*`.
 - Protobuf sources: `proto/tensorcast/config/v1/*.proto`.
 - Python loaders: `tensorcast/global_store/config/settings.py`, `tensorcast/client_config_loader.py`.
-

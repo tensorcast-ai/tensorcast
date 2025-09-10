@@ -9,6 +9,14 @@ This document explains the internal implementation of the Global Store (central 
 - Interface: gRPC (unary-unary RPCs), Prometheus metrics, optional Web UI process.
 - Runtime: Background maintenance thread (cleanup + VACUUM), batched heartbeats.
 
+## Configuration
+
+- Config is defined by `tensorcast.config.v1.GlobalStoreConfig` (see `proto/tensorcast/config/v1`).
+- YAML/JSON is parsed strictly against the proto schema; unknown keys are rejected.
+- Enum fields accept friendly values and are normalized to canonical names:
+  - `observability.otel.exporter_protocol: grpc | http/protobuf`
+  - `observability.logging.level: debug | info | warn | error` (case-insensitive; `warning` is also accepted)
+
 ## Package Layout
 
 ```

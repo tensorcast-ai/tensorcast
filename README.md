@@ -298,3 +298,5 @@ observability:
   logging:
     level: INFO
 ```
+
+- Enum fields accept friendly values: `exporter_protocol: grpc | http/protobuf`, `logging.level: debug|info|warn|error` (case-insensitive). Loaders normalize these to the canonical protobuf enum names for both C++ and Python.
