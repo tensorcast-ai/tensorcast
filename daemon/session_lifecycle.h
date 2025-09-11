@@ -24,9 +24,11 @@
 #include <sys/types.h>
 #include <array>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
@@ -265,107 +267,134 @@ class SessionLifecycleManager {
     sweep_reg_join_ttl();
     // If pidfd monitor is active, event-driven handle_pid_exit() will drop refs;
     // keep a minimal fallback scan for environments without pidfd.
-    if (!monitor_ || !monitor_->using_pidfd()) {
+    PidMonitor* mon = nullptr;
+    {
+      absl::MutexLock lock(&mu_);
+      mon = monitor_;
+    }
+    if (!mon || !mon->using_pidfd()) {
       sweep_pid_liveness();
     }
     expire_due(absl::Now());
   }
 
   // API shape (skeleton)
-  absl::StatusOr<LeaseId> create_use_lease(const ReplicaSubject& subj, pid_t pid) {
-    LeaseRec r;
-    r.id = next_id_++;
-    r.kind = LeaseKind::kUse;
-    r.subj = subj;
-    r.pid = pid;
-    // Guards: PID liveness
-    GuardRec g;
-    g.id = next_guard_id_++;
-    g.kind = GuardKind::kPidLiveness;
-    g.lease = r.id;
-    g.generation = 1;
-    g.pid = pid;
-    guard_by_id_.emplace(g.id, g);
-    r.guards.push_back(g.id);
-    pid_index_[pid].insert(g.id);
-    if (monitor_)
-      monitor_->watch(pid);
-    // Finalizer: drop ref for this pid+subject
-    r.finalizers.push_back([this, subj, pid]() -> absl::Status {
-      store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = subj.device_id, .uuid = ""};
-      store::loading::ReplicaKey key{.artifact_id = subj.artifact_id, .device = dev_key, .replica = 0};
-      refs_.drop_ref(key, pid);
-      return absl::OkStatus();
-    });
-    by_id_[r.id] = std::move(r);
-    inc_use_(subj);
-    return by_id_[next_id_ - 1].id;
-  }
-  absl::StatusOr<LeaseId> create_placement_lease(const ReplicaSubject& subj, /*spec*/ absl::Duration ttl) {
-    LeaseRec r;
-    r.id = next_id_++;
-    r.kind = LeaseKind::kPlacement;
-    r.subj = subj;
-    r.pid = -1;
-    if (ttl > absl::ZeroDuration()) {
+  absl::StatusOr<LeaseId> create_use_lease(const ReplicaSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+    PidMonitor* mon = nullptr;
+    LeaseId created_id = 0;
+    {
+      absl::MutexLock lock(&mu_);
+      LeaseRec r;
+      r.id = next_id_++;
+      r.kind = LeaseKind::kUse;
+      r.subj = subj;
+      r.pid = pid;
+      // Guards: PID liveness
       GuardRec g;
       g.id = next_guard_id_++;
-      g.kind = GuardKind::kDeadline;
+      g.kind = GuardKind::kPidLiveness;
       g.lease = r.id;
       g.generation = 1;
-      g.deadline = absl::Now() + ttl;
+      g.pid = pid;
       guard_by_id_.emplace(g.id, g);
       r.guards.push_back(g.id);
-      push_deadline_(g.id, g.deadline, g.generation);
-    } else {
-      GuardRec g;
-      g.id = next_guard_id_++;
-      g.kind = GuardKind::kManual;
-      g.lease = r.id;
-      g.generation = 1;
-      guard_by_id_.emplace(g.id, g);
-      r.guards.push_back(g.id);
+      pid_index_[pid].insert(g.id);
+      mon = monitor_;
+      // Finalizer: drop ref for this pid+subject
+      r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
+        store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = subj.device_id, .uuid = ""};
+        store::loading::ReplicaKey key{.artifact_id = subj.artifact_id, .device = dev_key, .replica = 0};
+        refs_.drop_ref(key, pid);
+        return absl::OkStatus();
+      });
+      by_id_[r.id] = std::move(r);
+      inc_use_(subj);
+      created_id = by_id_[next_id_ - 1].id;
     }
-    // Finalizer: drop placement pin counters only; actual memory reclaim is handled elsewhere
-    r.finalizers.emplace_back([subj]() -> absl::Status {
-      // Counter decremented on retire; no engine ops here
-      (void)subj; // silence unused capture warning if compiled without use
-      return absl::OkStatus();
-    });
-    by_id_[r.id] = std::move(r);
-    inc_pin_(subj);
-    return by_id_[next_id_ - 1].id;
+    if (mon) {
+      mon->watch(pid);
+    }
+    return created_id;
   }
-  absl::StatusOr<LeaseId> create_commit_lease(const CommitSubject& subj, pid_t pid) {
-    LeaseRec r;
-    r.id = next_id_++;
-    r.kind = LeaseKind::kCommit;
-    r.subj = ReplicaSubject{.artifact_id = subj.artifact_id, .device_id = subj.device_id};
-    r.pid = pid;
-    // Guards: PID liveness
-    GuardRec g;
-    g.id = next_guard_id_++;
-    g.kind = GuardKind::kPidLiveness;
-    g.lease = r.id;
-    g.generation = 1;
-    g.pid = pid;
-    guard_by_id_.emplace(g.id, g);
-    r.guards.push_back(g.id);
-    pid_index_[pid].insert(g.id);
-    if (monitor_)
-      monitor_->watch(pid);
-    // Finalizer: remove commit metadata is handled by LipManager sweep; no explicit engine work here.
-    r.finalizers.emplace_back([]() -> absl::Status { return absl::OkStatus(); });
-    by_id_[r.id] = std::move(r);
-    return by_id_[next_id_ - 1].id;
+  absl::StatusOr<LeaseId> create_placement_lease(const ReplicaSubject& subj, /*spec*/ absl::Duration ttl)
+      ABSL_LOCKS_EXCLUDED(mu_) {
+    LeaseId created_id = 0;
+    {
+      absl::MutexLock lock(&mu_);
+      LeaseRec r;
+      r.id = next_id_++;
+      r.kind = LeaseKind::kPlacement;
+      r.subj = subj;
+      r.pid = -1;
+      if (ttl > absl::ZeroDuration()) {
+        GuardRec g;
+        g.id = next_guard_id_++;
+        g.kind = GuardKind::kDeadline;
+        g.lease = r.id;
+        g.generation = 1;
+        g.deadline = absl::Now() + ttl;
+        guard_by_id_.emplace(g.id, g);
+        r.guards.push_back(g.id);
+        push_deadline_(g.id, g.deadline, g.generation);
+      } else {
+        GuardRec g;
+        g.id = next_guard_id_++;
+        g.kind = GuardKind::kManual;
+        g.lease = r.id;
+        g.generation = 1;
+        guard_by_id_.emplace(g.id, g);
+        r.guards.push_back(g.id);
+      }
+      // Finalizer: drop placement pin counters only; actual memory reclaim is handled elsewhere
+      r.finalizers.emplace_back([subj]() -> absl::Status {
+        (void)subj;
+        return absl::OkStatus();
+      });
+      by_id_[r.id] = std::move(r);
+      inc_pin_(subj);
+      created_id = by_id_[next_id_ - 1].id;
+    }
+    return created_id;
+  }
+  absl::StatusOr<LeaseId> create_commit_lease(const CommitSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+    PidMonitor* mon = nullptr;
+    LeaseId created_id = 0;
+    {
+      absl::MutexLock lock(&mu_);
+      LeaseRec r;
+      r.id = next_id_++;
+      r.kind = LeaseKind::kCommit;
+      r.subj = ReplicaSubject{.artifact_id = subj.artifact_id, .device_id = subj.device_id};
+      r.pid = pid;
+      // Guards: PID liveness
+      GuardRec g;
+      g.id = next_guard_id_++;
+      g.kind = GuardKind::kPidLiveness;
+      g.lease = r.id;
+      g.generation = 1;
+      g.pid = pid;
+      guard_by_id_.emplace(g.id, g);
+      r.guards.push_back(g.id);
+      pid_index_[pid].insert(g.id);
+      mon = monitor_;
+      // Finalizer: remove commit metadata is handled by LipManager sweep; no explicit engine work here.
+      r.finalizers.emplace_back([]() -> absl::Status { return absl::OkStatus(); });
+      by_id_[r.id] = std::move(r);
+      created_id = by_id_[next_id_ - 1].id;
+    }
+    if (mon) {
+      mon->watch(pid);
+    }
+    return created_id;
   }
 
 #if defined(TC_ENABLE_TEST_HOOKS)
   // Test-only: attach an additional deadline guard to an existing lease to simulate
   // mixed-guard scenarios (AND semantics). Returns the new GuardId.
-  absl::StatusOr<GuardId> add_deadline_guard_for_test(LeaseId id, absl::Duration ttl) {
+  absl::StatusOr<GuardId> add_deadline_guard_for_test(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
     if (ttl <= absl::ZeroDuration())
       return absl::InvalidArgumentError("ttl must be > 0");
+    absl::MutexLock lock(&mu_);
     auto it = by_id_.find(id);
     if (it == by_id_.end())
       return absl::NotFoundError("lease not found");
@@ -385,7 +414,9 @@ class SessionLifecycleManager {
   static absl::Status keepalive_session(/*sid*/ const std::string& /*sid*/, absl::Duration /*ttl*/) {
     return absl::OkStatus();
   }
-  absl::Status renew_placement(LeaseId id, absl::Duration ttl) {
+
+  absl::Status renew_placement(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
     auto it = by_id_.find(id);
     if (it == by_id_.end())
       return absl::NotFoundError("lease not found");
@@ -404,53 +435,110 @@ class SessionLifecycleManager {
     }
     return absl::OkStatus();
   }
-  void release_lease(LeaseId id) {
+
+  void release_lease(LeaseId id) ABSL_LOCKS_EXCLUDED(mu_) {
     retire_lease_(id, /*reason=*/"manual_release");
   }
-  void release_by_pid(pid_t pid) {
+
+  // Retire a single Use lease bound to the given subject and pid.
+  // If multiple Use leases exist for the same (subject, pid), retires one of them.
+  // Returns NotFound when no matching Use lease exists.
+  absl::Status release_use_lease(const ReplicaSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+    LeaseId match = 0;
+    {
+      absl::MutexLock lock(&mu_);
+      for (const auto& kv : by_id_) {
+        const auto& rec = kv.second;
+        if (rec.kind != LeaseKind::kUse)
+          continue;
+        if (rec.pid != pid)
+          continue;
+        if (rec.subj.artifact_id != subj.artifact_id || rec.subj.device_id != subj.device_id)
+          continue;
+        match = kv.first;
+        break;
+      }
+    }
+    if (match == 0) {
+      return absl::NotFoundError("use lease not found");
+    }
+    retire_lease_(match, /*reason=*/"manual_release_use");
+    return absl::OkStatus();
+  }
+
+  void release_by_pid(pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
     // Retire all leases bound to this pid (Use/Commit kinds)
     std::vector<LeaseId> to_retire;
-    to_retire.reserve(by_id_.size());
-    for (const auto& kv : by_id_) {
-      if (kv.second.pid == pid)
-        to_retire.push_back(kv.first);
+    {
+      absl::MutexLock lock(&mu_);
+      to_retire.reserve(by_id_.size());
+      for (const auto& kv : by_id_) {
+        if (kv.second.pid == pid)
+          to_retire.push_back(kv.first);
+      }
     }
     for (LeaseId id : to_retire)
       retire_lease_(id, /*reason=*/"pid_release");
   }
+
   void release_session(/*sid*/ const std::string& /*sid*/) {}
 
-  [[nodiscard]] absl::Time next_deadline() const {
+  [[nodiscard]] absl::Time next_deadline() const ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
     return (deadlines_.empty() ? absl::InfiniteFuture() : deadlines_.top().when);
   }
-  void expire_due(absl::Time now) {
-    while (!deadlines_.empty() && deadlines_.top().when <= now) {
-      const auto d = deadlines_.top();
-      deadlines_.pop();
-      auto git = guard_by_id_.find(d.guard);
-      if (git == guard_by_id_.end())
-        continue; // already removed
-      if (git->second.generation != d.generation)
-        continue; // stale entry
-      // Mark guard failed and retire lease
-      git->second.failed = true;
-      retire_lease_(git->second.lease, /*reason=*/"deadline_expired");
+
+  void expire_due(absl::Time now) ABSL_LOCKS_EXCLUDED(mu_) {
+    std::vector<LeaseId> to_retire;
+    {
+      absl::MutexLock lock(&mu_);
+      while (!deadlines_.empty() && deadlines_.top().when <= now) {
+        const auto d = deadlines_.top();
+        deadlines_.pop();
+        auto git = guard_by_id_.find(d.guard);
+        if (git == guard_by_id_.end())
+          continue; // already removed
+        if (git->second.generation != d.generation)
+          continue; // stale entry
+        // Mark guard failed and schedule lease retirement
+        git->second.failed = true;
+        to_retire.push_back(git->second.lease);
+      }
+    }
+    for (LeaseId id : to_retire) {
+      retire_lease_(id, /*reason=*/"deadline_expired");
     }
   }
-  void handle_pid_exit(pid_t pid) {
+
+  void handle_pid_exit(pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
     // Mark all pid guards failed and retire their leases
     std::unordered_set<GuardId> guards;
     {
+      absl::MutexLock lock(&mu_);
       auto it = pid_index_.find(pid);
       if (it != pid_index_.end())
         guards = it->second;
+      for (GuardId gid : guards) {
+        auto git = guard_by_id_.find(gid);
+        if (git != guard_by_id_.end()) {
+          git->second.failed = true;
+        }
+      }
     }
-    for (GuardId gid : guards) {
-      auto git = guard_by_id_.find(gid);
-      if (git == guard_by_id_.end())
-        continue;
-      git->second.failed = true;
-      retire_lease_(git->second.lease, /*reason=*/"pid_exit");
+    {
+      std::unordered_set<LeaseId> leases_to_retire;
+      {
+        absl::MutexLock lock(&mu_);
+        for (GuardId gid : guards) {
+          auto git = guard_by_id_.find(gid);
+          if (git != guard_by_id_.end()) {
+            leases_to_retire.insert(git->second.lease);
+          }
+        }
+      }
+      for (LeaseId id : leases_to_retire) {
+        retire_lease_(id, /*reason=*/"pid_exit");
+      }
     }
     // Best-effort: drop RefTracker references for this pid
     auto keys = refs_.keys();
@@ -462,22 +550,25 @@ class SessionLifecycleManager {
   }
 
   // Attach a PID monitor (owned by the caller) for event-driven PID exit handling
-  void attach_pid_monitor(PidMonitor* mon) {
+  void attach_pid_monitor(PidMonitor* mon) ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
     monitor_ = mon;
   }
 
   // Query counters for eviction and status
-  [[nodiscard]] size_t use_count_for(const store::loading::ReplicaKey& key) const {
+  [[nodiscard]] size_t use_count_for(const store::loading::ReplicaKey& key) const ABSL_LOCKS_EXCLUDED(mu_) {
     auto subj = subj_from_key_(key);
     if (!subj)
       return 0;
+    absl::MutexLock lock(&mu_);
     auto it = counters_.find(subject_key_(*subj));
     return (it == counters_.end() ? 0 : static_cast<size_t>(it->second.use_count));
   }
-  [[nodiscard]] size_t placement_pin_count_for(const store::loading::ReplicaKey& key) const {
+  [[nodiscard]] size_t placement_pin_count_for(const store::loading::ReplicaKey& key) const ABSL_LOCKS_EXCLUDED(mu_) {
     auto subj = subj_from_key_(key);
     if (!subj)
       return 0;
+    absl::MutexLock lock(&mu_);
     auto it = counters_.find(subject_key_(*subj));
     return (it == counters_.end() ? 0 : static_cast<size_t>(it->second.placement_pins));
   }
@@ -487,45 +578,58 @@ class SessionLifecycleManager {
     int use_count{0};
     int placement_pins{0};
   };
+
   static std::string subject_key_(const ReplicaSubject& s) {
     return absl::StrCat(s.artifact_id, "#", s.device_id);
   }
-  void inc_use_(const ReplicaSubject& s) {
+
+  void inc_use_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     auto& c = counters_[subject_key_(s)];
     ++c.use_count;
   }
-  void dec_use_(const ReplicaSubject& s) {
+
+  void dec_use_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     auto it = counters_.find(subject_key_(s));
     if (it != counters_.end() && it->second.use_count > 0)
       --it->second.use_count;
   }
-  void inc_pin_(const ReplicaSubject& s) {
+
+  void inc_pin_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     auto& c = counters_[subject_key_(s)];
     ++c.placement_pins;
   }
-  void dec_pin_(const ReplicaSubject& s) {
+
+  void dec_pin_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     auto it = counters_.find(subject_key_(s));
     if (it != counters_.end() && it->second.placement_pins > 0)
       --it->second.placement_pins;
   }
+
   static std::optional<ReplicaSubject> subj_from_key_(const store::loading::ReplicaKey& key) {
     if (key.device.type != DeviceType::GPU)
       return std::nullopt;
     return ReplicaSubject{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
   }
-  void sync_pid_watches_() {
-    if (!monitor_)
+
+  void sync_pid_watches_() ABSL_LOCKS_EXCLUDED(mu_) {
+    PidMonitor* mon = nullptr;
+    {
+      absl::MutexLock lock(&mu_);
+      mon = monitor_;
+    }
+    if (!mon)
       return;
     // RefTracker PIDs
     auto keys = refs_.keys();
     for (const auto& key : keys) {
       auto plist = refs_.pids(key);
       for (int32_t pid : plist) {
-        monitor_->watch(static_cast<pid_t>(pid));
+        mon->watch(static_cast<pid_t>(pid));
       }
     }
     // Note: LIP leases are handled by LipManager; we rely on RefTracker cover for now.
   }
+
   void sweep_sessions_ttl() {
     for (const auto& k : sessions_.keys()) {
       (void)sessions_.remove_if_expired(k);
@@ -581,53 +685,61 @@ class SessionLifecycleManager {
       return when > other.when;
     } // min-heap
   };
-  void push_deadline_(GuardId gid, absl::Time when, uint64_t gen) {
+  void push_deadline_(GuardId gid, absl::Time when, uint64_t gen) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     deadlines_.push(Due{.when = when, .guard = gid, .generation = gen});
   }
 
-  LeaseId next_id_{1};
-  GuardId next_guard_id_{1};
-  absl::flat_hash_map<LeaseId, LeaseRec> by_id_;
-  absl::flat_hash_map<GuardId, GuardRec> guard_by_id_;
-  std::priority_queue<Due> deadlines_;
-  PidMonitor* monitor_{nullptr};
-  absl::flat_hash_map<std::string, Counts> counters_;
-  absl::flat_hash_map<pid_t, std::unordered_set<GuardId>> pid_index_;
+  // Mutex guarding state below
+  mutable absl::Mutex mu_;
 
-  void retire_lease_(LeaseId id, const char* /*reason*/) {
-    auto it = by_id_.find(id);
-    if (it == by_id_.end())
-      return;
-    if (it->second.state == LeaseState::kRetired)
-      return;
-    // Transition to retiring → retired
-    it->second.state = LeaseState::kRetiring;
-    // Run finalizers outside of any locks (we hold none here)
-    for (auto& f : it->second.finalizers) {
+  LeaseId next_id_ ABSL_GUARDED_BY(mu_){1};
+  GuardId next_guard_id_ ABSL_GUARDED_BY(mu_){1};
+  absl::flat_hash_map<LeaseId, LeaseRec> by_id_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<GuardId, GuardRec> guard_by_id_ ABSL_GUARDED_BY(mu_);
+  std::priority_queue<Due> deadlines_ ABSL_GUARDED_BY(mu_);
+  PidMonitor* monitor_ ABSL_GUARDED_BY(mu_){nullptr};
+  absl::flat_hash_map<std::string, Counts> counters_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<pid_t, std::unordered_set<GuardId>> pid_index_ ABSL_GUARDED_BY(mu_);
+
+  void retire_lease_(LeaseId id, const char* /*reason*/) ABSL_LOCKS_EXCLUDED(mu_) {
+    std::vector<std::function<absl::Status()>> finalizers;
+    {
+      absl::MutexLock lock(&mu_);
+      auto it = by_id_.find(id);
+      if (it == by_id_.end())
+        return;
+      if (it->second.state == LeaseState::kRetired)
+        return;
+      // Transition to retiring → retired
+      it->second.state = LeaseState::kRetiring;
+      // Move finalizers out; call them after unlock
+      finalizers = std::move(it->second.finalizers);
+      // Update counters once
+      if (it->second.kind == LeaseKind::kUse)
+        dec_use_(it->second.subj);
+      if (it->second.kind == LeaseKind::kPlacement)
+        dec_pin_(it->second.subj);
+      // Cleanup guard indices
+      for (GuardId gid : it->second.guards) {
+        auto git = guard_by_id_.find(gid);
+        if (git != guard_by_id_.end()) {
+          if (git->second.kind == GuardKind::kPidLiveness && git->second.pid > 0) {
+            auto pit = pid_index_.find(git->second.pid);
+            if (pit != pid_index_.end()) {
+              pit->second.erase(gid);
+              if (pit->second.empty())
+                pid_index_.erase(pit);
+            }
+          }
+          guard_by_id_.erase(git);
+        }
+      }
+      it->second.state = LeaseState::kRetired;
+      by_id_.erase(it);
+    }
+    for (auto& f : finalizers) {
       (void)f();
     }
-    // Update counters once
-    if (it->second.kind == LeaseKind::kUse)
-      dec_use_(it->second.subj);
-    if (it->second.kind == LeaseKind::kPlacement)
-      dec_pin_(it->second.subj);
-    // Cleanup guard indices
-    for (GuardId gid : it->second.guards) {
-      auto git = guard_by_id_.find(gid);
-      if (git != guard_by_id_.end()) {
-        if (git->second.kind == GuardKind::kPidLiveness && git->second.pid > 0) {
-          auto pit = pid_index_.find(git->second.pid);
-          if (pit != pid_index_.end()) {
-            pit->second.erase(gid);
-            if (pit->second.empty())
-              pid_index_.erase(pit);
-          }
-        }
-        guard_by_id_.erase(git);
-      }
-    }
-    it->second.state = LeaseState::kRetired;
-    by_id_.erase(it);
   }
 };
 

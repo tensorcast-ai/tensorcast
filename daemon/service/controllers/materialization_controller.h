@@ -46,7 +46,7 @@ class MaterializationController {
       const v1::GetArtifactIndexByIdRequest& req,
       v1::GetArtifactIndexByIdResponse& resp);
 
-  grpc::Status confirm(RpcContext& rctx, const v1::ConfirmReplicaRequest& req, v1::ConfirmReplicaResponse& resp);
+  grpc::Status confirm(RpcContext& rctx, const v1::ConfirmReplicaRequest& req, v1::ConfirmReplicaResponse& resp) const;
 
   grpc::Status unload(RpcContext& rctx, const v1::UnloadReplicaRequest& req, v1::UnloadReplicaResponse& resp);
 

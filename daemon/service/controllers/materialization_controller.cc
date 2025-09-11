@@ -258,7 +258,7 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
 grpc::Status MaterializationController::confirm(
     RpcContext& rctx,
     const v1::ConfirmReplicaRequest& req,
-    v1::ConfirmReplicaResponse& resp) {
+    v1::ConfirmReplicaResponse& resp) const {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", req.disk_path());
@@ -336,7 +336,11 @@ grpc::Status MaterializationController::unload(
   if (req.has_pid()) {
     d_.refs.drop_ref(key, req.pid());
     if (d_.lifecycle && key.device.type == DeviceType::GPU) {
-      d_.lifecycle->release_by_pid(req.pid());
+      SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
+      const auto status = d_.lifecycle->release_use_lease(subj, req.pid());
+      if (!status.ok()) {
+        LOG(ERROR) << "failed to release use lease: " << status;
+      }
     }
     if (d_.refs.ref_count(key) > 0) {
       resp.set_code(0);
