@@ -66,7 +66,9 @@ class GlobalStoreClient {
       uint32_t grpc_port,
       uint32_t p2p_port,
       uint64_t mem_pool_total_size,
-      uint64_t mem_pool_available_size);
+      uint64_t mem_pool_available_size,
+      bool is_recovery_registration = false,
+      std::string_view previous_worker_id = {});
 
   absl::Status send_heartbeat(
       std::string_view worker_id,

@@ -29,7 +29,6 @@ class ArtifactIndexRepository(BaseRepository):
         """
         index_key = hashlib.sha256(index_data).hexdigest()
         cursor = self.get_cursor()
-        cursor.execute("DELETE FROM artifact_indices WHERE index_key = ?", [index_key])
         cursor.execute(
             """
             INSERT INTO artifact_indices (
@@ -39,6 +38,11 @@ class ArtifactIndexRepository(BaseRepository):
                 size_bytes,
                 index_data
             ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (index_key) DO UPDATE SET
+                schema_version = EXCLUDED.schema_version,
+                encoding = EXCLUDED.encoding,
+                size_bytes = EXCLUDED.size_bytes,
+                index_data = EXCLUDED.index_data
             """,
             [index_key, schema_version, encoding, len(index_data), index_data],
         )

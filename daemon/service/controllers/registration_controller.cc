@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/store/loader/segment_plan_source.h"
@@ -372,6 +373,9 @@ grpc::Status RegistrationController::commit(
       } catch (...) {
         VLOG(1) << "metrics counter tc_register_commit_lip_total unavailable";
       }
+      // Log lease-in-place registration summary including plan.
+      LOG(INFO) << "Registered memory replica: " << out.artifact_id
+                << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
       d_.reg.erase_all_for(req.registration_id());
       rctx.mark_success();
       return Status::OK;
@@ -490,6 +494,9 @@ grpc::Status RegistrationController::commit(
     } catch (...) {
       VLOG(1) << "metrics counter tc_register_commit_lease_total unavailable";
     }
+    // Log lease materialized-to-VRAM registration summary including plan.
+    LOG(INFO) << "Registered memory replica: " << d.artifact_id
+              << " plan=vram_leased(materialized) device=gpu:" << meta.device_id << " size=" << d.size_bytes << "B";
     d_.reg.erase_all_for(req.registration_id());
     rctx.mark_success();
     return Status::OK;

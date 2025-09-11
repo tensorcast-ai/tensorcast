@@ -60,6 +60,7 @@ class WorkerLifecycleManager {
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
+  absl::Status reregister_worker(bool preserve_identity);
 
   std::shared_ptr<store::StoreEngine> engine_;
   StoreDaemonServiceImpl* service_;

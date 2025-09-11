@@ -31,12 +31,18 @@ class KeyMappingRepository(BaseRepository):
         Enforces uniqueness of key; last write wins for hints.
         """
         cursor = self.get_cursor()
-        cursor.execute("DELETE FROM key_mappings WHERE key = ?", [key])
         cursor.execute(
             """
             INSERT INTO key_mappings (
               key, artifact_id, replica_uuid, daemon_address, disk_path, ttl_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, now(), now())
+            ON CONFLICT (key) DO UPDATE SET
+              artifact_id = EXCLUDED.artifact_id,
+              replica_uuid = EXCLUDED.replica_uuid,
+              daemon_address = EXCLUDED.daemon_address,
+              disk_path = EXCLUDED.disk_path,
+              ttl_seconds = EXCLUDED.ttl_seconds,
+              updated_at = now()
             """,
             [key, artifact_id, replica_uuid, daemon_address, disk_path, ttl_seconds],
         )
@@ -64,8 +70,16 @@ class KeyMappingRepository(BaseRepository):
         }
 
     def delete(self, key: str) -> bool:
-        cursor = self.get_cursor()
-        result = cursor.execute(
-            "DELETE FROM key_mappings WHERE key = ? RETURNING key", [key]
-        )
-        return result.fetchone() is not None
+        # Select first to avoid depending on RETURNING support
+        with self.transaction() as cursor:
+            exists = (
+                cursor.execute(
+                    "SELECT 1 FROM key_mappings WHERE key = ?",
+                    [key],
+                ).fetchone()
+                is not None
+            )
+            if not exists:
+                return False
+            cursor.execute("DELETE FROM key_mappings WHERE key = ?", [key])
+            return True

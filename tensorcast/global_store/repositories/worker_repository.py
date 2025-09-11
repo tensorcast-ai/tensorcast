@@ -190,20 +190,27 @@ class WorkerRepository(BaseRepository):
         Returns:
             List of (worker_id, node_id) tuples
         """
-        cursor = self.get_cursor()
-
         cutoff_time = time.time() - timeout_seconds
 
-        result = cursor.execute(
-            """
-            DELETE FROM workers
-            WHERE EXTRACT(epoch FROM last_heartbeat) < ?
-            RETURNING worker_id, node_id
-            """,
-            [cutoff_time],
-        )
+        with self.transaction() as cursor:
+            rows = cursor.execute(
+                """
+                SELECT worker_id, node_id FROM workers
+                WHERE EXTRACT(epoch FROM last_heartbeat) < ?
+                """,
+                [cutoff_time],
+            ).fetchall()
 
-        return result.fetchall()
+            if rows:
+                cursor.execute(
+                    """
+                    DELETE FROM workers
+                    WHERE EXTRACT(epoch FROM last_heartbeat) < ?
+                    """,
+                    [cutoff_time],
+                )
+
+        return rows
 
     def find_active(self, include_unavailable: bool = False) -> list[Worker]:
         """Find all active workers."""
@@ -297,22 +304,28 @@ class WorkerRepository(BaseRepository):
         Returns:
             List of (worker_id, node_id) tuples that were cleaned up
         """
-        cursor = self.get_cursor()
+        with self.transaction() as cursor:
+            # Select first to avoid fetching a large RETURNING result set
+            rows = cursor.execute(
+                """
+                SELECT worker_id, node_id FROM workers
+                WHERE EXTRACT(epoch FROM last_heartbeat) < ?
+                """,
+                [recovery_time],
+            ).fetchall()
 
-        # Delete workers that haven't heartbeated since before recovery
-        result = cursor.execute(
-            """
-            DELETE FROM workers
-            WHERE EXTRACT(epoch FROM last_heartbeat) < ?
-            RETURNING worker_id, node_id
-            """,
-            [recovery_time],
-        )
+            if rows:
+                cursor.execute(
+                    """
+                    DELETE FROM workers
+                    WHERE EXTRACT(epoch FROM last_heartbeat) < ?
+                    """,
+                    [recovery_time],
+                )
 
-        cleaned_up = result.fetchall()
-        if cleaned_up:
-            logger.info(f"Cleaned up {len(cleaned_up)} stale workers")
-        return cleaned_up
+        if rows:
+            logger.info(f"Cleaned up {len(rows)} stale workers")
+        return rows
 
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""

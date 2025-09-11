@@ -40,7 +40,14 @@ absl::Status WorkerLifecycleManager::start() {
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
 
   auto reg_or = gs_->register_worker(
-      node_id_, node_addr, grpc_port, opts_.p2p_port, engine_->get_mem_pool_size(), engine_->get_available_memory());
+      node_id_,
+      node_addr,
+      grpc_port,
+      opts_.p2p_port,
+      engine_->get_mem_pool_size(),
+      engine_->get_available_memory(),
+      /*is_recovery_registration=*/false,
+      /*previous_worker_id=*/"");
   if (!reg_or.ok())
     return reg_or.status();
   worker_id_ = *reg_or;
@@ -127,6 +134,14 @@ void WorkerLifecycleManager::heartbeat_loop() {
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
+        // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
+        // perform recovery-aware re-registration to preserve identity.
+        if (gs_->is_connected()) {
+          auto st_re = reregister_worker(/*preserve_identity=*/true);
+          if (!st_re.ok()) {
+            VLOG(1) << "Re-registration attempt failed: " << st_re;
+          }
+        }
       } else {
         const auto& hb = *hb_or;
         hb_success_.fetch_add(1);
@@ -278,6 +293,45 @@ void WorkerLifecycleManager::heartbeat_loop() {
     LOG(ERROR) << "heartbeat_loop crashed: unknown exception";
   }
   hb_alive_.store(false);
+}
+
+absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
+  if (!gs_)
+    return absl::FailedPreconditionError("GlobalStore client not initialized");
+  const std::string node_addr = host_from_listen(opts_.listen_addr);
+  const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
+  const bool recovery = preserve_identity && !worker_id_.empty();
+  auto reg_or = gs_->register_worker(
+      node_id_,
+      node_addr,
+      grpc_port,
+      opts_.p2p_port,
+      engine_->get_mem_pool_size(),
+      engine_->get_available_memory(),
+      /*is_recovery_registration=*/recovery,
+      /*previous_worker_id=*/recovery ? std::string_view(worker_id_) : std::string_view{});
+  if (!reg_or.ok())
+    return reg_or.status();
+  const std::string& new_worker_id = *reg_or;
+  if (recovery && new_worker_id != worker_id_) {
+    LOG(INFO) << "Worker identity changed after recovery: old=" << worker_id_ << " new=" << new_worker_id;
+  }
+  worker_id_ = new_worker_id;
+  service_->set_worker_registered(worker_id_);
+  if (engine_) {
+    engine_->set_worker_identity(worker_id_, node_id_);
+  }
+  // Perform a best-effort full-state sync after re-registration
+  std::vector<commonpb::ReplicaInfo> expected;
+  auto full_or = gs_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
+  if (full_or.ok()) {
+    state_version_ = full_or->first;
+    state_checksum_ = full_or->second;
+    apply_full_state(expected);
+    last_sync_success_ts_ = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+  }
+  return absl::OkStatus();
 }
 
 void WorkerLifecycleManager::chunk_sync_loop() {

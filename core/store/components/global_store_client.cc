@@ -77,7 +77,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
     uint32_t grpc_port,
     uint32_t p2p_port,
     uint64_t mem_pool_total_size,
-    uint64_t mem_pool_available_size) {
+    uint64_t mem_pool_available_size,
+    bool is_recovery_registration,
+    std::string_view previous_worker_id) {
   global_store::RegisterWorkerRequest request;
   request.set_node_id(std::string(node_id));
   request.set_node_address(std::string(node_address));
@@ -85,6 +87,12 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
   request.set_p2p_port(p2p_port);
   request.set_mem_pool_total_size(mem_pool_total_size);
   request.set_mem_pool_available_size(mem_pool_available_size);
+  if (is_recovery_registration) {
+    request.set_is_recovery_registration(true);
+    if (!previous_worker_id.empty()) {
+      request.set_previous_worker_id(std::string(previous_worker_id));
+    }
+  }
 
   global_store::RegisterWorkerResponse response;
 
@@ -324,7 +332,14 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
   }
 
-  LOG(INFO) << "Registered memory replica: " << artifact_id << " with ID: " << response.replica_id();
+  // Enrich log with plan type and basic context. We infer plan from device type:
+  // - CPU device ⇒ DVMP (UMA)
+  // - GPU device ⇒ VRAM_COALESCED (including materialized Lease)
+  const char* plan_str = (device.type == DeviceType::CPU) ? "dvmp" : "vram_coalesced";
+  const char* dev_kind = (device.type == DeviceType::CPU) ? "cpu" : "gpu";
+  LOG(INFO) << "Registered memory replica: " << artifact_id << " plan=" << plan_str << " device=" << dev_kind << ":"
+            << device.ordinal << " size=" << memory_size << "B"
+            << " replica_id=" << response.replica_id();
   return response.replica_id();
 }
 

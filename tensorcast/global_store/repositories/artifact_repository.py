@@ -32,11 +32,9 @@ class ArtifactRepository(BaseRepository):
     ) -> None:
         """Create or update an artifact descriptor row by primary key `artifact_id`.
 
-        DuckDB lacks a portable ON CONFLICT clause; use DELETE + INSERT which is
-        sufficient given our single-writer service process.
+        Uses ON CONFLICT DO UPDATE for atomic upsert semantics.
         """
         cursor = self.get_cursor()
-        cursor.execute("DELETE FROM artifacts WHERE artifact_id = ?", [artifact_id])
         cursor.execute(
             """
             INSERT INTO artifacts (
@@ -47,6 +45,12 @@ class ArtifactRepository(BaseRepository):
                 encoding,
                 hash_params_json
             ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (artifact_id) DO UPDATE SET
+                index_multihash = EXCLUDED.index_multihash,
+                data_multihash = EXCLUDED.data_multihash,
+                schema_version = EXCLUDED.schema_version,
+                encoding = EXCLUDED.encoding,
+                hash_params_json = EXCLUDED.hash_params_json
             """,
             [
                 artifact_id,

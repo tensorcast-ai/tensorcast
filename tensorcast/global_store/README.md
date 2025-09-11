@@ -169,7 +169,7 @@ Note: `chunk_directory` has a composite primary key: `(artifact_id, device_uuid,
 ## Schema Source of Truth
 
 - Canonical schema lives at repo root: `schema.sql` (single source of truth per design-0001).
-- Global Store initialization always uses the repo-root `schema.sql`. No environment overrides or packaged fallbacks are supported.
+- Global Store initialization prefers the repo-root `schema.sql`; if not found, it falls back to the packaged `tensorcast/schema.sql` shipped with the wheel.
 
 Migration guidance
 - If you add or change tables/columns, update `schema.sql` and reference the change from the relevant design document under `docs/designs/`.
@@ -211,12 +211,12 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
 
 - ChunkService
   - `query_chunk_locations()` joins `chunk_directory` with `workers` to return candidate sources, excluding `EVICTED` chunks, ordered by `(chunk_idx, chunk_state, node_load_ratio)`.
-  - `batch_update_chunk_states()` uses `INSERT OR REPLACE` to upsert per-chunk state rows.
+  - `batch_update_chunk_states()` uses `ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id) DO UPDATE` to perform atomic upsert on composite PK and refresh `last_update_time`.
   - Helpers: stale cleanup and distribution statistics.
 
 ## gRPC Facade (GlobalStoreServicer)
 
-- Wires config, DB connection, repositories, and services; initializes schema from `init.sql` and starts a maintenance thread (worker cleanup, transport cleanup, periodic `VACUUM`).
+- Wires config, DB connection, repositories, and services; initializes schema from `schema.sql` and starts a maintenance thread (worker cleanup, transport cleanup, periodic `VACUUM`).
 - Exposes RPCs defined in `proto/tensorcast/global_store/v1/global_store.proto`:
   - Artifact replicas: `RegisterReplica`, `UpdateReplica`, `UnregisterReplica`, `GetArtifactInfoById`, `ListReplicasV2` (pagination via integer offset token).
   - Transport: `RequestReplicaTransport`, `CompleteReplicaTransport`.
@@ -314,6 +314,15 @@ Use the unified config fields in `examples/config/global_store_config.yaml`.
 - `replica_counters` decouples high-churn counters from descriptive replica columns.
 - `ListReplicasV2` pagination uses an integer offset encoded in `page_token`.
 - Safety-first recovery: removals only when a worker supplies a non-empty replica inventory.
+
+### Upsert Policy
+
+- All idempotent write paths use DuckDB `ON CONFLICT DO UPDATE` atomic UPSERT to avoid delete+insert race:
+  - `chunk_directory`（composite primary key）
+  - `artifacts`（primary key `artifact_id`）
+  - `artifact_indices`（primary key `index_key`）
+  - `key_mappings`（primary key `key`）
+  - `replica_counters`（primary key `replica_id`）
 
 ## Running the Server
 

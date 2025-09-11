@@ -160,7 +160,7 @@ class ReplicaRepository(BaseRepository):
             )
             UPDATE replica_counters
             SET current_requests = current_requests + 1,
-                last_assigned_at = CURRENT_TIMESTAMP
+                last_assigned_at = now()
             WHERE replica_id = (SELECT replica_id FROM candidate)
             RETURNING replica_id
             """,
@@ -239,17 +239,14 @@ class ReplicaRepository(BaseRepository):
             ],
         )
 
-        # Ensure corresponding counter record exists
-        cursor.execute(
-            """
-            DELETE FROM replica_counters WHERE replica_id = ?
-            """,
-            [str(replica.replica_id)],
-        )
+        # Ensure corresponding counter record exists (atomic upsert)
         cursor.execute(
             """
             INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, now())
+            ON CONFLICT (replica_id) DO UPDATE SET
+                current_requests = EXCLUDED.current_requests,
+                last_assigned_at = now()
             """,
             [str(replica.replica_id), replica.current_requests],
         )
@@ -365,17 +362,14 @@ class ReplicaRepository(BaseRepository):
                 ],
             )
 
-        # Ensure corresponding counter record exists (using INSERT OR REPLACE pattern)
-        cursor.execute(
-            """
-            DELETE FROM replica_counters WHERE replica_id = ?
-            """,
-            [str(replica.replica_id)],
-        )
+        # Ensure corresponding counter record exists (atomic upsert)
         cursor.execute(
             """
             INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, now())
+            ON CONFLICT (replica_id) DO UPDATE SET
+                current_requests = EXCLUDED.current_requests,
+                last_assigned_at = now()
             """,
             [str(replica.replica_id), replica.current_requests],
         )

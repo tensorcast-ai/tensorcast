@@ -39,14 +39,19 @@ class ChunkDirectoryRepository(BaseRepository):
         updates_applied = 0
 
         try:
-            # Use INSERT OR REPLACE for upsert behavior
+            # Use ON CONFLICT DO UPDATE to perform atomic upsert on composite PK
             for update in updates:
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO chunk_directory (
+                    INSERT INTO chunk_directory (
                         artifact_id, chunk_idx, node_id, device_uuid, replica,
                         chunk_state, last_update_time, node_load_ratio
-                    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0.0)
+                    ) VALUES (?, ?, ?, ?, ?, ?, now(), 0.0)
+                    ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id)
+                    DO UPDATE SET
+                        chunk_state = EXCLUDED.chunk_state,
+                        last_update_time = now(),
+                        node_load_ratio = EXCLUDED.node_load_ratio
                     """,
                     (
                         update.artifact_id,
@@ -82,6 +87,10 @@ class ChunkDirectoryRepository(BaseRepository):
         Returns:
             List of tuples containing chunk location information
         """
+        # Explicitly treat an empty list as an empty result set (do not fall back to full scan)
+        if chunk_indices is not None and len(chunk_indices) == 0:
+            return []
+
         cursor = self.get_cursor()
 
         try:
@@ -90,8 +99,8 @@ class ChunkDirectoryRepository(BaseRepository):
                 placeholders = ",".join("?" for _ in chunk_indices)
                 query = f"""
                     SELECT DISTINCT
-                        chunk_idx, node_id, node_address, p2p_port,
-                        chunk_state, node_load_ratio, device_uuid, replica
+                        cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
+                        cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
                     FROM chunk_directory cd
                     JOIN workers w ON cd.node_id = w.node_id
                     WHERE cd.artifact_id = ?
@@ -104,8 +113,8 @@ class ChunkDirectoryRepository(BaseRepository):
                 # Query all chunks for the artifact
                 query = """
                     SELECT DISTINCT
-                        chunk_idx, node_id, node_address, p2p_port,
-                        chunk_state, node_load_ratio, device_uuid, replica
+                        cd.chunk_idx, w.node_id, w.node_address, w.p2p_port,
+                        cd.chunk_state, cd.node_load_ratio, cd.device_uuid, cd.replica
                     FROM chunk_directory cd
                     JOIN workers w ON cd.node_id = w.node_id
                     WHERE cd.artifact_id = ?
@@ -130,18 +139,26 @@ class ChunkDirectoryRepository(BaseRepository):
         Returns:
             Number of entries removed
         """
-        cursor = self.get_cursor()
-
         try:
-            result = cursor.execute(
-                """
-                DELETE FROM chunk_directory
-                WHERE last_update_time < datetime('now', ? || ' seconds')
-                """,
-                (-stale_threshold_seconds,),
-            )
+            # Execute count + delete atomically to avoid interleaving changes
+            with self.transaction() as cursor:
+                count_row = cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM chunk_directory
+                    WHERE EXTRACT(epoch FROM last_update_time) < EXTRACT(epoch FROM current_timestamp) - ?
+                    """,
+                    (stale_threshold_seconds,),
+                ).fetchone()
+                deleted_count = int(count_row[0]) if count_row is not None else 0
 
-            deleted_count = result.rowcount
+                if deleted_count > 0:
+                    cursor.execute(
+                        """
+                        DELETE FROM chunk_directory
+                        WHERE EXTRACT(epoch FROM last_update_time) < EXTRACT(epoch FROM current_timestamp) - ?
+                        """,
+                        (stale_threshold_seconds,),
+                    )
             if deleted_count > 0:
                 logger.info(f"Cleaned up {deleted_count} stale chunk entries")
 
