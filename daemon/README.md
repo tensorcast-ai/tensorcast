@@ -17,8 +17,10 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 - gRPC surface for artifact loading, lifecycle, key mapping, and status.
 - Orchestration via controllers with strong input validation and deadline handling.
 - Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
-- Event-driven background scheduling to sweep/refresh TTL-bound state and complete verification.
+- Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
+- Eviction consults lifecycle counters (use_count, placement_pins) rather than legacy `keep_for_global` flags.
+- Maps `MaterializeReplica(keep_for_global=true)` to a TTL prefetch pin by creating a PlacementLease on GPU replicas (default TTL 10 minutes).
 
 ## What It Does Not Do
 
@@ -47,7 +49,7 @@ flowchart TB
   - StatusController: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`.
 - Managers/Registries:
   - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
-- Runtime: BackgroundScheduler unifies sweeps (sessions, locks, verification, auto-register, PID, optional eviction) with “sleep until deadline or signal” semantics.
+  - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
 - Engine: single source of truth for materialization orchestration, memory lifecycle, DVMP locking semantics, verification futures.
 
 ## Interfaces (Public Surface)
@@ -77,11 +79,11 @@ Contract highlights:
 - `grpc_service_impl.{h,cc}`: thin gRPC service entry points and dependency wiring.
 - `service/controllers/*`: controllers for materialization, registration, transport, and status.
 - `registration_manager.h`, `replica_session_manager.h`, `sessions_service.h`: unified registration/session lifecycles with TTL.
-- `ref_tracker.h`: PID reference tracking and `/proc` sweeper integration.
+- `ref_tracker.h`: PID reference tracking; liveness integrated via `SessionLifecycleTask`.
 - `transport_lock_manager.h`: tokenized chunk locking with TTL and best-effort unlock.
 - `verification_tracker.h`: verification futures, capacity and expiry-based eviction.
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
-- `background_scheduler.h`, `sweep_tasks.h`: event-driven runtime scheduler and task definitions.
+- `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
 - `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile).
 - `server_main.cc`: flags/bootstrap and service registration.

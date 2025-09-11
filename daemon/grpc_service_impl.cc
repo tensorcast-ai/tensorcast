@@ -12,6 +12,7 @@
 #include "daemon/status_utils.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/types.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -242,12 +243,47 @@ Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
 void StoreDaemonServiceImpl::start_sweepers() {
   scheduler_ = std::make_unique<BackgroundScheduler>();
   using std::chrono::milliseconds;
-  // Session TTL
+  // Session lifecycle: unified task for sessions TTL, PID liveness, join TTL
   {
-    auto t = std::make_shared<SessionTtlTask>(sessions_);
+    lifecycle_mgr_ = std::make_shared<SessionLifecycleManager>(sessions_, refs_, *lip_mgr_, *reg_mgr_);
+    // Create PID monitor: event-driven liveness via pidfd with /proc fallback
+    pid_monitor_ = std::make_unique<PidMonitor>([this](pid_t pid) {
+      if (this->lifecycle_mgr_) {
+        this->lifecycle_mgr_->handle_pid_exit(pid);
+      }
+    });
+    pid_monitor_->start();
+    // Metric: pid monitor fallback when pidfd is unavailable
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_pid_monitor_fallback_total");
+      if (!pid_monitor_->using_pidfd()) {
+        counter->Add(1.0);
+      }
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_pid_monitor_fallback_total unavailable";
+    }
+    lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
+    auto lifecycle_task = std::make_shared<SessionLifecycleTask>(*lifecycle_mgr_);
+    auto* sched_ptr = scheduler_.get();
     scheduler_->add_task(
-        TaskKind::kSessionTTL, std::chrono::duration_cast<milliseconds>(opts_.sessions_sweep_interval), [t]() {
-          t->run_once();
+        TaskKind::kSessionLifecycle, std::chrono::milliseconds(0), [lifecycle_task, this, sched_ptr]() {
+          lifecycle_task->poll();
+          if (sched_ptr) {
+            absl::Time next_deadline = this->lifecycle_mgr_->next_deadline();
+            absl::Duration delta;
+            if (next_deadline == absl::InfiniteFuture()) {
+              // Fallback: sleep for configured poll minimum when no deadlines
+              delta = absl::Milliseconds(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(this->opts_.sessions_sweep_interval).count());
+            } else {
+              delta = next_deadline - absl::Now();
+            }
+            if (delta < absl::Milliseconds(1))
+              delta = absl::Milliseconds(1);
+            auto when = BackgroundScheduler::Clock::now() + std::chrono::milliseconds(absl::ToInt64Milliseconds(delta));
+            sched_ptr->set_next_due(TaskKind::kSessionLifecycle, when);
+          }
         });
   }
   // Lock TTL
@@ -266,26 +302,11 @@ void StoreDaemonServiceImpl::start_sweepers() {
           t->run_once();
         });
   }
-  // Registration join TTL (duplicate join keepalive)
-  {
-    auto t = std::make_shared<RegJoinTtlTask>(*reg_mgr_, refs_);
-    scheduler_->add_task(
-        TaskKind::kRegJoinTTL, std::chrono::duration_cast<milliseconds>(opts_.sessions_sweep_interval), [t]() {
-          t->run_once();
-        });
-  }
-  // PID watch
-  {
-    auto t = std::make_shared<PidWatchTask>(refs_, *lip_mgr_);
-    scheduler_->add_task(
-        TaskKind::kPidWatch, std::chrono::duration_cast<milliseconds>(opts_.proc_check_interval), [t]() {
-          t->run_once();
-        });
-  }
+  // Registration join TTL and PID watch unified under SessionLifecycleTask
   // Optional eviction
   if (opts_.enable_periodic_eviction) {
     const double limit = opts_.gpu_memory_limit_fraction;
-    auto t = std::make_shared<EvictionTask>(*engine_, refs_, limit);
+    auto t = std::make_shared<EvictionTask>(*engine_, refs_, lifecycle_mgr_.get(), limit);
     scheduler_->add_task(
         TaskKind::kEviction, std::chrono::duration_cast<milliseconds>(opts_.eviction_check_interval), [t]() {
           t->run_once();
@@ -298,6 +319,10 @@ void StoreDaemonServiceImpl::stop_sweepers() {
   if (scheduler_) {
     scheduler_->stop();
     scheduler_.reset();
+  }
+  if (pid_monitor_) {
+    pid_monitor_->stop();
+    pid_monitor_.reset();
   }
 }
 

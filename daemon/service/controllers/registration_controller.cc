@@ -369,8 +369,19 @@ grpc::Status RegistrationController::commit(
           meta.index_data,
           meta.index_key_hex,
           std::move(lease_vec));
-      if (!out_or.ok())
+      if (!out_or.ok()) {
+        if (absl::IsAlreadyExists(out_or.status())) {
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto counter = meter->CreateDoubleCounter("tc_register_commit_denied_total");
+            counter->Add(1.0);
+          } catch (...) {
+            VLOG(1) << "metrics counter tc_register_commit_denied_total unavailable";
+          }
+        }
         return to_grpc_status(out_or.status());
+      }
       const auto& out = *out_or;
       auto* desc = resp.mutable_artifact_descriptor();
       desc->set_artifact_id(out.artifact_id);
@@ -386,6 +397,11 @@ grpc::Status RegistrationController::commit(
         counter->Add(1.0);
       } catch (...) {
         VLOG(1) << "metrics counter tc_register_commit_lip_total unavailable";
+      }
+      // Create CommitLease for VRAM_LEASED in-place ownership (device-unique)
+      if (d_.lifecycle) {
+        SessionLifecycleManager::CommitSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
+        (void)d_.lifecycle->create_commit_lease(subj, meta.owner_pid);
       }
       // Log lease-in-place registration summary including plan.
       LOG(INFO) << "Registered memory replica: " << out.artifact_id

@@ -140,7 +140,7 @@ Note: Legacy `load_dict(...)`, `load_dict_handle(...)`, `get_artifact(...)`, and
   - `descriptor` (ArtifactDescriptor)
   - `existed` (bool) — true when the commit hit an existing replica and joined a reference
 - Idempotent success on duplicates: if the same `mi2:` artifact already has a replica on the same device, the daemon reclaims the new allocation and returns `OK` with the existing descriptor plus `existed=true`.
-- Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and a background sweeper drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.
+- Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and the unified `SessionLifecycleTask` drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.
 
 ### SDK Module Layout
 

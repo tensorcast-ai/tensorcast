@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/time.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 
@@ -60,7 +61,16 @@ grpc::Status MaterializationController::materialize_replica(
             d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
           }
           if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/req.keep_for_global());
+            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/false);
+            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
+              SessionLifecycleManager::ReplicaSubject subj{
+                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
+              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              // TTL prefetch pin when requested: create a PlacementLease with default TTL (10 minutes)
+              if (req.keep_for_global()) {
+                (void)d_.lifecycle->create_placement_lease(subj, absl::Minutes(10));
+              }
+            }
           }
         },
         resp.mutable_mem_handle());
@@ -98,7 +108,16 @@ grpc::Status MaterializationController::materialize_replica(
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
   if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid(), req.keep_for_global());
+    d_.refs.add_ref(handle.replica_key, req.pid(), /*keep_for_global=*/false);
+    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
+      SessionLifecycleManager::ReplicaSubject subj{
+          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
+      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      // TTL prefetch pin when requested: create a PlacementLease with default TTL (10 minutes)
+      if (req.keep_for_global()) {
+        (void)d_.lifecycle->create_placement_lease(subj, absl::Minutes(10));
+      }
+    }
   }
   if (has_disk)
     resp.set_disk_path(req.disk_path());
@@ -147,6 +166,12 @@ grpc::Status MaterializationController::materialize_by_key(
           }
           if (req.pid() > 0) {
             d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/false);
+            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
+              SessionLifecycleManager::ReplicaSubject subj{
+                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
+              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              // MaterializeByKey has no keep_for_global; pins are not created here.
+            }
           }
         },
         resp.mutable_mem_handle());
@@ -192,6 +217,12 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   if (req.pid() > 0) {
     d_.refs.add_ref(handle.replica_key, req.pid(), /*keep_for_global=*/false);
+    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
+      SessionLifecycleManager::ReplicaSubject subj{
+          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
+      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      // MaterializeByKey has no keep_for_global; pins are not created here.
+    }
   }
   if (handle.cuda_ipc_handle.is_valid()) {
     resp.mutable_mem_handle()->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
@@ -304,6 +335,9 @@ grpc::Status MaterializationController::unload(
   }
   if (req.has_pid()) {
     d_.refs.drop_ref(key, req.pid());
+    if (d_.lifecycle && key.device.type == DeviceType::GPU) {
+      d_.lifecycle->release_by_pid(req.pid());
+    }
     if (d_.refs.ref_count(key) > 0) {
       resp.set_code(0);
       rctx.mark_success();

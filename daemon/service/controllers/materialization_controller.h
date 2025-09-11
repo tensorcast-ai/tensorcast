@@ -11,6 +11,7 @@
 #include "daemon/lip_bridge.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/rpc_context.h"
+#include "daemon/session_lifecycle.h"
 #include "daemon/sessions_service.h"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
@@ -25,6 +26,7 @@ class MaterializationController {
     LipBridge& lip;
     DeviceResolver& devices;
     std::atomic<bool>& is_shutting_down;
+    SessionLifecycleManager* lifecycle{nullptr};
   };
 
   explicit MaterializationController(Dep d) : d_(d) {}

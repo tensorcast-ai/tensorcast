@@ -5,10 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
-#include <future>
 #include <memory>
 
-#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
@@ -22,6 +20,7 @@
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
+#include "daemon/session_lifecycle.h"
 #include "daemon/sessions_service.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/transport_lock_manager.h"
@@ -76,9 +75,11 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .sessions = *sessions_svc_,
         .lip = *lip_bridge_,
         .devices = devices_,
-        .is_shutting_down = is_shutting_down_};
+        .is_shutting_down = is_shutting_down_,
+        .lifecycle = lifecycle_mgr_.get()};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
-    RegistrationController::Dep rdep{.engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_, .refs = refs_};
+    RegistrationController::Dep rdep{
+        .engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_, .refs = refs_, .lifecycle = lifecycle_mgr_.get()};
     registration_controller_ = std::make_unique<RegistrationController>(rdep);
     TransportController::Dep tdep{.engine = *engine_, .locks = locks_, .lip = *lip_mgr_};
     transport_controller_ = std::make_unique<TransportController>(tdep);
@@ -248,6 +249,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::chrono::time_point<std::chrono::steady_clock> start_time_{std::chrono::steady_clock::now()};
   void start_sweepers();
   void stop_sweepers();
+  std::shared_ptr<SessionLifecycleManager> lifecycle_mgr_;
+  std::unique_ptr<PidMonitor> pid_monitor_;
 
   // Helpers (moved into controllers/helpers per RFC‑0016)
 

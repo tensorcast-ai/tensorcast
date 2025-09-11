@@ -16,7 +16,13 @@
 
 namespace tensorcast::daemon {
 
-enum class TaskKind : std::uint8_t { kSessionTTL, kLockTTL, kPidWatch, kVerification, kEviction, kRegJoinTTL };
+enum class TaskKind : std::uint8_t {
+  kLockTTL,
+  kVerification,
+  kEviction,
+  // Unified lifecycle task replaces SessionTTL, RegJoinTTL, and PidWatch
+  kSessionLifecycle,
+};
 
 class BackgroundScheduler {
  public:
@@ -69,6 +75,19 @@ class BackgroundScheduler {
     for (auto& t : tasks_) {
       if (t.kind == kind)
         t.pending = true;
+    }
+    cv_.notify_one();
+  }
+
+  // Dynamically set next due time for a task to enable deadline-driven scheduling
+  void set_next_due(TaskKind kind, Clock::time_point when) {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto& t : tasks_) {
+      if (t.kind == kind) {
+        t.next_due = when;
+        t.pending = false;
+        break;
+      }
     }
     cv_.notify_one();
   }

@@ -11,6 +11,7 @@
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
 #include "daemon/rpc_context.h"
+#include "daemon/session_lifecycle.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
@@ -23,6 +24,7 @@ class RegistrationController {
     RegistrationManager& reg;
     LipManager& lip;
     RefTracker& refs;
+    SessionLifecycleManager* lifecycle{nullptr};
   };
   explicit RegistrationController(Dep d) : d_(d) {}
 

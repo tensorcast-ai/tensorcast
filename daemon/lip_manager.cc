@@ -450,6 +450,21 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   out.encoding = "json";
   out.total_size = total_size;
 
+  // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
+  {
+    absl::MutexLock l(&mu_);
+    ArtifactDeviceKey k{.artifact_id = out.artifact_id, .device_id = device_id};
+    auto it = leases_.find(k);
+    if (it != leases_.end()) {
+      const auto now = std::chrono::steady_clock::now();
+      const bool active = it->second.expiry.time_since_epoch().count() <= 0 || !(now > it->second.expiry);
+      if (active) {
+        return absl::AlreadyExistsError(
+            absl::StrCat("lease already exists for artifact on device (pid=", it->second.owner_pid, ")"));
+      }
+    }
+  }
+
   // Verification JSON: read three 8-byte values (start/middle/end) if possible
   auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
     uint64_t v = 0;
