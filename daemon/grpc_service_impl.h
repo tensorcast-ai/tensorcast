@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/device_resolver.h"
@@ -67,7 +68,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     verif_tracker_ = std::make_unique<VerificationTracker>();
     start_sweepers();
     // Wire helper services and controllers (post-scheduler construction)
-    sessions_svc_ = std::make_unique<SessionsService>(sessions_, *verif_tracker_, scheduler_.get());
+    sessions_svc_ = std::make_unique<SessionsService>(
+        sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(opts_.sessions_ttl.count()));
     lip_bridge_ = std::make_unique<LipBridge>(*lip_mgr_);
     MaterializationController::Dep dep{
         .engine = *engine_,
@@ -116,9 +118,11 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     }
     is_registered_.store(true);
   }
+
   bool is_registered() const {
     return is_registered_.load();
   }
+
   std::string worker_id() const {
     absl::MutexLock l(&worker_mu_);
     return worker_id_;

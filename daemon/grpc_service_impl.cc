@@ -245,13 +245,15 @@ void StoreDaemonServiceImpl::start_sweepers() {
   using std::chrono::milliseconds;
   // Session lifecycle: unified task for sessions TTL, PID liveness, join TTL
   {
-    lifecycle_mgr_ = std::make_shared<SessionLifecycleManager>(sessions_, refs_, *lip_mgr_, *reg_mgr_);
+    lifecycle_mgr_ = std::make_shared<SessionLifecycleManager>(sessions_, refs_, *lip_mgr_, *engine_);
     // Create PID monitor: event-driven liveness via pidfd with /proc fallback
-    pid_monitor_ = std::make_unique<PidMonitor>([this](pid_t pid) {
-      if (this->lifecycle_mgr_) {
-        this->lifecycle_mgr_->handle_pid_exit(pid);
-      }
-    });
+    pid_monitor_ = std::make_unique<PidMonitor>(
+        [this](pid_t pid) {
+          if (this->lifecycle_mgr_) {
+            this->lifecycle_mgr_->handle_pid_exit(pid);
+          }
+        },
+        std::chrono::duration_cast<std::chrono::milliseconds>(opts_.proc_check_interval));
     pid_monitor_->start();
     // Metric: pid monitor fallback when pidfd is unavailable
     try {
@@ -266,6 +268,21 @@ void StoreDaemonServiceImpl::start_sweepers() {
     lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
     auto lifecycle_task = std::make_shared<SessionLifecycleTask>(*lifecycle_mgr_);
     auto* sched_ptr = scheduler_.get();
+    // Tighten deadline scheduling: reschedule lifecycle task when earliest deadline changes
+    lifecycle_mgr_->set_schedule_hook([this, sched_ptr](absl::Time when) {
+      absl::Duration delta;
+      if (when == absl::InfiniteFuture()) {
+        delta = absl::Milliseconds(
+            std::chrono::duration_cast<std::chrono::milliseconds>(this->opts_.sessions_sweep_interval).count());
+      } else {
+        delta = when - absl::Now();
+      }
+      if (delta < absl::Milliseconds(1))
+        delta = absl::Milliseconds(1);
+      auto next = BackgroundScheduler::Clock::now() + std::chrono::milliseconds(absl::ToInt64Milliseconds(delta));
+      if (sched_ptr)
+        sched_ptr->set_next_due(TaskKind::kSessionLifecycle, next);
+    });
     scheduler_->add_task(
         TaskKind::kSessionLifecycle, std::chrono::milliseconds(0), [lifecycle_task, this, sched_ptr]() {
           lifecycle_task->poll();

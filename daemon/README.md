@@ -17,15 +17,19 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 - gRPC surface for artifact loading, lifecycle, key mapping, and status.
 - Orchestration via controllers with strong input validation and deadline handling.
 - Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
-- Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks.
+- Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks. The lifecycle manager exposes a schedule hook so the scheduler can be rescheduled immediately when the earliest deadline changes, minimizing expiry drift.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
-- Eviction consults lifecycle counters (use_count, placement_pins) rather than legacy `keep_for_global` flags.
-- Maps `MaterializeReplica(keep_for_global=true)` to a TTL prefetch pin by creating a PlacementLease on GPU replicas (default TTL 10 minutes).
+- Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
+- Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
+- Join TTL via leases: duplicate coalesced commits (`existed=true`) create a TTL-bound UseLease for the owner PID. On expiry, the lease finalizer drops the lightweight RefTracker ref and may reclaim memory immediately.
+- Session keepalive: session principal TTL is tracked by the lifecycle manager via deadline guards instead of a standalone sweep.
+- PID unwatch: when the last pid-bound guard retires, the monitor stops watching that PID (pidfd/epoll cleaned). The PID monitor’s polling fallback interval is configurable via service options (`proc_check_interval`).
+
 
 ## What It Does Not Do
 
 - Reimplement engine invariants: memory lifecycle, DVMP/UMA model, verification semantics, or DVMP chunk-locking rules.
-- Own long-lived cache policy beyond explicit hints (e.g., `keep_for_global`). Eviction policies live below or behind explicit feature flags.
+- Own long-lived cache policy is out of scope for the daemon. Eviction policies live below or behind explicit feature flags.
 - Bypass the StoreEngine for data movement or memory management.
 - Break wire compatibility. Protocol changes are additive and guarded.
 

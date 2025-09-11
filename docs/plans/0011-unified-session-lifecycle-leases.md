@@ -27,7 +27,7 @@ Deliver a unified lifecycle system in the daemon that replaces `SessionTtlTask`,
   - Implement PlacementLease/UseLease/CommitLease invariants; enforce device‑unique CommitIndex for VRAM_LEASED; implement TTL prefetch semantics.
 
 - Milestone 4 — Eviction & Metrics
-  - Update `EvictionTask` to consult Manager counters (UseCount/PlacementPins); remove the `keep_for_global` behavior; integrate/extend metrics.
+- Update `EvictionTask` to consult Manager counters (UseCount/PlacementPins); remove any `keep_for_global` behavior and state; integrate/extend metrics.
 
 - Milestone 5 — Tests & Docs & Cleanup
   - Unit/integration/load tests; update/remove old tests; update `daemon/README.md`, internal docs and metrics guide; clean up redundant code and paths.
@@ -39,7 +39,7 @@ Deliver a unified lifecycle system in the daemon that replaces `SessionTtlTask`,
 - PidMonitor: pidfd + polling fallback, simulated PID tests.
 - Reclaimer: Idempotent integration with `refs_`, `lip_mgr_`, `engine_`.
 - Integration: Register a single `SessionLifecycleTask` in `start_sweepers()`; delete the three legacy sweepers.
-- Controllers: materialize/register/commit paths create/renew/release Leases; convert joined lightweight refs to PlacementLease; remove use of `keep_for_global`.
+- Controllers: materialize/register/commit paths create/renew/release Leases; convert joined lightweight refs to PlacementLease; remove any use of `keep_for_global`.
 - VRAM_LEASED: CommitIndex (unique on (artifact_id, device_id)); duplicate commit returns AlreadyExists; maintain keepalive/expiry handling.
 - Prefetch: PlacementLease (DeadlineGuard) and reclaim on expiry if unused.
 - Eviction: Use Manager's UseCount/PlacementPins for decisions.
@@ -91,7 +91,7 @@ class SessionLifecycleManager {
 ## Code Removals & Simplifications
 
 - Delete sweeper classes: `SessionTtlTask`, `RegJoinTtlTask`, `PidWatchTask`.
-- Remove `keep_for_global`; express pins as PlacementLease with TTL/Manual guards.
+- Remove `keep_for_global` entirely from interfaces and internals.
 - Replace commit "existed=true" lightweight refs with PlacementLease management (TTL/Manual unified).
 - Route all PID liveness via `PidMonitor` (pidfd + poll), not periodic `/proc` loops.
 - Session TTL becomes a Session principal HeartbeatGuard; no separate session sweeper.
@@ -101,7 +101,7 @@ class SessionLifecycleManager {
 - Unit: renew/expire race conditions, PID exit precedence, finalizer idempotence.
 - Integration: synthetic clients creating/joining/crashing; verify reclamation latency and resource state.
 - Load: scale to 1e6 mixed operations; observe CPU, lock contention, queue sizes, and `expiry_drift_ms`.
-- Cutover: single cutover (no dual-run/rollback); remove legacy sweepers and `keep_for_global` paths together; enforce via CI tests and docs-check guards.
+- Cutover: single cutover (no dual-run/rollback); remove legacy sweepers and all `keep_for_global` code/fields together; enforce via CI tests and docs-check guards.
 
 # Risks & Tracking
 
@@ -122,7 +122,7 @@ Status Update — 2025-09-11
 - Behavior parity in first cut:
   - Session TTL, joined‑registration TTL, and PID liveness sweeps consolidated into one pass.
   - `LipManager::sweep_expired_and_dead_pids()` invoked from unified task.
-  - TTL prefetch pins: `MaterializeReplica(keep_for_global=true)` now creates a PlacementLease with a default TTL (10m) on GPU replicas; pin expires automatically if no activity.
+  - TTL prefetch via request flag removed. If/when needed, prefetch will be exposed via dedicated APIs or explicit TTL parameters.
 
 - Docs synced:
   - Updated daemon README to describe `SessionLifecycleTask`.
@@ -131,7 +131,7 @@ Status Update — 2025-09-11
 
 - Next steps (Milestones 1/3/4):
   - Introduce explicit Lease/Guard/Finalizer primitives and ExpirationQueue to shift from scan‑based to deadline‑driven expirations.
-  - Replace `keep_for_global` with PlacementLease pins and plumb Manager counters into Eviction policy.
+  - Remove `keep_for_global`; rely on PlacementLease pins and Manager counters in Eviction policy.
   - Add CommitIndex uniqueness enforcement for VRAM_LEASED and associated metrics.
 
 Incremental progress (scaffolding & invariants):
@@ -147,10 +147,10 @@ Incremental progress (scaffolding & invariants):
   - Added `BackgroundScheduler::set_next_due()` and prepared the lifecycle task to update its next wake based on `SessionLifecycleManager::next_deadline()` (using time deltas). This shifts the task toward deadline‑driven execution rather than fixed intervals.
 
 - Eviction alignment:
-  - Integrated `SessionLifecycleManager` counters (UseCount/PlacementPins) into `EvictionTask` decisions; eviction now skips when there are active use refs or placement pins. The legacy `keep_for_global` flag is ignored.
+  - Integrated `SessionLifecycleManager` counters (UseCount/PlacementPins) into `EvictionTask` decisions; eviction now skips when there are active use refs or placement pins.
 
 - Controllers integration (initial):
-  - `MaterializationController` now creates a `UseLease` for the caller PID on successful GPU materialization or LIP fast path and releases leases on `UnloadReplica` (by PID). When `keep_for_global` is requested on MaterializeReplica, it is expressed as a `PlacementLease` with a default TTL (10m) rather than a sticky flag.
+  - `MaterializationController` now creates a `UseLease` for the caller PID on successful GPU materialization or LIP fast path and releases leases on `UnloadReplica` (by PID). TTL prefetch via request flag is not supported.
   - `RegistrationController` creates a `CommitLease` on successful LIP in‑place commits (VRAM_LEASED), enforcing device‑unique ownership at the manager+LIP layer.
 
 ## Milestone Progress (2025-09-11)
@@ -167,7 +167,7 @@ Incremental progress (scaffolding & invariants):
 - Milestone 3 — Ownership Semantics
   - [x] Placement/Use/Commit lease paths: UseLease on load; CommitLease on LIP in‑place
   - [x] Enforce device‑unique commit for VRAM_LEASED (returns AlreadyExists)
-  - [x] TTL prefetch semantics — PlacementLease(DeadlineGuard) via `keep_for_global` on MaterializeReplica (10m default)
+  - [x] Removed `keep_for_global` from proto and service; no request-flag-driven TTL prefetch
 
 - Milestone 4 — Eviction & Metrics
   - [x] Eviction consults lifecycle counters (UseCount/PlacementPins) — integrated
@@ -193,7 +193,7 @@ Execution summary (2025-09-11):
 Plan status
 - All milestones completed; unified lifecycle task is integrated and validated by unit, integration, and load tests.
 - start_sweepers(): switched SessionLifecycleTask to 0ms base interval and rely on deadline-driven rescheduling via next_deadline().
-- Controllers: UseLease created on load paths; PlacementLease TTL pin created when keep_for_global=true; CommitLease created on LIP in-place commits with device-unique enforcement.
+- Controllers: UseLease created on load paths; CommitLease created on LIP in-place commits with device-unique enforcement.
 
 Completed guard/finalizer broadening and deadline-driven scheduling:
 - Introduced Guard records (PidLiveness, Deadline, Manual) with generations and a min-heap keyed by guard deadlines.

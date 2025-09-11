@@ -43,6 +43,7 @@ class IBackgroundTask {
 class LockTtlTask final : public IBackgroundTask {
  public:
   LockTtlTask(TransportLockManager& locks, store::StoreEngine& engine) : locks_(locks), engine_(engine) {}
+
   void run_once() override {
     for (const auto& tok : locks_.tokens()) {
       auto expired = locks_.remove_if_expired(tok);
@@ -51,6 +52,7 @@ class LockTtlTask final : public IBackgroundTask {
       }
     }
   }
+
   [[nodiscard]] std::string name() const override {
     return "LockTtlTask";
   }
@@ -120,6 +122,7 @@ class VerificationTask final : public IBackgroundTask {
     }
     tracker_.prune();
   }
+
   [[nodiscard]] std::string name() const override {
     return "VerificationTask";
   }
@@ -152,11 +155,13 @@ class EvictionTask final : public IBackgroundTask {
       double ratio = used / total;
       if (ratio <= limit_)
         continue;
+
       struct Cand {
         store::loading::ReplicaKey key;
         std::chrono::time_point<std::chrono::system_clock> last_access;
         size_t size;
       };
+
       std::vector<Cand> cands;
       for (const auto& info : engine_.get_all_replicas_info()) {
         if (info.gpu_state == common::memory::MemoryLocation::NONE)
@@ -165,7 +170,7 @@ class EvictionTask final : public IBackgroundTask {
           continue;
         store::loading::ReplicaKey key{
             .artifact_id = info.artifact_id, .device = store::DeviceRegistry::instance().gpu_key(dev), .replica = 0};
-        // Evict only when no active use or placement pins; legacy keep_for_global is deprecated
+        // Evict only when no active use or placement pins
         if (refs_.ref_count(key) > 0)
           continue;
         if (lifecycle_ && (lifecycle_->use_count_for(key) > 0 || lifecycle_->placement_pin_count_for(key) > 0))
@@ -186,6 +191,7 @@ class EvictionTask final : public IBackgroundTask {
       }
     }
   }
+
   std::string name() const override {
     return "EvictionTask";
   }

@@ -291,7 +291,6 @@ class DaemonCtl:
                 device_uuid=device_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                keep_for_global=False,
             )
             try:
                 response = self._unary_call(
@@ -372,7 +371,6 @@ class DaemonCtl:
                 device_uuid=device_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                keep_for_global=False,
             )
             try:
                 response = self._unary_call(

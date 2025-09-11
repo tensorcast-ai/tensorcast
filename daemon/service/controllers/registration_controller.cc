@@ -9,6 +9,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/time.h"
 #include "core/store/loader/segment_plan_source.h"
 #include "daemon/cuda_ipc_raii.h"
 #include "daemon/status_utils.h"
@@ -323,7 +324,7 @@ grpc::Status RegistrationController::commit(
           .artifact_id = out.artifact_id,
           .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
           .replica = 0};
-      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      d_.refs.add_ref(key, meta.owner_pid);
       // Preserve meta for optional TTL keepalive and mark joined
       meta.joined_existing = true;
       meta.artifact_id_mi2 = out.artifact_id;
@@ -433,6 +434,7 @@ grpc::Status RegistrationController::commit(
       uint64_t base;
       uint64_t len;
     };
+
     std::vector<Opened> opened;
     opened.reserve(lease_vec.size());
 
@@ -463,10 +465,12 @@ grpc::Status RegistrationController::commit(
       store::StoreEngine* engine;
       std::string id;
       bool active{true};
+
       ~RegAbortGuard() {
         if (active && engine)
           (void)engine->abort_registered_artifact(id);
       }
+
       void release() {
         active = false;
       }
@@ -524,7 +528,11 @@ grpc::Status RegistrationController::commit(
           .artifact_id = d.artifact_id,
           .device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = meta.device_id, .uuid = ""},
           .replica = 0};
-      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      d_.refs.add_ref(key, meta.owner_pid);
+      if (d_.lifecycle && meta.ttl_ms > 0) {
+        SessionLifecycleManager::ReplicaSubject subj{.artifact_id = d.artifact_id, .device_id = meta.device_id};
+        (void)d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+      }
       meta.joined_existing = true;
       meta.artifact_id_mi2 = d.artifact_id;
       d_.reg.set_meta(req.registration_id(), meta);
@@ -563,7 +571,11 @@ grpc::Status RegistrationController::commit(
           .artifact_id = out.artifact_id,
           .device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = meta.device_id, .uuid = ""},
           .replica = 0};
-      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      d_.refs.add_ref(key, meta.owner_pid);
+      if (d_.lifecycle && meta.ttl_ms > 0) {
+        SessionLifecycleManager::ReplicaSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
+        (void)d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+      }
       meta.joined_existing = true;
       meta.artifact_id_mi2 = out.artifact_id;
       d_.reg.set_meta(req.registration_id(), meta);

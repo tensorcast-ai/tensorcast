@@ -42,7 +42,7 @@ flowchart LR
 
 # Problem Statement & Scope
 
-Multiple overlapping background sweepers manage TTLs and liveness today: session TTL, registration join TTL, and PID scanning. Their semantics partly overlap with ad‑hoc pins (e.g., `keep_for_global`) and implicit reference counting via `RefTracker`. This leads to duplicate scans, unclear ownership, and delayed reclamation under multi‑tenant pressure.
+Multiple overlapping background sweepers manage TTLs and liveness today: session TTL, registration join TTL, and PID scanning. Their semantics partly overlapped with ad‑hoc pins and implicit reference counting via `RefTracker`. This led to duplicate scans, unclear ownership, and delayed reclamation under multi‑tenant pressure. The new design removes ad‑hoc pin fields entirely and expresses liveness solely via leases.
 
 Scope: unify all ephemeral lifecycle into a single Lease/Guard/Finalizer system inside the daemon; delete legacy sweepers; make reclamation immediate when safe; add explicit ownership modes; and express prefetch pins via TTLs. No protocol buffer or persistent schema changes are required.
 

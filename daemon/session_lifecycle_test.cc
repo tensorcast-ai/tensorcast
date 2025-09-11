@@ -26,9 +26,7 @@ TEST_CASE("TTL prefetch expiry drops placement pin", "[daemon][lifecycle][ttl]")
   RefTracker refs;
   // LipManager is required by API but not used by this test path
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:ttl";
   const int device_id = 0;
@@ -55,8 +53,7 @@ TEST_CASE("PID exit precedence drops UseLease and RefTracker refs", "[daemon][li
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:pid";
   const int device_id = 0;
@@ -68,7 +65,7 @@ TEST_CASE("PID exit precedence drops UseLease and RefTracker refs", "[daemon][li
   // Seed a UseLease and a RefTracker entry for this pid
   auto use_id_or = mgr.create_use_lease(subj, pid);
   REQUIRE(use_id_or.ok());
-  refs.add_ref(key, pid, /*keep_for_global=*/false);
+  refs.add_ref(key, pid);
 
   REQUIRE(mgr.use_count_for(key) == 1);
   REQUIRE(refs.ref_count(key) == 1);
@@ -86,8 +83,7 @@ TEST_CASE("Mixed guards: UseLease + Deadline retires on whichever fails first", 
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:mixed_use_deadline";
   const int device_id = 0;
@@ -99,7 +95,7 @@ TEST_CASE("Mixed guards: UseLease + Deadline retires on whichever fails first", 
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   // Track ref to observe finalizer dropping it
-  refs.add_ref(key, pid, /*keep_for_global=*/false);
+  refs.add_ref(key, pid);
   REQUIRE(mgr.use_count_for(key) == 1);
   REQUIRE(refs.ref_count(key) == 1);
 
@@ -122,8 +118,7 @@ TEST_CASE(
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:mixed_commit_deadline";
   const int device_id = 0;
@@ -154,8 +149,7 @@ TEST_CASE("Deadline guard generation: renew prevents stale expiry", "[daemon][li
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:renew";
   const int device_id = 0;
@@ -189,8 +183,7 @@ TEST_CASE("Manual guard: placement lease requires explicit release", "[daemon][l
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:manual";
   const int device_id = 0;
@@ -218,8 +211,7 @@ TEST_CASE("Manual release of UseLease drops use_count and RefTracker", "[daemon]
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:manual_use";
   const int device_id = 0;
@@ -231,7 +223,7 @@ TEST_CASE("Manual release of UseLease drops use_count and RefTracker", "[daemon]
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   // Seed RefTracker to observe finalizer effect
-  refs.add_ref(key, pid, /*keep_for_global=*/false);
+  refs.add_ref(key, pid);
 
   REQUIRE(mgr.use_count_for(key) == 1);
   REQUIRE(refs.ref_count(key) == 1);
@@ -249,8 +241,7 @@ TEST_CASE("Finalizer idempotency on UseLease manual retire", "[daemon][lifecycle
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:idemp_use";
   const int device_id = 0;
@@ -261,7 +252,7 @@ TEST_CASE("Finalizer idempotency on UseLease manual retire", "[daemon][lifecycle
   auto id_or = mgr.create_use_lease(subj, pid);
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
-  refs.add_ref(key, pid, /*keep_for_global=*/false);
+  refs.add_ref(key, pid);
   REQUIRE(mgr.use_count_for(key) == 1);
   REQUIRE(refs.ref_count(key) == 1);
 
@@ -279,8 +270,7 @@ TEST_CASE("Deadline expiry idempotency on PlacementLease", "[daemon][lifecycle][
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:idemp_deadline";
   const int device_id = 0;
@@ -305,8 +295,7 @@ TEST_CASE("next_deadline is InfiniteFuture for manual-only leases", "[daemon][li
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:no_deadlines";
   const int device_id = 0;

@@ -8,13 +8,11 @@
 #include "core/store/store_engine.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
-#include "daemon/registration_manager.h"
 #include "daemon/replica_session_manager.h"
 #include "daemon/session_lifecycle.h"
 
 using tensorcast::daemon::LipManager;
 using tensorcast::daemon::RefTracker;
-using tensorcast::daemon::RegistrationManager;
 using tensorcast::daemon::ReplicaSessionManager;
 using tensorcast::daemon::SessionLifecycleManager;
 using tensorcast::store::DeviceRegistry;
@@ -24,8 +22,7 @@ TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lif
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
   const int N = 2000; // keep runtime modest while exercising data structures
@@ -54,8 +51,7 @@ TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][li
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
   const int N = 2000;
@@ -69,7 +65,7 @@ TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][li
     auto id_or = mgr.create_use_lease(subj, pid);
     REQUIRE(id_or.ok());
     ReplicaKey key{.artifact_id = art, .device = DeviceRegistry::instance().gpu_key(kDevice), .replica = 0};
-    refs.add_ref(key, pid, /*keep_for_global=*/false);
+    refs.add_ref(key, pid);
     items.emplace_back(key, pid);
   }
 
@@ -88,8 +84,7 @@ TEST_CASE("Lifecycle load: mass renewal prevents stale expiries", "[daemon][life
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
-  RegistrationManager reg;
-  SessionLifecycleManager mgr(sessions, refs, *lip, reg);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
   const int N = 1000;

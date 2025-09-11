@@ -242,7 +242,6 @@ sc_header_only_library(
     deps = [
         ":lip_manager_lib",
         ":ref_tracker_hdr",
-        ":registration_manager_lib",
         ":session_manager_hdr",
         "//core/store:store_engine",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -282,6 +281,7 @@ sc_header_only_library(
     hdrs = ["sessions_service.h"],
     deps = [
         ":background_scheduler_hdr",
+        ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":verification_tracker_hdr",
     ],
@@ -380,6 +380,93 @@ cc_test(
         ":registration_manager_lib",
         ":session_lifecycle_hdr",
         "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_immediate_unload_test",
+    srcs = ["session_lifecycle_immediate_unload_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_pid_unwatch_test",
+    srcs = ["session_lifecycle_pid_unwatch_test.cc"],
+    copts = ["-DTC_ENABLE_TEST_HOOKS"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_session_guard_test",
+    srcs = ["session_lifecycle_session_guard_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "pid_monitor_unwatch_integration_test",
+    srcs = ["pid_monitor_unwatch_integration_test.cc"],
+    copts = ["-DTC_ENABLE_TEST_HOOKS"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "eviction_task_behavior_test",
+    srcs = ["eviction_task_behavior_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        ":sweep_tasks_hdr",
+        "//core/store:store_engine",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_eviction_notify_test",
+    srcs = ["session_lifecycle_eviction_notify_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
         "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],

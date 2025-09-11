@@ -100,7 +100,6 @@ message MaterializeReplicaRequest {
   DeviceType target_device_type = 4;
   int32 pinned_allocation_timeout_ms = 5;
   int32 pid = 6; // Process ID for reference tracking
-  bool keep_for_global = 7; // Keep in cache for global access
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
 }
 
@@ -278,7 +277,6 @@ message LoadedReplicaInfo {
   int32 ref_count = 4; // 引用计数
   repeated int32 pids = 5; // 持有引用的进程ID列表
   int64 size_bytes = 6; // Artifact 大小（字节）
-  bool keep_for_global = 7; // 是否保留为全局缓存
   google.protobuf.Timestamp last_access_ts = 8; // 标准时间戳
 }
 

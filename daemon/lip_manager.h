@@ -52,6 +52,10 @@ class LipManager {
   bool has_active_on_device(const std::string& artifact_id, int device_id) const;
   void sweep_expired_and_dead_pids();
 
+  // Remove the commit lease for (artifact, device) when the owner pid matches.
+  // Best-effort: returns true on removal, false if not found or owner mismatch.
+  bool revoke_commit_lease_if_owner_matches(const std::string& artifact_id, int device_id, int owner_pid);
+
   // Commit a LIP (lease in-place) registration into a persistent lease entry,
   // computing the artifact descriptor using index/data multihashes streamed
   // from the leased GPU segments. Stores the lease for keepalive/revoke and

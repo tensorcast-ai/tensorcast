@@ -61,15 +61,12 @@ grpc::Status MaterializationController::materialize_replica(
             d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
           }
           if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/false);
+            d_.refs.add_ref(rkey, req.pid());
             if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
               SessionLifecycleManager::ReplicaSubject subj{
                   .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
               (void)d_.lifecycle->create_use_lease(subj, req.pid());
-              // TTL prefetch pin when requested: create a PlacementLease with default TTL (10 minutes)
-              if (req.keep_for_global()) {
-                (void)d_.lifecycle->create_placement_lease(subj, absl::Minutes(10));
-              }
+              // TTL prefetch pins via request flag removed; only UseLease is created.
             }
           }
         },
@@ -108,15 +105,12 @@ grpc::Status MaterializationController::materialize_replica(
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
   if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid(), /*keep_for_global=*/false);
+    d_.refs.add_ref(handle.replica_key, req.pid());
     if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
       SessionLifecycleManager::ReplicaSubject subj{
           .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
       (void)d_.lifecycle->create_use_lease(subj, req.pid());
-      // TTL prefetch pin when requested: create a PlacementLease with default TTL (10 minutes)
-      if (req.keep_for_global()) {
-        (void)d_.lifecycle->create_placement_lease(subj, absl::Minutes(10));
-      }
+      // TTL prefetch pins via request flag removed; only UseLease is created.
     }
   }
   if (has_disk)
@@ -165,12 +159,12 @@ grpc::Status MaterializationController::materialize_by_key(
             d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
           }
           if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/false);
+            d_.refs.add_ref(rkey, req.pid());
             if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
               SessionLifecycleManager::ReplicaSubject subj{
                   .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
               (void)d_.lifecycle->create_use_lease(subj, req.pid());
-              // MaterializeByKey has no keep_for_global; pins are not created here.
+              // MaterializeByKey: no TTL prefetch; only UseLease is created.
             }
           }
         },
@@ -216,12 +210,12 @@ grpc::Status MaterializationController::materialize_by_key(
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
   if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid(), /*keep_for_global=*/false);
+    d_.refs.add_ref(handle.replica_key, req.pid());
     if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
       SessionLifecycleManager::ReplicaSubject subj{
           .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
       (void)d_.lifecycle->create_use_lease(subj, req.pid());
-      // MaterializeByKey has no keep_for_global; pins are not created here.
+      // MaterializeByKey: no TTL prefetch; only UseLease is created.
     }
   }
   if (handle.cuda_ipc_handle.is_valid()) {
