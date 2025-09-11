@@ -32,7 +32,7 @@ The CLI locates the binary from the wheel or development path automatically.
 
 ## Manage Daemon Sessions
 
-Daemon sessions are tracked under `~/.tensorcast/instances/<session_id>` and the
+Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
 current session id is stored in `~/.tensorcast/current_session`.
 
 Common commands:

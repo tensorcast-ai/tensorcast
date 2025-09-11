@@ -135,9 +135,17 @@ with init(address="local", daemon_config_path=".../store_daemon_config.yaml") as
     ...
 ```
 
-CLI-launched daemon sessions are recorded under `~/.tensorcast/instances/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. The current session id is stored at `~/.tensorcast/current_session` for `address=auto` resolution. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
+Notes on signals and cleanup:
+- The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.
+- To opt-in to SDK-installed signal handling (e.g., in standalone scripts), pass `install_signal_handlers=True`:
+  - `init(..., install_signal_handlers=True)` installs graceful handlers that stop the owned daemon and then exit.
+  - `init(..., install_signal_handlers=True, fate_share_sigterm=True)` installs hard-exit handlers that immediately terminate the process to trigger PDEATHSIG (use sparingly).
+
+CLI-launched daemon sessions are recorded under `~/.tensorcast/sessions/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. The current session id is stored at `~/.tensorcast/current_session` for `address=auto` resolution. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
 
 SDK launches via `init(address="local", ...)` are private: they do not update `current_session` or write `meta.json` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
+
+CLI duplicate protection: `tensorcast start` refuses to start a new local daemon if a current session is already healthy. Use `tensorcast restart` to stop and start, or `tensorcast stop` first.
 
 ## Advanced SDK: RegisteredArtifact with Context Manager
 

@@ -17,7 +17,7 @@ from typing import Optional
 
 import grpc
 
-from tensorcast.cli_utils.service_manager import get_instance_address
+from tensorcast.cli_utils.service_manager import get_session_address
 from tensorcast.proto.daemon.v1 import store_daemon_pb2, store_daemon_pb2_grpc
 
 
@@ -55,7 +55,7 @@ def resolve_address_mode(address: Optional[str]) -> ResolvedAddressMode:
     if address is None:
         if env_addr and ping_daemon(env_addr):
             return ResolvedAddressMode("connect", env_addr)
-        auto_addr = get_instance_address()
+        auto_addr = get_session_address()
         if auto_addr and ping_daemon(auto_addr):
             return ResolvedAddressMode("connect", auto_addr)
         return ResolvedAddressMode("launch", None)
@@ -65,7 +65,7 @@ def resolve_address_mode(address: Optional[str]) -> ResolvedAddressMode:
     if s_l == "local":
         return ResolvedAddressMode("launch", None)
     if s_l == "auto":
-        auto_addr = env_addr or get_instance_address()
+        auto_addr = env_addr or get_session_address()
         if auto_addr and ping_daemon(auto_addr):
             return ResolvedAddressMode("connect", auto_addr)
         raise RuntimeError(

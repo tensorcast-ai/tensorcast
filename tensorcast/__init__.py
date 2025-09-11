@@ -55,11 +55,13 @@ from tensorcast._version import __version__  # noqa: E402
 from tensorcast.startup import (  # noqa: E402
     init,
     is_initialized,
+    shutdown,
 )
 
 __all__ = [
     "__version__",
     "init",
     "is_initialized",
+    "shutdown",
     "_store_engine",
 ]

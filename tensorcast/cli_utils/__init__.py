@@ -8,8 +8,8 @@ Exports Linux-only service management primitives for the daemon.
 from tensorcast.cli_utils.service_manager import (
     ServiceError,
     check_service_status,
-    get_current_instance_id,
-    list_instances,
+    get_current_session_id,
+    list_sessions,
     logs_tail,
     start_service,
     stop_service,
@@ -21,6 +21,6 @@ __all__ = [
     "stop_service",
     "check_service_status",
     "logs_tail",
-    "get_current_instance_id",
-    "list_instances",
+    "get_current_session_id",
+    "list_sessions",
 ]
