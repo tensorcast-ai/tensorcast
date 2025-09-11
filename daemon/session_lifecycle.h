@@ -23,6 +23,9 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <array>
+#include <cerrno>
+#include <csignal>
+#include <cstdint>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
@@ -58,7 +61,7 @@ class PidMonitor final {
     if (epoll_fd_ >= 0 && event_fd_ >= 0) {
       epoll_event ev{};
       ev.events = EPOLLIN;
-      ev.data.fd = event_fd_;
+      ev.data.u64 = kEpollTagWake;
       (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, event_fd_, &ev);
       use_pidfd_.store(true);
     } else {
@@ -121,11 +124,16 @@ class PidMonitor final {
         pidfds_[pid] = pfd;
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
-        ev.data.u32 = static_cast<uint32_t>(pid);
+        ev.data.u64 = (kEpollTagPid | static_cast<uint64_t>(pid));
         (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, pfd, &ev);
       } else {
         // pidfd unavailable for this pid (maybe it already died); leave in watched_ for poll fallback
       }
+    }
+    // Wake the epoll loop so fallback polling notices newly watched PIDs promptly
+    if (event_fd_ >= 0) {
+      uint64_t one = 1;
+      (void)::write(event_fd_, &one, sizeof(one));
     }
   }
 
@@ -150,13 +158,18 @@ class PidMonitor final {
         continue;
       for (int i = 0; i < n; ++i) {
         const auto& ev = events[static_cast<size_t>(i)];
-        if (ev.data.fd == event_fd_) {
+        const uint64_t data = ev.data.u64;
+        if ((data & kEpollTagMask) == kEpollTagWake) {
           // drain eventfd
           uint64_t tmp;
           (void)::read(event_fd_, &tmp, sizeof(tmp));
           continue;
         }
-        pid_t pid = static_cast<pid_t>(ev.data.u32);
+        if ((data & kEpollTagMask) != kEpollTagPid) {
+          // Unknown tag; ignore
+          continue;
+        }
+        pid_t pid = static_cast<pid_t>(data & kEpollValueMask);
         // Cleanup pidfd and mapping
         int pfd = -1;
         {
@@ -174,6 +187,8 @@ class PidMonitor final {
         if (cb_)
           cb_(pid);
       }
+      // Poll fallback for PIDs without pidfd
+      poll_missing_pidfds_once_();
     }
   }
   void run_poll_() {
@@ -183,8 +198,7 @@ class PidMonitor final {
         std::lock_guard<std::mutex> g(mu_);
         to_drop.reserve(watched_.size());
         for (pid_t pid : watched_) {
-          std::string proc_path = absl::StrCat("/proc/", pid);
-          if (::access(proc_path.c_str(), F_OK) != 0) {
+          if (::kill(pid, 0) == -1 && errno == ESRCH) {
             to_drop.push_back(pid);
           }
         }
@@ -210,6 +224,35 @@ class PidMonitor final {
   std::mutex mu_;
   std::unordered_set<pid_t> watched_;
   std::unordered_map<pid_t, int> pidfds_;
+  // Epoll data tagging to disambiguate sources
+  static constexpr uint64_t kEpollTagMask = 0xFFFF000000000000ULL;
+  static constexpr uint64_t kEpollTagWake = 0xFFFF000000000000ULL;
+  static constexpr uint64_t kEpollTagPid = 0xEEEE000000000000ULL;
+  static constexpr uint64_t kEpollValueMask = 0x0000FFFFFFFFFFFFULL;
+
+  void poll_missing_pidfds_once_() {
+    if (!running_.load())
+      return;
+    std::vector<pid_t> to_drop;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      to_drop.reserve(watched_.size());
+      for (pid_t pid : watched_) {
+        if (pidfds_.find(pid) != pidfds_.end())
+          continue; // handled by epoll via pidfd
+        if (::kill(pid, 0) == -1 && errno == ESRCH) {
+          to_drop.push_back(pid);
+        }
+      }
+      for (pid_t pid : to_drop) {
+        watched_.erase(pid);
+      }
+    }
+    for (pid_t pid : to_drop) {
+      if (cb_)
+        cb_(pid);
+    }
+  }
 };
 
 class SessionLifecycleManager {
