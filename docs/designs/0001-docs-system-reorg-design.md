@@ -67,6 +67,7 @@ Design (docs/designs/<slug>.md)
 - Alternatives and rationale
 - Risks, success criteria, and compatibility
 - Cross‑links: owning code, related plans, and guides
+ - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).
 
 Plan (docs/plans/<slug>.md)
 - Phases/milestones and tasks
