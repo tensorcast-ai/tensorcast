@@ -2,7 +2,7 @@
 id: plan-20250911-unified-session-lifecycle-leases
 slug: 0011-unified-session-lifecycle-leases
 title: Plan — Unified Session Lifecycle via Leases, Guards, and Finalizers
-status: in_progress
+status: completed
 owners: ["daemon"]
 reviewers: ["core", "store", "infra"]
 created: 2025-09-11
@@ -188,6 +188,10 @@ Execution summary (2025-09-11):
   - bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=true → PASSED
   - bazel test //daemon:grpc_service_impl_lip_ttl_expiry_test --define=use_fake_cuda=true → PASSED
   - bazel test //daemon:session_lifecycle_load_test → PASSED
+  - bazel test $(bazel query 'tests(//daemon:all)') --define=use_fake_cuda=true → ALL PASSED
+
+Plan status
+- All milestones completed; unified lifecycle task is integrated and validated by unit, integration, and load tests.
 - start_sweepers(): switched SessionLifecycleTask to 0ms base interval and rely on deadline-driven rescheduling via next_deadline().
 - Controllers: UseLease created on load paths; PlacementLease TTL pin created when keep_for_global=true; CommitLease created on LIP in-place commits with device-unique enforcement.
 
