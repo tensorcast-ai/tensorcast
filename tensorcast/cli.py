@@ -2,20 +2,19 @@
 
 """tensorcast command-line interface."""
 
-import json
 import sys
 from pathlib import Path
 
 import click
 
 from tensorcast.cli_utils import (
-    DEFAULT_LOG_FILE,
-    DEFAULT_PID_FILE,
     ServiceError,
     check_service_status,
+    logs_tail,
     start_service,
     stop_service,
 )
+from tensorcast.cli_utils.service_manager import discover_default_config_path
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -33,65 +32,46 @@ def cli():
     "-c",
     required=False,
     type=click.Path(exists=True, path_type=Path),
-    help="Path to unified daemon config (YAML/JSON)",
+    help=(
+        "Path to unified daemon config (YAML/JSON). "
+        "If omitted, tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, "
+        "or examples/config/store_daemon_config.yaml"
+    ),
 )
 @click.option(
-    "--config-text",
-    required=False,
-    type=str,
-    help="Inline daemon config as YAML/JSON text (mutually exclusive with --config)",
-)
-@click.option(
-    "--verbose",
-    "-v",
+    "--block/--no-block",
     is_flag=True,
-    help="Enable verbose logging",
+    default=False,
+    help="Run in blocking mode (foreground). Default is non-blocking",
 )
 @click.option(
-    "--blocking/--non-blocking",
-    is_flag=True,
+    "--wait/--no-wait",
     default=True,
-    help="Run in blocking mode (foreground). Default is non-blocking (background)",
+    show_default=True,
+    help="Wait for daemon readiness before returning (non-blocking mode)",
 )
 @click.option(
-    "--pid-file",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_PID_FILE,
-    help=f"PID file location (default: {DEFAULT_PID_FILE})",
+    "--timeout",
+    type=float,
+    default=20.0,
+    show_default=True,
+    help="Readiness wait timeout in seconds (with --wait)",
 )
-@click.option(
-    "--log-file",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_LOG_FILE,
-    help=f"Log file location for daemon mode (default: {DEFAULT_LOG_FILE})",
-)
-def start(**kwargs):
+def start(config: Path | None, block: bool, wait: bool, timeout: float):
     """Start the StoreDaemon service."""
     try:
-        # Extract config file/text if provided
-        config_file = kwargs.pop("config")
-        config_text = kwargs.pop("config_text")
-
-        if bool(config_file) == bool(config_text):
+        cfg = config or discover_default_config_path()
+        if not cfg:
             raise ServiceError(
-                "Exactly one of --config or --config-text must be provided"
+                "No config provided and no default config found. "
+                "Provide --config or set $TENSORCAST_DAEMON_CONFIG."
             )
-
-        # Extract service management options
-        pid_file = kwargs.pop("pid_file")
-        log_file = kwargs.pop("log_file")
-        blocking = kwargs.pop("blocking")
-        verbose = kwargs.pop("verbose")
-
-        # Start the service
         start_service(
-            config_file=config_file,
-            config_text=config_text,
-            cli_args={},
-            pid_file=pid_file,
-            log_file=log_file,
-            blocking=blocking,
-            verbose=verbose,
+            config_path=cfg,
+            blocking=block,
+            to_console=True,
+            wait=wait,
+            timeout=timeout,
         )
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
@@ -104,20 +84,14 @@ def start(**kwargs):
 
 @cli.command(name="stop")
 @click.option(
-    "--pid-file",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_PID_FILE,
-    help=f"PID file location (default: {DEFAULT_PID_FILE})",
-)
-@click.option(
     "--force",
     is_flag=True,
     help="Force kill the daemon (SIGKILL instead of SIGTERM)",
 )
-def stop(pid_file: Path, force: bool):
+def stop(force: bool):
     """Stop the StoreDaemon service."""
     try:
-        stop_service(pid_file, force)
+        stop_service(instance_id=None, force=force)
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -129,12 +103,6 @@ def stop(pid_file: Path, force: bool):
 
 @cli.command(name="status")
 @click.option(
-    "--pid-file",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_PID_FILE,
-    help=f"PID file location (default: {DEFAULT_PID_FILE})",
-)
-@click.option(
     "--host",
     default=None,
     help="Optional host override for status RPC (default: config/default)",
@@ -145,10 +113,10 @@ def stop(pid_file: Path, force: bool):
     type=int,
     help="Optional port override for status RPC (default: config/default)",
 )
-def status(pid_file: Path, host: str | None, port: int | None):
+def status(host: str | None, port: int | None):
     """Check the status of StoreDaemon service."""
     try:
-        check_service_status(pid_file, host=host, port=port)
+        check_service_status(instance_id=None, host=host, port=port)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -156,33 +124,35 @@ def status(pid_file: Path, host: str | None, port: int | None):
 
 @cli.command(name="restart")
 @click.option(
-    "--pid-file",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_PID_FILE,
-    help=f"PID file location (default: {DEFAULT_PID_FILE})",
-)
-@click.option(
     "--force",
     is_flag=True,
     help="Force kill the daemon during stop",
 )
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Path to unified daemon config",
+)
 @click.pass_context
-def restart(ctx: click.Context, pid_file: Path, force: bool):
+def restart(ctx: click.Context, force: bool, config: Path):
     """Restart the StoreDaemon service."""
-    # First stop the service
-    ctx.invoke(stop, pid_file=pid_file, force=force)
-
-    # Then start it again with the same configuration
-    # Note: This assumes the service will use the same configuration
-    # as before. For full restart with new options, use stop then start.
+    ctx.invoke(stop, force=force)
     click.echo("Starting service...")
+    ctx.invoke(start, config=config)
 
-    meta_path = pid_file.with_suffix(".meta.json")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    cfg_path = meta.get("config_path")
-    if not cfg_path:
-        raise FileNotFoundError("config_path missing in meta")
-    ctx.invoke(start, pid_file=pid_file, config=Path(cfg_path))
+
+@cli.command(name="logs")
+@click.option("--stderr", is_flag=True, help="Show stderr instead of stdout")
+@click.option("-f", "--follow", is_flag=True, help="Follow log output (tail -f)")
+def logs(stderr: bool, follow: bool):
+    """Show or tail logs for the local daemon session."""
+    try:
+        logs_tail(instance_id=None, stderr=stderr, follow=follow)
+    except ServiceError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 def main():

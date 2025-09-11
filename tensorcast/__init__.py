@@ -51,8 +51,8 @@ if not already_patched:
 import tensorcast._store_engine as _store_engine  # noqa: E402
 from tensorcast._version import __version__  # noqa: E402
 
-# Import functions from config module
-from tensorcast.config import (  # noqa: E402
+# Import functions from the canonical startup module
+from tensorcast.startup import (  # noqa: E402
     init,
     is_initialized,
 )
