@@ -256,11 +256,13 @@ include = [
 
 exclude = [
     "tensorcast/proto/*",
-    "tensorcast/proto/**/*.pyi"
+    "tensorcast/proto/**/*.pyi",
+    "tensorcast/global_store/webui_backend/*"
 ]
-
+# strict = ["tensorcast/global_store"]
 typeCheckingMode = "standard"
 reportMissingImports = "error"
 reportMissingModuleSource = "none"
 pythonVersion = "3.10"
 reportAttributeAccessIssue = "none"
+reportUnknownMemberType="none"

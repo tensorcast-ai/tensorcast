@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import sys
 import types
+from pathlib import Path
 
 # Avoid importing the compiled extension during this simple helper test
 sys.modules.setdefault("tensorcast._store_engine", types.ModuleType("tensorcast._store_engine"))
-# Also stub tensorcast.config to avoid optional dependencies during this unit test
-cfg_mod = types.ModuleType("tensorcast.config")
-setattr(cfg_mod, "init", lambda: None)
-setattr(cfg_mod, "is_initialized", lambda: True)
-sys.modules.setdefault("tensorcast.config", cfg_mod)
+# (No longer needed) Previously stubbed tensorcast.config for tests;
+# module has been removed in favor of tensorcast.startup.
 
-from tensorcast.communicator import config_io as pycfg
+from tensorcast.communicator import config_io as pycfg  # noqa: E402
 
 
 def test_python_helper_from_yaml(tmp_path: Path) -> None:
