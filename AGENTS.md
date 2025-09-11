@@ -279,7 +279,9 @@ if (fd < 0) {
 
 #### Core Principles
 - **Functional programming**: Prefer functional, declarative style over classes where possible
-- **Type safety**: Always use type hints for function signatures
+- **Type safety**:
+  - Try your best to make the code type safe
+  - Always use type hints for function signatures
 - **Modern Python**: Use Python 3.10+ features freely
 
 #### Type Safety Requirements

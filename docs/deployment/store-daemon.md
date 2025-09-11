@@ -23,10 +23,30 @@ bazel build //daemon:tensorcast_daemon
 Use the unified YAML config and start via CLI:
 
 ```
-uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml
+uv run -q python -m tensorcast.cli start --no-block --config=examples/config/store_daemon_config.yaml
+
+If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
 ```
 
 The CLI locates the binary from the wheel or development path automatically.
+
+## Manage Daemon Sessions
+
+Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
+current session id is stored in `~/.tensorcast/current_session`.
+
+Common commands:
+
+```
+# Status (connects to daemon gRPC if available, otherwise shows process info)
+uv run -q python -m tensorcast.cli status
+
+# Logs (stdout by default, --stderr for stderr; add -f to follow)
+uv run -q python -m tensorcast.cli logs -f
+
+# Stop current session (SIGTERM with SIGKILL fallback)
+uv run -q python -m tensorcast.cli stop
+```
 
 ## Observability
 
@@ -34,7 +54,8 @@ Metrics are exposed via the unified system; the daemon no longer provides an HTT
 
 ## Configuration
 
-All runtime parameters are configured via the unified config. See `examples/config/store_daemon_config.yaml`.
+All runtime parameters are configured via the unified config. The daemon only
+accepts `--config=/path/to/file`. See `examples/config/store_daemon_config.yaml`.
 Enum fields accept friendly values and are normalized (case-insensitive): `observability.otel.exporter_protocol: grpc | http/protobuf`, `observability.logging.level: debug|info|warn|error`.
 ```yaml
 network:

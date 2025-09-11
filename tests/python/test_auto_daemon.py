@@ -13,12 +13,12 @@ This module tests the automatic daemon lifecycle management:
 import time
 from pathlib import Path
 from unittest import mock
-
+import tempfile
 import pytest
 
 from tensorcast.daemon_manager import DaemonManager, ensure_daemon_running
 from tensorcast.logger import init_logger
-from google.protobuf.json_format import MessageToJson
+from tensorcast.daemon_runtime_config import dump_daemon_config
 from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
 
 logger = init_logger(__name__)
@@ -131,13 +131,15 @@ class TestConvenienceFunction:
         cfg.server.storage_path = str(Path(test_storage_path))
         cfg.engine.mem_pool_size_bytes = 4 * 1024 * 1024 * 1024
 
-        cfg_json = MessageToJson(cfg, always_print_fields_with_no_presence=True)
+        with tempfile.NamedTemporaryFile(prefix="tc_test_", suffix=".yaml", delete=False) as tmp:
+            dump_daemon_config(cfg, tmp.name)
+            cfg_path = tmp.name
 
         success = ensure_daemon_running(
             host,
             port,
             auto_start=True,
-            config_text=cfg_json,
+            config_path=cfg_path,
         )
 
         assert isinstance(success, bool)
@@ -256,8 +258,10 @@ class TestIntegration:
         cfg1.server.listen.port = port1
         cfg1.server.storage_path = path1
         cfg1.engine.mem_pool_size_bytes = 2 * 1024 * 1024 * 1024
-        cfg1_json = MessageToJson(cfg1, always_print_fields_with_no_presence=True)
-        manager1 = DaemonManager(host=host1, port=port1, auto_start=True, config_text=cfg1_json)
+        with tempfile.NamedTemporaryFile(prefix="tc_test1_", suffix=".yaml", delete=False) as tmp1:
+            dump_daemon_config(cfg1, tmp1.name)
+            cfg1_path = tmp1.name
+        manager1 = DaemonManager(host=host1, port=port1, auto_start=True, config_path=cfg1_path)
 
         # Manager 2 config
         host2, port2 = "127.0.0.1", 65012
@@ -266,8 +270,10 @@ class TestIntegration:
         cfg2.server.listen.port = port2
         cfg2.server.storage_path = path2
         cfg2.engine.mem_pool_size_bytes = 4 * 1024 * 1024 * 1024
-        cfg2_json = MessageToJson(cfg2, always_print_fields_with_no_presence=True)
-        manager2 = DaemonManager(host=host2, port=port2, auto_start=True, config_text=cfg2_json)
+        with tempfile.NamedTemporaryFile(prefix="tc_test2_", suffix=".yaml", delete=False) as tmp2:
+            dump_daemon_config(cfg2, tmp2.name)
+            cfg2_path = tmp2.name
+        manager2 = DaemonManager(host=host2, port=port2, auto_start=True, config_path=cfg2_path)
 
         success1 = manager1.ensure_daemon_running()
         success2 = manager2.ensure_daemon_running()

@@ -41,7 +41,6 @@ class DaemonManager:
         port: int,
         auto_start: bool = True,
         config_path: str | None = None,
-        config_text: str | None = None,
     ):
         # Initialize OTel in a library-friendly manner; if instrumentation is
         # unavailable in the environment (e.g., minimal test env), proceed
@@ -60,7 +59,6 @@ class DaemonManager:
         self.daemon_process: Optional[subprocess.Popen] = None
         self._daemon_started_by_us = False
         self._config_path = config_path
-        self._config_text = config_text
 
         # Register cleanup function
         atexit.register(self.cleanup)
@@ -97,12 +95,9 @@ class DaemonManager:
             "-m",
             "tensorcast.cli",
             "start",
-            "--non-blocking",
+            "--no-block",
         ]
-        if self._config_text is not None:
-            cmd.extend(["--config-text", self._config_text])
-        else:
-            cmd.extend(["--config", str(self._config_path or "")])
+        cmd.extend(["--config", str(self._config_path or "")])
         return cmd
 
     def _wait_until_ready(
@@ -244,7 +239,6 @@ def get_daemon_manager(
     port: int,
     auto_start: bool = True,
     config_path: str | None = None,
-    config_text: str | None = None,
 ) -> DaemonManager:
     """Get or create the global daemon manager instance."""
     global _global_daemon_manager
@@ -255,7 +249,6 @@ def get_daemon_manager(
             port=port,
             auto_start=auto_start,
             config_path=config_path,
-            config_text=config_text,
         )
 
     return _global_daemon_manager
@@ -267,7 +260,6 @@ def ensure_daemon_running(
     *,
     auto_start: bool = True,
     config_path: str | None = None,
-    config_text: str | None = None,
 ) -> bool:
     """Convenience function to ensure daemon is running."""
     manager = get_daemon_manager(
@@ -275,6 +267,5 @@ def ensure_daemon_running(
         port=port,
         auto_start=auto_start,
         config_path=config_path,
-        config_text=config_text,
     )
     return manager.ensure_daemon_running()

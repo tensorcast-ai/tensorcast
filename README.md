@@ -62,14 +62,18 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
 
 - Development (from source):
   - Build once with Bazel: `bazel build //daemon:tensorcast_daemon`
-  - Start background: `uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml`
+  - Start background: `uv run -q python -m tensorcast.cli start --no-block --config=examples/config/store_daemon_config.yaml`
+    - By default non-blocking start waits until the daemon is ready (timeout 20s). Use `--no-wait` to return immediately.
+    - Customize readiness timeout: `--timeout 30`
+  - Status: `uv run -q python -m tensorcast.cli status`
+  - Logs (follow): `uv run -q python -m tensorcast.cli logs -f`
   - Stop: `uv run -q python -m tensorcast.cli stop`
-  - The CLI automatically locates the binary from `bazel-bin/daemon/tensorcast_daemon`.
+  - The CLI automatically locates the binary from `bazel-bin/daemon/tensorcast_daemon` or the packaged wheel.
 
 - Packaged (wheel) usage:
   - The wheel packages the daemon at `tensorcast/bin/tensorcast_daemon` and the CLI will use it automatically.
 
-Runtime flags have been removed. All runtime parameters are configured via the unified config passed to `--config`.
+Runtime flags have been removed. The daemon accepts exactly one flag: `--config=/path/to/file.{yaml,json}`. All runtime parameters are configured via this unified config.
 
 See `examples/config/store_daemon_config.yaml` for a complete example, including the `communicator.*` section.
 network:
@@ -106,6 +110,42 @@ the daemon initializes the communication engine using these typed settings (no e
 # Run this on the root directory of the project
 ln -s $(bazel info output_base)/external external
 ```
+
+## Client Init (Launch/Connect)
+
+Use the unified, Linux-only launch/connect API from Python:
+
+```python
+from tensorcast import init
+
+# Connect to current session or env TENSORCAST_ADDRESS if available
+ctx = init()  # or init(address="auto")
+
+# Force local launch (private session). If daemon_config_path is omitted,
+# init() will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml,
+# or examples/config/store_daemon_config.yaml.
+# Private launches do not publish ~/.tensorcast/current_session or meta.json and bind to 127.0.0.1.
+ctx = init(address="local", daemon_config_path="examples/config/store_daemon_config.yaml")
+
+# Connect to a specific daemon
+ctx = init(address="127.0.0.1:50052")
+
+# Context manages owned session lifecycle (stops on close/atexit)
+with init(address="local", daemon_config_path=".../store_daemon_config.yaml") as ctx:
+    ...
+```
+
+Notes on signals and cleanup:
+- The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.
+- To opt-in to SDK-installed signal handling (e.g., in standalone scripts), pass `install_signal_handlers=True`:
+  - `init(..., install_signal_handlers=True)` installs graceful handlers that stop the owned daemon and then exit.
+  - `init(..., install_signal_handlers=True, fate_share_sigterm=True)` installs hard-exit handlers that immediately terminate the process to trigger PDEATHSIG (use sparingly).
+
+CLI-launched daemon sessions are recorded under `~/.tensorcast/sessions/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. The current session id is stored at `~/.tensorcast/current_session` for `address=auto` resolution. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
+
+SDK launches via `init(address="local", ...)` are private: they do not update `current_session` or write `meta.json` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
+
+CLI duplicate protection: `tensorcast start` refuses to start a new local daemon if a current session is already healthy. Use `tensorcast restart` to stop and start, or `tensorcast stop` first.
 
 ## Advanced SDK: RegisteredArtifact with Context Manager
 

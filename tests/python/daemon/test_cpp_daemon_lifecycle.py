@@ -23,10 +23,8 @@ from pathlib import Path
 import grpc
 import pytest
 
-from tensorcast.cli_utils.service_manager import (
-    ServiceError,
-    _ensure_cpp_daemon_binary,
-)
+from tensorcast.cli_utils.service_manager import ServiceError
+from tensorcast.cli_utils.proc import ensure_cpp_daemon_binary
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.global_store.config.settings import (
     GlobalStoreConfig,
@@ -84,7 +82,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         pytest.skip("Set TENSORCAST_RUN_CPP_DAEMON_IT=1 to run daemon integration test")
     # Locate daemon binary or skip
     try:
-        bin_path: Path = _ensure_cpp_daemon_binary()
+        bin_path: Path = ensure_cpp_daemon_binary()
     except ServiceError:
         pytest.skip("C++ daemon binary not available; skipping integration test")
 
