@@ -457,8 +457,8 @@ def start_service(
         t1.start()
         t2.start()
         ret = proc.wait()
-    click.echo(f"daemon exited with code {ret}")
-    return inst
+        click.echo(f"daemon exited with code {ret}")
+        return inst
 
     # Non-blocking
     proc = subprocess.Popen(
