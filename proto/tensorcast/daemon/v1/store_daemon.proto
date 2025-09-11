@@ -460,6 +460,10 @@ message CommitRegisteredArtifactRequest {
 message CommitRegisteredArtifactResponse {
   // Content-addressed artifact descriptor (RFC-0007)
   tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 1;
+  // Idempotency indicator: true when the replica already existed on the same
+  // device and the daemon returned the existing descriptor while joining a
+  // lightweight reference for this registration. See docs/internals/model-loading.md.
+  bool existed = 2;
 }
 
 // Abort registration request

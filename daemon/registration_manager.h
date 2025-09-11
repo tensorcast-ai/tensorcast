@@ -32,6 +32,11 @@ class RegistrationManager {
     bool lease_in_place{false};
     std::string index_key_hex;
     std::string index_data;
+    // Join semantics: set when Commit detects an existing replica and the
+    // controller joined a lightweight reference for this registration.
+    bool joined_existing{false};
+    // The content-addressed mi2 id associated with the joined replica.
+    std::string artifact_id_mi2;
   };
 
   RegistrationManager() = default;
@@ -139,6 +144,16 @@ class RegistrationManager {
     absl::MutexLock l(&mu_);
     reg_meta_.erase(reg_id);
     reg_leases_.erase(reg_id);
+  }
+
+  // Enumerate registration ids (for TTL sweeping and tests)
+  std::vector<std::string> keys() const {
+    absl::MutexLock l(&mu_);
+    std::vector<std::string> out;
+    out.reserve(reg_meta_.size());
+    for (const auto& kv : reg_meta_)
+      out.push_back(kv.first);
+    return out;
   }
 
  private:

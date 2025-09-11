@@ -22,6 +22,7 @@
 #include "core/store/store_engine.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
+#include "daemon/registration_manager.h"
 #include "daemon/replica_session_manager.h"
 #include "daemon/transport_lock_manager.h"
 #include "daemon/verification_tracker.h"
@@ -226,6 +227,39 @@ class EvictionTask final : public IBackgroundTask {
   store::StoreEngine& engine_;
   RefTracker& refs_;
   double limit_;
+};
+
+// TTL sweeper for duplicate-join registrations: when a joined registration's
+// TTL expires, drop the lightweight reference that was added at commit time.
+class RegJoinTtlTask final : public IBackgroundTask {
+ public:
+  RegJoinTtlTask(RegistrationManager& reg, RefTracker& refs) : reg_(reg), refs_(refs) {}
+  void run_once() override {
+    auto ids = reg_.keys();
+    for (const auto& id : ids) {
+      auto meta_opt = reg_.get_meta(id);
+      if (!meta_opt.has_value())
+        continue;
+      const auto& m = *meta_opt;
+      if (!m.joined_existing)
+        continue;
+      if (reg_.expire_if_ttl_elapsed(id)) {
+        store::DeviceKey dev_key{
+            .type = (m.plan == RegistrationManager::RegPlan::DVMP ? DeviceType::CPU : DeviceType::GPU),
+            .ordinal = (m.plan == RegistrationManager::RegPlan::DVMP ? -1 : m.device_id),
+            .uuid = ""};
+        store::loading::ReplicaKey key{.artifact_id = m.artifact_id_mi2, .device = dev_key, .replica = 0};
+        refs_.drop_ref(key, m.owner_pid);
+      }
+    }
+  }
+  [[nodiscard]] std::string name() const override {
+    return "RegJoinTtlTask";
+  }
+
+ private:
+  RegistrationManager& reg_;
+  RefTracker& refs_;
 };
 
 } // namespace tensorcast::daemon

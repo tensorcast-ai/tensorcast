@@ -1914,6 +1914,44 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Replace entry.artifact_id with the content-addressed ID for registration and return
   entry.artifact_id = artifact_id_mi2;
 
+  // Idempotent success: if the same content-addressed artifact already has a
+  // replica on the target device, reclaim this allocation and return OK with
+  // existed=true and the computed descriptor. No new registry mapping is
+  // created and no Global Store upsert is attempted.
+  {
+    DeviceKey dev_key{
+        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .uuid = ""};
+    loading::ReplicaKey check_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
+    auto existing_or = replica_registry_->find(check_key);
+    if (existing_or.ok()) {
+      // Cleanup: erase pending entry and best-effort release the allocation we made
+      {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending_regs_.erase(std::string(registration_id));
+      }
+      if (entry.plan == PendingRegistrationEntry::Plan::DVMP) {
+        // DVMP path allocated PAGEABLE_CPU memory
+        (void)entry.replica->release_memory(MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+      } else {
+        // Coalesced/Lease-materialized path allocated GPU memory
+        (void)entry.replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+      }
+      RegistrationCommitResult result;
+      result.registration_id = std::string(registration_id);
+      result.artifact_id = entry.artifact_id;
+      result.device_id = entry.device_id;
+      result.size_bytes = entry.size_bytes;
+      result.existed = true;
+      result.index_multihash = *index_mh_or;
+      result.data_multihash = *data_mh_or;
+      result.schema_version = entry.schema_version;
+      result.encoding = entry.encoding;
+      return result;
+    }
+  }
+
   // Also add a registry mapping for the content-addressed artifact_id so callers can
   // subsequently reference the instance by its mi2: identifier (in addition to the
   // original logical artifact_id used during Begin/Commit).
@@ -1922,7 +1960,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
         .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
         .uuid = ""};
-    ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, /*replica=*/.replica = 0};
+    ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
     (void)replica_registry_->emplace(mi2_key, entry.replica);
   }
 
@@ -1991,6 +2029,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   result.artifact_id = entry.artifact_id;
   result.device_id = entry.device_id;
   result.size_bytes = entry.size_bytes;
+  result.existed = false;
   // RFC-0007: Fill descriptor fields for upstream layers
   result.index_multihash = *index_mh_or;
   result.data_multihash = *data_mh_or;

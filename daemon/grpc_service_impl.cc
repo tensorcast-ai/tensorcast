@@ -266,6 +266,14 @@ void StoreDaemonServiceImpl::start_sweepers() {
           t->run_once();
         });
   }
+  // Registration join TTL (duplicate join keepalive)
+  {
+    auto t = std::make_shared<RegJoinTtlTask>(*reg_mgr_, refs_);
+    scheduler_->add_task(
+        TaskKind::kRegJoinTTL, std::chrono::duration_cast<milliseconds>(opts_.sessions_sweep_interval), [t]() {
+          t->run_once();
+        });
+  }
   // PID watch
   {
     auto t = std::make_shared<PidWatchTask>(refs_, *lip_mgr_);

@@ -116,7 +116,7 @@ No repository‑wide schema changes are required. This design does not modify `s
 # Compatibility & Acceptance Criteria
 
 Compatibility
-- Fully backward‑compatible with existing partitioned artifacts; safetensors path is engaged only when no `tensor.data*` is present.
+- Safetensors path is engaged only when no `tensor.data*` is present.
 - Preserves v2 index semantics so downstream consumers and P2P paths operate unchanged.
 - Works in CPU‑only environments (fake CUDA backend) and real GPU setups.
 
@@ -131,4 +131,3 @@ Acceptance criteria
 - Architecture: docs/architecture/architecture-overview.md, docs/internals/model-loading.md.
 - Related code: `core/store/loader/*`, `core/store/replica/*`, `tensorcast/api/_indices.py`.
  
-

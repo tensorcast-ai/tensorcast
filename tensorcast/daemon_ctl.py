@@ -27,6 +27,7 @@ from tensorcast.types import (
     ArtifactDescriptor,
     BeginRegisterArtifactResult,
     CoalescedHandshake,
+    CommitResult,
     DVMPEmptyHandshake,
     DVMPRingHandshake,
     DVMPStreamHandshake,
@@ -681,8 +682,11 @@ class DaemonCtl:
         registration_id: str,
         *,
         timeout_s: float = 30.0,
-    ) -> ArtifactDescriptor:
-        """Commit a previously begun tensor dict registration and return descriptor (RFC-0007)."""
+    ) -> "CommitResult":
+        """Commit a previously begun tensor dict registration.
+
+        Returns CommitResult(descriptor, existed).
+        """
 
         if not registration_id:
             raise ValueError("registration_id is required")
@@ -714,8 +718,12 @@ class DaemonCtl:
                     raise TimeoutError(str(e)) from e
                 raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
 
+            existed = bool(resp.existed)
+            if existed:
+                set_span_attributes({"tc.register.existed": True})
             desc = resp.artifact_descriptor
-            return ArtifactDescriptor(
+
+            ad = ArtifactDescriptor(
                 artifact_id=desc.artifact_id,
                 index_multihash=desc.index_multihash,
                 data_multihash=desc.data_multihash,
@@ -723,6 +731,7 @@ class DaemonCtl:
                 encoding=desc.encoding,
                 total_size=int(desc.total_size),
             )
+            return CommitResult(descriptor=ad, existed=existed)
 
     def abort_registered_artifact(
         self, registration_id: str, *, timeout_s: float = 15.0

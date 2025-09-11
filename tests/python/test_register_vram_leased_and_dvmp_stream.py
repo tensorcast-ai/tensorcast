@@ -250,8 +250,8 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
         ctl = DaemonCtl(listen)
         ok = ctl.feed_register_artifact_lease_segments(handle.registration_id, segments)
         assert ok
-        desc = handle.commit()
-        assert desc and desc.artifact_id.startswith("mi2:")
+        commit = handle.commit()
+        assert commit and commit.descriptor.artifact_id.startswith("mi2:")
     finally:
         try:
             proc.terminate()
@@ -365,7 +365,7 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
 
         # Commit should succeed due to keepalive thread
         commit = handle.commit()
-        assert commit and commit.artifact_id.startswith("mi2:")
+        assert commit and commit.descriptor.artifact_id.startswith("mi2:")
         stop.set()
     finally:
         try:

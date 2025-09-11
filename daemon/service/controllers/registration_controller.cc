@@ -316,6 +316,21 @@ grpc::Status RegistrationController::commit(
     desc->set_schema_version(out.schema_version);
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.size_bytes);
+    resp.set_existed(out.existed);
+    if (out.existed) {
+      // Join a lightweight reference to the existing replica (CPU for DVMP)
+      store::loading::ReplicaKey key{
+          .artifact_id = out.artifact_id,
+          .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+          .replica = 0};
+      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      // Preserve meta for optional TTL keepalive and mark joined
+      meta.joined_existing = true;
+      meta.artifact_id_mi2 = out.artifact_id;
+      d_.reg.set_meta(req.registration_id(), meta);
+    } else {
+      d_.reg.erase_meta(req.registration_id());
+    }
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_commit_dvmp_total");
@@ -323,7 +338,6 @@ grpc::Status RegistrationController::commit(
     } catch (...) {
       VLOG(1) << "metrics counter tc_register_commit_dvmp_total unavailable";
     }
-    d_.reg.erase_meta(req.registration_id());
     rctx.mark_success();
     return Status::OK;
   }
@@ -487,6 +501,20 @@ grpc::Status RegistrationController::commit(
     desc->set_schema_version(d.schema_version);
     desc->set_encoding(d.encoding);
     desc->set_total_size(d.size_bytes);
+    resp.set_existed(d.existed);
+    if (d.existed) {
+      // Join reference to existing GPU replica for LIP materialized-to-VRAM path
+      store::loading::ReplicaKey key{
+          .artifact_id = d.artifact_id,
+          .device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = meta.device_id, .uuid = ""},
+          .replica = 0};
+      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      meta.joined_existing = true;
+      meta.artifact_id_mi2 = d.artifact_id;
+      d_.reg.set_meta(req.registration_id(), meta);
+    } else {
+      d_.reg.erase_all_for(req.registration_id());
+    }
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_commit_lease_total");
@@ -497,7 +525,6 @@ grpc::Status RegistrationController::commit(
     // Log lease materialized-to-VRAM registration summary including plan.
     LOG(INFO) << "Registered memory replica: " << d.artifact_id
               << " plan=vram_leased(materialized) device=gpu:" << meta.device_id << " size=" << d.size_bytes << "B";
-    d_.reg.erase_all_for(req.registration_id());
     rctx.mark_success();
     return Status::OK;
   }
@@ -513,6 +540,20 @@ grpc::Status RegistrationController::commit(
     desc->set_schema_version(out.schema_version);
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.size_bytes);
+    resp.set_existed(out.existed);
+    if (out.existed) {
+      // Join reference to existing GPU replica for coalesced plan duplicates
+      store::loading::ReplicaKey key{
+          .artifact_id = out.artifact_id,
+          .device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = meta.device_id, .uuid = ""},
+          .replica = 0};
+      d_.refs.add_ref(key, meta.owner_pid, /*keep_for_global=*/false);
+      meta.joined_existing = true;
+      meta.artifact_id_mi2 = out.artifact_id;
+      d_.reg.set_meta(req.registration_id(), meta);
+    } else {
+      d_.reg.erase_meta(req.registration_id());
+    }
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
@@ -520,7 +561,6 @@ grpc::Status RegistrationController::commit(
     } catch (...) {
       VLOG(1) << "metrics counter tc_register_commit_coalesced_total unavailable";
     }
-    d_.reg.erase_meta(req.registration_id());
     rctx.mark_success();
     return Status::OK;
   }
@@ -548,6 +588,8 @@ grpc::Status RegistrationController::revoke(
     RpcContext& rctx,
     const v1::RevokeRegisteredArtifactRequest& req,
     v1::RevokeRegisteredArtifactResponse& /*resp*/) {
+  // Capture meta for potential joined-reference cleanup
+  auto meta_opt = d_.reg.get_meta(req.registration_id());
   {
     auto st = d_.lip.revoke_by_registration_id(req.registration_id());
     if (st.ok())
@@ -558,6 +600,15 @@ grpc::Status RegistrationController::revoke(
     d_.reg.erase_all_for(req.registration_id());
   }
 REVOKE_DONE:
+  if (meta_opt.has_value() && meta_opt->joined_existing) {
+    const auto& m = *meta_opt;
+    store::DeviceKey dev_key{
+        .type = (m.plan == RegistrationManager::RegPlan::DVMP ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (m.plan == RegistrationManager::RegPlan::DVMP ? -1 : m.device_id),
+        .uuid = ""};
+    store::loading::ReplicaKey key{.artifact_id = m.artifact_id_mi2, .device = dev_key, .replica = 0};
+    d_.refs.drop_ref(key, m.owner_pid);
+  }
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateDoubleCounter("tc_register_revoke_total");

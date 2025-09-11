@@ -16,7 +16,7 @@
 
 namespace tensorcast::daemon {
 
-enum class TaskKind : std::uint8_t { kSessionTTL, kLockTTL, kPidWatch, kVerification, kEviction };
+enum class TaskKind : std::uint8_t { kSessionTTL, kLockTTL, kPidWatch, kVerification, kEviction, kRegJoinTTL };
 
 class BackgroundScheduler {
  public:

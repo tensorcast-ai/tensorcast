@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tensorcast.types import ArtifactDescriptor, CommitResult
+
 from ._config import (
     GetArtifactOptions,
     PlanType,
@@ -45,4 +47,7 @@ __all__ = [
     # Low-level helpers (used by tests/examples)
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
+    # Types
+    "CommitResult",
+    "ArtifactDescriptor",
 ]

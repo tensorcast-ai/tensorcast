@@ -8,6 +8,7 @@
 
 #include "core/store/store_engine.h"
 #include "daemon/lip_manager.h"
+#include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
 #include "daemon/rpc_context.h"
 #include "grpcpp/grpcpp.h"
@@ -21,6 +22,7 @@ class RegistrationController {
     store::StoreEngine& engine;
     RegistrationManager& reg;
     LipManager& lip;
+    RefTracker& refs;
   };
   explicit RegistrationController(Dep d) : d_(d) {}
 

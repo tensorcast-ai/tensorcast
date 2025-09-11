@@ -78,7 +78,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .devices = devices_,
         .is_shutting_down = is_shutting_down_};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
-    RegistrationController::Dep rdep{.engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_};
+    RegistrationController::Dep rdep{.engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_, .refs = refs_};
     registration_controller_ = std::make_unique<RegistrationController>(rdep);
     TransportController::Dep tdep{.engine = *engine_, .locks = locks_, .lip = *lip_mgr_};
     transport_controller_ = std::make_unique<TransportController>(tdep);
