@@ -529,7 +529,7 @@ class P2PTestClient {
         false; // TODO: P2PSource doesn't have verification_info field, so we can't store the full info
 
     // Attach communicator engine to the P2P source (required by P2PLoader)
-    p2p_source.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{shared_engine};
+    p2p_source.comm_engine = shared_engine;
 
     // Build ReplicaConfig via aggregate initialization (avoid default construction)
     ReplicaConfig config{
