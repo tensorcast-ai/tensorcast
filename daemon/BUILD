@@ -538,6 +538,7 @@ cc_test(
         "//core/store/loader:source_hash",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 

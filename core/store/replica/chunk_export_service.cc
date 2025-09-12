@@ -47,16 +47,20 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
   }
 
   CommRegistrationInfo info;
-  info.artifact_size = uma_ && uma_->get_artifact_size(key).ok() ? *uma_->get_artifact_size(key) : 0;
+  {
+    auto sz_or = uma_->get_artifact_size(key);
+    info.artifact_size = sz_or.ok() ? *sz_or : 0;
+  }
   info.location = location;
 
   ExportRecord rec;
 
   if (location == common::memory::MemoryLocation::PAGEABLE_CPU) {
-    void* base = uma_ ? uma_->get_cpu_base_ptr(key) : nullptr;
-    if (!base) {
+    void* base_raw = uma_->get_cpu_base_ptr(key);
+    if (!base_raw) {
       return absl::FailedPreconditionError("CPU base not available");
     }
+    gsl::not_null<void*> base{base_raw};
 
     info.device_id = kCpuDeviceId;
     info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
@@ -84,7 +88,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
         return absl::OutOfRangeError(
             absl::StrFormat("Offset %llu exceeds artifact size %llu", va_off, info.artifact_size));
       }
-      const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base) + va_off);
+      const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.artifact_id, range_idx++);
       tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
       // Avoid registering an MR for DVMP logical windows; CPU path will be staged for TCP
@@ -94,8 +98,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       opts.async = false;
       // Register UMA lease mapping for this exported DVMP window to support
       // short-lived pin leases during staged transfers.
-      components::UmaLeaseProvider::instance()->register_mapping(
-          tensor_key, key, va_off, gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>{uma_});
+      components::UmaLeaseProvider::instance()->register_mapping(tensor_key, key, va_off, uma_);
 
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
@@ -118,10 +121,11 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
   }
 
   if (location == common::memory::MemoryLocation::GPU) {
-    void* gpu_ptr = uma_ ? uma_->get_gpu_base_ptr(key, key.device.ordinal) : nullptr;
-    if (!gpu_ptr) {
+    void* gpu_ptr_raw = uma_->get_gpu_base_ptr(key, key.device.ordinal);
+    if (!gpu_ptr_raw) {
       return absl::FailedPreconditionError("GPU base not available");
     }
+    gsl::not_null<void*> gpu_ptr{gpu_ptr_raw};
 
     info.device_id = key.device.ordinal;
     info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
@@ -145,7 +149,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
         return absl::OutOfRangeError(
             absl::StrFormat("Offset %llu exceeds artifact size %llu", off, info.artifact_size));
       }
-      const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr) + off);
+      const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr.get()) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.artifact_id, range_idx++);
       tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
       opts.register_mr = comm_engine.is_rdma_enabled();

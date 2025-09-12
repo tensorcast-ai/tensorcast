@@ -12,11 +12,9 @@ namespace tensorcast::store::components {
 // New ReplicaKey-based API implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
-absl::Status ReplicaRegistry::emplace(const loading::ReplicaKey& key, std::shared_ptr<replica::Replica> replica) {
-  if (!replica) {
-    return absl::InvalidArgumentError("Cannot register null replica");
-  }
-
+absl::Status ReplicaRegistry::emplace(
+    const loading::ReplicaKey& key,
+    gsl::not_null<std::shared_ptr<replica::Replica>> replica) {
   absl::MutexLock lock(&mutex_);
   if (by_instance_.contains(key)) {
     return absl::AlreadyExistsError("Instance already registered");
@@ -130,7 +128,7 @@ size_t ReplicaRegistry::get_replica_count_by_location(common::memory::MemoryLoca
   absl::MutexLock lock(&mutex_);
   size_t count = 0;
   for (const auto& entry : entries_) {
-    if (entry.replica && entry.replica->get_memory_state(location) == replica::MemoryState::LOADED) {
+    if (entry.replica->get_memory_state(location) == replica::MemoryState::LOADED) {
       ++count;
     }
   }
@@ -141,9 +139,6 @@ uint64_t ReplicaRegistry::get_total_replica_size() const {
   absl::MutexLock lock(&mutex_);
   uint64_t total = 0;
   for (const auto& entry : entries_) {
-    if (!entry.replica) {
-      continue;
-    }
     auto size_or = entry.replica->get_artifact_size();
     if (size_or.ok()) {
       total += *size_or;

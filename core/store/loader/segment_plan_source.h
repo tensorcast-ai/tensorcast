@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "gsl/pointers"
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -18,6 +19,7 @@ namespace tensorcast::store::loader {
 // When kind == PAD, the source is implicit zeros for the given length.
 struct SegmentPiece {
   enum Kind : uint8_t { DATA = 0, PAD = 1 };
+
   Kind kind{PAD};
   uint64_t dst_offset{0};
   uint64_t length{0};
@@ -37,13 +39,17 @@ absl::StatusOr<std::vector<SegmentPiece>> build_segment_plan_from_canonical_inde
 // and yields zero bytes over PAD regions.
 class LinearizedGpuPlanSource final : public SeekableSource {
  public:
-  LinearizedGpuPlanSource(void* device_ptr, int device_id, absl::Span<const SegmentPiece> plan, uint64_t total_size);
+  LinearizedGpuPlanSource(
+      gsl::not_null<void*> device_ptr,
+      int device_id,
+      absl::Span<const SegmentPiece> plan,
+      uint64_t total_size);
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
  private:
-  void* device_ptr_;
+  gsl::not_null<void*> device_ptr_;
   int device_id_;
   std::vector<SegmentPiece> plan_;
   uint64_t total_size_;
@@ -52,7 +58,7 @@ class LinearizedGpuPlanSource final : public SeekableSource {
 
 // Compute data multihash by streaming over a SegmentPlan (PAD=0 semantics).
 absl::StatusOr<std::string> compute_data_multihash_from_gpu_plan(
-    void* device_ptr,
+    gsl::not_null<void*> device_ptr,
     int device_id,
     absl::Span<const SegmentPiece> plan,
     uint64_t total_size,

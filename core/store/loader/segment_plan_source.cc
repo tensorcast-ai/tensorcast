@@ -67,7 +67,7 @@ absl::StatusOr<std::vector<SegmentPiece>> build_segment_plan_from_canonical_inde
 }
 
 LinearizedGpuPlanSource::LinearizedGpuPlanSource(
-    void* device_ptr,
+    gsl::not_null<void*> device_ptr,
     int device_id,
     absl::Span<const SegmentPiece> plan,
     uint64_t total_size)
@@ -115,7 +115,7 @@ absl::StatusOr<size_t> LinearizedGpuPlanSource::read_at(uint64_t offset, void* d
       if (auto st = tensorcast::cuda::set_device(device_id_); !st.ok())
         return st;
       auto st = tensorcast::cuda::memcpy(
-          out, static_cast<uint8_t*>(device_ptr_) + (p.src_offset + local), take, cudaMemcpyDeviceToHost);
+          out, static_cast<uint8_t*>(device_ptr_.get()) + (p.src_offset + local), take, cudaMemcpyDeviceToHost);
       if (!st.ok())
         return st;
       if (auto sync = tensorcast::cuda::device_synchronize(); !sync.ok())
@@ -132,14 +132,11 @@ absl::StatusOr<size_t> LinearizedGpuPlanSource::read_at(uint64_t offset, void* d
 }
 
 absl::StatusOr<std::string> compute_data_multihash_from_gpu_plan(
-    void* device_ptr,
+    gsl::not_null<void*> device_ptr,
     int device_id,
     absl::Span<const SegmentPiece> plan,
     uint64_t total_size,
     size_t leaf_chunk_bytes) {
-  if (device_ptr == nullptr) {
-    return absl::InvalidArgumentError("device_ptr must not be null");
-  }
   LinearizedGpuPlanSource src(device_ptr, device_id, plan, total_size);
   return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
 }

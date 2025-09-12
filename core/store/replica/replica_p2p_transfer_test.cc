@@ -30,6 +30,7 @@
 #include "core/store/memory_types.h" // For MB definition
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
+#include "gsl/pointers"
 
 #include <catch2/catch_section_info.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -528,7 +529,7 @@ class P2PTestClient {
         false; // TODO: P2PSource doesn't have verification_info field, so we can't store the full info
 
     // Attach communicator engine to the P2P source (required by P2PLoader)
-    p2p_source.comm_engine = shared_engine;
+    p2p_source.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{shared_engine};
 
     // Build ReplicaConfig via aggregate initialization (avoid default construction)
     ReplicaConfig config{

@@ -7,16 +7,12 @@
 namespace tensorcast::store::loading {
 
 absl::Status ReplicaRegistrationHelper::register_local_replica(
-    components::GlobalStoreClient* gs_client,
+    gsl::not_null<components::GlobalStoreClient*> gs_client,
     std::string_view worker_id,
     std::string_view artifact_id,
     const DeviceKey& device,
     common::memory::MemoryLocation location,
     uint64_t size_bytes) {
-  if (gs_client == nullptr) {
-    return absl::FailedPreconditionError("GlobalStoreClient is null");
-  }
-
   auto reg_or = gs_client->register_replica(
       artifact_id,
       worker_id,

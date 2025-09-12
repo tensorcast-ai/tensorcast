@@ -224,6 +224,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - **Default private visibility** - Only expose true public APIs
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
 - Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
+- **Resolve missing headers via BUILD deps first** - When a header appears "missing", fix the Bazel BUILD dependencies by adding the precise library that exports the header to the target's `deps`. Do not rely on global include paths or accidental transitive includes; wire dependencies explicitly in BUILD files.
 
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
@@ -264,6 +265,7 @@ if (fd < 0) {
 - **Concurrency**: Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
 - **Documentation**: Doxygen style for public APIs
  - **Pointer annotations**: Prefer `std::unique_ptr` over `std::shared_ptr`. When using pointers, annotate intent with GSL: use `gsl::not_null<>` for non-null, non-owning pointers and `gsl::owner<>` for owning pointers. Constrain pointers at the type level wherever possible.
+ - **not_null dereference**: For `gsl::not_null<T*>` and `gsl::not_null<std::shared_ptr<T>>`, use `var->member` instead of `var.get()->member`; prefer `operator->` for readability.
 
 ### Python Guidelines
 

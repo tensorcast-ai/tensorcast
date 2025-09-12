@@ -133,6 +133,7 @@ sc_cc_library(
     deps = [
         ":source",
         "//core/communicator:engine_lib",
+        "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -145,6 +146,7 @@ sc_cc_library(
     deps = [
         ":source",
         "//core/common:error_handling_lib",
+        "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -161,6 +163,7 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:cuda_api_lib",
         "@abseil-cpp//absl/types:span",
+        "@gsl",
     ],
 )
 
@@ -176,6 +179,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
+        "@gsl",
         "@nlohmann_json//:json",
     ],
 )
@@ -191,6 +195,7 @@ sc_cc_library(
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
+        "@gsl",
     ],
 )
 
@@ -217,6 +222,7 @@ sc_cc_library(
     deps = [
         ":buffer_pool",
         "//core/common:streaming_pinned_buffer_lib",
+        "@gsl",
     ],
 )
 
@@ -465,6 +471,7 @@ cc_test(
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 
@@ -613,5 +620,6 @@ cc_test(
         "//core/testing:common",
         "//core/testing:test_helpers",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )

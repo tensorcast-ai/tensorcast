@@ -13,19 +13,12 @@
 namespace tensorcast::store::loader {
 
 RemoteKeySource::RemoteKeySource(Options options) : options_(std::move(options)) {
-  if (!options_.comm_engine) {
-    LOG(ERROR) << "CommunicateEngine is null";
-  }
   if (options_.memory_keys.size() != options_.buffer_sizes.size()) {
     LOG(ERROR) << "Memory keys and buffer sizes mismatch";
   }
 }
 
 absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
-  if (!options_.comm_engine) {
-    return absl::InvalidArgumentError("CommunicateEngine is null");
-  }
-
   if (total_bytes_read_ >= options_.total_size) {
     return 0; // EOF
   }
@@ -96,10 +89,6 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
 }
 
 absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size_t bytes) {
-  if (!options_.comm_engine) {
-    return absl::InvalidArgumentError("CommunicateEngine is null");
-  }
-
   if (offset >= options_.total_size) {
     return 0; // Offset beyond EOF
   }
@@ -193,16 +182,13 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
 }
 
 bool RemoteKeySource::supports_direct_write() const {
-  return options_.comm_engine && options_.comm_engine->is_rdma_enabled();
+  return options_.comm_engine->is_rdma_enabled();
 }
 
 absl::StatusOr<size_t> RemoteKeySource::read_into(
     uint64_t dest_va_offset,
     size_t bytes,
     const DirectWriteToken& token) {
-  if (!options_.comm_engine) {
-    return absl::InvalidArgumentError("CommunicateEngine is null");
-  }
   if (dest_va_offset >= options_.total_size) {
     return 0; // Beyond EOF
   }

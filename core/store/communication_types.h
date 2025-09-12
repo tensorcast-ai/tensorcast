@@ -6,11 +6,8 @@
 #include <string>
 #include <vector>
 #include "core/common/memory/memory_location.h"
+#include "core/communicator/engine/engine.h"
 #include "core/store/device_types.h"
-
-namespace tensorcast::communicator::engine {
-class CommunicateEngine;
-} // namespace tensorcast::communicator::engine
 
 namespace tensorcast::store {
 
@@ -50,7 +47,7 @@ struct P2PSource {
   // will mux remote source with this disk source for resilience.
   std::string fallback_disk_dir;
 
-  std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine;
+  std::shared_ptr<communicator::engine::CommunicateEngine> comm_engine;
 };
 
 } // namespace tensorcast::store

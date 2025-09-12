@@ -21,9 +21,9 @@ class BufferPool {
  public:
   virtual ~BufferPool() = default;
 
-  virtual size_t chunk_size() const = 0;
+  [[nodiscard]] virtual size_t chunk_size() const = 0;
 
-  virtual int capacity() const = 0;
+  [[nodiscard]] virtual int capacity() const = 0;
 
   virtual absl::StatusOr<int> get_free_chunk() = 0;
 

@@ -11,6 +11,7 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/replica_memory_coordinator.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::replica {
 
@@ -37,9 +38,9 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_size,
-    void* dvmp_base,
+    gsl::not_null<void*> dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
     const loading::ReplicaKey& ikey);
@@ -65,9 +66,9 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_size,
-    void* dvmp_base,
+    gsl::not_null<void*> dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp);
 
 } // namespace tensorcast::store::replica

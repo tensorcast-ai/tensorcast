@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <utility>
 
-#include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/loader/dvmp_region_sink.h"
 #include "core/store/loader/file_partition_source.h"
@@ -23,10 +22,12 @@ using common::memory::MemoryLocation;
 namespace {
 // Per-GPU (device_id) concurrency limiter: at most 1 active session per GPU.
 ABSL_CONST_INIT absl::Mutex g_gpu_limit_mu(absl::kConstInit);
+
 struct GpuGate {
   bool active{false};
   absl::CondVar cv;
 };
+
 std::unordered_map<int, GpuGate> g_gpu_gates ABSL_GUARDED_BY(g_gpu_limit_mu);
 } // namespace
 
@@ -72,13 +73,9 @@ TransferService::ScopedGpuPermit::~ScopedGpuPermit() {
 
 absl::Status TransferService::copy_cpu_to_gpu_streaming(
     uint32_t device_id,
-    cudaStream_t stream,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_bytes) {
   // Validate parameters first
-  if (!gpu_ptr) {
-    return absl::InvalidArgumentError("GPU pointer is null");
-  }
   if (total_bytes == 0) {
     return absl::InvalidArgumentError("Total bytes must be greater than 0");
   }
@@ -97,18 +94,22 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
     return init_status;
   }
   return perform_copy_cpu_to_gpu_streaming(
-      replica_key_.artifact_id, device_id, session_spb, gpu_ptr, total_bytes, dvmp_base, dvmp_, uma_, replica_key_);
+      replica_key_.artifact_id,
+      device_id,
+      session_spb,
+      gpu_ptr,
+      total_bytes,
+      gsl::not_null<void*>{dvmp_base},
+      dvmp_,
+      uma_,
+      replica_key_);
 }
 
 absl::Status TransferService::copy_gpu_to_cpu_streaming(
     uint32_t device_id,
-    cudaStream_t stream,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_bytes) {
   // Validate parameters first
-  if (!gpu_ptr) {
-    return absl::InvalidArgumentError("GPU pointer is null");
-  }
   if (total_bytes == 0) {
     return absl::InvalidArgumentError("Total bytes must be greater than 0");
   }
@@ -122,7 +123,7 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
     return absl::FailedPreconditionError("DVMP base not available via UMA");
   }
   return perform_copy_gpu_to_cpu_streaming(
-      replica_key_.artifact_id, device_id, spb, gpu_ptr, total_bytes, dvmp_base, dvmp_);
+      replica_key_.artifact_id, device_id, spb, gpu_ptr, total_bytes, gsl::not_null<void*>{dvmp_base}, dvmp_);
 }
 
 std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
@@ -131,7 +132,7 @@ std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
     int device_id) {
   if (target_location == MemoryLocation::GPU) {
     auto sink = std::make_unique<loader::GPUMemorySink>(loader::GPUMemorySink::Options{
-        .gpu_base_ptr = gpu_ptr,
+        .gpu_base_ptr = gsl::not_null<void*>{gpu_ptr},
         .total_size = uma_->get_artifact_size(replica_key_).ok() ? *uma_->get_artifact_size(replica_key_) : 0,
         .chunk_size = get_pool_chunk_size(),
         .device_id = device_id});

@@ -499,3 +499,25 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
+
+sc_header_only_library(
+    name = "engine_hdrs",
+    hdrs = ["engine/engine.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":channel_lib",
+        ":constants_lib",
+        ":dram_stager_lib",
+        ":ibv_wrap_lib",
+        ":message_lib",
+        ":mr_cache_lib",
+        ":rdma_lib",
+        ":request_lib",
+        ":store_lib",
+        ":tcp_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)

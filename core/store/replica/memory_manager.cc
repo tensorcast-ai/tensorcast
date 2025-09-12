@@ -23,6 +23,7 @@
 #include "core/store/direct_write.h"
 #include "core/store/replica/chunk_export_service.h"
 #include "core/store/replica/transfer_service.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::replica {
 
@@ -57,7 +58,10 @@ MemoryManager::MemoryManager(
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
                   .pinned_memory_timeout = pinned_memory_timeout_})),
-      export_service_(std::make_shared<ChunkExportService>(memory_coordinator_, dvmp_)) {
+      export_service_(
+          std::make_shared<ChunkExportService>(
+              gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>>{memory_coordinator_},
+              dvmp_)) {
   // Populate replica_key_ using constructor inputs
   replica_key_.artifact_id = std::move(artifact_identifier);
   replica_key_.device.type = DeviceType::GPU;
@@ -458,10 +462,10 @@ std::future<absl::Status> MemoryManager::copy_data_async(MemoryLocation source, 
 
     if (src_host_async && !dst_host_async) { // Host -> GPU
       copy_status = transfer_service_->copy_cpu_to_gpu_streaming(
-          p.device_id, p.stream, p.cuda_mem ? p.cuda_mem->get() : nullptr, p.total_size);
+          p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
     } else if (!src_host_async && dst_host_async) { // GPU -> Host
       copy_status = transfer_service_->copy_gpu_to_cpu_streaming(
-          p.device_id, p.stream, p.cuda_mem ? p.cuda_mem->get() : nullptr, p.total_size);
+          p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
     } else {
       LOG(ERROR) << "MemoryManager(" << p.artifact_id << "): Unsupported copy direction: " << static_cast<int>(source)
                  << " -> " << static_cast<int>(destination);
@@ -781,9 +785,13 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
   ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADING));
   const int dst_dev_id = get_local_device_id();
   const int src_dev_id = source.get_local_device_id();
+  // Wrap pointers after validation for safer use
+  gsl::not_null<void*> src_nn{src_ptr};
+  gsl::not_null<void*> dst_nn{dst_ptr};
+
   if (dst_dev_id == src_dev_id) {
-    common::DeviceRegion s{.device_id = dst_dev_id, .dev_ptr = src_ptr, .length = static_cast<size_t>(bytes)};
-    common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = dst_ptr, .length = static_cast<size_t>(bytes)};
+    common::DeviceRegion s{.device_id = dst_dev_id, .dev_ptr = src_nn.get(), .length = static_cast<size_t>(bytes)};
+    common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = dst_nn.get(), .length = static_cast<size_t>(bytes)};
     auto hdl_or = common::AsyncCopyManager::instance().submit_d2d(s, d, {.tracing_stage = "D2D/Copy"});
     if (!hdl_or.ok()) {
       ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
@@ -802,7 +810,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
     if (can_st.ok() && can) {
       (void)cuda::enable_peer_access(dst_dev_id, src_dev_id);
       (void)cuda::enable_peer_access(src_dev_id, dst_dev_id);
-      auto st = cuda::memcpy_peer_async(dst_ptr, dst_dev_id, src_ptr, src_dev_id, bytes, stream_to_use);
+      auto st = cuda::memcpy_peer_async(dst_nn.get(), dst_dev_id, src_nn.get(), src_dev_id, bytes, stream_to_use);
       if (!st.ok()) {
         LOG(WARNING) << "Peer copy failed, falling back to staged: " << st.message();
       } else {
@@ -841,7 +849,8 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
         return absl::InternalError("SPB returned null chunk pointer");
       }
       // D2H from source device
-      common::DeviceRegion s{.device_id = src_dev_id, .dev_ptr = static_cast<char*>(src_ptr) + offset, .length = step};
+      common::DeviceRegion s{
+          .device_id = src_dev_id, .dev_ptr = static_cast<char*>(src_nn.get()) + offset, .length = step};
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
       auto d2h_hdl = common::AsyncCopyManager::instance().submit_d2h(s, h, {.tracing_stage = "D2H/Copy"});
       if (!d2h_hdl.ok()) {
@@ -856,7 +865,8 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
         return d2h_wait;
       }
       // H2D to destination device
-      common::DeviceRegion d{.device_id = dst_dev_id, .dev_ptr = static_cast<char*>(dst_ptr) + offset, .length = step};
+      common::DeviceRegion d{
+          .device_id = dst_dev_id, .dev_ptr = static_cast<char*>(dst_nn.get()) + offset, .length = step};
       auto h2d_hdl = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
       if (!h2d_hdl.ok()) {
         (void)spb->return_chunk(slot_id);

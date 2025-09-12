@@ -19,15 +19,14 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_size,
-    void* dvmp_base,
+    gsl::not_null<void*> dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp,
     const std::shared_ptr<ReplicaMemoryCoordinator>& uma,
     const loading::ReplicaKey& ikey) {
   // Required components must be present – enforce via CHECKKs
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
-  ABSL_CHECK(gpu_ptr) << "GPU destination pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
   const size_t dvmp_chunk = common::memory::DistributedVirtualMemoryPool::kDefaultChunkSize;
@@ -80,11 +79,11 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
       }
 
       // Copy from DVMP region to pinned chunk
-      void* src_host = static_cast<char*>(dvmp_base) + dvmp_off + copied;
+      void* src_host = static_cast<char*>(dvmp_base.get()) + dvmp_off + copied;
       std::memcpy(host_ptr, src_host, step);
 
       // Async copy H2D via ACM; return SPB slot in host callback
-      void* dst_device = static_cast<char*>(gpu_ptr) + dvmp_off + copied;
+      void* dst_device = static_cast<char*>(gpu_ptr.get()) + dvmp_off + copied;
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
       common::DeviceRegion d{.device_id = static_cast<int>(device_id), .dev_ptr = dst_device, .length = step};
       common::CopyOptions opts{
@@ -151,14 +150,12 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::string& artifact_id,
     uint32_t device_id,
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
-    void* gpu_ptr,
+    gsl::not_null<void*> gpu_ptr,
     size_t total_size,
-    void* dvmp_base,
+    gsl::not_null<void*> dvmp_base,
     const std::shared_ptr<common::memory::DistributedVirtualMemoryPool>& dvmp) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
-  ABSL_CHECK(gpu_ptr) << "GPU source pointer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
-  ABSL_CHECK(dvmp_base) << "DVMP base pointer must not be null";
 
   size_t chunk_size = streaming_buf->chunk_size();
   size_t offset = 0;
@@ -189,7 +186,7 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     }
 
     // Async D2H via ACM; upon completion, write into DVMP and return the slot
-    void* src_device = static_cast<char*>(gpu_ptr) + offset;
+    void* src_device = static_cast<char*>(gpu_ptr.get()) + offset;
     common::DeviceRegion s{
         .device_id = static_cast<int>(device_id), .dev_ptr = src_device, .length = current_chunk_size};
     common::HostRegion h{.base = host_ptr, .length = current_chunk_size, .pinned = true};

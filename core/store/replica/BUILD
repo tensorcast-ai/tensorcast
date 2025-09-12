@@ -249,6 +249,7 @@ cc_test(
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 

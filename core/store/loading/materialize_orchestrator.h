@@ -8,6 +8,7 @@
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/store_engine.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::loading {
 
@@ -17,7 +18,7 @@ namespace tensorcast::store::loading {
 // StoreEngine::materialize_replica() when mode == AUTO.
 class MaterializeOrchestrator {
  public:
-  MaterializeOrchestrator(StoreEngine* store, components::GlobalStoreClient* gs_client);
+  MaterializeOrchestrator(gsl::not_null<StoreEngine*> store, gsl::not_null<components::GlobalStoreClient*> gs_client);
 
   // Execute the preparation logic.
   absl::StatusOr<ReplicaHandle> run(
@@ -26,8 +27,8 @@ class MaterializeOrchestrator {
       const MaterializeHints& hints);
 
  private:
-  StoreEngine* store_;
-  components::GlobalStoreClient* gs_client_;
+  gsl::not_null<StoreEngine*> store_;
+  gsl::not_null<components::GlobalStoreClient*> gs_client_;
 };
 
 } // namespace tensorcast::store::loading

@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "gsl/pointers"
 
 #include "absl/status/statusor.h"
 #include "core/communicator/engine/engine.h"
@@ -15,7 +16,7 @@ namespace tensorcast::store::loader {
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {
-    std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine; // Communicator instance
+    gsl::not_null<std::shared_ptr<communicator::engine::CommunicateEngine>> comm_engine; // Communicator instance
     std::vector<std::string> memory_keys; // Remote tensor keys in order
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP
