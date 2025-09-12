@@ -104,7 +104,8 @@ Recommended: use `RegisteredArtifact` as a context manager to benefit from autom
 ```
 with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
     # feed DVMP chunks or LeaseSegments here if needed
-    desc = handle.commit()
+    commit = handle.commit()
+    desc = commit.descriptor
 ```
 - Commit returns RFC-0007 content-addressed descriptor (artifact_id = mi2:index_multihash:data_multihash).
 - Same-machine consumers always materialize to daemon-owned coalesced VRAM (CUDA IPC) for zero-copy use.
@@ -123,15 +124,23 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
   - `PlanType.VRAM_COALESCED` (aliases: `"coalesced"`)
   - `PlanType.DVMP` (aliases: `"uma"`, `"cpu"`)
   - `PlanType.VRAM_LEASED` (aliases: `"lease"`)
-  - Backwards‑compatible: `RegisterArtifactOptions(plan="dvmp")` etc. are accepted and normalized.
 - `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability. DVMP knobs `dvmp_preferred_channel` and `dvmp_ring_bytes` are surfaced here.
 - Loading helpers with fixed return types:
   - Synchronous: `load_dict_sync(...) -> dict[str, torch.Tensor]` and `get_artifact_sync(...) -> dict[str, torch.Tensor]`
   - Asynchronous: `load_dict_async(...) -> LoadHandle` and `get_artifact_async(...) -> LoadHandle`
-  - `LoadHandle.ready() / wait(timeout) / result()`; accessing tensors before `wait()` raises an error to prevent premature reads.
+- `LoadHandle.ready() / wait(timeout) / result()`; accessing tensors before `wait()` raises an error to prevent premature reads.
 
 Note: Legacy `load_dict(...)`, `load_dict_handle(...)`, `get_artifact(...)`, and `get_artifact_handle(...)` have been removed. Use the fixed-type helpers above.
 - Unified error model under `TensorCastError` with readable subclasses like `DaemonUnavailable`, `DeviceMismatch`, and `IndexParseError`.
+
+### Registration Semantics
+
+- Commit returns RFC-0007 content-addressed descriptor (`artifact_id = mi2:index_multihash:data_multihash`).
+- Python: `RegisteredArtifact.commit()` returns `CommitResult` with fields:
+  - `descriptor` (ArtifactDescriptor)
+  - `existed` (bool) — true when the commit hit an existing replica and joined a reference
+- Idempotent success on duplicates: if the same `mi2:` artifact already has a replica on the same device, the daemon reclaims the new allocation and returns `OK` with the existing descriptor plus `existed=true`.
+- Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and the unified `SessionLifecycleTask` drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.
 
 ### SDK Module Layout
 

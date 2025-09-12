@@ -140,6 +140,7 @@ class StoreEngine {
     std::string artifact_id;
     int device_id{0};
     uint64_t size_bytes{0};
+    bool existed{false};
     // RFC-0007: Expose content-address components for callers who need
     // authoritative descriptor details without recomputation.
     std::string index_multihash; // multibase(base32)-encoded multihash of canonical index

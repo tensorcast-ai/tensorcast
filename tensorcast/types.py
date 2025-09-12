@@ -97,6 +97,15 @@ class ArtifactDescriptor(BaseModel):
     total_size: int
 
 
+class CommitResult(BaseModel):
+    """Commit result with descriptor and idempotency flag."""
+
+    model_config = ConfigDict(frozen=True)
+
+    descriptor: ArtifactDescriptor
+    existed: bool = False
+
+
 # ------------------------------ Plan models --------------------------------
 
 
@@ -112,7 +121,7 @@ class PlanBase(BaseModel):
 
 
 class CoalescedPlan(PlanBase):
-    # Accept legacy alias but normalize at call sites to coalesced semantics
+    # Aliases supported for coalesced semantics
     kind: Literal["coalesced", "vram_coalesced"] = "coalesced"
     max_inflight_bytes: int = 512 * 1024 * 1024
     release_on_tensor_commit: bool = True
@@ -127,7 +136,7 @@ class CoalescedPlan(PlanBase):
 
 
 class DVMPPlan(PlanBase):
-    # Accept aliases for UMA/CPU pathways but treat as DVMP in daemon
+    # Aliases supported for UMA/CPU pathways; treated as DVMP in daemon
     kind: Literal["dvmp", "uma", "cpu"] = "dvmp"
     # 1: SHM_RING, 2: GRPC_STREAM (daemon enum mapping handled by client)
     preferred_channel: Literal[1, 2] = 2
@@ -198,6 +207,7 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "CommitResult",
     "PlanBase",
     "CoalescedPlan",
     "DVMPPlan",

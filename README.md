@@ -197,7 +197,7 @@ with handle as h:
 
     # Finalize and get RFC-0007 descriptor
     commit = h.commit()
-    desc = commit
+    desc = commit.descriptor
     print("Artifact:", desc.artifact_id)  # mi2:<index_multihash>:<data_multihash>
 ```
 

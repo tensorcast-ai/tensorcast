@@ -31,7 +31,7 @@ Goals
 - Eliminate direct RDMA over DVMP VA and producer VRAM; use staged‑only responses for safety and performance predictability.
 - Bound memory and pinning: small chunked staging, immediate DVMP lease release after memcpy, and permanent MR registration only on stable pool buffers.
 - NUMA‑aware pool selection for better locality to NICs and GPUs.
-- Backward‑compatible protocol evolution using EX variants and ACKs for staged RDMA.
+- Protocol evolution using EX variants and ACKs for staged RDMA.
 
 Non‑Goals
 - Automatic NUMA discovery or distance scoring beyond an initial configurable mapping.
@@ -71,7 +71,7 @@ MemoryStager <|.. GpuNetStager
  I
 - RDMA server READ handling returns staged segments whose addresses/rkeys point to pool MRs. The client posts READs against those MRs and must send `RDMA_READ_DONE_EX` to allow buffer reclamation.
 - MTCP uses the same staged buffers for socket I/O and returns tokens on send completion.
-- All staged responses are EX‑variant messages; legacy single‑segment messages are deprecated but remain compatible where needed.
+- All staged responses are EX‑variant messages; legacy single‑segment messages are deprecated.
 
 ## Protocol (EX variants)
 
@@ -133,13 +133,7 @@ Risks and mitigations
 - Incomplete ACKs causing buffer leaks → TTL reaper and metrics for `ack_pending_total` with alerts.
 - Throughput regressions from chunk sizing → configurable defaults with headroom; later autotune can adjust at runtime.
 
-# Compatibility & Acceptance Criteria
-
-Compatibility
-- Backward‑compatible with peers lacking ACK_EX: server can fall back to MTCP when staging is required and peers do not support ACK_EX.
-- FAKE CUDA backend executes staged flows synchronously while preserving semantics for tests.
-
-Acceptance and success metrics
+# Acceptance Criteria
 - No RDMA MRs over DVMP VA or producer VRAM; MRs only on pool buffers.
 - No DVMP leases held beyond memcpy duration.
 - End‑to‑end throughput within ±5% of baseline for 10–50 GB and scalable without pinning blowups; staged RDMA shows stable latency distribution.
@@ -201,4 +195,3 @@ sequenceDiagram
     TX-->>ST: send_done → token.complete()
   end
 ```
-

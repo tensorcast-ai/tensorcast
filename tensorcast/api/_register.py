@@ -127,12 +127,13 @@ class RegisteredArtifact:
         if self._ka_thread and self._ka_thread.is_alive():
             self._ka_thread.join(timeout=1.0)
 
-    def commit(self, timeout_s: float = 60.0) -> ArtifactDescriptor:
-        desc = self.client.commit_registered_artifact(
+    def commit(self, timeout_s: float = 60.0):
+        """Commit and return CommitResult(descriptor, existed)."""
+        commit_res = self.client.commit_registered_artifact(
             self.registration_id, timeout_s=timeout_s
         )
         self.__exit__(None, None, None)
-        return desc
+        return commit_res
 
     def abort(self, timeout_s: float = 15.0) -> bool:
         self.__exit__(None, None, None)
@@ -699,7 +700,8 @@ def _register_artifact_core(
                     handshake=hs,
                     daemon_address=addr,
                 )
-                desc = handle.commit(timeout_s=60.0)
+                commit_res = handle.commit(timeout_s=60.0)
+                desc = commit_res.descriptor
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=state_dict
                 )
@@ -716,7 +718,8 @@ def _register_artifact_core(
                     handshake=hs,
                     daemon_address=addr,
                 )
-                desc = handle.commit(timeout_s=60.0)
+                commit_res = handle.commit(timeout_s=60.0)
+                desc = commit_res.descriptor
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=state_dict
                 )
@@ -733,7 +736,8 @@ def _register_artifact_core(
                     handshake=hs,
                     daemon_address=addr,
                 )
-                desc = handle.commit(timeout_s=60.0)
+                commit_res = handle.commit(timeout_s=60.0)
+                desc = commit_res.descriptor
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=None
                 )
@@ -746,7 +750,7 @@ def _register_artifact_core(
                         ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
                         owner_pid=ctl._get_effective_pid(),
                     )
-                # For lease plans, return original artifact as the state_dict (compat)
+                # For lease plans, return original artifact as the state_dict
                 return RegistrationResult(
                     state_dict=artifact, descriptor=desc, lease=lease_obj
                 )

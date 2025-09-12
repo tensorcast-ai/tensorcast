@@ -16,15 +16,12 @@ class RefTracker {
  public:
   struct Entry {
     std::unordered_set<int32_t> pids;
-    bool keep_for_global{false};
   };
 
-  void add_ref(const store::loading::ReplicaKey& key, int32_t pid, bool keep_for_global = false) {
+  void add_ref(const store::loading::ReplicaKey& key, int32_t pid) {
     absl::MutexLock l(&mu_);
     auto& e = refs_[key];
     e.pids.insert(pid);
-    // Once set, keep_for_global remains true for the lifetime of the replica unless all refs drop.
-    e.keep_for_global = e.keep_for_global || keep_for_global;
   }
 
   void drop_ref(const store::loading::ReplicaKey& key, int32_t pid) {
@@ -55,12 +52,6 @@ class RefTracker {
     for (int32_t p : it->second.pids)
       out.push_back(p);
     return out;
-  }
-
-  bool keep_for_global(const store::loading::ReplicaKey& key) const {
-    absl::MutexLock l(&mu_);
-    auto it = refs_.find(key);
-    return it == refs_.end() ? false : it->second.keep_for_global;
   }
 
   std::vector<store::loading::ReplicaKey> keys() const {

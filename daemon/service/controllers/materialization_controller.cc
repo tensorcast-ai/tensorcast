@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/time.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 
@@ -60,7 +61,13 @@ grpc::Status MaterializationController::materialize_replica(
             d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
           }
           if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/req.keep_for_global());
+            d_.refs.add_ref(rkey, req.pid());
+            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
+              SessionLifecycleManager::ReplicaSubject subj{
+                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
+              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              // TTL prefetch pins via request flag removed; only UseLease is created.
+            }
           }
         },
         resp.mutable_mem_handle());
@@ -98,7 +105,13 @@ grpc::Status MaterializationController::materialize_replica(
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
   if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid(), req.keep_for_global());
+    d_.refs.add_ref(handle.replica_key, req.pid());
+    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
+      SessionLifecycleManager::ReplicaSubject subj{
+          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
+      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      // TTL prefetch pins via request flag removed; only UseLease is created.
+    }
   }
   if (has_disk)
     resp.set_disk_path(req.disk_path());
@@ -146,7 +159,13 @@ grpc::Status MaterializationController::materialize_by_key(
             d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
           }
           if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid(), /*keep_for_global=*/false);
+            d_.refs.add_ref(rkey, req.pid());
+            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
+              SessionLifecycleManager::ReplicaSubject subj{
+                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
+              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              // MaterializeByKey: no TTL prefetch; only UseLease is created.
+            }
           }
         },
         resp.mutable_mem_handle());
@@ -191,7 +210,13 @@ grpc::Status MaterializationController::materialize_by_key(
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
   if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid(), /*keep_for_global=*/false);
+    d_.refs.add_ref(handle.replica_key, req.pid());
+    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
+      SessionLifecycleManager::ReplicaSubject subj{
+          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
+      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      // MaterializeByKey: no TTL prefetch; only UseLease is created.
+    }
   }
   if (handle.cuda_ipc_handle.is_valid()) {
     resp.mutable_mem_handle()->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
@@ -227,7 +252,7 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
 grpc::Status MaterializationController::confirm(
     RpcContext& rctx,
     const v1::ConfirmReplicaRequest& req,
-    v1::ConfirmReplicaResponse& resp) {
+    v1::ConfirmReplicaResponse& resp) const {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", req.disk_path());
@@ -304,6 +329,13 @@ grpc::Status MaterializationController::unload(
   }
   if (req.has_pid()) {
     d_.refs.drop_ref(key, req.pid());
+    if (d_.lifecycle && key.device.type == DeviceType::GPU) {
+      SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
+      const auto status = d_.lifecycle->release_use_lease(subj, req.pid());
+      if (!status.ok()) {
+        LOG(ERROR) << "failed to release use lease: " << status;
+      }
+    }
     if (d_.refs.ref_count(key) > 0) {
       resp.set_code(0);
       rctx.mark_success();

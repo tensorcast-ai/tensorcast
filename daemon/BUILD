@@ -28,6 +28,7 @@ sc_cc_library(
         ":registration_manager_lib",
         ":replica_listing_hdr",
         ":rpc_context_hdr",
+        ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":sessions_service_hdr",
         ":status_controller_hdr",
@@ -222,6 +223,7 @@ sc_header_only_library(
         ":background_scheduler_hdr",
         ":lip_manager_lib",
         ":ref_tracker_hdr",
+        ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":transport_lock_manager_hdr",
         ":verification_tracker_hdr",
@@ -231,6 +233,20 @@ sc_header_only_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
+    ],
+)
+
+sc_header_only_library(
+    name = "session_lifecycle_hdr",
+    hdrs = ["session_lifecycle.h"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":session_manager_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -265,6 +281,7 @@ sc_header_only_library(
     hdrs = ["sessions_service.h"],
     deps = [
         ":background_scheduler_hdr",
+        ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":verification_tracker_hdr",
     ],
@@ -309,6 +326,7 @@ sc_cc_library(
         ":lip_bridge_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
+        ":session_lifecycle_hdr",
         ":sessions_service_hdr",
         ":status_utils",
         "//core/store:store_engine",
@@ -324,8 +342,10 @@ sc_cc_library(
     deps = [
         ":cuda_ipc_raii_hdr",
         ":lip_manager_lib",
+        ":ref_tracker_hdr",
         ":registration_manager_lib",
         ":rpc_context_hdr",
+        ":session_lifecycle_hdr",
         ":status_utils",
         "//core/store:store_engine",
         "//core/store/loader:segment_plan_source",
@@ -347,6 +367,122 @@ sc_cc_library(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_test",
+    srcs = ["session_lifecycle_test.cc"],
+    copts = ["-DTC_ENABLE_TEST_HOOKS"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_immediate_unload_test",
+    srcs = ["session_lifecycle_immediate_unload_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_pid_unwatch_test",
+    srcs = ["session_lifecycle_pid_unwatch_test.cc"],
+    copts = ["-DTC_ENABLE_TEST_HOOKS"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_session_guard_test",
+    srcs = ["session_lifecycle_session_guard_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "pid_monitor_unwatch_integration_test",
+    srcs = ["pid_monitor_unwatch_integration_test.cc"],
+    copts = ["-DTC_ENABLE_TEST_HOOKS"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "eviction_task_behavior_test",
+    srcs = ["eviction_task_behavior_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        ":sweep_tasks_hdr",
+        "//core/store:store_engine",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_eviction_notify_test",
+    srcs = ["session_lifecycle_eviction_notify_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        ":session_manager_hdr",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "session_lifecycle_load_test",
+    srcs = ["session_lifecycle_load_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":registration_manager_lib",
+        ":session_lifecycle_hdr",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
     ],
 )
 

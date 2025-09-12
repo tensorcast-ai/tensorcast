@@ -33,7 +33,6 @@ inline void FillLoadedReplicasV2(
     int32_t ref_count;
     std::vector<int32_t> pids;
     uint64_t size_bytes;
-    bool keep_for_global;
     int64_t last_access_ts;
   };
 
@@ -62,7 +61,6 @@ inline void FillLoadedReplicasV2(
     for (int32_t pid : refs.pids(key))
       e.pids.push_back(pid);
     e.size_bytes = info.size_bytes;
-    e.keep_for_global = refs.keep_for_global(key);
     e.last_access_ts =
         std::chrono::duration_cast<std::chrono::seconds>(info.last_access_time.time_since_epoch()).count();
     entries.push_back(std::move(e));
@@ -93,7 +91,6 @@ inline void FillLoadedReplicasV2(
       for (int32_t pid : e.pids)
         out->add_pids(pid);
       out->set_size_bytes(static_cast<int64_t>(e.size_bytes));
-      out->set_keep_for_global(e.keep_for_global);
       auto* ts = out->mutable_last_access_ts();
       ts->set_seconds(e.last_access_ts);
       ts->set_nanos(0);
@@ -111,10 +108,12 @@ inline void FillLoadedReplicasV2(
       return a.artifact_id < b.artifact_id;
     return a.device_id < b.device_id;
   });
+
   struct CursorKey {
     std::string artifact_id;
     int device_id;
   };
+
   std::optional<CursorKey> cursor;
   if (req.has_pagination() && req.pagination().has_page_token()) {
     const auto& tok = req.pagination().page_token();
@@ -155,7 +154,6 @@ inline void FillLoadedReplicasV2(
     for (int32_t pid : e.pids)
       out->add_pids(pid);
     out->set_size_bytes(static_cast<int64_t>(e.size_bytes));
-    out->set_keep_for_global(e.keep_for_global);
     auto* ts = out->mutable_last_access_ts();
     ts->set_seconds(e.last_access_ts);
     ts->set_nanos(0);

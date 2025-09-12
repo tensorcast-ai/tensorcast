@@ -17,13 +17,19 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 - gRPC surface for artifact loading, lifecycle, key mapping, and status.
 - Orchestration via controllers with strong input validation and deadline handling.
 - Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
-- Event-driven background scheduling to sweep/refresh TTL-bound state and complete verification.
+- Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks. The lifecycle manager exposes a schedule hook so the scheduler can be rescheduled immediately when the earliest deadline changes, minimizing expiry drift.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
+- Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
+- Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
+- Join TTL via leases: duplicate coalesced commits (`existed=true`) create a TTL-bound UseLease for the owner PID. On expiry, the lease finalizer drops the lightweight RefTracker ref and may reclaim memory immediately.
+- Session keepalive: session principal TTL is tracked by the lifecycle manager via deadline guards instead of a standalone sweep.
+- PID unwatch: when the last pid-bound guard retires, the monitor stops watching that PID (pidfd/epoll cleaned). The PID monitor’s polling fallback interval is configurable via service options (`proc_check_interval`).
+
 
 ## What It Does Not Do
 
 - Reimplement engine invariants: memory lifecycle, DVMP/UMA model, verification semantics, or DVMP chunk-locking rules.
-- Own long-lived cache policy beyond explicit hints (e.g., `keep_for_global`). Eviction policies live below or behind explicit feature flags.
+- Own long-lived cache policy is out of scope for the daemon. Eviction policies live below or behind explicit feature flags.
 - Bypass the StoreEngine for data movement or memory management.
 - Break wire compatibility. Protocol changes are additive and guarded.
 
@@ -47,7 +53,7 @@ flowchart TB
   - StatusController: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`.
 - Managers/Registries:
   - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
-- Runtime: BackgroundScheduler unifies sweeps (sessions, locks, verification, auto-register, PID, optional eviction) with “sleep until deadline or signal” semantics.
+  - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
 - Engine: single source of truth for materialization orchestration, memory lifecycle, DVMP locking semantics, verification futures.
 
 ## Interfaces (Public Surface)
@@ -77,11 +83,11 @@ Contract highlights:
 - `grpc_service_impl.{h,cc}`: thin gRPC service entry points and dependency wiring.
 - `service/controllers/*`: controllers for materialization, registration, transport, and status.
 - `registration_manager.h`, `replica_session_manager.h`, `sessions_service.h`: unified registration/session lifecycles with TTL.
-- `ref_tracker.h`: PID reference tracking and `/proc` sweeper integration.
+- `ref_tracker.h`: PID reference tracking; liveness integrated via `SessionLifecycleTask`.
 - `transport_lock_manager.h`: tokenized chunk locking with TTL and best-effort unlock.
 - `verification_tracker.h`: verification futures, capacity and expiry-based eviction.
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
-- `background_scheduler.h`, `sweep_tasks.h`: event-driven runtime scheduler and task definitions.
+- `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
 - `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile).
 - `server_main.cc`: flags/bootstrap and service registration.

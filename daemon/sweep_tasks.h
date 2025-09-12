@@ -22,7 +22,9 @@
 #include "core/store/store_engine.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
+#include "daemon/registration_manager.h"
 #include "daemon/replica_session_manager.h"
+#include "daemon/session_lifecycle.h"
 #include "daemon/transport_lock_manager.h"
 #include "daemon/verification_tracker.h"
 #include "nlohmann/json.hpp"
@@ -36,25 +38,12 @@ class IBackgroundTask {
   [[nodiscard]] virtual std::string name() const = 0;
 };
 
-class SessionTtlTask final : public IBackgroundTask {
- public:
-  explicit SessionTtlTask(ReplicaSessionManager& sessions) : sessions_(sessions) {}
-  void run_once() override {
-    for (const auto& k : sessions_.keys()) {
-      sessions_.remove_if_expired(k);
-    }
-  }
-  [[nodiscard]] std::string name() const override {
-    return "SessionTtlTask";
-  }
-
- private:
-  ReplicaSessionManager& sessions_;
-};
+// Session TTL handling moved under unified SessionLifecycleTask
 
 class LockTtlTask final : public IBackgroundTask {
  public:
   LockTtlTask(TransportLockManager& locks, store::StoreEngine& engine) : locks_(locks), engine_(engine) {}
+
   void run_once() override {
     for (const auto& tok : locks_.tokens()) {
       auto expired = locks_.remove_if_expired(tok);
@@ -63,6 +52,7 @@ class LockTtlTask final : public IBackgroundTask {
       }
     }
   }
+
   [[nodiscard]] std::string name() const override {
     return "LockTtlTask";
   }
@@ -132,6 +122,7 @@ class VerificationTask final : public IBackgroundTask {
     }
     tracker_.prune();
   }
+
   [[nodiscard]] std::string name() const override {
     return "VerificationTask";
   }
@@ -143,35 +134,12 @@ class VerificationTask final : public IBackgroundTask {
   std::deque<AutoRegTask>* queue_ ABSL_GUARDED_BY(*mu_);
 };
 
-class PidWatchTask final : public IBackgroundTask {
- public:
-  PidWatchTask(RefTracker& refs, LipManager& lip) : refs_(refs), lip_(lip) {}
-  void run_once() override {
-    auto keys = refs_.keys();
-    for (const auto& key : keys) {
-      auto plist = refs_.pids(key);
-      for (int32_t pid : plist) {
-        std::string proc_path = absl::StrCat("/proc/", pid);
-        if (::access(proc_path.c_str(), F_OK) != 0) {
-          refs_.drop_ref(key, pid);
-        }
-      }
-    }
-    lip_.sweep_expired_and_dead_pids();
-  }
-  std::string name() const override {
-    return "PidWatchTask";
-  }
-
- private:
-  RefTracker& refs_;
-  LipManager& lip_;
-};
+// PID watch handling moved under unified SessionLifecycleTask
 
 class EvictionTask final : public IBackgroundTask {
  public:
-  EvictionTask(store::StoreEngine& engine, RefTracker& refs, double limit)
-      : engine_(engine), refs_(refs), limit_(limit) {}
+  EvictionTask(store::StoreEngine& engine, RefTracker& refs, SessionLifecycleManager* lifecycle, double limit)
+      : engine_(engine), refs_(refs), lifecycle_(lifecycle), limit_(limit) {}
 
   void run_once() override {
     const int num_gpus = engine_.get_num_gpus();
@@ -187,11 +155,13 @@ class EvictionTask final : public IBackgroundTask {
       double ratio = used / total;
       if (ratio <= limit_)
         continue;
+
       struct Cand {
         store::loading::ReplicaKey key;
         std::chrono::time_point<std::chrono::system_clock> last_access;
         size_t size;
       };
+
       std::vector<Cand> cands;
       for (const auto& info : engine_.get_all_replicas_info()) {
         if (info.gpu_state == common::memory::MemoryLocation::NONE)
@@ -200,7 +170,10 @@ class EvictionTask final : public IBackgroundTask {
           continue;
         store::loading::ReplicaKey key{
             .artifact_id = info.artifact_id, .device = store::DeviceRegistry::instance().gpu_key(dev), .replica = 0};
-        if (refs_.ref_count(key) > 0 || refs_.keep_for_global(key))
+        // Evict only when no active use or placement pins
+        if (refs_.ref_count(key) > 0)
+          continue;
+        if (lifecycle_ && (lifecycle_->use_count_for(key) > 0 || lifecycle_->placement_pin_count_for(key) > 0))
           continue;
         cands.push_back(
             Cand{.key = key, .last_access = info.last_access_time, .size = static_cast<size_t>(info.size_bytes)});
@@ -218,6 +191,7 @@ class EvictionTask final : public IBackgroundTask {
       }
     }
   }
+
   std::string name() const override {
     return "EvictionTask";
   }
@@ -225,7 +199,10 @@ class EvictionTask final : public IBackgroundTask {
  private:
   store::StoreEngine& engine_;
   RefTracker& refs_;
+  SessionLifecycleManager* lifecycle_{nullptr};
   double limit_;
 };
+
+// Registration join TTL handling moved under unified SessionLifecycleTask
 
 } // namespace tensorcast::daemon

@@ -35,14 +35,17 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   if (!begin_or.ok())
     return begin_or.status();
   const auto& out = *begin_or;
+
   struct RegAbortGuard {
     store::StoreEngine* engine;
     std::string id;
     bool active{true};
+
     ~RegAbortGuard() {
       if (active && engine)
         (void)engine->abort_registered_artifact(id);
     }
+
     void release() {
       active = false;
     }
@@ -75,6 +78,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     uint64_t len;
     uint64_t dst;
   };
+
   std::vector<Opened> opened;
   opened.reserve(segments.size());
   for (const auto& seg : segments) {
@@ -131,6 +135,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   if (chunk_size == 0) {
     return absl::FailedPreconditionError("invalid chunk_size (0)");
   }
+
   struct OpenedSeg {
     int device_id;
     CudaIpcMapping map;
@@ -138,6 +143,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     uint64_t len;
     uint64_t dst;
   };
+
   std::vector<OpenedSeg> opened;
   opened.reserve(lip.segments.size());
   for (const auto& seg : lip.segments) {
@@ -161,10 +167,12 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   };
   std::vector<std::string> tensor_keys;
   tensor_keys.reserve(chunk_indices.size());
+
   // Guard to ensure partial registrations are cleaned up on failure
   struct KeysGuard {
     communicator::engine::CommunicateEngine* comm_engine{nullptr};
     std::vector<std::string>* keys{nullptr};
+
     ~KeysGuard() {
       if (comm_engine && keys) {
         for (const auto& k : *keys) {
@@ -172,11 +180,13 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
         }
       }
     }
+
     void release() {
       comm_engine = nullptr;
       keys = nullptr;
     }
   } guard;
+
   guard.comm_engine = &comm_engine;
   guard.keys = &tensor_keys;
   for (uint32_t idx : chunk_indices) {
@@ -330,6 +340,27 @@ void LipManager::sweep_expired_and_dead_pids() {
   }
 }
 
+bool LipManager::revoke_commit_lease_if_owner_matches(const std::string& artifact_id, int device_id, int owner_pid) {
+  absl::MutexLock l(&mu_);
+  ArtifactDeviceKey key{.artifact_id = artifact_id, .device_id = device_id};
+  auto it = leases_.find(key);
+  if (it == leases_.end())
+    return false;
+  if (it->second.owner_pid != owner_pid)
+    return false;
+  // Erase any reg->key mappings that point to this key
+  std::vector<std::string> regs;
+  regs.reserve(reg_to_key_.size());
+  for (const auto& rk : reg_to_key_) {
+    if (rk.second == key)
+      regs.push_back(rk.first);
+  }
+  for (const auto& rid : regs)
+    reg_to_key_.erase(rid);
+  leases_.erase(it);
+  return true;
+}
+
 absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     const std::string& registration_id,
     int device_id,
@@ -353,6 +384,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     uint64_t len;
     uint64_t dst;
   };
+
   std::vector<OpenedSeg> opened;
   opened.reserve(segments.size());
   for (const auto& seg : segments) {
@@ -373,10 +405,13 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     explicit LipSeekableSource(std::vector<OpenedSeg> segs, uint64_t total) : segs_(std::move(segs)), total_(total) {
       std::sort(segs_.begin(), segs_.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
     }
+
     ~LipSeekableSource() override = default;
+
     absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
       return read_at(cur_, dst, max_bytes);
     }
+
     absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
       if (offset >= total_)
         return static_cast<size_t>(0);
@@ -449,6 +484,21 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   out.schema_version = "v2";
   out.encoding = "json";
   out.total_size = total_size;
+
+  // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
+  {
+    absl::MutexLock l(&mu_);
+    ArtifactDeviceKey k{.artifact_id = out.artifact_id, .device_id = device_id};
+    auto it = leases_.find(k);
+    if (it != leases_.end()) {
+      const auto now = std::chrono::steady_clock::now();
+      const bool active = it->second.expiry.time_since_epoch().count() <= 0 || !(now > it->second.expiry);
+      if (active) {
+        return absl::AlreadyExistsError(
+            absl::StrCat("lease already exists for artifact on device (pid=", it->second.owner_pid, ")"));
+      }
+    }
+  }
 
   // Verification JSON: read three 8-byte values (start/middle/end) if possible
   auto read_u64 = [&](uint64_t off) -> std::optional<uint64_t> {
