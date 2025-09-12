@@ -62,7 +62,7 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
     size_t size,
     bool is_gpu,
     cudaStream_t stream) {
-  (void)stream;
+  static_cast<void>(stream);
   if (!initialized_) {
     return absl::FailedPreconditionError("StreamingTensorWriter not initialized");
   }
@@ -124,7 +124,10 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
 
       // Use a callback that marks the chunk ready with the same global id.
       auto on_done = [spb = streaming_buffer_.get(), slot_id, global_chunk_id, chunk_size]() {
-        (void)spb->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
+        absl::Status rc = spb->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
+        if (!rc.ok()) {
+          LOG(WARNING) << "StreamingPinnedBuffer::mark_chunk_ready failed slot=" << slot_id << ": " << rc;
+        }
       };
       common::CopyOptions opts{.tracing_stage = "D2H/Copy", .callbacks = {.on_copy_done = on_done}};
       auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(src, dst, opts);
@@ -200,7 +203,7 @@ void StreamingTensorWriter::disk_writer_thread() {
       // Verify offset matches expected
       uint64_t expected_offset = chunk_offsets_[ready_chunk.global_chunk_id];
       if (written_offset != expected_offset) {
-        VLOG(1) << "Chunk offset mismatch: expected " << expected_offset << " but got " << written_offset;
+        LOG(ERROR) << "Chunk offset mismatch: expected " << expected_offset << " but got " << written_offset;
       }
     }
 

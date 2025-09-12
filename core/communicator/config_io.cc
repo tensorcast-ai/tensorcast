@@ -122,10 +122,10 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
     tr->set_connect_timeout_sec(10);
 
   // Affinity defaults
-  (void)cfg->mutable_affinity();
+  cfg->mutable_affinity();
 
   // NUMA defaults
-  (void)cfg->mutable_simple_numa();
+  cfg->mutable_simple_numa();
 }
 
 absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std::string& path) {

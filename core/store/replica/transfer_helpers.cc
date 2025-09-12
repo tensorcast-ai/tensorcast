@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/log/absl_check.h"
+#include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/memory/memory_location.h"
@@ -100,8 +101,18 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
                                ikey,
                                first_error,
                                first_error_mu]() {
+                // Silence unused-capture warnings under configurations where UMA paths are no-ops
+                (void)artifact_id;
+                (void)dvmp_idx;
+                (void)device_id;
+                (void)ikey;
                 // Return chunk when GPU DMA completes
-                (void)streaming_buf->return_chunk(slot_id);
+                {
+                  absl::Status rc = streaming_buf->return_chunk(slot_id);
+                  if (!rc.ok()) {
+                    LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
+                  }
+                }
                 // When all sub-chunks of this DVMP block complete, advance UMA state
                 if (remaining->fetch_sub(1) == 1) {
                   std::vector<uint32_t> one{static_cast<uint32_t>(dvmp_idx)};
@@ -110,7 +121,10 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
                                 : absl::OkStatus();
                   if (!st.ok()) {
                     // Best-effort DVMP unlock to avoid holding LOCKED_TX
-                    (void)dvmp->unlock_chunks(artifact_id, one, /*copied_gpu=*/true);
+                    absl::Status _ul = dvmp->unlock_chunks(artifact_id, one, /*copied_gpu=*/true);
+                    if (!_ul.ok()) {
+                      LOG(WARNING) << "DVMP unlock_chunks failed during UMA advance: " << _ul;
+                    }
                     absl::MutexLock lk(first_error_mu.get());
                     if (first_error->ok()) {
                       *first_error = st;
@@ -211,7 +225,12 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
                   *first_error = st;
                 }
               }
-              (void)streaming_buf->return_chunk(slot_id);
+              {
+                absl::Status rc = streaming_buf->return_chunk(slot_id);
+                if (!rc.ok()) {
+                  LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
+                }
+              }
             }}};
     auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(s, h, opts);
     if (!hdl_or.ok()) {

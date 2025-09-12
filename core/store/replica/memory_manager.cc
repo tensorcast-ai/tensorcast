@@ -201,7 +201,12 @@ absl::Status MemoryManager::allocate_gpu_memory() {
 
   auto gpu_alloc_result = memory_coordinator_->get_or_create_gpu_allocation(replica_key_, replica_key_.device.ordinal);
   if (!gpu_alloc_result.ok()) {
-    (void)set_state(MemoryLocation::GPU, MemoryState::FAILED);
+    {
+      absl::Status _st = set_state(MemoryLocation::GPU, MemoryState::FAILED);
+      if (!_st.ok()) {
+        LOG(WARNING) << "allocate_gpu_memory: failed to set state to FAILED after UMA alloc error: " << _st;
+      }
+    }
     return absl::ResourceExhaustedError(
         absl::Substitute(
             "MemoryManager($0): Failed UMA GPU allocation on device $1: $2",
@@ -589,7 +594,12 @@ std::string MemoryManager::get_last_error_locked_(MemoryLocation location) const
 void MemoryManager::record_failure_and_fail_(MemoryLocation location, std::string message) {
   absl::MutexLock lock(&mutex_);
   set_failure_locked_(location, std::move(message));
-  (void)set_state_locked(location, MemoryState::FAILED);
+  {
+    absl::Status _st = set_state_locked(location, MemoryState::FAILED);
+    if (!_st.ok()) {
+      LOG(WARNING) << "record_failure_and_fail_: failed to set state to FAILED: " << _st;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -808,8 +818,18 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
     int can = 0;
     auto can_st = cuda::device_can_access_peer(&can, dst_dev_id, src_dev_id);
     if (can_st.ok() && can) {
-      (void)cuda::enable_peer_access(dst_dev_id, src_dev_id);
-      (void)cuda::enable_peer_access(src_dev_id, dst_dev_id);
+      {
+        absl::Status _a = cuda::enable_peer_access(dst_dev_id, src_dev_id);
+        if (!_a.ok()) {
+          VLOG(1) << "enable_peer_access(dst,src) failed: " << _a;
+        }
+      }
+      {
+        absl::Status _b = cuda::enable_peer_access(src_dev_id, dst_dev_id);
+        if (!_b.ok()) {
+          VLOG(1) << "enable_peer_access(src,dst) failed: " << _b;
+        }
+      }
       auto st = cuda::memcpy_peer_async(dst_nn.get(), dst_dev_id, src_nn.get(), src_dev_id, bytes, stream_to_use);
       if (!st.ok()) {
         LOG(WARNING) << "Peer copy failed, falling back to staged: " << st.message();
@@ -844,7 +864,12 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
       const int slot_id = *slot_or;
       char* host_ptr = spb->get_chunk_ptr(slot_id);
       if (host_ptr == nullptr) {
-        (void)spb->return_chunk(slot_id);
+        {
+          absl::Status _rc = spb->return_chunk(slot_id);
+          if (!_rc.ok()) {
+            LOG(WARNING) << "SPB return_chunk failed (null host_ptr) slot=" << slot_id << ": " << _rc;
+          }
+        }
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
         return absl::InternalError("SPB returned null chunk pointer");
       }
@@ -854,13 +879,23 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
       auto d2h_hdl = common::AsyncCopyManager::instance().submit_d2h(s, h, {.tracing_stage = "D2H/Copy"});
       if (!d2h_hdl.ok()) {
-        (void)spb->return_chunk(slot_id);
+        {
+          absl::Status _rc = spb->return_chunk(slot_id);
+          if (!_rc.ok()) {
+            LOG(WARNING) << "SPB return_chunk failed after d2h submit error slot=" << slot_id << ": " << _rc;
+          }
+        }
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
         return d2h_hdl.status();
       }
       auto d2h_wait = d2h_hdl->wait();
       if (!d2h_wait.ok()) {
-        (void)spb->return_chunk(slot_id);
+        {
+          absl::Status _rc = spb->return_chunk(slot_id);
+          if (!_rc.ok()) {
+            LOG(WARNING) << "SPB return_chunk failed after d2h wait error slot=" << slot_id << ": " << _rc;
+          }
+        }
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
         return d2h_wait;
       }
@@ -869,12 +904,22 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
           .device_id = dst_dev_id, .dev_ptr = static_cast<char*>(dst_nn.get()) + offset, .length = step};
       auto h2d_hdl = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
       if (!h2d_hdl.ok()) {
-        (void)spb->return_chunk(slot_id);
+        {
+          absl::Status _rc = spb->return_chunk(slot_id);
+          if (!_rc.ok()) {
+            LOG(WARNING) << "SPB return_chunk failed after h2d submit error slot=" << slot_id << ": " << _rc;
+          }
+        }
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
         return h2d_hdl.status();
       }
       auto h2d_wait = h2d_hdl->wait();
-      (void)spb->return_chunk(slot_id);
+      {
+        absl::Status _rc = spb->return_chunk(slot_id);
+        if (!_rc.ok()) {
+          LOG(WARNING) << "SPB return_chunk failed after h2d wait slot=" << slot_id << ": " << _rc;
+        }
+      }
       if (!h2d_wait.ok()) {
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
         return h2d_wait;
@@ -1127,7 +1172,10 @@ std::future<absl::Status> MemoryManager::load_async_from_source(
   // Mark destination LOADING
   {
     absl::MutexLock lock(&mutex_);
-    (void)set_state_locked(target_location, MemoryState::LOADING);
+    absl::Status _st = set_state_locked(target_location, MemoryState::LOADING);
+    if (!_st.ok()) {
+      LOG(WARNING) << "ensure_loaded_async: failed to set state to LOADING: " << _st;
+    }
   }
 
   // Phase 2: launch async pump task delegated to TransferService

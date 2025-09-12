@@ -405,7 +405,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
           state,
           (op.target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
                                                              : std::nullopt);
-      (void)upd_status; // ignore result for now
+      if (!upd_status.ok()) {
+        VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+      }
     }
   }
 
@@ -455,7 +457,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
         state,
         (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
                                                         : std::nullopt);
-    (void)upd_status; // suppress unused warning
+    if (!upd_status.ok()) {
+      VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+    }
     progress_cb(chunks.size(), chunks.size());
   }
 

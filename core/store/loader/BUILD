@@ -242,7 +242,6 @@ sc_cc_library(
         "//core/common:error_handling_lib",
         "//core/common:memory_location_lib",
         "//core/store:loading_spec",
-        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/strings",
     ],
 )

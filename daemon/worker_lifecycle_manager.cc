@@ -10,7 +10,9 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
+#include "absl/log/log.h"
 #include "core/store/device_registry.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -100,10 +102,17 @@ void WorkerLifecycleManager::stop() {
       continue;
     store::DeviceKey dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
     store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
-    (void)engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+    auto st = engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+    if (!st.ok()) {
+      LOG(WARNING) << "disable_remote_replica_access failed during stop: artifact_id=" << info.artifact_id
+                   << " dev=" << info.gpu_device_id << ": " << st;
+    }
   }
   if (!worker_id_.empty()) {
-    (void)gs_->unregister_worker(worker_id_, /*is_graceful_shutdown=*/true);
+    auto st = gs_->unregister_worker(worker_id_, /*is_graceful_shutdown=*/true);
+    if (!st.ok()) {
+      LOG(WARNING) << "GlobalStore unregister_worker failed: " << st;
+    }
   }
 }
 
@@ -139,7 +148,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         if (gs_->is_connected()) {
           auto st_re = reregister_worker(/*preserve_identity=*/true);
           if (!st_re.ok()) {
-            VLOG(1) << "Re-registration attempt failed: " << st_re;
+            LOG(WARNING) << "Re-registration attempt failed: " << st_re;
           }
         }
       } else {
@@ -234,7 +243,11 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   std::thread([engine, dev, artifact_id]() {
                     store::loading::MaterializeHints hints;
                     hints.artifact_id = artifact_id;
-                    (void)engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+                    auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+                    if (!res.ok()) {
+                      VLOG(1) << "Prefetch materialize_replica failed: artifact_id=" << artifact_id
+                              << " dev=" << dev.to_string() << ": " << res.status();
+                    }
                   }).detach();
                   break;
                 }
@@ -251,9 +264,31 @@ void WorkerLifecycleManager::heartbeat_loop() {
                     auto dev = store::DeviceRegistry::instance().gpu_key(li.gpu_device_id);
                     store::loading::ReplicaKey key{.artifact_id = li.artifact_id, .device = dev, .replica = 0};
                     if (!ri.stats().is_available() && li.is_registered_for_comm) {
-                      (void)engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+                      auto st = engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+                      if (!st.ok()) {
+                        LOG(WARNING) << "disable_remote_replica_access failed: artifact_id=" << li.artifact_id
+                                     << " dev=" << li.gpu_device_id << ": " << st;
+                        try {
+                          static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter(
+                              "tensorcast.daemon", "1.0.0");
+                          static auto ctr = meter->CreateDoubleCounter("tc_remote_access_toggle_failed_total");
+                          ctr->Add(1.0);
+                        } catch (...) {
+                        }
+                      }
                     } else if (ri.stats().is_available() && !li.is_registered_for_comm) {
-                      (void)engine_->enable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+                      auto info_or = engine_->enable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+                      if (!info_or.ok()) {
+                        LOG(WARNING) << "enable_remote_replica_access failed: artifact_id=" << li.artifact_id
+                                     << " dev=" << li.gpu_device_id << ": " << info_or.status();
+                        try {
+                          static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter(
+                              "tensorcast.daemon", "1.0.0");
+                          static auto ctr = meter->CreateDoubleCounter("tc_remote_access_toggle_failed_total");
+                          ctr->Add(1.0);
+                        } catch (...) {
+                        }
+                      }
                     }
                   }
                   break;
@@ -356,7 +391,17 @@ void WorkerLifecycleManager::chunk_sync_loop() {
         }
       }
       if (!updates.empty()) {
-        (void)gs_->batch_update_chunk_states(worker_id_, node_id_, updates);
+        auto st = gs_->batch_update_chunk_states(worker_id_, node_id_, updates);
+        if (!st.ok()) {
+          LOG(WARNING) << "batch_update_chunk_states failed: " << st;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_chunk_states_batch_update_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
       }
       std::this_thread::sleep_for(interval);
       sync_ticks_.fetch_add(1);
@@ -427,12 +472,33 @@ void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::stri
       if (info.gpu_state != common::memory::MemoryLocation::NONE) {
         auto dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
         store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
-        (void)engine_->unload_replica(key);
+        int rc = engine_->unload_replica(key);
+        if (rc != 0) {
+          LOG(WARNING) << "apply_obsolete_replicas: GPU unload failed rc=" << rc << " artifact_id=" << info.artifact_id
+                       << " dev=" << info.gpu_device_id;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
       }
       if (info.cpu_state != common::memory::MemoryLocation::NONE) {
         store::DeviceKey cpu{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
         store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = cpu, .replica = 0};
-        (void)engine_->unload_replica(key);
+        int rc = engine_->unload_replica(key);
+        if (rc != 0) {
+          LOG(WARNING) << "apply_obsolete_replicas: CPU unload failed rc=" << rc << " artifact_id=" << info.artifact_id;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
       }
     }
   }

@@ -49,7 +49,6 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
-        "@abseil-cpp//absl/log:absl_check",
     ],
 )
 

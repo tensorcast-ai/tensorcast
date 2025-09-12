@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/common/cuda_api.h"
@@ -20,12 +21,16 @@ namespace tensorcast::daemon {
 class CudaIpcMapping {
  public:
   CudaIpcMapping() = default;
+
   explicit CudaIpcMapping(void* p) : ptr_(p) {}
+
   CudaIpcMapping(const CudaIpcMapping&) = delete;
   CudaIpcMapping& operator=(const CudaIpcMapping&) = delete;
+
   CudaIpcMapping(CudaIpcMapping&& o) noexcept : ptr_(o.ptr_) {
     o.ptr_ = nullptr;
   }
+
   CudaIpcMapping& operator=(CudaIpcMapping&& o) noexcept {
     if (this != &o) {
       reset();
@@ -34,6 +39,7 @@ class CudaIpcMapping {
     }
     return *this;
   }
+
   ~CudaIpcMapping() {
     reset();
   }
@@ -82,7 +88,10 @@ class CudaIpcMapping {
 
   void reset() {
     if (ptr_ != nullptr) {
-      (void)cuda::close_ipc_mem_handle(ptr_);
+      absl::Status _st = cuda::close_ipc_mem_handle(ptr_);
+      if (!_st.ok()) {
+        LOG(WARNING) << "CudaIpcMapping: close_ipc_mem_handle failed: " << _st;
+      }
       ptr_ = nullptr;
     }
   }

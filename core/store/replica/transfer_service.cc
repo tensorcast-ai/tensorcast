@@ -251,7 +251,12 @@ absl::Status TransferService::load_from_source(
   if (!pump_status.ok()) {
     return pump_status;
   }
-  (void)sink->close();
+  {
+    absl::Status _st = sink->close();
+    if (!_st.ok()) {
+      LOG(WARNING) << "TransferService: sink->close failed: " << _st;
+    }
+  }
   return absl::OkStatus();
 }
 

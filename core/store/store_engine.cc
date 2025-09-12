@@ -145,11 +145,11 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       dvmp_(
           gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>(
               std::make_shared<common::memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
-  VLOG(1) << "Initializing StoreEngine with unified Options constructor";
-  VLOG(1) << "Storage path: "
-          << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
-  VLOG(1) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
-  VLOG(1) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::misc::MB << "MB";
+  LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
+  LOG(INFO) << "Storage path: "
+            << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
+  LOG(INFO) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
+  LOG(INFO) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::misc::MB << "MB";
 
   initialize_components();
   initialize_global_store(opts);
@@ -404,7 +404,12 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
     if (evict_st.ok()) {
       // Reset replica GPU memory state then retry loading.
-      (void)replica->release_memory(common::memory::MemoryLocation::GPU, /*safe_release=*/true);
+      {
+        absl::Status _st = replica->release_memory(common::memory::MemoryLocation::GPU, /*safe_release=*/true);
+        if (!_st.ok()) {
+          LOG(WARNING) << "release_memory(GPU) failed during retry after eviction: " << _st;
+        }
+      }
 
       // Trigger load again.
       load_future = replica->ensure_loaded_async(target_location, num_thread_, opt_dev);
@@ -1230,7 +1235,16 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
           return dst_or.status();
         }
         auto dst_replica = std::shared_ptr<replica::Replica>(std::move(dst_or.value()));
-        (void)replica_registry_->emplace(dst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{dst_replica});
+        {
+          absl::Status emplace_status =
+              replica_registry_->emplace(dst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{dst_replica});
+          if (absl::IsAlreadyExists(emplace_status)) {
+            VLOG(1) << "Replica already present for COPY_ONLY dst_key (will reuse existing instance): "
+                    << dst_key.artifact_id;
+          } else if (!emplace_status.ok()) {
+            return emplace_status;
+          }
+        }
 
         absl::Status copy_st = dst_replica->copy_from(*src_replica);
 
@@ -1702,7 +1716,15 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   // Emplace into registry to ensure lifecycle is tracked (ReplicaKey via config).
   DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = reg.device_id, .uuid = ""};
   ReplicaKey inst_key{.artifact_id = reg.artifact_id, .device = dev_key, /*replica=*/.replica = 0};
-  (void)replica_registry_->emplace(inst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{replica});
+  {
+    absl::Status emplace_status =
+        replica_registry_->emplace(inst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{replica});
+    if (absl::IsAlreadyExists(emplace_status)) {
+      VLOG(1) << "Pending registry already had instance for key=" << inst_key.artifact_id;
+    } else if (!emplace_status.ok()) {
+      return emplace_status;
+    }
+  }
 
   // Create pending entry with cryptographically secure random ID
   // Use a combination of timestamp, process ID, and random bytes for uniqueness
@@ -1779,7 +1801,15 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   // Register CPU-resident replica under temporary identifier for lifecycle tracking.
   DeviceKey cpu_key{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   ReplicaKey inst_key{.artifact_id = reg.artifact_id, .device = cpu_key, /*replica=*/.replica = 0};
-  (void)replica_registry_->emplace(inst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{replica});
+  {
+    absl::Status emplace_status =
+        replica_registry_->emplace(inst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{replica});
+    if (absl::IsAlreadyExists(emplace_status)) {
+      VLOG(1) << "Pending DVMP registry already had instance for key=" << inst_key.artifact_id;
+    } else if (!emplace_status.ok()) {
+      return emplace_status;
+    }
+  }
 
   // Create registration id and track pending DVMP registration.
   std::random_device rd;
@@ -1871,7 +1901,12 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
 
   // Release memory outside the critical section if TTL expired
   if (expired_replica) {
-    (void)expired_replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    {
+      absl::Status _st = expired_replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+      if (!_st.ok()) {
+        VLOG(1) << "release_memory(GPU) failed during TTL cleanup: " << _st;
+      }
+    }
     return absl::DeadlineExceededError("registration expired (TTL)");
   }
 
@@ -1952,10 +1987,16 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       }
       if (entry.plan == PendingRegistrationEntry::Plan::DVMP) {
         // DVMP path allocated PAGEABLE_CPU memory
-        (void)entry.replica->release_memory(MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+        absl::Status _st = entry.replica->release_memory(MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+        if (!_st.ok()) {
+          VLOG(1) << "release_memory(CPU) failed during idempotent success cleanup: " << _st;
+        }
       } else {
         // Coalesced/Lease-materialized path allocated GPU memory
-        (void)entry.replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+        absl::Status _st = entry.replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+        if (!_st.ok()) {
+          VLOG(1) << "release_memory(GPU) failed during idempotent success cleanup: " << _st;
+        }
       }
       RegistrationCommitResult result;
       result.registration_id = std::string(registration_id);
@@ -1980,7 +2021,15 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
         .uuid = ""};
     ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
-    (void)replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry.replica});
+    {
+      absl::Status emplace_status =
+          replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry.replica});
+      if (absl::IsAlreadyExists(emplace_status)) {
+        VLOG(1) << "mi2 mapping already present for artifact_id=" << entry.artifact_id;
+      } else if (!emplace_status.ok()) {
+        return emplace_status;
+      }
+    }
   }
 
   // Export remote memory keys if communication is enabled (GPU location).
@@ -2081,8 +2130,11 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
     pending_regs_.erase(it);
   }
   if (replica) {
-    // Release GPU memory; ignore failures to guarantee best-effort cleanup.
-    (void)replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    // Release GPU memory; best-effort cleanup but log failures.
+    absl::Status _st = replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    if (!_st.ok()) {
+      VLOG(1) << "abort_registered_artifact: release_memory(GPU) failed: " << _st;
+    }
   }
   return absl::OkStatus();
 }

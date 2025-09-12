@@ -30,7 +30,7 @@ namespace tensorcast::common::memory {
 DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : chunk_size_(chunk_size) {
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
   // Ensure capabilities are detected early even if communicator is not constructed.
-  (void)common::SystemCapabilities::instance();
+  common::SystemCapabilities::instance();
   // Warn once per process if mlock/munlock are unavailable so later paths can be quiet.
   static std::once_flag warn_once;
   std::call_once(warn_once, []() {
@@ -132,12 +132,14 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     // No-op for empty input per test expectation
     return absl::OkStatus();
   }
+
   // Track successfully locked indices, their previous states, and whether mlock succeeded
   struct LockedChunk {
     uint32_t idx;
     store::replica::ChunkState prev_state;
     bool mlocked;
   };
+
   std::vector<LockedChunk> locked;
   locked.reserve(idx.size());
 
@@ -229,7 +231,10 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     // If mlock globally disabled, opportunistically prefetch to reduce first-touch stalls
     if (!common::SystemCapabilities::instance().mlock_enabled() &&
         common::SystemCapabilities::instance().madv_willneed_available()) {
-      (void)::madvise(addr, chunk_size_, MADV_WILLNEED);
+      int rc = ::madvise(addr, chunk_size_, MADV_WILLNEED);
+      if (rc != 0 && errno != EINVAL) {
+        PLOG(DFATAL) << "madvise WILLNEED failed";
+      }
     }
 
     meta.last_touch_s.store(now_s(), std::memory_order_relaxed);
@@ -457,7 +462,10 @@ absl::Status DistributedVirtualMemoryPool::write_at(
 
   // If MADV_WILLNEED is supported, proactively fault pages to reduce first-write stalls
   if (common::SystemCapabilities::instance().madv_willneed_available()) {
-    (void)::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
+    int rc = ::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
+    if (rc != 0 && errno != EINVAL) {
+      PLOG(WARNING) << "madvise WILLNEED failed in write_at";
+    }
   }
 
   void* dst = static_cast<char*>(info.cpu_base) + va_offset;
@@ -575,6 +583,7 @@ bool DistributedVirtualMemoryPool::ChunkResidencyLease::is_expired() const {
 DistributedVirtualMemoryPool::ChunkResidencyLease::ChunkResidencyLease(ChunkResidencyLease&& other) noexcept {
   impl_ = std::move(other.impl_);
 }
+
 DistributedVirtualMemoryPool::ChunkResidencyLease& DistributedVirtualMemoryPool::ChunkResidencyLease::operator=(
     ChunkResidencyLease&& other) noexcept {
   if (this != &other) {

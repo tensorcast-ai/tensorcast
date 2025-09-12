@@ -6,11 +6,13 @@
 
 #include <future>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -65,7 +67,18 @@ grpc::Status MaterializationController::materialize_replica(
             if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
               SessionLifecycleManager::ReplicaSubject subj{
                   .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
+              if (!lid_or.ok()) {
+                LOG(WARNING) << "create_use_lease failed (LIP path): artifact_id=" << rkey.artifact_id
+                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
+                try {
+                  static auto meter =
+                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+                  ctr->Add(1.0);
+                } catch (...) {
+                }
+              }
               // TTL prefetch pins via request flag removed; only UseLease is created.
             }
           }
@@ -109,7 +122,18 @@ grpc::Status MaterializationController::materialize_replica(
     if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
       SessionLifecycleManager::ReplicaSubject subj{
           .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
+      if (!lid_or.ok()) {
+        LOG(WARNING) << "create_use_lease failed (engine path): artifact_id=" << handle.replica_key.artifact_id
+                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+          ctr->Add(1.0);
+        } catch (...) {
+        }
+      }
       // TTL prefetch pins via request flag removed; only UseLease is created.
     }
   }
@@ -163,7 +187,18 @@ grpc::Status MaterializationController::materialize_by_key(
             if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
               SessionLifecycleManager::ReplicaSubject subj{
                   .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              (void)d_.lifecycle->create_use_lease(subj, req.pid());
+              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
+              if (!lid_or.ok()) {
+                LOG(WARNING) << "create_use_lease failed (LIP by-key): artifact_id=" << rkey.artifact_id
+                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
+                try {
+                  static auto meter =
+                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+                  ctr->Add(1.0);
+                } catch (...) {
+                }
+              }
               // MaterializeByKey: no TTL prefetch; only UseLease is created.
             }
           }
@@ -214,7 +249,18 @@ grpc::Status MaterializationController::materialize_by_key(
     if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
       SessionLifecycleManager::ReplicaSubject subj{
           .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      (void)d_.lifecycle->create_use_lease(subj, req.pid());
+      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
+      if (!lid_or.ok()) {
+        LOG(WARNING) << "create_use_lease failed (engine by-key): artifact_id=" << handle.replica_key.artifact_id
+                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+          ctr->Add(1.0);
+        } catch (...) {
+        }
+      }
       // MaterializeByKey: no TTL prefetch; only UseLease is created.
     }
   }
@@ -345,7 +391,10 @@ grpc::Status MaterializationController::unload(
   const int rc = d_.engine.unload_replica(key);
   if (rc == 0) {
     if (!req.replica_uuid().empty()) {
-      (void)d_.sessions.erase(req.replica_uuid());
+      const size_t erased = d_.sessions.erase(req.replica_uuid());
+      if (erased == 0) {
+        VLOG(2) << "unload: session not found for replica_uuid=" << req.replica_uuid();
+      }
     }
     resp.set_code(0);
     rctx.mark_success();

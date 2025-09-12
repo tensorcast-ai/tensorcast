@@ -571,7 +571,9 @@ absl::Status ReplicaMemoryCoordinator::post_gpu_load_policy(
   }
   switch (policy) {
     case PostGpuLoadPolicy::EvictCPU: {
-      (void)dvmp_->evict_tail_bytes(key.artifact_id, bytes);
+      size_t freed = dvmp_->evict_tail_bytes(key.artifact_id, bytes);
+      VLOG(2) << "EvictCPU policy: requested=" << bytes << " freed=" << freed
+              << " bytes for artifact=" << key.artifact_id;
       return absl::OkStatus();
     }
     case PostGpuLoadPolicy::MarkPreemptible: {

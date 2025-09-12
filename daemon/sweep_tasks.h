@@ -15,19 +15,18 @@
 
 #include <unistd.h>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
-#include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
-#include "daemon/registration_manager.h"
-#include "daemon/replica_session_manager.h"
 #include "daemon/session_lifecycle.h"
 #include "daemon/transport_lock_manager.h"
 #include "daemon/verification_tracker.h"
 #include "nlohmann/json.hpp"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -48,7 +47,17 @@ class LockTtlTask final : public IBackgroundTask {
     for (const auto& tok : locks_.tokens()) {
       auto expired = locks_.remove_if_expired(tok);
       if (expired.has_value()) {
-        (void)engine_.unlock_chunks(expired->key, absl::MakeSpan(expired->chunk_indices), /*copied_gpu=*/false);
+        auto st = engine_.unlock_chunks(expired->key, absl::MakeSpan(expired->chunk_indices), /*copied_gpu=*/false);
+        if (!st.ok()) {
+          LOG(WARNING) << "LockTtlTask.unlock_chunks failed for artifact_id=" << expired->key.artifact_id << ": " << st;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_unlock_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
       }
     }
   }
@@ -93,7 +102,10 @@ class VerificationTask final : public IBackgroundTask {
       }
     }
     for (auto& task : reg_ready) {
-      (void)task.ready.get();
+      absl::Status ready = task.ready.get();
+      if (!ready.ok()) {
+        LOG(ERROR) << "VerificationTask: ready future returned error: " << ready;
+      }
       std::string mi2_id;
       try {
         std::filesystem::path desc_path = std::filesystem::path(task.disk_path) / "artifact_descriptor.json";
@@ -117,7 +129,7 @@ class VerificationTask final : public IBackgroundTask {
       }
       auto st = engine_.register_replica_with_global_store(task.key, mi2_id);
       if (!st.ok()) {
-        VLOG(1) << "Auto-register disk load failed: " << st;
+        LOG(WARNING) << "Auto-register disk load failed: " << st;
       }
     }
     tracker_.prune();
@@ -182,7 +194,18 @@ class EvictionTask final : public IBackgroundTask {
       for (const auto& c : cands) {
         if (ratio <= limit_)
           break;
-        (void)engine_.unload_replica(c.key);
+        int rc = engine_.unload_replica(c.key);
+        if (rc != 0) {
+          LOG(WARNING) << "EvictionTask: unload_replica failed rc=" << rc << " artifact_id=" << c.key.artifact_id
+                       << " device_ord=" << c.key.device.ordinal;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
         auto f2 = engine_.get_device_free_memory(dev);
         if (!f2.ok())
           break;

@@ -356,7 +356,6 @@ sc_cc_library(
         "//core/common:system_capabilities_lib",
         "//core/store:uma_lease_provider",
         "//proto/tensorcast/communicator/v1:communicator_cc",
-        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
     ] + select({

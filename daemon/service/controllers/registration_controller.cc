@@ -128,7 +128,7 @@ grpc::Status RegistrationController::begin(
   if (plan == RegistrationManager::RegPlan::LEASE) {
     std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
     resp.set_registration_id(reg_id);
-    (void)resp.mutable_lease();
+    resp.mutable_lease();
     resp.set_device_id(req.device_id());
     resp.set_total_size(req.total_size());
     try {
@@ -174,7 +174,17 @@ grpc::Status RegistrationController::feed_stream(
 
     uint32_t extend_ms = d_.reg.extend_if_has_ttl(reg_id);
     if (extend_ms > 0) {
-      (void)d_.engine.keep_alive_registered_artifact(reg_id, extend_ms);
+      auto st = d_.engine.keep_alive_registered_artifact(reg_id, extend_ms);
+      if (!st.ok()) {
+        LOG(WARNING) << "keep_alive_registered_artifact failed (stream): reg_id=" << reg_id << ": " << st;
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto ctr = meter->CreateDoubleCounter("tc_register_keepalive_failed_total");
+          ctr->Add(1.0);
+        } catch (...) {
+        }
+      }
     }
     if (req.has_dvmp_chunk()) {
       const auto& ck = req.dvmp_chunk();
@@ -204,7 +214,6 @@ grpc::Status RegistrationController::feed_stream(
 
 grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
-  bool saw_last = false;
   for (const auto& req : reqs) {
     if (reg_id.empty()) {
       reg_id = req.registration_id();
@@ -227,8 +236,19 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
     }
     {
       uint32_t extend_ms = d_.reg.extend_if_has_ttl(reg_id);
-      if (extend_ms > 0)
-        (void)d_.engine.keep_alive_registered_artifact(reg_id, extend_ms);
+      if (extend_ms > 0) {
+        auto st = d_.engine.keep_alive_registered_artifact(reg_id, extend_ms);
+        if (!st.ok()) {
+          LOG(WARNING) << "keep_alive_registered_artifact failed (vector): reg_id=" << reg_id << ": " << st;
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_register_keepalive_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
+      }
     }
     if (req.has_dvmp_chunk()) {
       const auto& ck = req.dvmp_chunk();
@@ -252,7 +272,6 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
       return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
     }
   }
-  (void)saw_last;
   return Status::OK;
 }
 
@@ -403,7 +422,18 @@ grpc::Status RegistrationController::commit(
       // Create CommitLease for VRAM_LEASED in-place ownership (device-unique)
       if (d_.lifecycle) {
         SessionLifecycleManager::CommitSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
-        (void)d_.lifecycle->create_commit_lease(subj, meta.owner_pid);
+        auto lid_or = d_.lifecycle->create_commit_lease(subj, meta.owner_pid);
+        if (!lid_or.ok()) {
+          LOG(WARNING) << "create_commit_lease failed: artifact_id=" << out.artifact_id << " dev=" << meta.device_id
+                       << ": " << lid_or.status();
+          try {
+            static auto meter =
+                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+            static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+            ctr->Add(1.0);
+          } catch (...) {
+          }
+        }
       }
       // Log lease-in-place registration summary including plan.
       LOG(INFO) << "Registered memory replica: " << out.artifact_id
@@ -468,8 +498,12 @@ grpc::Status RegistrationController::commit(
       bool active{true};
 
       ~RegAbortGuard() {
-        if (active && engine)
-          (void)engine->abort_registered_artifact(id);
+        if (active && engine) {
+          absl::Status _st = engine->abort_registered_artifact(id);
+          if (!_st.ok()) {
+            LOG(WARNING) << "RegAbortGuard: abort_registered_artifact failed for id=" << id << ": " << _st;
+          }
+        }
       }
 
       void release() {
@@ -482,7 +516,11 @@ grpc::Status RegistrationController::commit(
       return to_grpc_status(dst_map_or.status());
     auto dst_map = std::move(*dst_map_or);
     void* dst_dev = dst_map.get();
-    (void)cuda::set_device(meta.device_id);
+    {
+      auto _set = cuda::set_device(meta.device_id);
+      if (!_set.ok())
+        return to_grpc_status(_set);
+    }
 
     for (const auto& p : plan) {
       if (p.kind != store::loader::SegmentPiece::PAD)
@@ -509,7 +547,11 @@ grpc::Status RegistrationController::commit(
         return to_grpc_status(st);
     }
 
-    (void)cuda::device_synchronize();
+    {
+      auto _sync = cuda::device_synchronize();
+      if (!_sync.ok())
+        return to_grpc_status(_sync);
+    }
     auto commit2_or = d_.engine.commit_registered_artifact(out2.registration_id);
     if (!commit2_or.ok())
       return to_grpc_status(commit2_or.status());
@@ -635,7 +677,10 @@ grpc::Status RegistrationController::revoke(
       goto REVOKE_DONE;
   }
   {
-    (void)d_.engine.abort_registered_artifact(req.registration_id());
+    absl::Status _st = d_.engine.abort_registered_artifact(req.registration_id());
+    if (!_st.ok()) {
+      LOG(WARNING) << "revoke: abort_registered_artifact failed for id=" << req.registration_id() << ": " << _st;
+    }
     d_.reg.erase_all_for(req.registration_id());
   }
 REVOKE_DONE:
@@ -647,7 +692,11 @@ REVOKE_DONE:
     } else if (m.plan != RegistrationManager::RegPlan::DVMP) {
       // Fallback by subject+pid
       SessionLifecycleManager::ReplicaSubject subj{.artifact_id = m.artifact_id_mi2, .device_id = m.device_id};
-      (void)d_.lifecycle->release_use_lease(subj, m.owner_pid);
+      auto st = d_.lifecycle->release_use_lease(subj, m.owner_pid);
+      if (!st.ok()) {
+        LOG(WARNING) << "release_use_lease failed (revoke fallback): artifact_id=" << m.artifact_id_mi2
+                     << " dev=" << m.device_id << ": " << st;
+      }
     }
     store::DeviceKey dev_key{
         .type = (m.plan == RegistrationManager::RegPlan::DVMP ? DeviceType::CPU : DeviceType::GPU),

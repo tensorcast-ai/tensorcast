@@ -7,12 +7,14 @@
 #include <optional>
 #include <string>
 
+#include "absl/log/log.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/replica_session_manager.h"
 #include "daemon/session_lifecycle.h"
 #include "daemon/verification_tracker.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -36,7 +38,17 @@ class SessionsService {
       sched_->notify(TaskKind::kVerification);
     if (lifecycle_) {
       // Create or renew session principal keepalive under the unified lifecycle
-      (void)lifecycle_->keepalive_session(replica_uuid, session_ttl_);
+      auto st = lifecycle_->keepalive_session(replica_uuid, session_ttl_);
+      if (!st.ok()) {
+        LOG(WARNING) << "keepalive_session failed for replica_uuid=" << replica_uuid << ": " << st;
+        try {
+          static auto meter =
+              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+          static auto ctr = meter->CreateDoubleCounter("tc_lease_keepalive_failed_total");
+          ctr->Add(1.0);
+        } catch (...) {
+        }
+      }
     }
   }
 

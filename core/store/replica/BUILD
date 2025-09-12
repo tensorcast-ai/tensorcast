@@ -79,7 +79,6 @@ sc_cc_library(
         "//core/common:memory_location_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/store:device_types",
-        "@abseil-cpp//absl/log:absl_check",
         "@opentelemetry-cpp//api:api",
     ],
 )

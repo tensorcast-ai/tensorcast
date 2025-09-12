@@ -332,7 +332,7 @@ void MTcpTransport::server_loop() {
       tasks_[i] = std::make_unique<MTcpTransportTask>(sock_fds_[i]);
       tasks_[i]->start();
     }
-    VLOG(1) << "[MTcpTransport::server_loop] MTCP ready with _conn_count=" << conn_count_;
+    LOG(INFO) << "[MTcpTransport::server_loop] MTCP ready with _conn_count=" << conn_count_;
     recv_loop();
   }
 }
@@ -802,7 +802,11 @@ void MTcpTransport::recv_loop() {
                     .device_id = device_id, .dev_ptr = gpu_ptr, .length = static_cast<size_t>(sub_chunk_size)};
                 tensorcast::common::CopyOptions opts{
                     .tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = [recv_buffer, slot_id]() {
-                                                   (void)recv_buffer->return_chunk(slot_id);
+                                                   absl::Status rc = recv_buffer->return_chunk(slot_id);
+                                                   if (!rc.ok()) {
+                                                     LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << slot_id
+                                                                  << ": " << rc;
+                                                   }
                                                  }}};
                 auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
                 if (!hdl_or.ok()) {

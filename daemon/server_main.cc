@@ -102,7 +102,9 @@ int main(int argc, char** argv) {
   // Apply logging level/VLOG, install optional sinks, then initialize OTel
   common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
   common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
-  (void)common::otel::init_from_config(cfg.observability(), "store-daemon");
+  if (!common::otel::init_from_config(cfg.observability(), "store-daemon")) {
+    LOG(WARNING) << "OpenTelemetry initialization failed; continuing without telemetry";
+  }
   common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
   // Configure Chrome trace directory (optional)
   if (!cfg.observability().tracing().chrome_trace_dir().empty()) {

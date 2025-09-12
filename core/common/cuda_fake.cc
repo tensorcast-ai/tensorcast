@@ -421,8 +421,8 @@ void configure_same_process_ipc_fallback(bool /*enabled*/) {
 }
 
 absl::Status device_can_access_peer(int* can_access, int device, int peer_device) {
-  (void)device;
-  (void)peer_device;
+  static_cast<void>(device);
+  static_cast<void>(peer_device);
   if (can_access == nullptr) {
     return absl::InvalidArgumentError("can_access pointer is null");
   }
@@ -431,8 +431,8 @@ absl::Status device_can_access_peer(int* can_access, int device, int peer_device
 }
 
 absl::Status enable_peer_access(int current_device, int peer_device) {
-  (void)current_device;
-  (void)peer_device;
+  static_cast<void>(current_device);
+  static_cast<void>(peer_device);
   return absl::OkStatus();
 }
 
@@ -443,8 +443,8 @@ absl::Status memcpy_peer_async(
     int src_device,
     size_t bytes,
     cudaStream_t stream) {
-  (void)dst_device;
-  (void)src_device;
+  static_cast<void>(dst_device);
+  static_cast<void>(src_device);
   return memcpy_async(dst, src, bytes, cudaMemcpyDeviceToDevice, stream);
 }
 

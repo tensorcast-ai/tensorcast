@@ -34,7 +34,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   enabled_ = true;
   // Inject UMA-backed lease provider for CPU staging (DRAM)
   comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
-  VLOG(1) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
+  LOG(INFO) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
 
@@ -54,7 +54,7 @@ absl::Status CommunicationManager::initialize_with_config(
   enabled_ = true;
   // Inject UMA-backed lease provider for CPU staging (DRAM)
   comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
-  VLOG(1) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
+  LOG(INFO) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
 

@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/absl_check.h"
+#include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/error_handling.h"
 
@@ -33,6 +35,7 @@ absl::flat_hash_map<std::string, ExportedIpcInfo> g_exported_ipc_map ABSL_GUARDE
 absl::flat_hash_set<void*> g_exported_ptrs ABSL_GUARDED_BY(g_ipc_map_mu);
 std::atomic<bool> g_enable_same_process_ipc_fallback{false};
 } // namespace
+
 void configure_same_process_ipc_fallback(bool enabled) {
   g_enable_same_process_ipc_fallback.store(enabled, std::memory_order_relaxed);
 }
@@ -141,7 +144,7 @@ absl::Status get_ipc_handle(const void* ptr, std::string* handle) {
   if (g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
     absl::MutexLock lock(&g_ipc_map_mu);
     int current_device = -1;
-    (void)get_device(&current_device);
+    ABSL_CHECK_OK(get_device(&current_device));
     g_exported_ipc_map[*handle] = ExportedIpcInfo{
         .ptr = const_cast<void*>(ptr), // NOLINT(cppcoreguidelines-pro-type-const-cast)
         .device_id = current_device,
@@ -189,7 +192,7 @@ absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
     }
     // Ensure device consistency when possible
     int cur_dev = -1;
-    (void)get_device(&cur_dev);
+    ABSL_CHECK_OK(get_device(&cur_dev));
     cudaPointerAttributes attrs;
     if (cudaPointerGetAttributes(&attrs, info.ptr) == cudaSuccess) {
       if (cur_dev >= 0 && attrs.device != cur_dev) {
@@ -376,7 +379,12 @@ absl::Status enable_peer_access(int current_device, int peer_device) {
   SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(current_device));
   cudaError_t err = cudaDeviceEnablePeerAccess(peer_device, 0);
   if (err == cudaErrorPeerAccessAlreadyEnabled) {
-    (void)cudaGetLastError();
+    {
+      cudaError_t _clear = cudaGetLastError();
+      if (_clear != cudaSuccess) {
+        LOG(ERROR) << "cudaGetLastError after peer-access-already-enabled: " << static_cast<int>(_clear);
+      }
+    }
     return absl::OkStatus();
   }
   if (err != cudaSuccess) {

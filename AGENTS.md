@@ -31,6 +31,23 @@ bazel test //core/communicator/engine:tcp_engine_test
 bazel test //core/store/loader:disk_loader_streaming_buffer_test
 ```
 
+#### Bazel Quiet / Reduced Output
+Bazel does not support the `-q` parameter (do not use it). To reduce build/test log noise, use the following composable options:
+
+```bash
+# Build quietly: hide progress and loading info, only show warnings and errors
+bazel build //daemon:tensorcast_daemon \
+  --noshow_progress --noshow_loading_progress \
+  --ui_event_filters=warning,error
+
+# Run tests with minimal output: only show failure details, reduce general logging
+bazel test //daemon:session_lifecycle_test \
+  --define=use_fake_cuda=true \
+  --test_output=errors \
+  --noshow_progress --noshow_loading_progress \
+  --ui_event_filters=warning,error
+```
+
 #### Fake CUDA Backend (Development Without GPU)
 The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
 
@@ -244,6 +261,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 #### Best Practices
 - **Error Handling**: Use `absl::Status` or `absl::StatusOr<T>`; `absl::ErrnoToStatus` to convert errno to status
+- **Never ignore Status**: Do not discard `absl::Status`/`absl::StatusOr` results (avoid `(void)expr`). For invariants, assert with `ABSL_CHECK_OK(...)`. For recoverable or expected errors, handle/log/propagate them explicitly and continue safely when possible.
 - **Errno handling policy**: Avoid direct use of `errno`, `strerror`, and `perror`. Prefer `absl::ErrnoToStatus` for converting OS errors to statuses and `PLOG(...)` for logging errors that include `errno` safely.
 
 ```cpp
@@ -261,6 +279,14 @@ if (fd < 0) {
   return absl::ErrnoToStatus(errno, "open failed");
 }
 ```
+
+#### Logging (C++)
+- `LOG(ERROR)`: Invariants/consistency risks or crashes (e.g., background task threw, checkpoint offset mismatch, fatal loop crashes).
+- `LOG(WARNING)`: Recoverable but user‑visible failures (e.g., lease create/release failures, unload failures, GS sync/keepalive/remote‑access toggle failures).
+- `LOG(INFO)`: One‑time milestones and service summaries (engine/comm init, server ready, successful registration summary).
+- `VLOG(1)`: Flow‑level debug; avoid in hot loops.
+- `VLOG(2+)`: Inner‑loop/high‑frequency traces only.
+- `PLOG(level)`: Use when OS/syscalls fail and `errno` should be included.
 - **Testing**: Catch2 framework with Arrange-Act-Assert pattern
 - **Concurrency**: Use absl thread annotations (`ABSL_GUARDED_BY`, etc.)
 - **Documentation**: Doxygen style for public APIs

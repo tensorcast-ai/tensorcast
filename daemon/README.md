@@ -98,6 +98,12 @@ Contract highlights:
 - Launch with unified config: see `../docs/deployment/store-daemon.md`
 - C++ tests: `bazel test //daemon:grpc_service_impl_registration_test` (and related `*_test.cc` in this directory)
 
+## Error Handling Conventions
+
+- Use wrappers in `daemon/common/safe_sys.h` (e.g., `safe_epoll_add`, `safe_epoll_del`, `safe_eventfd_write/read`) instead of raw syscalls; they map errno to Status and treat expected cases (EEXIST/ENOENT) as OK.
+
+These conventions improve observability while keeping best‑effort paths fast and non‑fatal.
+
 ## Ownership
 
 - Area: `daemon`
