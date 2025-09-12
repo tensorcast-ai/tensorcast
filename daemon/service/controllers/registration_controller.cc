@@ -4,6 +4,7 @@
 
 #include "daemon/service/controllers/registration_controller.h"
 
+#include <cstddef>
 #include <string>
 
 #include "absl/log/log.h"
@@ -531,7 +532,12 @@ grpc::Status RegistrationController::commit(
       d_.refs.add_ref(key, meta.owner_pid);
       if (d_.lifecycle && meta.ttl_ms > 0) {
         SessionLifecycleManager::ReplicaSubject subj{.artifact_id = d.artifact_id, .device_id = meta.device_id};
-        (void)d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+        auto lease_or = d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+        if (lease_or.ok()) {
+          meta.use_lease_id = *lease_or;
+        } else {
+          LOG(ERROR) << "failed to create ttl use lease: " << lease_or.status();
+        }
       }
       meta.joined_existing = true;
       meta.artifact_id_mi2 = d.artifact_id;
@@ -574,7 +580,12 @@ grpc::Status RegistrationController::commit(
       d_.refs.add_ref(key, meta.owner_pid);
       if (d_.lifecycle && meta.ttl_ms > 0) {
         SessionLifecycleManager::ReplicaSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
-        (void)d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+        auto lease_or = d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+        if (lease_or.ok()) {
+          meta.use_lease_id = *lease_or;
+        } else {
+          LOG(ERROR) << "failed to create ttl use lease: " << lease_or.status();
+        }
       }
       meta.joined_existing = true;
       meta.artifact_id_mi2 = out.artifact_id;
@@ -630,6 +641,14 @@ grpc::Status RegistrationController::revoke(
 REVOKE_DONE:
   if (meta_opt.has_value() && meta_opt->joined_existing) {
     const auto& m = *meta_opt;
+    // Release lifecycle UseLease precisely, if recorded
+    if (m.use_lease_id != 0 && m.plan != RegistrationManager::RegPlan::DVMP) {
+      d_.lifecycle->release_lease(static_cast<SessionLifecycleManager::LeaseId>(m.use_lease_id));
+    } else if (m.plan != RegistrationManager::RegPlan::DVMP) {
+      // Fallback by subject+pid
+      SessionLifecycleManager::ReplicaSubject subj{.artifact_id = m.artifact_id_mi2, .device_id = m.device_id};
+      (void)d_.lifecycle->release_use_lease(subj, m.owner_pid);
+    }
     store::DeviceKey dev_key{
         .type = (m.plan == RegistrationManager::RegPlan::DVMP ? DeviceType::CPU : DeviceType::GPU),
         .ordinal = (m.plan == RegistrationManager::RegPlan::DVMP ? -1 : m.device_id),

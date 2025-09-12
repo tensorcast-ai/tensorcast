@@ -21,6 +21,7 @@ namespace tensorcast::daemon {
 class RegistrationManager {
  public:
   enum class RegPlan : uint8_t { COALESCED = 0, DVMP = 1, LEASE = 2 };
+
   struct RegMeta {
     RegPlan plan{RegPlan::COALESCED};
     std::chrono::time_point<std::chrono::steady_clock> expiry;
@@ -37,6 +38,8 @@ class RegistrationManager {
     bool joined_existing{false};
     // The content-addressed mi2 id associated with the joined replica.
     std::string artifact_id_mi2;
+    // Lease ID for TTL UseLease created on commit when joining existing GPU replica.
+    uint64_t use_lease_id{0};
   };
 
   RegistrationManager() = default;

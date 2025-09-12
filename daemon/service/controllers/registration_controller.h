@@ -4,8 +4,10 @@
 
 #pragma once
 
+#include <utility>
 #include <vector>
 
+#include <gsl/pointers>
 #include "core/store/store_engine.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
@@ -24,9 +26,10 @@ class RegistrationController {
     RegistrationManager& reg;
     LipManager& lip;
     RefTracker& refs;
-    SessionLifecycleManager* lifecycle{nullptr};
+    gsl::not_null<SessionLifecycleManager*> lifecycle;
   };
-  explicit RegistrationController(Dep d) : d_(d) {}
+
+  explicit RegistrationController(Dep d) : d_(std::move(d)) {}
 
   grpc::Status begin(
       RpcContext& rctx,
