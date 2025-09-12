@@ -255,28 +255,28 @@ jobs:
           mkdir -p bazel-bin
           tar -xzf bazel-bin-proto.tgz -C bazel-bin
 
-      - name: Restore Buf proto/gen cache
-        id: restore-buf-proto-gen
-        uses: actions/cache/restore@v4
-        with:
-          path: head/proto/gen
-          key: proto-gen-${{ hashFiles('proto/**/*.proto', 'proto/buf.gen.yaml', 'proto/buf.yaml') }}
-          restore-keys: |
-            proto-gen-
+      # - name: Restore Buf proto/gen cache
+      #   id: restore-buf-proto-gen
+      #   uses: actions/cache/restore@v4
+      #   with:
+      #     path: head/proto/gen
+      #     key: proto-gen-${{ hashFiles('proto/**/*.proto', 'proto/buf.gen.yaml', 'proto/buf.yaml') }}
+      #     restore-keys: |
+      #       proto-gen-
 
-      - name: Sync restored proto/gen to ./proto/gen
-        if: steps.restore-buf-proto-gen.outputs.cache-hit == 'true'
-        run: |
-          rm -rf proto/gen
-          mkdir -p proto/gen
-          cp -a head/proto/gen/. proto/gen/
+      # - name: Sync restored proto/gen to ./proto/gen
+      #   if: steps.restore-buf-proto-gen.outputs.cache-hit == 'true'
+      #   run: |
+      #     rm -rf proto/gen
+      #     mkdir -p proto/gen
+      #     cp -a head/proto/gen/. proto/gen/
 
       - name: Setup Buf CLI
-        if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
+        # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
         uses: bufbuild/buf-setup-action@v1
 
       - name: Generate protos via Buf
-        if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
+        # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
         run: |
           cd proto
           buf generate
