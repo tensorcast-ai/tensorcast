@@ -30,6 +30,7 @@
 #include "core/store/memory_types.h" // For MB definition
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
+#include "gsl/pointers"
 
 #include <catch2/catch_section_info.hpp>
 #include <catch2/catch_test_macros.hpp>

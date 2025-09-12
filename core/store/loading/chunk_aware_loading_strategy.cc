@@ -13,15 +13,13 @@
 #include "absl/strings/match.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
-#include "core/common/cuda_api.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
-#include "opentelemetry/trace/provider.h"
-#include "opentelemetry/trace/scope.h"
 // p2p_loader.h and source.h are included indirectly via other headers. Avoid unused includes.
 #include "core/store/replica/memory_manager.h"
 #include "core/store/replica/replica_memory_coordinator.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::loading {
 
@@ -268,12 +266,11 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   auto cpu_ptrs = mem_manager->get_pointer(common::memory::MemoryLocation::PAGEABLE_CPU);
   auto gpu_ptrs = mem_manager->get_pointer(common::memory::MemoryLocation::GPU);
 
-  if (cpu_ptrs.empty() || gpu_ptrs.empty()) {
+  if (cpu_ptrs.empty() || gpu_ptrs.empty() || cpu_ptrs[0] == nullptr || gpu_ptrs[0] == nullptr) {
     return absl::InternalError("Memory pointers not available");
   }
-
-  void* cpu_base = cpu_ptrs[0];
-  void* gpu_base = gpu_ptrs[0];
+  gsl::not_null<void*> cpu_base{cpu_ptrs[0]};
+  gsl::not_null<void*> gpu_base{gpu_ptrs[0]};
   const size_t chunk_size = memory.get_chunk_size();
 
   // Get total artifact size
@@ -296,8 +293,8 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     size_t offset = chunk_idx * chunk_size;
     size_t size = std::min(chunk_size, artifact_size - offset);
 
-    void* src = static_cast<char*>(cpu_base) + offset;
-    void* dst = static_cast<char*>(gpu_base) + offset;
+    void* src = static_cast<char*>(cpu_base.get()) + offset;
+    void* dst = static_cast<char*>(gpu_base.get()) + offset;
 
     // Schedule H2D via ACM; UMA state advanced in callback for this chunk
     common::HostRegion h{.base = src, .length = size, .pinned = false};
@@ -408,7 +405,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
           state,
           (op.target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
                                                              : std::nullopt);
-      (void)upd_status; // ignore result for now
+      if (!upd_status.ok()) {
+        VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+      }
     }
   }
 
@@ -458,7 +457,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
         state,
         (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
                                                         : std::nullopt);
-    (void)upd_status; // suppress unused warning
+    if (!upd_status.ok()) {
+      VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+    }
     progress_cb(chunks.size(), chunks.size());
   }
 

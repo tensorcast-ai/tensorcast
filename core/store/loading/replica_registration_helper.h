@@ -7,6 +7,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::loading {
 
@@ -15,7 +16,7 @@ class ReplicaRegistrationHelper {
   // Registers the current process' replica of the given artifact with Global Store.
   // This is a thin wrapper around GlobalStoreClient::register_replica().
   static absl::Status register_local_replica(
-      components::GlobalStoreClient* gs_client,
+      gsl::not_null<components::GlobalStoreClient*> gs_client,
       std::string_view worker_id,
       std::string_view artifact_id,
       const DeviceKey& device,

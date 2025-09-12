@@ -2,6 +2,7 @@
 
 #include "core/common/async_copy_manager.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/absl_check.h"
 
 namespace tensorcast::common {
 
@@ -48,7 +49,8 @@ void AsyncCopyManager::shutdown() {
   auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
     for (auto& kv : m) {
       if (kv.second != nullptr) {
-        (void)cuda::stream_destroy(kv.second);
+        // Ignore errors during shutdown
+        ABSL_CHECK_OK(cuda::stream_destroy(kv.second));
       }
     }
     m.clear();

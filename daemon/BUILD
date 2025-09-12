@@ -4,6 +4,14 @@ load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 package(default_visibility = ["//visibility:public"])
 
+sc_header_only_library(
+    name = "safe_sys_hdr",
+    hdrs = ["common/safe_sys.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+    ],
+)
+
 sc_cc_library(
     name = "status_utils",
     hdrs = ["status_utils.h"],
@@ -157,6 +165,7 @@ sc_cc_library(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -230,9 +239,11 @@ sc_header_only_library(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -242,11 +253,14 @@ sc_header_only_library(
     deps = [
         ":lip_manager_lib",
         ":ref_tracker_hdr",
+        ":safe_sys_hdr",
         ":session_manager_hdr",
         "//core/store:store_engine",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -284,6 +298,8 @@ sc_header_only_library(
         ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":verification_tracker_hdr",
+        "@abseil-cpp//absl/log",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -332,6 +348,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -538,6 +555,7 @@ cc_test(
         "//core/store/loader:source_hash",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 

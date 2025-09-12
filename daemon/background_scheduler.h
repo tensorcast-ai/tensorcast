@@ -36,6 +36,7 @@ class BackgroundScheduler {
   };
 
   BackgroundScheduler() = default;
+
   ~BackgroundScheduler() {
     stop();
   }
@@ -129,7 +130,7 @@ class BackgroundScheduler {
           tasks_[idx].fn();
         } catch (...) {
           // Log and continue; background failures must not kill the scheduler
-          VLOG(1) << "BackgroundScheduler task threw; kind=" << static_cast<int>(tasks_[idx].kind);
+          LOG(ERROR) << "BackgroundScheduler task threw; kind=" << static_cast<int>(tasks_[idx].kind);
         }
       }
       lk.lock();

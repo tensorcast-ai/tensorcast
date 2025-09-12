@@ -12,7 +12,9 @@
 
 namespace tensorcast::store::loading {
 
-MaterializeOrchestrator::MaterializeOrchestrator(StoreEngine* store, components::GlobalStoreClient* gs_client)
+MaterializeOrchestrator::MaterializeOrchestrator(
+    gsl::not_null<StoreEngine*> store,
+    gsl::not_null<components::GlobalStoreClient*> gs_client)
     : store_(store), gs_client_(gs_client) {}
 
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
@@ -22,7 +24,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // ------------------------------------------------------------------
   // 1. Query Global Store for existing replicas
   // ------------------------------------------------------------------
-  if (!gs_client_ || !gs_client_->is_connected()) {
+  if (!gs_client_->is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 

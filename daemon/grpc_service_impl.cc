@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/status_utils.h"
@@ -255,16 +256,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
         },
         std::chrono::duration_cast<std::chrono::milliseconds>(opts_.proc_check_interval));
     pid_monitor_->start();
-    // Metric: pid monitor fallback when pidfd is unavailable
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_pid_monitor_fallback_total");
-      if (!pid_monitor_->using_pidfd()) {
-        counter->Add(1.0);
-      }
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_pid_monitor_fallback_total unavailable";
-    }
+    // Note: pid monitor fallback metric removed for minimal dependency surface.
     lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
     auto lifecycle_task = std::make_shared<SessionLifecycleTask>(*lifecycle_mgr_);
     auto* sched_ptr = scheduler_.get();

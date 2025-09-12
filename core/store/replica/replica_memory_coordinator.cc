@@ -1,6 +1,7 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/store/replica/replica_memory_coordinator.h"
+#include "gsl/pointers"
 
 #include <algorithm>
 #include <cmath>
@@ -533,6 +534,7 @@ absl::StatusOr<DirectWriteToken> ReplicaMemoryCoordinator::create_direct_write_t
   struct DwKeep {
     std::vector<common::memory::DistributedVirtualMemoryPool::ChunkResidencyLease> leases;
   };
+
   auto keep = std::make_shared<DwKeep>();
 
   DirectWriteToken token;
@@ -547,10 +549,11 @@ absl::StatusOr<DirectWriteToken> ReplicaMemoryCoordinator::create_direct_write_t
       return lease_or.status();
     }
     keep->leases.emplace_back(std::move(*lease_or));
+    gsl::not_null<void*> base{alloc.dram_region.cpu_base};
     token.segments.push_back(
         DirectWriteToken::Segment{
             .va_offset = r.offset,
-            .local_addr = reinterpret_cast<uint64_t>(static_cast<char*>(alloc.dram_region.cpu_base) + r.offset),
+            .local_addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + r.offset),
             .length = r.length});
   }
   token.keepalive = keep;
@@ -568,7 +571,9 @@ absl::Status ReplicaMemoryCoordinator::post_gpu_load_policy(
   }
   switch (policy) {
     case PostGpuLoadPolicy::EvictCPU: {
-      (void)dvmp_->evict_tail_bytes(key.artifact_id, bytes);
+      size_t freed = dvmp_->evict_tail_bytes(key.artifact_id, bytes);
+      VLOG(2) << "EvictCPU policy: requested=" << bytes << " freed=" << freed
+              << " bytes for artifact=" << key.artifact_id;
       return absl::OkStatus();
     }
     case PostGpuLoadPolicy::MarkPreemptible: {

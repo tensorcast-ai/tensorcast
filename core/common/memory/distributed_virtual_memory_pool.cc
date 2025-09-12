@@ -21,7 +21,6 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "core/common/system_capabilities.h"
-#include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -30,11 +29,11 @@ namespace tensorcast::common::memory {
 DistributedVirtualMemoryPool::DistributedVirtualMemoryPool(size_t chunk_size) : chunk_size_(chunk_size) {
   LOG(INFO) << "Initialized DVMP with chunk size: " << chunk_size_ / (1024 * 1024) << " MiB";
   // Ensure capabilities are detected early even if communicator is not constructed.
-  (void)common::SystemCapabilities::instance();
+  SystemCapabilities::instance();
   // Warn once per process if mlock/munlock are unavailable so later paths can be quiet.
   static std::once_flag warn_once;
   std::call_once(warn_once, []() {
-    if (!common::SystemCapabilities::instance().mlock_enabled()) {
+    if (!SystemCapabilities::instance().mlock_enabled()) {
       LOG(WARNING)
           << "DVMP: mlock/munlock unavailable; page pinning is disabled. unlock() will not physically unpin pages.";
     }
@@ -132,12 +131,14 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     // No-op for empty input per test expectation
     return absl::OkStatus();
   }
+
   // Track successfully locked indices, their previous states, and whether mlock succeeded
   struct LockedChunk {
     uint32_t idx;
     store::replica::ChunkState prev_state;
     bool mlocked;
   };
+
   std::vector<LockedChunk> locked;
   locked.reserve(idx.size());
 
@@ -202,7 +203,7 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
     // Attempt to lock the corresponding memory pages so they cannot be reclaimed.
     void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
     bool mlocked = false;
-    if (common::SystemCapabilities::instance().mlock_enabled() && ::mlock(addr, chunk_size_) != 0) {
+    if (SystemCapabilities::instance().mlock_enabled() && ::mlock(addr, chunk_size_) != 0) {
       const int err = errno;
       // If the failure is due to insufficient mlock limit or permissions, degrade
       // gracefully instead of aborting the entire load. In such cases we keep the
@@ -216,20 +217,22 @@ absl::Status DistributedVirtualMemoryPool::lock_chunks(std::string_view artifact
         if (!warned_demote.exchange(true, std::memory_order_acq_rel)) {
           PLOG(WARNING) << "mlock failed (EPERM/ENOMEM) — disabling page pinning; proceeding without mlock/munlock";
         }
-        common::SystemCapabilities::instance().set_mlock_enabled(false);
+        SystemCapabilities::instance().set_mlock_enabled(false);
       } else {
         // Failed to lock pages, rollback this chunk and any previously locked ones.
         meta.state.store(expected, std::memory_order_release); // revert to previous state for this chunk
         return rollback_and_log(absl::ErrnoToStatus(err, "mlock failed while locking chunk memory"), i);
       }
-    } else if (common::SystemCapabilities::instance().mlock_enabled()) {
+    } else if (SystemCapabilities::instance().mlock_enabled()) {
       info.mlock_refcnt[i].fetch_add(1, std::memory_order_acq_rel);
       mlocked = true;
     }
     // If mlock globally disabled, opportunistically prefetch to reduce first-touch stalls
-    if (!common::SystemCapabilities::instance().mlock_enabled() &&
-        common::SystemCapabilities::instance().madv_willneed_available()) {
-      (void)::madvise(addr, chunk_size_, MADV_WILLNEED);
+    if (!SystemCapabilities::instance().mlock_enabled() && SystemCapabilities::instance().madv_willneed_available()) {
+      int rc = ::madvise(addr, chunk_size_, MADV_WILLNEED);
+      if (rc != 0 && errno != EINVAL) {
+        PLOG(WARNING) << "madvise WILLNEED failed";
+      }
     }
 
     meta.last_touch_s.store(now_s(), std::memory_order_relaxed);
@@ -323,7 +326,7 @@ size_t DistributedVirtualMemoryPool::evict_tail_bytes(std::string_view artifact_
       // Choose once based on capabilities to avoid repeated failing syscalls
       int madv_flag = MADV_DONTNEED;
 #ifdef MADV_PAGEOUT
-      if (common::SystemCapabilities::instance().madv_pageout_available()) {
+      if (SystemCapabilities::instance().madv_pageout_available()) {
         madv_flag = MADV_PAGEOUT;
       }
 #endif
@@ -396,7 +399,7 @@ absl::Status DistributedVirtualMemoryPool::mark_preemptible(
         void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
         // Prefer MADV_FREE if capability detected, else MADV_DONTNEED directly
         int rc = 0;
-        if (common::SystemCapabilities::instance().madv_free_available()) {
+        if (SystemCapabilities::instance().madv_free_available()) {
           rc = ::madvise(addr, chunk_size_, kMadviseFlagsFree);
           if (rc != 0 && errno == EINVAL) {
             rc = ::madvise(addr, chunk_size_, MADV_DONTNEED);
@@ -456,8 +459,11 @@ absl::Status DistributedVirtualMemoryPool::write_at(
   }
 
   // If MADV_WILLNEED is supported, proactively fault pages to reduce first-write stalls
-  if (common::SystemCapabilities::instance().madv_willneed_available()) {
-    (void)::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
+  if (SystemCapabilities::instance().madv_willneed_available()) {
+    int rc = ::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
+    if (rc != 0 && errno != EINVAL) {
+      PLOG(WARNING) << "madvise WILLNEED failed in write_at";
+    }
   }
 
   void* dst = static_cast<char*>(info.cpu_base) + va_offset;
@@ -575,6 +581,7 @@ bool DistributedVirtualMemoryPool::ChunkResidencyLease::is_expired() const {
 DistributedVirtualMemoryPool::ChunkResidencyLease::ChunkResidencyLease(ChunkResidencyLease&& other) noexcept {
   impl_ = std::move(other.impl_);
 }
+
 DistributedVirtualMemoryPool::ChunkResidencyLease& DistributedVirtualMemoryPool::ChunkResidencyLease::operator=(
     ChunkResidencyLease&& other) noexcept {
   if (this != &other) {
@@ -678,7 +685,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
     auto prev = info.pin_refcnt[i].load(std::memory_order_acquire);
     info.pin_refcnt[i].store(prev + 1, std::memory_order_release);
     void* addr = static_cast<char*>(info.cpu_base) + static_cast<size_t>(i) * chunk_size_;
-    if (common::SystemCapabilities::instance().mlock_enabled()) {
+    if (SystemCapabilities::instance().mlock_enabled()) {
       if (::mlock(addr, chunk_size_) == 0) {
         info.mlock_refcnt[i].fetch_add(1, std::memory_order_acq_rel);
       } else {
@@ -688,7 +695,7 @@ absl::StatusOr<DistributedVirtualMemoryPool::ChunkResidencyLease> DistributedVir
           if (!warned_demote.exchange(true, std::memory_order_acq_rel)) {
             PLOG(WARNING) << "mlock failed (EPERM/ENOMEM) — disabling page pinning; proceeding without mlock/munlock";
           }
-          common::SystemCapabilities::instance().set_mlock_enabled(false);
+          SystemCapabilities::instance().set_mlock_enabled(false);
         }
       }
     }

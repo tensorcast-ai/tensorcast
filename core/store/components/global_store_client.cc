@@ -722,8 +722,6 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
     const global_store::WorkerLocalState& local_state,
     bool force_full_sync,
     std::vector<global_store::StateChange>* out_changes) {
-  if (!out_changes)
-    return absl::InvalidArgumentError("out_changes must not be null");
   global_store::SynchronizeWorkerStateRequest request;
   request.set_worker_id(local_state.worker_id());
   *request.mutable_local_state() = local_state;
@@ -752,8 +750,6 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
     std::string_view worker_id,
     uint64_t current_state_version,
     std::vector<tensorcast::common::v1::ReplicaInfo>* out_expected_replicas) {
-  if (!out_expected_replicas)
-    return absl::InvalidArgumentError("out_expected_replicas must not be null");
   global_store::RequestFullStateSyncRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_current_state_version(current_state_version);

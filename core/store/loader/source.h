@@ -26,9 +26,11 @@ class SeekableSource : public Source {
   [[nodiscard]] virtual bool supports_direct_write() const {
     return false;
   }
-  virtual absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& /*token*/) {
-    (void)dest_va_offset;
-    (void)bytes;
+
+  virtual absl::StatusOr<size_t> read_into(
+      [[maybe_unused]] uint64_t dest_va_offset,
+      [[maybe_unused]] size_t bytes,
+      const DirectWriteToken& /*token*/) {
     return absl::UnimplementedError("direct write not supported");
   }
 };

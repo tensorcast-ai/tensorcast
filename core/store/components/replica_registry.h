@@ -14,6 +14,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/replica/replica.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::components {
 
@@ -69,7 +70,7 @@ class ReplicaRegistry {
    * @brief Insert a new replica instance into the registry.
    *        Returns AlreadyExists if the same ReplicaKey already exists.
    */
-  absl::Status emplace(const loading::ReplicaKey& key, std::shared_ptr<replica::Replica> replica)
+  absl::Status emplace(const loading::ReplicaKey& key, gsl::not_null<std::shared_ptr<replica::Replica>> replica)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
@@ -96,6 +97,7 @@ class ReplicaRegistry {
 
  private:
   mutable absl::Mutex mutex_;
+
   // ────────────────────────────────────────────────────────────────────────
   // New multi-index storage (prototyped, not yet implemented)
   // ────────────────────────────────────────────────────────────────────────

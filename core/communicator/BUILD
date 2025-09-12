@@ -356,7 +356,6 @@ sc_cc_library(
         "//core/common:system_capabilities_lib",
         "//core/store:uma_lease_provider",
         "//proto/tensorcast/communicator/v1:communicator_cc",
-        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
     ] + select({
@@ -497,5 +496,27 @@ cc_test(
         "//core/testing:common",
         "//core/testing:test_helpers",
         "@catch2//:catch2_main",
+    ],
+)
+
+sc_header_only_library(
+    name = "engine_hdrs",
+    hdrs = ["engine/engine.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":channel_lib",
+        ":constants_lib",
+        ":dram_stager_lib",
+        ":ibv_wrap_lib",
+        ":message_lib",
+        ":mr_cache_lib",
+        ":rdma_lib",
+        ":request_lib",
+        ":store_lib",
+        ":tcp_lib",
+        "//core/common:pinned_memory_pool_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
     ],
 )

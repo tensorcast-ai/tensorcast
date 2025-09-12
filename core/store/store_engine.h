@@ -162,7 +162,7 @@ class StoreEngine {
    * Extends the internal expiry_time used for TTL enforcement during
    * CommitRegisteredArtifact. No-op when ttl_ms == 0.
    */
-  absl::Status keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms);
+  [[nodiscard]] absl::Status keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms);
 
   // ------------------------------------------------------------------------
   // Query helpers (multi-device binding)
@@ -197,15 +197,17 @@ class StoreEngine {
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key);
 
   // Remote memory registration helpers (ReplicaKey version)
-  absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(
+  [[nodiscard]] absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location);
-  absl::Status disable_remote_replica_access(const loading::ReplicaKey& key, common::memory::MemoryLocation location);
+  [[nodiscard]] absl::Status disable_remote_replica_access(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location);
 
   // Register a loaded replica with the Global Store if connected. When
   // artifact_id_override is provided, it is used as the identifier (e.g.,
   // content-addressed mi2:...); otherwise key.artifact_id is used.
-  absl::Status register_replica_with_global_store(
+  [[nodiscard]] absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override = {});
 
@@ -230,16 +232,20 @@ class StoreEngine {
   [[nodiscard]] size_t get_mem_pool_size() const {
     return memory_pool_size_;
   }
+
   [[nodiscard]] size_t get_chunk_size() const {
     return chunk_size_;
   }
+
   [[nodiscard]] size_t get_available_memory() const;
   void update_memory_pool_metrics();
   [[nodiscard]] std::vector<ReplicaInfo> get_all_replicas_info() const;
+
   // GPU device queries (for status/health reporting)
   [[nodiscard]] int get_num_gpus() const {
     return device_manager_->get_num_gpus();
   }
+
   absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
   absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
 
@@ -258,7 +264,9 @@ class StoreEngine {
    *
    * @return absl::Status OK on success, ResourceExhausted if any chunk is already locked.
    */
-  absl::Status lock_chunks(const loading::ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices);
+  [[nodiscard]] absl::Status lock_chunks(
+      const loading::ReplicaKey& replica_key,
+      absl::Span<const uint32_t> chunk_indices);
 
   /**
    * @brief Unlock chunks after H2D or P2P transfer completion.
@@ -269,13 +277,14 @@ class StoreEngine {
    *
    * @return absl::Status OK on success.
    */
-  absl::Status unlock_chunks(
+  [[nodiscard]] absl::Status unlock_chunks(
       const loading::ReplicaKey& replica_key,
       absl::Span<const uint32_t> chunk_indices,
       bool copied_gpu);
 
   // Expose the configured communication manager to daemon for P2P export paths
   // that are not bound to a loaded replica (e.g., LIP-backed staged transfers).
+  // Always non-null; may be disabled (see is_enabled()).
   [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const {
     return comm_manager_;
   }
@@ -300,7 +309,7 @@ class StoreEngine {
   gsl::not_null<std::unique_ptr<components::ReplicaRegistry>> replica_registry_;
   gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
   std::unique_ptr<components::GlobalStoreClient> global_store_client_;
-  std::shared_ptr<components::CommunicationManager> comm_manager_;
+  gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
   gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> memory_pool_;
   gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
   // ═══════════════════════════════════════════════════════════════════════════

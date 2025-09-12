@@ -59,6 +59,7 @@ def sc_cc_library(
     # Standard dependencies that almost all libraries need
     standard_deps = [
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
     ]

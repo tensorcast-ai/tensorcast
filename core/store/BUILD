@@ -24,6 +24,8 @@ sc_header_only_library(
     deps = [
         ":device_types",
         "//core/common:memory_location_lib",
+        "//core/communicator:engine_hdrs",
+        "@gsl",
     ],
 )
 
@@ -175,6 +177,7 @@ sc_cc_library(
         "//core/store/replica:chunk_meta",
         "//core/store/replica:memory_manager",
         "//core/store/replica:replica_memory_coordinator",
+        "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -187,6 +190,7 @@ sc_cc_library(
     deps = [
         ":device_types",
         ":global_store_client",
+        "@gsl",
     ],
 )
 
@@ -235,11 +239,11 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/functional:overload",
-        "@abseil-cpp//absl/log:absl_check",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@gsl",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
     ] + select({

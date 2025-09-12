@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include "gsl/pointers"
 
 #include "absl/status/status.h"
 #include "core/store/loader/sink.h"
@@ -12,7 +13,7 @@ namespace tensorcast::store::loader {
 class GPUMemorySink : public Sink, public PositionedSink, public AsyncPositionedSink {
  public:
   struct Options {
-    void* gpu_base_ptr = nullptr;
+    gsl::not_null<void*> gpu_base_ptr;
     uint64_t total_size = 0;
     size_t chunk_size = 128 * 1024 * 1024; // 128MB default
     int device_id = 0;

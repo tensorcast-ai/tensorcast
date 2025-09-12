@@ -14,6 +14,7 @@
 #include "core/store/loader/p2p_loader.h"
 #include "core/store/replica/memory_manager.h"
 #include "core/testing/test_helpers.h"
+#include "gsl/pointers"
 
 using tensorcast::common::memory::DistributedVirtualMemoryPool;
 using tensorcast::common::memory::MemoryLocation;
@@ -81,7 +82,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU;
     source_config.location.device_id = 0;
-    source_config.comm_engine = target_engine; // Local communicator used to pull remote tensor
+    source_config.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{
+        target_engine}; // Local communicator used to pull remote tensor
 
     auto loader = std::make_shared<P2PLoader>(source_config);
     REQUIRE(loader->initialize().ok());
@@ -179,7 +181,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU; // Remote data on GPU
     source_config.location.device_id = 0;
-    source_config.comm_engine = target_engine;
+    source_config.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{target_engine};
 
     auto loader = std::make_shared<P2PLoader>(source_config);
     auto loader_init_status = loader->initialize();

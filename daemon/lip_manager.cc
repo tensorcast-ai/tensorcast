@@ -6,6 +6,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
@@ -42,8 +43,12 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     bool active{true};
 
     ~RegAbortGuard() {
-      if (active && engine)
-        (void)engine->abort_registered_artifact(id);
+      if (active && engine) {
+        absl::Status _st = engine->abort_registered_artifact(id);
+        if (!_st.ok()) {
+          LOG(WARNING) << "LipManager RegAbortGuard: abort_registered_artifact failed for id=" << id << ": " << _st;
+        }
+      }
     }
 
     void release() {
@@ -62,7 +67,9 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     return dst_map_or.status();
   auto dst_map = std::move(*dst_map_or);
   void* dst_dev = dst_map.get();
-  (void)cuda::set_device(target_device_id);
+  if (auto st_set = cuda::set_device(target_device_id); !st_set.ok()) {
+    return st_set;
+  }
   for (const auto& p : plan) {
     if (p.kind != store::loader::SegmentPiece::PAD || p.length == 0)
       continue;
@@ -176,7 +183,10 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     ~KeysGuard() {
       if (comm_engine && keys) {
         for (const auto& k : *keys) {
-          (void)comm_engine->unregister_tensor(k);
+          auto st = comm_engine->unregister_tensor(k);
+          if (!st.ok()) {
+            LOG(WARNING) << "LIP KeysGuard: unregister_tensor failed for key=" << k << ": " << st;
+          }
         }
       }
     }
@@ -236,7 +246,10 @@ absl::Status LipManager::release_staged_export(const std::string& token, store::
   if (comm_mgr->is_enabled()) {
     auto& comm_engine = comm_mgr->get_engine();
     for (const auto& k : it->second.tensor_keys) {
-      (void)comm_engine.unregister_tensor(k);
+      auto st = comm_engine.unregister_tensor(k);
+      if (!st.ok()) {
+        LOG(WARNING) << "release_staged_export: unregister_tensor failed for key=" << k << ": " << st;
+      }
     }
   }
   exports_.erase(it);
@@ -358,6 +371,8 @@ bool LipManager::revoke_commit_lease_if_owner_matches(const std::string& artifac
   for (const auto& rid : regs)
     reg_to_key_.erase(rid);
   leases_.erase(it);
+  VLOG(2) << "revoke_commit_lease_if_owner_matches: erased lease for artifact_id=" << artifact_id
+          << " device_id=" << device_id;
   return true;
 }
 

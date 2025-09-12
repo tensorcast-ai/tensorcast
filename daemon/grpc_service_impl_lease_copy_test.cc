@@ -10,6 +10,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
+#include "gsl/pointers"
 #include "nlohmann/json.hpp"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
@@ -108,7 +109,8 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   std::memset(expected.data(), 0, expected.size());
   std::memset(expected.data() + 0, 0x11, 16);
   std::memset(expected.data() + 32, 0x22, 16);
-  auto mh_or = tensorcast::store::loader::compute_data_multihash_from_cpu_memory(expected.data(), expected.size());
+  auto mh_or = tensorcast::store::loader::compute_data_multihash_from_cpu_memory(
+      gsl::not_null<const void*>{expected.data()}, expected.size());
   REQUIRE(mh_or.ok());
   REQUIRE(desc.data_multihash() == *mh_or);
 }

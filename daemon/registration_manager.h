@@ -138,7 +138,11 @@ class RegistrationManager {
       }
     }
     if (effective_extend_ms > 0) {
-      (void)engine.keep_alive_registered_artifact(reg_id, effective_extend_ms);
+      absl::Status _st = engine.keep_alive_registered_artifact(reg_id, effective_extend_ms);
+      if (!_st.ok()) {
+        LOG(WARNING) << "keep_alive_registered_artifact failed in keepalive_precommit: reg_id=" << reg_id
+                     << " ms=" << effective_extend_ms << ": " << _st;
+      }
     }
     return absl::OkStatus();
   }

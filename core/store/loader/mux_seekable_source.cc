@@ -11,15 +11,10 @@
 
 namespace tensorcast::store::loader {
 
-MuxSeekableSource::MuxSeekableSource(std::shared_ptr<SeekableSource> primary, std::shared_ptr<SeekableSource> fallback)
-    : primary_(std::move(primary)), fallback_(std::move(fallback)) {
-  if (!primary_) {
-    LOG(ERROR) << "MuxSeekableSource: primary source is null";
-  }
-  if (!fallback_) {
-    LOG(WARNING) << "MuxSeekableSource: fallback source is null; no fallback will be possible";
-  }
-}
+MuxSeekableSource::MuxSeekableSource(
+    gsl::not_null<std::shared_ptr<SeekableSource>> primary,
+    gsl::not_null<std::shared_ptr<SeekableSource>> fallback)
+    : primary_(std::move(primary)), fallback_(std::move(fallback)) {}
 
 absl::StatusOr<size_t> MuxSeekableSource::read(void* dst, size_t max_bytes) {
   // Implement in terms of read_at with current_offset_
@@ -40,7 +35,7 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
   }
 
   // Try primary for the whole request
-  if (primary_) {
+  {
     auto st = primary_->read_at(offset, ptr, bytes);
     if (st.ok()) {
       total_read = *st;
@@ -61,7 +56,7 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
   }
 
   // If short or failed and fallback exists, complete the remainder
-  if (fallback_ && total_read < bytes) {
+  if (total_read < bytes) {
     size_t remain = bytes - total_read;
     auto fst = fallback_->read_at(offset + total_read, ptr + total_read, remain);
     if (!fst.ok()) {

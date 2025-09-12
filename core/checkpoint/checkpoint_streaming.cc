@@ -81,8 +81,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
   }
 
   for (const auto& name : tensor_names) {
-    const auto& [base, logical_size_unused] = tensor_data[name];
-    (void)logical_size_unused; // Suppress unused variable warning
+    const uint64_t base = tensor_data[name].first;
     const char* data_ptr = reinterpret_cast<const char*>(base);
 
     auto it_ptr = ptr_written_offset.find(data_ptr);

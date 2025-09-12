@@ -30,6 +30,7 @@ class CpuMemorySourceLocal : public SeekableSource {
     current_offset_ += *st;
     return st;
   }
+
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
     if (offset >= total_size_)
       return static_cast<size_t>(0);
@@ -56,6 +57,7 @@ class GpuMemorySourceLocal : public SeekableSource {
     current_offset_ += *st;
     return st;
   }
+
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
     if (offset >= total_size_)
       return static_cast<size_t>(0);
@@ -114,25 +116,19 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
 }
 
 absl::StatusOr<std::string> compute_data_multihash_from_cpu_memory(
-    const void* base_ptr,
+    gsl::not_null<const void*> base_ptr,
     uint64_t total_size,
     size_t leaf_chunk_bytes) {
-  if (base_ptr == nullptr) {
-    return absl::InvalidArgumentError("base_ptr must not be null");
-  }
-  CpuMemorySourceLocal src(base_ptr, total_size);
+  CpuMemorySourceLocal src(base_ptr.get(), total_size);
   return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
 }
 
 absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
-    void* device_ptr,
+    gsl::not_null<void*> device_ptr,
     uint64_t total_size,
     int device_id,
     size_t leaf_chunk_bytes) {
-  if (device_ptr == nullptr) {
-    return absl::InvalidArgumentError("device_ptr must not be null");
-  }
-  GpuMemorySourceLocal src(device_ptr, total_size, device_id);
+  GpuMemorySourceLocal src(device_ptr.get(), total_size, device_id);
   return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
 }
 

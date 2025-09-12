@@ -25,7 +25,7 @@ namespace tensorcast::store::replica {
 class ChunkExportService {
  public:
   ChunkExportService(
-      std::shared_ptr<ReplicaMemoryCoordinator> uma,
+      gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma,
       gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp)
       : uma_(std::move(uma)), dvmp_(std::move(dvmp)) {}
 
@@ -46,6 +46,7 @@ class ChunkExportService {
   struct ExportKey {
     loading::ReplicaKey key;
     common::memory::MemoryLocation location;
+
     bool operator==(const ExportKey& other) const {
       return key == other.key && location == other.location;
     }
@@ -68,7 +69,7 @@ class ChunkExportService {
     std::vector<DirectWriteToken> cpu_tokens;
   };
 
-  std::shared_ptr<ReplicaMemoryCoordinator> uma_;
+  gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma_;
   gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_;
 
   // Cache per (ReplicaKey, Location) to support precise unexport and lease lifetime

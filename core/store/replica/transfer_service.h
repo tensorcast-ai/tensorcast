@@ -46,11 +46,12 @@ class TransferService {
   [[nodiscard]] std::shared_ptr<common::memory::StreamingPinnedBuffer> get_streaming_buffer() const {
     return spb_;
   }
+
   [[nodiscard]] size_t get_pool_chunk_size() const;
 
   // Copies
-  absl::Status copy_cpu_to_gpu_streaming(uint32_t device_id, cudaStream_t stream, void* gpu_ptr, size_t total_bytes);
-  absl::Status copy_gpu_to_cpu_streaming(uint32_t device_id, cudaStream_t stream, void* gpu_ptr, size_t total_bytes);
+  absl::Status copy_cpu_to_gpu_streaming(uint32_t device_id, gsl::not_null<void*> gpu_ptr, size_t total_bytes);
+  absl::Status copy_gpu_to_cpu_streaming(uint32_t device_id, gsl::not_null<void*> gpu_ptr, size_t total_bytes);
 
   // High-level load from source → CPU/GPU
   absl::Status load_from_source(

@@ -35,14 +35,14 @@ class LipManager {
   // Returns an opaque lock token which can be used to release the export via
   // release_staged_export(). This does not DVMP-lock chunks; it registers GPU
   // ranges for transport and records CUDA IPC mappings for later cleanup.
-  absl::StatusOr<std::string> create_staged_export(
+  [[nodiscard]] absl::StatusOr<std::string> create_staged_export(
       const LipLeaseEntry& lip,
       absl::Span<const uint32_t> chunk_indices,
       store::StoreEngine& engine);
 
   // Release a staged export by lock token: unregister tensor keys and close
   // CUDA IPC mappings.
-  absl::Status release_staged_export(const std::string& token, store::StoreEngine& engine);
+  [[nodiscard]] absl::Status release_staged_export(const std::string& token, store::StoreEngine& engine);
 
   // LIP registry operations (moved from service)
   void put_lease(const std::string& registration_id, const ArtifactDeviceKey& key, LipLeaseEntry entry);
@@ -60,7 +60,7 @@ class LipManager {
   // computing the artifact descriptor using index/data multihashes streamed
   // from the leased GPU segments. Stores the lease for keepalive/revoke and
   // returns descriptor fields and an optional verification JSON.
-  absl::StatusOr<CommitLeaseResult> commit_lease_in_place(
+  [[nodiscard]] absl::StatusOr<CommitLeaseResult> commit_lease_in_place(
       const std::string& registration_id,
       int device_id,
       int owner_pid,

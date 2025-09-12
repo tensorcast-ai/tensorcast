@@ -62,7 +62,9 @@ bool can_mlock_some_bytes() noexcept {
     }
     return false;
   }
-  (void)::munlock(p, static_cast<size_t>(page_bytes));
+  if (::munlock(p, static_cast<size_t>(page_bytes)) != 0) {
+    PLOG(WARNING) << "munlock probe unlock failed";
+  }
   ::munmap(p, static_cast<size_t>(page_bytes));
   return true;
 }

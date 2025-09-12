@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <memory>
 
 #include "absl/status/status.h"
@@ -49,18 +50,23 @@ class GpuNetStager : public MemoryStager {
 
     // Perform synchronous D2H copy into pinned buffer
     int device_id = tensor->get_device_id();
-    if (device_id < 0)
-      device_id = 0;
+    device_id = std::max(device_id, 0);
     auto guard = tensorcast::cuda::set_device(device_id);
     if (!guard.ok()) {
       // Return the slot on failure
-      (void)streaming_->return_chunk(slot);
+      absl::Status _ret = streaming_->return_chunk(slot);
+      if (!_ret.ok()) {
+        LOG(WARNING) << "GpuNetStager: return_chunk failed after set_device error: " << _ret;
+      }
       return guard;
     }
     void* src = reinterpret_cast<void*>(tensor->get_uint64_addr() + offset);
     auto copy_st = tensorcast::cuda::memcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
     if (!copy_st.ok()) {
-      (void)streaming_->return_chunk(slot);
+      absl::Status _ret = streaming_->return_chunk(slot);
+      if (!_ret.ok()) {
+        LOG(WARNING) << "GpuNetStager: return_chunk failed after memcpy error: " << _ret;
+      }
       return copy_st;
     }
 
@@ -89,6 +95,7 @@ class GpuNetStager : public MemoryStager {
   size_t get_chunk_size() const override {
     return chunk_size_;
   }
+
   size_t get_num_buffers() const override {
     return num_buffers_;
   }

@@ -29,13 +29,16 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "daemon/common/safe_sys.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/replica_session_manager.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -65,7 +68,10 @@ class PidMonitor final {
       epoll_event ev{};
       ev.events = EPOLLIN;
       ev.data.u64 = kEpollTagWake;
-      (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, event_fd_, &ev);
+      {
+        auto _tc_st = sys::safe_epoll_add(epoll_fd_, event_fd_, &ev);
+        ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: epoll add eventfd: " << _tc_st;
+      }
       use_pidfd_.store(true);
     } else {
       // cleanup partially created
@@ -88,8 +94,8 @@ class PidMonitor final {
     running_.store(false);
     // Wake thread
     if (event_fd_ >= 0) {
-      uint64_t one = 1;
-      (void)::write(event_fd_, &one, sizeof(one));
+      auto _tc_st = sys::safe_eventfd_write(event_fd_, /*v=*/1);
+      ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: wake on stop: " << _tc_st;
     }
     if (th_.joinable())
       th_.join();
@@ -128,15 +134,18 @@ class PidMonitor final {
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
         ev.data.u64 = (kEpollTagPid | static_cast<uint64_t>(pid));
-        (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, pfd, &ev);
+        {
+          auto _tc_st = sys::safe_epoll_add(epoll_fd_, pfd, &ev);
+          ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: epoll add pidfd: " << _tc_st;
+        }
       } else {
         // pidfd unavailable for this pid (maybe it already died); leave in watched_ for poll fallback
       }
     }
     // Wake the epoll loop so fallback polling notices newly watched PIDs promptly
     if (event_fd_ >= 0) {
-      uint64_t one = 1;
-      (void)::write(event_fd_, &one, sizeof(one));
+      auto _tc_st = sys::safe_eventfd_write(event_fd_, /*v=*/1);
+      ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: wake on watch: " << _tc_st;
     }
   }
 
@@ -155,13 +164,16 @@ class PidMonitor final {
       }
     }
     if (use_pidfd_.load() && epoll_fd_ >= 0 && pfd >= 0) {
-      (void)::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, pfd, nullptr);
+      {
+        auto _tc_st = sys::safe_epoll_del(epoll_fd_, pfd);
+        ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: epoll del pidfd: " << _tc_st;
+      }
       ::close(pfd);
     }
     // Wake the loop to apply changes promptly
     if (event_fd_ >= 0) {
-      uint64_t one = 1;
-      (void)::write(event_fd_, &one, sizeof(one));
+      auto _tc_st = sys::safe_eventfd_write(event_fd_, /*v=*/1);
+      ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: wake on unwatch: " << _tc_st;
     }
   }
 
@@ -201,7 +213,10 @@ class PidMonitor final {
         if ((data & kEpollTagMask) == kEpollTagWake) {
           // drain eventfd
           uint64_t tmp;
-          (void)::read(event_fd_, &tmp, sizeof(tmp));
+          {
+            auto _tc_st = sys::safe_eventfd_read(event_fd_, &tmp);
+            ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: drain eventfd: " << _tc_st;
+          }
           continue;
         }
         if ((data & kEpollTagMask) != kEpollTagPid) {
@@ -389,7 +404,8 @@ class SessionLifecycleManager {
   }
 
   // API shape (skeleton)
-  absl::StatusOr<LeaseId> create_use_lease(const ReplicaSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::StatusOr<LeaseId> create_use_lease(const ReplicaSubject& subj, pid_t pid)
+      ABSL_LOCKS_EXCLUDED(mu_) {
     PidMonitor* mon = nullptr;
     LeaseId created_id = 0;
     {
@@ -430,7 +446,7 @@ class SessionLifecycleManager {
   }
 
   // Create a Use lease bound to pid with an additional Deadline guard (TTL-based join).
-  absl::StatusOr<LeaseId> create_ttl_use_lease(const ReplicaSubject& subj, pid_t pid, absl::Duration ttl)
+  [[nodiscard]] absl::StatusOr<LeaseId> create_ttl_use_lease(const ReplicaSubject& subj, pid_t pid, absl::Duration ttl)
       ABSL_LOCKS_EXCLUDED(mu_) {
     if (ttl <= absl::ZeroDuration())
       return absl::InvalidArgumentError("ttl must be > 0");
@@ -527,7 +543,8 @@ class SessionLifecycleManager {
     return created_id;
   }
 
-  absl::StatusOr<LeaseId> create_commit_lease(const CommitSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::StatusOr<LeaseId> create_commit_lease(const CommitSubject& subj, pid_t pid)
+      ABSL_LOCKS_EXCLUDED(mu_) {
     PidMonitor* mon = nullptr;
     LeaseId created_id = 0;
     {
@@ -550,7 +567,11 @@ class SessionLifecycleManager {
       mon = monitor_;
       // Finalizer: remove device-unique commit index in LipManager for matching owner
       r.finalizers.emplace_back([this, r]() -> absl::Status {
-        (void)lip_.revoke_commit_lease_if_owner_matches(r.subj.artifact_id, r.subj.device_id, r.pid);
+        const bool revoked = lip_.revoke_commit_lease_if_owner_matches(r.subj.artifact_id, r.subj.device_id, r.pid);
+        if (revoked) {
+          VLOG(2) << "Commit lease revoked for artifact=" << r.subj.artifact_id << " dev=" << r.subj.device_id
+                  << " owner_pid=" << r.pid;
+        }
         return absl::OkStatus();
       });
       created_id = r.id;
@@ -599,7 +620,7 @@ class SessionLifecycleManager {
 #endif
 
   // Session principal keepalive: create or renew a deadline for the given session id.
-  absl::Status keepalive_session(std::string sid, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::Status keepalive_session(std::string sid, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
     if (ttl <= absl::ZeroDuration())
       return absl::InvalidArgumentError("ttl must be > 0");
     std::optional<absl::Time> notify_when;
@@ -626,7 +647,7 @@ class SessionLifecycleManager {
     return absl::OkStatus();
   }
 
-  absl::Status renew_placement(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::Status renew_placement(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_) {
     std::optional<absl::Time> notify_when;
     {
       absl::MutexLock lock(&mu_);
@@ -662,7 +683,7 @@ class SessionLifecycleManager {
   // Retire a single Use lease bound to the given subject and pid.
   // If multiple Use leases exist for the same (subject, pid), retires one of them.
   // Returns NotFound when no matching Use lease exists.
-  absl::Status release_use_lease(const ReplicaSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::Status release_use_lease(const ReplicaSubject& subj, pid_t pid) ABSL_LOCKS_EXCLUDED(mu_) {
     LeaseId match = 0;
     {
       absl::MutexLock lock(&mu_);
@@ -711,7 +732,12 @@ class SessionLifecycleManager {
       session_by_sid_.erase(it);
       session_guard_by_id_.erase(gid);
     }
-    (void)sessions_.erase(sid);
+    {
+      const size_t erased = sessions_.erase(sid);
+      if (erased == 0) {
+        VLOG(2) << "release_session: session not found for sid=" << sid;
+      }
+    }
   }
 
   [[nodiscard]] absl::Time next_deadline() const ABSL_LOCKS_EXCLUDED(mu_) {
@@ -754,7 +780,10 @@ class SessionLifecycleManager {
       retire_lease_(id, /*reason=*/"deadline_expired");
     }
     for (const auto& sid : sessions_to_erase) {
-      (void)sessions_.erase(sid);
+      const size_t erased = sessions_.erase(sid);
+      if (erased == 0) {
+        VLOG(2) << "expire_due: session not found for sid=" << sid;
+      }
     }
     // Reschedule according to the new earliest deadline
     notify_schedule_if_earlier_(next_after);
@@ -1026,7 +1055,10 @@ class SessionLifecycleManager {
       by_id_.erase(it);
     }
     for (auto& f : finalizers) {
-      (void)f();
+      absl::Status st = f();
+      if (!st.ok()) {
+        LOG(WARNING) << "SessionLifecycle finalizer failed: " << st;
+      }
     }
     // Perform unwatch outside the lock
     PidMonitor* mon = nullptr;
@@ -1077,7 +1109,18 @@ class SessionLifecycleManager {
     if (state <= store::replica::MemoryState::UNALLOCATED) {
       return; // not allocated/loaded on GPU
     }
-    (void)engine_->unload_replica(key);
+    int rc = engine_->unload_replica(key);
+    if (rc != 0) {
+      LOG(WARNING) << "maybe_unload_daemon_replica: unload_replica rc=" << rc << " artifact_id=" << key.artifact_id
+                   << " device_id=" << subj.device_id;
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+        ctr->Add(1.0);
+      } catch (...) {
+      }
+    }
   }
 };
 

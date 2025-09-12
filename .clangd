@@ -86,6 +86,9 @@ Diagnostics:
       readability-identifier-naming.ProtectedMemberSuffix: _
       readability-identifier-naming.PrivateMethodCase: lower_case
       readability-identifier-naming.PrivateMethodIgnoredRegexp: "^[a-z][a-z0-9_]*_$"
+      readability-identifier-naming.VariableIgnoredRegexp: "^_[a-z][a-z0-9_]*$"
+      readability-identifier-naming.LocalVariableIgnoredRegexp: "^_[a-z][a-z0-9_]*$"
+      readability-identifier-naming.GlobalVariableIgnoredRegexp: "^_[a-z][a-z0-9_]*$"
       readability-identifier-naming.ConstexprVariableCase: CamelCase
       readability-identifier-naming.ConstexprVariablePrefix: k
       readability-identifier-naming.StaticConstantCase: CamelCase

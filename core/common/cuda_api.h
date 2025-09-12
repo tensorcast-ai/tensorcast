@@ -196,7 +196,9 @@ absl::Status memcpy_peer_async(
     return absl::UnimplementedError(absl::StrCat("Operation not supported in FakeCuda: ", #operation)); \
   } while (0)
 #else
-#define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation) ((void)0)
+#define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation) \
+  do {                                                \
+  } while (0)
 #endif
 
 } // namespace tensorcast::cuda

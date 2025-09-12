@@ -9,11 +9,6 @@
 namespace tensorcast::store::loader {
 
 GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
-  if (!options_.gpu_base_ptr) {
-    overall_status_ = absl::InvalidArgumentError("GPU base pointer is null");
-    return;
-  }
-
   // Create non-blocking CUDA stream for H2D transfers
   common::DeviceGuard guard(options_.device_id);
   if (!guard.status().ok()) {
@@ -69,7 +64,7 @@ absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t by
   // Submit H2D via AsyncCopyManager and wait for completion to preserve
   // synchronous write_at semantics for non-pump callers. Pump will use
   // write_at_async to avoid per-chunk waits and achieve overlap.
-  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
+  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr.get()) + offset;
   common::HostRegion h{.base = src, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
   auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
@@ -106,7 +101,7 @@ absl::StatusOr<common::CopyHandle> GPUMemorySink::write_at_async(uint64_t offset
 
   // Submit H2D via ACM; caller is responsible for waiting before reusing src
   // memory (e.g., pump will defer returning SPB slot until handle completes).
-  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr) + offset;
+  char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr.get()) + offset;
   common::HostRegion h{.base = src, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
   auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});

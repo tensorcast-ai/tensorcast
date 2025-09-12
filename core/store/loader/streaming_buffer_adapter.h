@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include "gsl/pointers"
 
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/loader/buffer_pool.h"
@@ -12,7 +13,7 @@ namespace tensorcast::store::loader {
 // Adapter to make StreamingPinnedBuffer implement the BufferPool interface
 class StreamingBufferAdapter : public BufferPool {
  public:
-  explicit StreamingBufferAdapter(std::shared_ptr<tensorcast::common::memory::StreamingPinnedBuffer> buffer);
+  explicit StreamingBufferAdapter(gsl::not_null<std::shared_ptr<common::memory::StreamingPinnedBuffer>> buffer);
   ~StreamingBufferAdapter() override = default;
 
   [[nodiscard]] size_t chunk_size() const override;
@@ -34,12 +35,12 @@ class StreamingBufferAdapter : public BufferPool {
   void* get_chunk_data_ptr(int slot_id) override;
 
   // Get the underlying buffer for direct access if needed
-  tensorcast::common::memory::StreamingPinnedBuffer* get_buffer() {
-    return buffer_.get();
+  common::memory::StreamingPinnedBuffer* get_buffer() {
+    return buffer_.get().get();
   }
 
  private:
-  std::shared_ptr<tensorcast::common::memory::StreamingPinnedBuffer> buffer_;
+  gsl::not_null<std::shared_ptr<common::memory::StreamingPinnedBuffer>> buffer_;
 };
 
 } // namespace tensorcast::store::loader
