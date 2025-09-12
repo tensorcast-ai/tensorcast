@@ -28,16 +28,16 @@ This design removes duplicated scan logic, unifies semantics across registration
 ```mermaid
 flowchart LR
     subgraph Daemon
-      A[SessionLifecycleManager]\nLeases + Guards + Finalizers
-      Q[ExpirationQueue]\n(min-heap by deadline)
-      P[PidMonitor]\n(pidfd/poll events)
-      R[Reclaimer]\n(idempotent cleanup)
+      A[SessionLifecycleManager<br>Leases + Guards + Finalizers]
+      Q["ExpirationQueue<br>(min-heap by deadline)"]
+      P["PidMonitor<br>(pidfd/poll events)"]
+      R["Reclaimer<br>(idempotent cleanup)"]
     end
-    C[BackgroundScheduler]\n(periodic or schedule_at) -->|poll| A
+    C["BackgroundScheduler<br>(periodic or schedule_at)"] -->|poll| A
     P -->|exit event| A
     Q -->|due deadlines| A
     A -->|release| R
-    R -->|refs_/engine_/lip_mgr_| E[StoreEngine + IPC]
+    R -->|refs_/engine_/lip_mgr_| E["StoreEngine + IPC"]
 ```
 
 # Problem Statement & Scope

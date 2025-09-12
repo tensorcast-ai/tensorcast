@@ -68,7 +68,6 @@ MemoryStager <|.. GpuNetStager
 ```
 
 ## Transport semantics
- I
 - RDMA server READ handling returns staged segments whose addresses/rkeys point to pool MRs. The client posts READs against those MRs and must send `RDMA_READ_DONE_EX` to allow buffer reclamation.
 - MTCP uses the same staged buffers for socket I/O and returns tokens on send completion.
 - All staged responses are EX‑variant messages; legacy single‑segment messages are deprecated.

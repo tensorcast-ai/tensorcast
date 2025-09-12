@@ -9,9 +9,9 @@ links:
 
 # Summary
 
-Restructure the repository documentation into a hierarchical, human–AI collaborative workspace that preserves context and accelerates delivery. The system separates “why/what” (designs) from “how” (plans) and codifies localized guidance via README.md and AGENTS.md files placed throughout the repo. A single canonical `schema.sql` acts as the ground truth for project‑wide data structures.
+Define the documentation model centered on `docs/designs/` (why/what) and `docs/plans/` (how). It standardizes directory semantics, required content, and metadata so designs and plans are consistent, discoverable, and enforce a clear separation of concerns.
 
-This document specifies the purpose, scope, information architecture, metadata schema, ownership/governance, and success criteria. The step‑by‑step migration is covered by the linked plan.
+This document specifies the directory semantics, required sections, and metadata schema for designs and plans.
 
 ```mermaid
 flowchart LR
@@ -42,12 +42,6 @@ flowchart LR
 - Canonical data source: `schema.sql` is the single source of truth for data structures.
 - Guardrails: CI enforces metadata, cross‑linking, and the “doc sync” rule for code changes.
 
-# Non‑Goals (Out of Scope)
-
-- Rewriting technical content of individual RFCs beyond structural split.
-- Changing core build/test systems (beyond adding docs checks and PR templates).
-- Publishing an external site. This design targets the in‑repo workspace.
-
 # Information Architecture (What)
 
 ## Directories and Semantics
@@ -68,11 +62,27 @@ Design (docs/designs/<slug>.md)
 - Risks, success criteria, and compatibility
 - Cross‑links: owning code, related plans, and guides
  - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).
+  - Mermaid guidance:
+    - You can use Mermaid to algorithmically express and emulate more complex cognitive processes (e.g., decision pipelines, concurrent branches, feedback loops).
+    - For line breaks inside node labels, use `<br>` instead of `</n>`.
+    - Avoid using `:` inside plain node text; colons can be interpreted as Mermaid syntax tokens in certain contexts.
+    - Parentheses can also trigger syntax. When you need parentheses in text, wrap the entire label in quotes. Example: `A["Reclaimer<br>(idempotent cleanup)"]`.
+    - Example (correct):
+      ```mermaid
+      flowchart LR
+        A["Reclaimer<br>(idempotent cleanup)"] --> B["Done"]
+      ```
+    - Example (incorrect; will error due to `</n>` and unquoted parentheses):
+      ```mermaid
+      flowchart LR
+        A[Reclaimer</n>(idempotent cleanup)] --> B[Done]
+      ```
 
 Plan (docs/plans/<slug>.md)
 - Phases/milestones and tasks
 - Acceptance checks, test plan, rollout/backout
 - Risk tracking and owner checklist
+ - Phases & Milestones MUST use Markdown checkboxes (`- [ ]`) for progress tracking
 
 Guides (docs/guides/<topic>.md)
 - Goal‑oriented, concise steps with code references
@@ -146,7 +156,7 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 
 - Frontmatter validation: required keys present; status is valid; cross‑links resolve.
 - 1:1 linkage: every plan points to exactly one design and vice versa (except umbrella designs/plans which declare `is_umbrella: true`).
-- Link hygiene: no references to `./rfcs` after migration; CI link checker passes.
+- Link hygiene: CI link checker passes.
 - Doc Sync: PRs that change code touching an owned area must link a design/plan and update localized README/AGENTS.md.
 - Schema discipline: designs referencing data models must link `schema.sql`; plans must include migration/testing steps.
 - Local `AGENTS.md` include the repository’s Software Design Philosophy anchors (Complexity Reduction, Comment‑First Development, Error Handling Philosophy).
@@ -157,31 +167,12 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Stable slugs and IDs for deep links; filenames mirror `<slug>.md`.
 - Cross‑linking: designs link to plans and owning code; plans link back to designs and tests.
 
-# Success Metrics
+# How to Write a Plan
 
-- 100% of active RFCs split and migrated; `./rfcs` frozen with a pointer.
-- 0 broken internal links; CI `docs-check` enforces frontmatter and link hygiene.
-- PR adoption: ≥90% of feature PRs link to a design/plan after one sprint.
-- Reduced onboarding time: contributors can find the right doc within 2 clicks from repo root.
-
-# Risks and Mitigations
-
-- Ambiguous splits of older RFCs → Provide clear split heuristics and manual curation list in the plan.
-- Drift between code and docs → Enforce Doc Sync in PR template and CI; owners approve changes.
-- Overhead for small changes → Allow “lite” designs/plans for trivial updates with minimal required sections.
-- Multiple truth sources → Schema governance and required cross‑links keep data models centralized.
-
-# Split Heuristics (from RFC → design/plan)
-
-- Design picks up: Motivation, Goals/Non‑goals, Overview, APIs, Data/Schemas, Invariants, Trade‑offs, Risks, Compatibility.
-- Plan picks up: Implementation details, Phases/Milestones/Tasks, Testing/Validation, Rollout/Backout, Tracking and execution notes.
-- Keep review history in design; keep execution status in plan.
-
-# Acceptance Criteria
-
-- The repository contains the directories and conventions described herein.
-- A migration plan exists and is linked (this doc’s frontmatter).
-- CI guardrails (frontmatter + linking + rfcs references) are specified and scheduled for rollout in the plan.
+- Use concise, outcome‑oriented titles for phases and milestones.
+- Phases & Milestones MUST use Markdown checkboxes (`- [ ]`) so progress is visible in diffs and reviews.
+- Link each milestone to owning code/tests where applicable.
+- Keep tasks small, actionable, and verifiable.
 
 # Templates (Authoring Aids)
 
@@ -234,6 +225,12 @@ links:
 # Objective
 
 # Phases & Milestones
+
+- [ ] Phase 1: <name>
+  - [ ] Milestone 1: <outcome>
+  - [ ] Milestone 2: <outcome>
+- [ ] Phase 2: <name>
+  - [ ] Milestone 1: <outcome>
 
 # Tasks
 

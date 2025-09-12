@@ -125,7 +125,7 @@ sequenceDiagram
     CL->>DM: FeedRegisterArtifactStream{lease_segments}
     CL-->>DM: KeepAlive (optional)
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: Copy Lease→VRAM + zero PAD; register COALESCED_VRAM
+    DM->>DM: "Copy Lease→VRAM + zero PAD, register COALESCED_VRAM"
   else vram_leased (in_place=true, LIP)
     CL->>DM: FeedRegisterArtifactStream{lease_segments}
     CL-->>DM: KeepAlive (optional)
@@ -137,7 +137,7 @@ sequenceDiagram
     CL->>DM: FeedRegisterArtifactStream{dvmp_chunk}
     DM->>DV: DVMPRegionSink.write_at
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: Hash → mi2:; register DVMP
+    DM->>DM: "Hash → mi2, register DVMP"
   end
 ```
 

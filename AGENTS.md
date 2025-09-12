@@ -6,6 +6,11 @@ This file provides guidance to AI when working with code in this repository.
 
 TensorCast is a high-performance distributed artifact storage and loading system for machine learning inference and training. It uses a distributed master-worker architecture; see Architecture Overview below for details.
 
+## Platform Assumptions
+
+- Supported OS: Linux only
+- Baseline kernel: Linux 5.10.x (no need to support versions < 5.10)
+
 ## Development Environment Setup
 
 ### Build Commands
@@ -141,39 +146,39 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 ### Repository-level docs
 
-- [Project Quickstart](./README.md) — Top-level guide for setup, builds, tests, and running key services.
-- [Developer Guides Index](./docs/README.md) — Entry point to component development, architecture, and workflows.
-- [Architecture Index](./docs/architecture/README.md) — Architecture docs index and quick navigation by concern.
-- [Architecture Overview](./docs/architecture/architecture-overview.md) — High-level component overview and interactions.
-- [High Availability Design](./docs/architecture/high-availability-design.md) — HA design, recovery, and state synchronization details.
-- [P2P Transfer Strategies](./docs/architecture/p2p-transfer-strategies.md) — P2P transfer strategies, load balancing, and performance notes.
-- [Model Loading Internals](./docs/internals/model-loading.md) — Internal model loading flow and integration points.
-- [Save Dict Flow](./docs/internals/save_dict_flow.md) — End-to-end save_dict data path and artifacts produced.
-- [Adding Metrics](./docs/internals/adding-metrics.md) — How to add and expose new metrics.
+- ./README.md — Top-level guide for setup, builds, tests, and running key services.
+- ./docs/README.md — Entry point to component development, architecture, and workflows.
+- ./docs/architecture/README.md — Architecture docs index and quick navigation by concern.
+- ./docs/architecture/architecture-overview.md — High-level component overview and interactions.
+- ./docs/architecture/high-availability-design.md — HA design, recovery, and state synchronization details.
+- ./docs/architecture/p2p-transfer-strategies.md — P2P transfer strategies, load balancing, and performance notes.
+- ./docs/internals/model-loading.md — Internal model loading flow and integration points.
+- ./docs/internals/save_dict_flow.md — End-to-end save_dict data path and artifacts produced.
+- ./docs/internals/adding-metrics.md — How to add and expose new metrics.
 
 ### Modules (C++ core and services)
 
-- [Store Engine](./core/store/README.md) — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
-  - [Store Engine Architecture](./core/store/docs/architecture.md) — Detailed engine architecture and component responsibilities.
-  - [State Management](./core/store/docs/state-management.md) — UMA/DVMP state model and lifecycle.
-  - [Device Manager](./core/store/docs/device-manager.md) — Device discovery, UUID/ordinal mapping, and per-device state.
-  - [Device Registry](./core/store/docs/device-registry.md) — Replica/device registry structures and indexing.
+- ./core/store/README.md — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
+  - ./core/store/docs/architecture.md — Detailed engine architecture and component responsibilities.
+  - ./core/store/docs/state-management.md — UMA/DVMP state model and lifecycle.
+  - ./core/store/docs/device-manager.md — Device discovery, UUID/ordinal mapping, and per-device state.
+  - ./core/store/docs/device-registry.md — Replica/device registry structures and indexing.
 
-- [Checkpoint Module](./core/checkpoint/README.md) — Overview and streaming save/restore.
-  - [Checkpoint Architecture](./core/checkpoint/docs/architecture.md) — Detailed design and relationships.
-  - [Checkpoint Data Format](./core/checkpoint/docs/data-format.md) — Binary file format and index schema.
-  - [Verification Integration](./core/checkpoint/docs/verification-integration.md) — Integrity verification and integration paths.
+- ./core/checkpoint/README.md — Overview and streaming save/restore.
+  - ./core/checkpoint/docs/architecture.md — Detailed design and relationships.
+  - ./core/checkpoint/docs/data-format.md — Binary file format and index schema.
+  - ./core/checkpoint/docs/verification-integration.md — Integrity verification and integration paths.
 
-- [Communicator](./core/communicator/README.md) — TCP/MTCP/RDMA data-movement engine internals.
+- ./core/communicator/README.md — TCP/MTCP/RDMA data-movement engine internals.
 
-- [Store Daemon](./daemon/README.md) — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
+- ./daemon/README.md — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
 
-- [Global Store](./tensorcast/global_store/README.md) — Control plane internals (layered architecture, data model, services, flows).
-  - [Global Store Web UI](./tensorcast/global_store/webui_frontend/README.md) — Web UI features, development, and integration.
+- ./tensorcast/global_store/README.md — Control plane internals (layered architecture, data model, services, flows).
+  - ./tensorcast/global_store/webui_frontend/README.md — Web UI features, development, and integration.
 
 ### Tests and examples
 
-- [tests/python/README.md](./tests/python/README.md) — Python test layout and commands for running suites.
+- tests/python/README.md — Python test layout and commands for running suites.
 
 ### Doc sync rule (required for agents)
 
@@ -183,28 +188,24 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
   - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
 
-- When authoring any design or plan document, follow the repository’s documentation system specification in [0001-docs-system-reorg-design](./docs/designs/0001-docs-system-reorg-design.md) for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
+- When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-reorg-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
 
 
 ## Coding Standards
 
 ### Package & Directory Structure
 
-- Directory layout must mirror package/namespace hierarchy.
-- C++: Derive namespace from path (`a/b/c` -> `a::b::c`); open matching nested namespaces. In the innermost namespace, prefer unqualified local names; fully qualify only when crossing namespaces or to disambiguate. Do not use `using namespace` at file scope.
-  - `/core/`: drop leading `core` when deriving (`core/a/b/c` -> `tensorcast::a::b::c`).
-  - `/daemon/`: do NOT drop `daemon`; derive as `tensorcast::daemon::<subdirs>` (e.g., `daemon/a/b` -> `tensorcast::daemon::a::b`).
-  - Tests (`*_test.cc`): allow narrowly scoped `using`; prefer `using a::b::Symbol;` over broad imports.
-  - Qualification elision:
-    - Most sources sit under outer `tensorcast`; inside it, omit the `tensorcast::` prefix (e.g., `communicator::misc::GB`).
-    - You can always omit the outer `tensorcast::` qualifier inside `core/` and `daemon/`; for example, use `common::` rather than `tensorcast::common`.
-    - `core/store/**` is `tensorcast::store`; inside these files, also omit `store::` and refer directly to sub-namespaces (consistent with `core/store/store_engine.cc`): `loading::ReplicaHandle`, `replica::Replica`, `components::DeviceManager`.
-    - Fully qualify with `tensorcast::...` only when leaving the implicit root or to resolve ambiguity. Never add `using namespace` at file scope.
-  - Examples:
-    - Good: `loading::ReplicaHandle`, `replica::Replica::create(...)`, `communicator::misc::GB`
-    - Bad: `tensorcast::store::loading::ReplicaHandle`, `tensorcast::store::replica::Replica::create(...)`, `tensorcast::communicator::misc::GB`
-    - Good (inside daemon): `grpc::ServiceImpl`
-    - Bad (inside daemon): `tensorcast::daemon::grpc::ServiceImpl`
+- Mirror directories to namespaces/packages.
+- C++: Derive namespaces from paths and open matching nested namespaces. Avoid file-scope `using namespace`.
+  - `core/a/b/c` → `tensorcast::a::b::c` (drop `core`).
+  - `daemon/a/b` → `tensorcast::daemon::a::b` (keep `daemon`).
+  - Tests (`*_test.cc`): allow narrow `using` (e.g., `using a::b::Symbol;`).
+- Qualification rules:
+  - Inside `core/` and `daemon/`, omit the outer `tensorcast::` unless leaving the root or to disambiguate.
+  - Inside `core/store/**`, treat it as `tensorcast::store` and also omit `store::`; refer directly to sub-namespaces (e.g., `loading::ReplicaHandle`).
+- Examples:
+  - Good: `loading::ReplicaHandle`, `replica::Replica::create(...)`, `communicator::misc::GB`, `grpc::ServiceImpl` (inside daemon).
+  - Avoid: `tensorcast::store::loading::ReplicaHandle`, `tensorcast::store::replica::Replica::create(...)`, `tensorcast::communicator::misc::GB`, `tensorcast::daemon::grpc::ServiceImpl`.
 
 ### C++ Guidelines (Simplified)
 

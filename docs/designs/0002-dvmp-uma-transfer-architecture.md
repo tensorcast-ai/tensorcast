@@ -38,14 +38,14 @@ flowchart LR
     S1 --> MUX
     S2 --> MUX
     PUMP[Pump Ranges]
-    BUF[StreamingPinnedBuffer\n(BufferPool via Adapter)]
+    BUF["StreamingPinnedBuffer<br>(BufferPool via Adapter)"]
     MUX --> PUMP
     PUMP -.producers/consumer.-> BUF
   end
 
   subgraph Sinks
-    DVS[DVMPRegionSink\n(PositionedSink + DirectWritableSink)]
-    GPS[GPUMemorySink\n(PositionedSink)]
+    DVS["DVMPRegionSink<br>(PositionedSink + DirectWritableSink)"]
+    GPS["GPUMemorySink<br>(PositionedSink)"]
   end
 
   subgraph Memory
@@ -60,7 +60,7 @@ flowchart LR
   MM <-->|alloc/export/evict| DVMP
   MM -->|provide DVMP region/base| DVS
   MM -->|GPU ptr/stream| GPS
-  PUMP -->|after close(): finalize_load()| MM
+  PUMP -->|"after close(): finalize_load()"| MM
 ```
 
 # Goals / Non‑Goals
