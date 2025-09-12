@@ -21,7 +21,7 @@ struct CommRegistrationInfo {
   int comm_dev_type = 0; // Device type used for communicator registration
   std::vector<uint64_t> buffer_addresses; // Addresses (cast to uint64_t) of registered regions/chunks
   std::vector<size_t> buffer_sizes; // Sizes of registered regions/chunks
-  std::vector<std::string> remote_memory_keys; // Keys used for registration with CommunicateEngine
+  std::vector<std::string> remote_memory_keys; // Keys used for registration with Communicator
 } __attribute__((aligned(128)));
 
 /**
@@ -47,7 +47,7 @@ struct P2PSource {
   // will mux remote source with this disk source for resilience.
   std::string fallback_disk_dir;
 
-  std::shared_ptr<communicator::engine::CommunicateEngine> comm_engine;
+  std::shared_ptr<communicator::engine::Communicator> comm_engine;
 };
 
 } // namespace tensorcast::store

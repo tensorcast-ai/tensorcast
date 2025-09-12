@@ -11,7 +11,7 @@ namespace tensorcast::common {
  *
  * The detector probes mlock quota/permissions and MADV_* support once and
  * caches results to avoid repeated syscalls on hot paths. RDMA availability
- * can be recorded by higher layers (e.g., CommunicateEngine) and consulted by
+ * can be recorded by higher layers (e.g., Communicator) and consulted by
  * loaders to decide on direct-write paths.
  */
 class SystemCapabilities {
@@ -22,15 +22,19 @@ class SystemCapabilities {
   [[nodiscard]] bool mlock_enabled() const noexcept {
     return mlock_enabled_.load(std::memory_order_acquire);
   }
+
   [[nodiscard]] bool madv_free_available() const noexcept {
     return madv_free_available_.load(std::memory_order_acquire);
   }
+
   [[nodiscard]] bool madv_pageout_available() const noexcept {
     return madv_pageout_available_.load(std::memory_order_acquire);
   }
+
   [[nodiscard]] bool madv_willneed_available() const noexcept {
     return madv_willneed_available_.load(std::memory_order_acquire);
   }
+
   [[nodiscard]] bool rdma_available() const noexcept {
     return rdma_available_.load(std::memory_order_acquire);
   }

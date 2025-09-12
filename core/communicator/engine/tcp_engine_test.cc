@@ -11,9 +11,9 @@ namespace tensorcast::unittests {
 #define KEY "TCP_TENSOR_KEY"
 
 struct TcpTestFixture {
-  communicator::engine::CommunicateEngine* server_;
+  communicator::engine::Communicator* server_;
   absl::Status server_init_status_;
-  communicator::engine::CommunicateEngine* client_;
+  communicator::engine::Communicator* client_;
   absl::Status client_init_status_;
   uint32_t server_buf_[BUF_SIZE];
   uint32_t client_buf_[BUF_SIZE];
@@ -21,11 +21,11 @@ struct TcpTestFixture {
   TcpTestFixture() {
     communicator::v1::CommunicatorConfig srv_cfg;
     srv_cfg.set_enable_rdma(false);
-    server_ = new communicator::engine::CommunicateEngine(srv_cfg, 30);
+    server_ = new communicator::engine::Communicator(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     communicator::v1::CommunicatorConfig cli_cfg;
     cli_cfg.set_enable_rdma(false);
-    client_ = new communicator::engine::CommunicateEngine(cli_cfg, 30);
+    client_ = new communicator::engine::Communicator(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
     for (uint32_t i = 0; i < BUF_SIZE; i++) {
@@ -51,7 +51,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Register CPU tensor synchronously") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+    communicator::engine::Communicator::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = false;
     opts.async = false;
@@ -71,7 +71,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
 
     // Note: It appears TCP engine now accepts GPU tensor registration
     // but may handle it internally (possibly as CPU memory)
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts1;
+    communicator::engine::Communicator::RegisterTensorOptions opts1;
     opts1.register_mr = false;
     opts1.needs_staging = true; // GPU over TCP requires staging
     opts1.async = true;
@@ -88,7 +88,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     status = fixture.server_->unregister_tensor(KEY);
     REQUIRE(status.ok());
 
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts2;
+    communicator::engine::Communicator::RegisterTensorOptions opts2;
     opts2.register_mr = false;
     opts2.needs_staging = false;
     opts2.async = true;
@@ -105,7 +105,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Register and unregister CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts3;
+    communicator::engine::Communicator::RegisterTensorOptions opts3;
     opts3.register_mr = false;
     opts3.needs_staging = false;
     opts3.async = false;
@@ -132,7 +132,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
   SECTION("Read CPU tensor") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts4;
+    communicator::engine::Communicator::RegisterTensorOptions opts4;
     opts4.register_mr = false;
     opts4.needs_staging = false;
     opts4.async = false;

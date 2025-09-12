@@ -177,7 +177,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
 
   // Guard to ensure partial registrations are cleaned up on failure
   struct KeysGuard {
-    communicator::engine::CommunicateEngine* comm_engine{nullptr};
+    communicator::engine::Communicator* comm_engine{nullptr};
     std::vector<std::string>* keys{nullptr};
 
     ~KeysGuard() {
@@ -211,7 +211,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     }
     uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg->map.get()) + (seg->base + (off - seg->dst)));
     std::string tkey = absl::StrCat(lip.artifact_id, "_GPU_chunk_", idx);
-    communicator::engine::CommunicateEngine::RegisterTensorOptions ro;
+    communicator::engine::Communicator::RegisterTensorOptions ro;
     ro.register_mr = comm_engine.is_rdma_enabled();
     ro.needs_staging = (!comm_engine.is_rdma_enabled());
     ro.async = false;

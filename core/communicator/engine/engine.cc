@@ -44,7 +44,7 @@ using transport::tcp_transport_t;
 
 // No legacy constructors; typed CommunicatorConfig is required.
 
-CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
+Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
     : stop_(false),
       inited_(false),
       server_context_(new transport::TcpContext()),
@@ -142,7 +142,7 @@ CommunicateEngine::CommunicateEngine(const v1::CommunicatorConfig& config, uint3
   }
 }
 
-CommunicateEngine::~CommunicateEngine() {
+Communicator::~Communicator() {
   store_.clear();
   stop_.store(true);
   request_queue_.stop();
@@ -160,7 +160,7 @@ CommunicateEngine::~CommunicateEngine() {
   pending_requests_.clear();
 }
 
-void CommunicateEngine::set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider) {
+void Communicator::set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider) {
   if (!memory_stager_)
     return;
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
@@ -174,7 +174,7 @@ void CommunicateEngine::set_dram_lease_provider(std::shared_ptr<DRAMStager::Leas
   }
 }
 
-absl::Status CommunicateEngine::init(const std::string& ip, uint16_t port, int conn_count) {
+absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_count) {
   inited_.store(true);
   if (server_context_->open(ip, port, [this](tcp_transport_t t) { return this->on_new_client(t); }) != SUCCESS) {
     return absl::InternalError("failed to open server " + ip + ":" + std::to_string(port));
@@ -183,7 +183,7 @@ absl::Status CommunicateEngine::init(const std::string& ip, uint16_t port, int c
   return absl::OkStatus();
 }
 
-future_read_result_t CommunicateEngine::read_tensor(
+future_read_result_t Communicator::read_tensor(
     const std::string& key,
     uint64_t addr,
     uint64_t bytes,
@@ -230,7 +230,7 @@ future_read_result_t CommunicateEngine::read_tensor(
   return req->get_future();
 }
 
-absl::Status CommunicateEngine::register_tensor_ex(
+absl::Status Communicator::register_tensor_ex(
     const std::string& tensor_key,
     uint64_t addr,
     uint64_t bytes,
@@ -287,7 +287,7 @@ absl::Status CommunicateEngine::register_tensor_ex(
   return absl::OkStatus();
 }
 
-absl::Status CommunicateEngine::unregister_tensor(const std::string& tensor_key) {
+absl::Status Communicator::unregister_tensor(const std::string& tensor_key) {
   if (store_.get_tensor(tensor_key) == nullptr) {
     return absl::InternalError("failed to unregister a non-existed tensor");
   }
@@ -295,7 +295,7 @@ absl::Status CommunicateEngine::unregister_tensor(const std::string& tensor_key)
   return absl::OkStatus();
 }
 
-misc::result_t CommunicateEngine::on_new_client(const tcp_transport_t& t) {
+misc::result_t Communicator::on_new_client(const tcp_transport_t& t) {
   LOG(INFO) << "[on_new_client] New client connection from " << t->get_remote_url() << " fd=" << t->get_fd();
   auto channel = std::make_shared<Channel>(t, enable_rdma_ ? CHANNEL_RDMA : CHANNEL_MTCP);
   channels_.put(t->get_remote_url(), channel);
@@ -323,7 +323,7 @@ misc::result_t CommunicateEngine::on_new_client(const tcp_transport_t& t) {
   return misc::SUCCESS;
 }
 
-absl::StatusOr<channel_t> CommunicateEngine::do_create_channel(const std::string& ip, uint16_t port) {
+absl::StatusOr<channel_t> Communicator::do_create_channel(const std::string& ip, uint16_t port) {
   absl::MutexLock lock(&create_channel_mu_);
 
   // Fast-path: if another thread has already created the channel, reuse it
@@ -348,7 +348,7 @@ absl::StatusOr<channel_t> CommunicateEngine::do_create_channel(const std::string
   auto transport = *t;
   auto channel = std::make_shared<Channel>(transport, enable_rdma_ ? CHANNEL_RDMA : CHANNEL_MTCP);
 
-  VLOG(1) << "[CommunicateEngine] Control channel connected: local=" << server_context_->get_local_ip() << ":" << port
+  VLOG(1) << "[Communicator] Control channel connected: local=" << server_context_->get_local_ip() << ":" << port
           << " remote=" << ip << ":" << port << " fd=" << transport->get_fd();
 
   transport->set_recv_func([this](const tcp_transport_t& t) {
@@ -391,11 +391,11 @@ absl::StatusOr<channel_t> CommunicateEngine::do_create_channel(const std::string
     return existing;
   }
 
-  VLOG(1) << "[CommunicateEngine] Channel stored: " << transport->get_remote_url();
+  VLOG(1) << "[Communicator] Channel stored: " << transport->get_remote_url();
   return channel;
 }
 
-void CommunicateEngine::do_read_request_loop() {
+void Communicator::do_read_request_loop() {
   while (!stop_.load()) {
     auto req = request_queue_.pop(true);
     if (stop_.load()) {
@@ -457,7 +457,7 @@ void CommunicateEngine::do_read_request_loop() {
   }
 }
 
-misc::result_t CommunicateEngine::on_receive_request(
+misc::result_t Communicator::on_receive_request(
     const channel_t& channel,
     const tcp_transport_t& t,
     const engine_message_t& msg) {
@@ -811,7 +811,7 @@ misc::result_t CommunicateEngine::on_receive_request(
   return misc::SUCCESS;
 }
 
-misc::result_t CommunicateEngine::on_receive_response(
+misc::result_t Communicator::on_receive_response(
     const channel_t& channel,
     const tcp_transport_t& t,
     const engine_message_t& msg) {
@@ -979,7 +979,7 @@ misc::result_t CommunicateEngine::on_receive_response(
   return misc::SUCCESS;
 }
 
-net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
+net_dev_t Communicator::get_net_dev(int dev_type, int dev_id) {
   net_dev_t net_dev(nullptr);
   if (enable_rdma_) {
     CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
@@ -1000,7 +1000,7 @@ net_dev_t CommunicateEngine::get_net_dev(int dev_type, int dev_id) {
   return net_dev;
 }
 
-absl::Status CommunicateEngine::close_connection(const std::string& dst_ip, uint16_t dst_port) {
+absl::Status Communicator::close_connection(const std::string& dst_ip, uint16_t dst_port) {
   std::stringstream url;
   url << dst_ip << ":" << dst_port;
   if (channels_.exist(url.str())) {
@@ -1015,7 +1015,7 @@ absl::Status CommunicateEngine::close_connection(const std::string& dst_ip, uint
   return absl::OkStatus();
 }
 
-void CommunicateEngine::do_channel_gc_loop() {
+void Communicator::do_channel_gc_loop() {
   while (!stop_.load()) {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     auto pairs = channels_.pairs();
@@ -1079,14 +1079,14 @@ void CommunicateEngine::do_channel_gc_loop() {
   }
 }
 
-std::shared_ptr<MemoryStager> CommunicateEngine::get_cpu_stager_for_nic(const std::string& nic_name) const {
+std::shared_ptr<MemoryStager> Communicator::get_cpu_stager_for_nic(const std::string& nic_name) const {
   auto it = nic_cpu_stagers_.find(nic_name);
   if (it != nic_cpu_stagers_.end())
     return it->second;
   return nullptr;
 }
 
-std::shared_ptr<MemoryStager> CommunicateEngine::get_gpu_mem_stager_for_id(int gpu_id) const {
+std::shared_ptr<MemoryStager> Communicator::get_gpu_mem_stager_for_id(int gpu_id) const {
   auto it = gpu_mem_stagers_.find(gpu_id);
   if (it != gpu_mem_stagers_.end())
     return it->second;

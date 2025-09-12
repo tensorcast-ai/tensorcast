@@ -24,7 +24,7 @@ namespace tensorcast::store::components {
 class CommunicationManager {
  public:
   CommunicationManager() = default;
-  explicit CommunicationManager(std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> external_engine);
+  explicit CommunicationManager(std::shared_ptr<tensorcast::communicator::engine::Communicator> external_engine);
   ~CommunicationManager() = default;
 
   // Disable copy and move
@@ -66,12 +66,12 @@ class CommunicationManager {
    * @brief Get the communication engine.
    * @return Pointer to the engine or nullptr if not initialized
    */
-  tensorcast::communicator::engine::CommunicateEngine& get_engine() {
+  tensorcast::communicator::engine::Communicator& get_engine() {
     return *comm_engine_;
   }
 
   // Return shared pointer for cases needing shared ownership (e.g., ReplicaConfig)
-  [[nodiscard]] std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> get_shared_engine() const {
+  [[nodiscard]] std::shared_ptr<tensorcast::communicator::engine::Communicator> get_shared_engine() const {
     return comm_engine_;
   }
 
@@ -89,7 +89,7 @@ class CommunicationManager {
 
  private:
   bool enabled_ = false;
-  std::shared_ptr<tensorcast::communicator::engine::CommunicateEngine> comm_engine_;
+  std::shared_ptr<tensorcast::communicator::engine::Communicator> comm_engine_;
 };
 
 } // namespace tensorcast::store::components

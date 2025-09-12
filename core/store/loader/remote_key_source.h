@@ -16,7 +16,7 @@ namespace tensorcast::store::loader {
 class RemoteKeySource : public SeekableSource {
  public:
   struct Options {
-    gsl::not_null<std::shared_ptr<communicator::engine::CommunicateEngine>> comm_engine; // Communicator instance
+    gsl::not_null<std::shared_ptr<communicator::engine::Communicator>> comm_engine; // Communicator instance
     std::vector<std::string> memory_keys; // Remote tensor keys in order
     std::vector<size_t> buffer_sizes; // Corresponding sizes for each key
     std::string ip; // Remote peer IP

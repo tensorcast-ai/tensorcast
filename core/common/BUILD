@@ -157,6 +157,17 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
+# Alias: Virtual Address Space (DVMP → VS)
+sc_header_only_library(
+    name = "virtual_address_space_lib",
+    hdrs = ["memory/virtual_address_space.h"],
+    includes = ["memory"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":distributed_virtual_memory_pool_lib",
+    ],
+)
+
 # Memory management - Streaming pinned buffer
 sc_cc_library(
     name = "streaming_pinned_buffer_lib",

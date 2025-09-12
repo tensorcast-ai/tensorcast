@@ -149,7 +149,7 @@ class Replica {
    */
   absl::StatusOr<CommRegistrationInfo> enable_remote_memory_access(
       common::memory::MemoryLocation location,
-      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Disables the communication access for the specified location.
@@ -160,7 +160,7 @@ class Replica {
    */
   absl::Status disable_remote_memory_access(
       common::memory::MemoryLocation location,
-      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Generates verification information for the replica data at the specified location.

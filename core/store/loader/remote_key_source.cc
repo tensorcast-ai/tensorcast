@@ -48,7 +48,7 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
     evt_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(to_read));
     evt_span->SetAttribute("tc.remote.key", key);
 
-    // Use CommunicateEngine to read from remote peer directly into dst_ptr.
+    // Use Communicator to read from remote peer directly into dst_ptr.
     auto future = options_.comm_engine->read_tensor(
         key,
         reinterpret_cast<uint64_t>(dst_ptr + bytes_read),

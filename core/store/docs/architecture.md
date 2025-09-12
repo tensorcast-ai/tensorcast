@@ -64,7 +64,7 @@ graph TB
 
     subgraph "Communication Layer"
         CMN[CommunicationManager]
-        CE[CommunicateEngine]
+        CE[Communicator]
         CRI[CommRegistrationInfo]
     end
 
@@ -222,7 +222,7 @@ classDiagram
 
 **P2PLoader Workflow**:
 1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/loader/p2p_loader.{h,cc}`
-2. Create `RemoteKeySource` that wraps remote memory via `CommunicateEngine` — `core/store/loader/remote_key_source.{h,cc}`
+2. Create `RemoteKeySource` that wraps remote memory via `Communicator` — `core/store/loader/remote_key_source.{h,cc}`
 3. Optional disk fallback via `MuxSeekableSource` — `core/store/loader/mux_seekable_source.{h,cc}`
 4. Uses the same `load_async_from_source()` path to target CPU (PAGEABLE_CPU) or GPU
 5. Optional checksum or direct-write support depends on communicator — see `RemoteKeySource::supports_direct_write()`
@@ -516,9 +516,9 @@ sequenceDiagram
 
 - Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/memory_manager.{h,cc}`
 
-### P2P Loading Flow with CommunicateEngine
+### P2P Loading Flow with Communicator
 
-P2P transfers leverage the `CommunicateEngine` for remote memory access with `RemoteKeySource`:
+P2P transfers leverage the `Communicator` for remote memory access with `RemoteKeySource`:
 
 ```mermaid
 sequenceDiagram
@@ -622,7 +622,7 @@ The system is designed with multiple extension points to support future requirem
 1. **New Loader Types**: Implement `IArtifactLoader` interface and provide `SeekableSource`
 2. **New Source Types**: Add variants to `ArtifactSource` (e.g., S3Source, AzureBlobSource)
 3. **New Memory Types**: Extend `MemoryManager` and `MemoryLocation` enum
-4. **New Transfer Protocols**: Extend `CommunicateEngine` implementations
+4. **New Transfer Protocols**: Extend `Communicator` implementations
 5. **New Verification Methods**: Extend `ArtifactVerificationInfo` framework
 6. **Custom Device Types**: Extend `DeviceKey` and device registry
 

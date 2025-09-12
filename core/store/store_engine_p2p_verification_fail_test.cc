@@ -23,7 +23,7 @@
 using tensorcast::common::ArtifactVerifier;
 using tensorcast::common::VerificationLevel;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
-using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::engine::Communicator;
 using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngine;
@@ -48,13 +48,13 @@ TEST_CASE("P2P receiver verification fails with mismatched verification_json", "
 
   const std::size_t artifact_size = 4 * 1024 * 1024; // 4 MiB
 
-  // 1) Start a minimal CommunicateEngine exposing a GPU tensor
+  // 1) Start a minimal Communicator exposing a GPU tensor
   int src_port = tensorcast::testing::find_available_port(52000);
   REQUIRE(src_port > 0);
 
   CommunicatorConfig cfg;
   cfg.set_enable_rdma(false);
-  auto src_engine = std::make_shared<CommunicateEngine>(cfg);
+  auto src_engine = std::make_shared<Communicator>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
 
   void* src_gpu_ptr = nullptr;
@@ -63,7 +63,7 @@ TEST_CASE("P2P receiver verification fails with mismatched verification_json", "
   REQUIRE(tensorcast::cuda::memcpy(src_gpu_ptr, pattern.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
   const char* kRemoteKey = "remote_model_weights_badverif";
-  CommunicateEngine::RegisterTensorOptions reg_opts;
+  Communicator::RegisterTensorOptions reg_opts;
   reg_opts.register_mr = false;
   reg_opts.needs_staging = true;
   reg_opts.async = false;

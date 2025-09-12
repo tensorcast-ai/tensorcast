@@ -28,7 +28,7 @@ absl::Status P2PLoader::initialize() {
 
   // Validate source configuration
   if (!source_.comm_engine) {
-    return absl::InvalidArgumentError("CommunicateEngine is required");
+    return absl::InvalidArgumentError("Communicator is required");
   }
 
   if (source_.size_bytes == 0) {
@@ -122,15 +122,19 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
   // Default: return remote source (unique_ptr wrapper around shared)
   struct Wrapper : public loader::SeekableSource {
     explicit Wrapper(std::shared_ptr<loader::SeekableSource> inner) : inner_(std::move(inner)) {}
+
     absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
       return inner_->read(dst, max_bytes);
     }
+
     absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
       return inner_->read_at(offset, dst, bytes);
     }
+
     [[nodiscard]] bool supports_direct_write() const override {
       return inner_->supports_direct_write();
     }
+
     absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {
       return inner_->read_into(dest_va_offset, bytes, token);
     }
@@ -138,6 +142,7 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
    private:
     std::shared_ptr<loader::SeekableSource> inner_;
   };
+
   return std::make_unique<Wrapper>(remote_src);
 }
 

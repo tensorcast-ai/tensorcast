@@ -25,7 +25,7 @@ flowchart TB
   end
 
   subgraph Communicator["Communicator Module"]
-    CE[CommunicateEngine<br/>Thread-safe API]
+    CE[Communicator<br/>Thread-safe API]
 
     subgraph "Control Path"
       CH[Channel Manager]
@@ -59,7 +59,7 @@ flowchart TB
 
 ### Key Components
 
-* **CommunicateEngine** — Central orchestrator providing thread-safe public API
+* **Communicator** — Central orchestrator providing thread-safe public API
 * **Channel** — Manages logical connections (control + data) to remote peers
 * **Transport Layer** — Pluggable I/O mechanisms: TCP, Multi-TCP (MTCP), RDMA
 * **PartitionTensorStore** — Thread-safe registry for local tensors
@@ -79,7 +79,7 @@ flowchart LR
     AppN[App Thread N]
   end
 
-  subgraph "CommunicateEngine"
+  subgraph "Communicator"
     API[Thread-safe API<br/>- read_tensor<br/>- register_tensor<br/>- unregister_tensor]
     RQ[Request Queue<br/>Thread-safe]
     CM[Channel Map<br/>Thread-safe]
@@ -127,7 +127,7 @@ flowchart LR
 - Can call any public API method concurrently
 - All API methods are thread-safe through internal synchronization
 
-#### CommunicateEngine Threads
+#### Communicator Threads
 1. **request_thread_** — Dequeues read requests and initiates remote operations
 2. **gc_thread_** — Periodically scans and closes idle channels
 
@@ -165,7 +165,7 @@ void Map<K,V>::put(K key, V value) {
 
 ## 3. Core Components Deep Dive
 
-### 3.1 CommunicateEngine
+### 3.1 Communicator
 
 Location: `engine/engine.{h,cc}`
 
@@ -173,7 +173,7 @@ The engine maintains thread-safe state and coordinates all operations:
 
 ```mermaid
 classDiagram
-  class CommunicateEngine {
+  class Communicator {
     -bool enable_rdma_
     -Map channels_
     -Queue request_queue_
@@ -363,7 +363,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
   participant App as Application Thread
-  participant CE as CommunicateEngine
+  participant CE as Communicator
   participant RQ as Request Queue
   participant RT as Request Thread
   participant CH as Channel
@@ -399,7 +399,7 @@ sequenceDiagram
 sequenceDiagram
   participant App as App Thread 1
   participant App2 as App Thread 2
-  participant CE as CommunicateEngine
+  participant CE as Communicator
   participant Store as PartitionTensorStore
   participant NetDev as NetDev
   participant RegThread as Register Thread

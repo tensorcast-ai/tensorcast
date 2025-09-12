@@ -295,7 +295,7 @@ flowchart LR
   - GPU discovery, uuid↔ordinal mapping, per-device stream, and free/total memory metrics
 
 - CommunicationManager
-  - Wraps `CommunicateEngine`; registers memory for P2P and provides shared engine to loaders
+  - Wraps `Communicator`; registers memory for P2P and provides shared engine to loaders
 
 ## Content-Addressed Identity and Verification (RFC-0007)
 

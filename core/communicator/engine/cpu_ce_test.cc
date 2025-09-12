@@ -17,11 +17,11 @@ using tensorcast::testing::parse_options;
 int run_server() {
   tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
-  tensorcast::communicator::engine::CommunicateEngine engine(cfg);
+  tensorcast::communicator::engine::Communicator engine(cfg);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
   memset(addr, 0, g_count);
-  tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+  tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
   opts.register_mr = false;
   opts.needs_staging = false;
   opts.async = false;
@@ -35,7 +35,7 @@ int run_server() {
 int run_client() {
   tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(g_rdma);
-  tensorcast::communicator::engine::CommunicateEngine engine(cfg, 10);
+  tensorcast::communicator::engine::Communicator engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));
 

@@ -2,13 +2,13 @@
 
 1. 线程视角
    • 应用线程发起 read_tensor → 立即返回 future。
-   • CommunicateEngine::request_thread_（目标节点）负责异步出网请求。
-   • CommunicateEngine::gc_thread_ 周期性回收空闲 Channel。
+   • Communicator::request_thread_（目标节点）负责异步出网请求。
+   • Communicator::gc_thread_ 周期性回收空闲 Channel。
    • MTcpTransport 各自持有 send_thread_/recv_thread_。
    • 若 TCP 模式 + GPU → 额外 GPU→CPU staging（源）/CPU→GPU staging（目的）。
 
 2. 调用端（本地＝目标）
-   a) Application Thread 调 `CommunicateEngine::read_tensor()`
+   a) Application Thread 调 `Communicator::read_tensor()`
       - 若 `enable_rdma_==false` 且要读 GPU，store 中的 PartitionTensor 会被打上 `needs_staging()=true` 标记。
    b) ReadRequest 入队 `request_queue_`。
    c) request_thread_ 出队后
@@ -56,7 +56,7 @@
 flowchart LR
   subgraph "Caller Side (Target Node)"
     A["Application Thread\nread_tensor()"]
-    CE_T["CommunicateEngine (target)"]
+    CE_T["Communicator (target)"]
     QT["request_queue_\npush(ReadRequest)"]
     RT["request_thread_\n(do_read_request_loop)"]
     CH_T["Channel (TCP/RDMA)"]
@@ -71,7 +71,7 @@ flowchart LR
   end
 
   subgraph "Source Side (Remote Peer)"
-    CE_S["CommunicateEngine (source)"]
+    CE_S["Communicator (source)"]
     CH_S["Channel (TCP/RDMA)"]
     MTCP_S["MTcpTransport (send)"]
     STAGER_S["GpuNetStager (optional D2H)"]
@@ -120,7 +120,7 @@ flowchart LR
    • GpuNetStager 每个 chunk只分配一个 cudaEvent；并发 > num_chunks 时等待事件可形成隐形瓶颈。
 
 5. **Channel 发起/GC 频繁**
-   • 在压力测试里每个 reader 创建独立 CommunicateEngine→Channel；hand-shake (listen + connect) & 2 秒 GC 周期会插入额外 RTT。
+   • 在压力测试里每个 reader 创建独立 Communicator→Channel；hand-shake (listen + connect) & 2 秒 GC 周期会插入额外 RTT。
 
 ## 优化建议
 1. **提高 staging 池并发度**

@@ -2,7 +2,7 @@
 id: design-0001-docs-system-reorg-design
 slug: 0001-docs-system-reorg-design
 title: Human–AI Collaborative Documentation System (Design)
-status: draft
+status: accepted
 links:
   plan: ../plans/0001-docs-system-reorg-migration.md
 ---

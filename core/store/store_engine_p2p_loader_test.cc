@@ -27,7 +27,7 @@
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
-using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::engine::Communicator;
 using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngine;
@@ -43,19 +43,19 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   // ---------------------------------------------------------------------------
   SKIP_IF_NO_CUDA();
 
-  // RDMA is explicitly disabled via typed CommunicatorConfig in CommunicateEngine and StoreEngine.
+  // RDMA is explicitly disabled via typed CommunicatorConfig in Communicator and StoreEngine.
 
   const std::size_t artifact_size = 8 * 1024 * 1024; // 8 MiB
 
   // ---------------------------------------------------------------------------
-  // 1. Spin up a standalone CommunicateEngine that owns the remote tensor.
+  // 1. Spin up a standalone Communicator that owns the remote tensor.
   // ---------------------------------------------------------------------------
   int src_port = find_available_port(51000);
   REQUIRE(src_port > 0);
 
   CommunicatorConfig cfg;
   cfg.set_enable_rdma(false); /* disable RDMA */
-  auto src_engine = std::make_shared<CommunicateEngine>(cfg);
+  auto src_engine = std::make_shared<Communicator>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
 
   // Allocate GPU memory and fill with a deterministic pattern.
@@ -66,7 +66,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
 
   // Register the GPU buffer so that it can be fetched remotely.
   const char* kRemoteKey = "remote_model_weights";
-  CommunicateEngine::RegisterTensorOptions reg_opts;
+  Communicator::RegisterTensorOptions reg_opts;
   reg_opts.register_mr = false; // RDMA disabled for this engine
   reg_opts.needs_staging = true; // GPU over TCP requires staging
   reg_opts.async = false;

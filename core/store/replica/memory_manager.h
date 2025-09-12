@@ -240,11 +240,11 @@ class MemoryManager {
   [[nodiscard]] absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
       common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
-      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
   [[nodiscard]] absl::Status unexport_chunks_for_p2p(
       common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
-      tensorcast::communicator::engine::CommunicateEngine& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
+      tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   // --- New DVMP accessors ---------------------------------------------------
   /**

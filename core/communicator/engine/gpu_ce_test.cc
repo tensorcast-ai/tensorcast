@@ -16,7 +16,7 @@ using tensorcast::testing::g_port;
 using tensorcast::testing::parse_options;
 
 int run_server() {
-  tensorcast::communicator::engine::CommunicateEngine engine;
+  tensorcast::communicator::engine::Communicator engine;
   engine.init("0.0.0.0", g_port);
   uint8_t* addr[8][1024] = {{nullptr}};
 
@@ -39,7 +39,7 @@ int run_server() {
 }
 
 int run_client() {
-  tensorcast::communicator::engine::CommunicateEngine engine;
+  tensorcast::communicator::engine::Communicator engine;
   engine.init("0.0.0.0", g_port + 1);
   uint8_t* addr[8][1024] = {{nullptr}};
 

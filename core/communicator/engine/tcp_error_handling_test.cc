@@ -24,11 +24,11 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SECTION("Invalid tensor registration") {
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
-    auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
+    auto engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Try to register with invalid device ID
-    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+    tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;
@@ -105,14 +105,14 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SECTION("Zero-size transfer handling") {
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
-    auto engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
+    auto engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     void* gpu_ptr;
     REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, 1024).ok());
 
     // Register with zero size should fail
-    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+    tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;

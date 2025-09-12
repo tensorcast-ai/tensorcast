@@ -513,7 +513,7 @@ Missing keys fall back to sensible defaults.)pbdoc");
           py::arg("port") = 9090,
           py::arg("enable_rdma") = false,
           R"pbdoc(Create and initialize a CommunicationManager that wraps a
-shared CommunicateEngine. Use this instance to inject the engine into
+shared Communicator. Use this instance to inject the engine into
 StoreEngineOptions so multiple StoreEngine objects share the same
 transport layer.)pbdoc")
       .def_static(

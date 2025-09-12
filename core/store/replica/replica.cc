@@ -19,6 +19,7 @@
 namespace tensorcast::store::replica {
 
 using common::memory::MemoryLocation;
+
 //--------------------------------------------------------------------------
 // Static Factory: create()
 //--------------------------------------------------------------------------
@@ -503,7 +504,7 @@ MemoryManager& Replica::get_memory_manager() const {
 
 absl::StatusOr<CommRegistrationInfo> Replica::enable_remote_memory_access(
     MemoryLocation location,
-    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Build full chunk list using DVMP metadata snapshot.
@@ -629,7 +630,7 @@ absl::Status Replica::verify_key_points(
 
 absl::Status Replica::disable_remote_memory_access(
     MemoryLocation location,
-    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
   // Use chunk-scoped unexport. Chunks parameter is currently ignored internally.

@@ -11,9 +11,9 @@
 namespace tensorcast::store::components {
 
 //-------------------------------------------------------------------------
-// Constructor with externally provided CommunicateEngine (Phase-3 DI)
+// Constructor with externally provided Communicator (Phase-3 DI)
 //-------------------------------------------------------------------------
-CommunicationManager::CommunicationManager(std::shared_ptr<communicator::engine::CommunicateEngine> external_engine)
+CommunicationManager::CommunicationManager(std::shared_ptr<communicator::engine::Communicator> external_engine)
     : enabled_(external_engine != nullptr), comm_engine_(std::move(external_engine)) {}
 
 absl::Status CommunicationManager::initialize(const std::string& listen_addr, uint16_t listen_port, bool enable_rdma) {
@@ -22,7 +22,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
 
   communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(enable_rdma);
-  comm_engine_ = std::make_shared<communicator::engine::CommunicateEngine>(cfg);
+  comm_engine_ = std::make_shared<communicator::engine::Communicator>(cfg);
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -42,7 +42,7 @@ absl::Status CommunicationManager::initialize_with_config(
     const std::string& listen_addr,
     uint16_t listen_port,
     const communicator::v1::CommunicatorConfig& config) {
-  comm_engine_ = std::make_shared<communicator::engine::CommunicateEngine>(config);
+  comm_engine_ = std::make_shared<communicator::engine::Communicator>(config);
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -79,7 +79,7 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
     std::string key = absl::StrCat("buffer_", i, "_", reinterpret_cast<uintptr_t>(buffer_addresses[i]));
 
     // Register the tensor/buffer
-    communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+    communicator::engine::Communicator::RegisterTensorOptions opts;
     opts.register_mr = comm_engine_->is_rdma_enabled();
     opts.needs_staging = (!comm_engine_->is_rdma_enabled() && device_id >= 0);
     opts.async = false;

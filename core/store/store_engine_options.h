@@ -34,7 +34,7 @@ struct StoreEngineOptions {
   // Timeout for pinned-memory allocations.
   std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds{30000}}; // 30 s
 
-  // Port used by CommunicateEngine for P2P transfers.
+  // Port used by Communicator for P2P transfers.
   uint16_t p2p_port{9090};
 
   // Address of the Global Store gRPC service ("host:port").  Empty string means
@@ -43,7 +43,7 @@ struct StoreEngineOptions {
   std::string global_store_address;
 
   // (Phase-3) Optional externally created CommunicationManager so multiple
-  // StoreEngine instances can share the same underlying CommunicateEngine
+  // StoreEngine instances can share the same underlying Communicator
   // and listen socket.  When provided, the StoreEngine will reuse this
   // manager instead of creating its own internal instance.
   std::shared_ptr<components::CommunicationManager> comm_manager{nullptr};

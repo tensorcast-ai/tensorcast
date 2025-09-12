@@ -287,7 +287,7 @@ The system prioritizes RDMA transfers for optimal performance:
 4. **Fallback Mechanism**: Fall back to TCP if RDMA fails
 
 Implementation notes:
-- RDMA/TCP is selected by `enable_rdma` in the `CommunicatorConfig` used to initialize `CommunicateEngine` on each side.
+- RDMA/TCP is selected by `enable_rdma` in the `CommunicatorConfig` used to initialize `Communicator` on each side.
 - GPU over TCP requires staging buffers (`needs_staging=true`), while RDMA can register memory regions directly when supported.
 - Remote access uses exported `remote_memory_keys` and `buffer_sizes` provided by the source replica.
 

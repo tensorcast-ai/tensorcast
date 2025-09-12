@@ -37,7 +37,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location,
     absl::Span<const uint32_t> chunks,
-    tensorcast::communicator::engine::CommunicateEngine& comm_engine) {
+    tensorcast::communicator::engine::Communicator& comm_engine) {
   // Validate parameters
   if (chunks.empty()) {
     return absl::InvalidArgumentError("No chunks specified for export");
@@ -90,7 +90,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + va_off);
       auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.artifact_id, range_idx++);
-      tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+      tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
       // Avoid registering an MR for DVMP logical windows; CPU path will be staged for TCP
       opts.register_mr = false;
       // Hint: CPU staged when policy requires. For Phase 1 (TCP), staging happens in transport.
@@ -151,7 +151,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr.get()) + off);
       auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.artifact_id, range_idx++);
-      tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+      tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
       opts.register_mr = comm_engine.is_rdma_enabled();
       opts.needs_staging =
           (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::base::COMMUNICATE_ENGINE_DEV_GPU);
@@ -182,7 +182,7 @@ absl::StatusOr<CommRegistrationInfo> ChunkExportService::export_chunks(
 absl::Status ChunkExportService::unexport_chunks(
     const loading::ReplicaKey& key,
     const CommRegistrationInfo& info,
-    communicator::engine::CommunicateEngine& comm_engine) {
+    communicator::engine::Communicator& comm_engine) {
   // Validate parameters
   if (info.remote_memory_keys.empty()) {
     return absl::OkStatus(); // Nothing to unexport

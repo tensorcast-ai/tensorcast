@@ -21,7 +21,7 @@ using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedMemoryPool;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
-using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::engine::Communicator;
 using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::replica::MemoryManager;
 using namespace tensorcast::store;
@@ -41,7 +41,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     // Set up source engine with GPU tensor
     CommunicatorConfig cfg1;
     cfg1.set_enable_rdma(false); /* disable RDMA */
-    auto source_engine = std::make_shared<CommunicateEngine>(cfg1);
+    auto source_engine = std::make_shared<Communicator>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
@@ -53,7 +53,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), artifact_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
-    CommunicateEngine::RegisterTensorOptions reg_opts;
+    Communicator::RegisterTensorOptions reg_opts;
     reg_opts.register_mr = false; // RDMA disabled
     reg_opts.needs_staging = true; // GPU over TCP requires staging
     reg_opts.async = false;
@@ -70,7 +70,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     // Create target engine for loader
     CommunicatorConfig cfg2;
     cfg2.set_enable_rdma(false); /* disable RDMA */
-    auto target_engine = std::make_shared<CommunicateEngine>(cfg2);
+    auto target_engine = std::make_shared<Communicator>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Create P2PLoader with GPU source configuration (updated API)
@@ -82,8 +82,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU;
     source_config.location.device_id = 0;
-    source_config.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{
-        target_engine}; // Local communicator used to pull remote tensor
+    source_config.comm_engine =
+        gsl::not_null<std::shared_ptr<Communicator>>{target_engine}; // Local communicator used to pull remote tensor
 
     auto loader = std::make_shared<P2PLoader>(source_config);
     REQUIRE(loader->initialize().ok());
@@ -135,7 +135,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     // Similar test but with CPU target
     CommunicatorConfig cfg3;
     cfg3.set_enable_rdma(false); /* disable RDMA */
-    auto source_engine = std::make_shared<CommunicateEngine>(cfg3);
+    auto source_engine = std::make_shared<Communicator>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
@@ -152,7 +152,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(memcpy_status.message());
     REQUIRE(memcpy_status.ok());
 
-    CommunicateEngine::RegisterTensorOptions reg_opts2;
+    Communicator::RegisterTensorOptions reg_opts2;
     reg_opts2.register_mr = false;
     reg_opts2.needs_staging = true;
     reg_opts2.async = false;
@@ -168,7 +168,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     CommunicatorConfig cfg4;
     cfg4.set_enable_rdma(false); /* disable RDMA */
-    auto target_engine = std::make_shared<CommunicateEngine>(cfg4);
+    auto target_engine = std::make_shared<Communicator>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
@@ -181,7 +181,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU; // Remote data on GPU
     source_config.location.device_id = 0;
-    source_config.comm_engine = gsl::not_null<std::shared_ptr<CommunicateEngine>>{target_engine};
+    source_config.comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{target_engine};
 
     auto loader = std::make_shared<P2PLoader>(source_config);
     auto loader_init_status = loader->initialize();

@@ -860,7 +860,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   // Create replica with P2P source
   auto p2p_source = source;
   p2p_source.comm_engine =
-      gsl::not_null<std::shared_ptr<communicator::engine::CommunicateEngine>>{comm_manager_->get_shared_engine()};
+      gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager_->get_shared_engine()};
   // Provide optional disk fallback directory from engine options
   p2p_source.fallback_disk_dir = options_.p2p_fallback_disk_dir;
   replica::ReplicaConfig config{

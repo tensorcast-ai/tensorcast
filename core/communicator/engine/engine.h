@@ -28,11 +28,11 @@
 
 namespace tensorcast::communicator::engine {
 
-class CommunicateEngine {
+class Communicator {
  public:
-  explicit CommunicateEngine(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
+  explicit Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
 
-  ~CommunicateEngine();
+  ~Communicator();
 
   /**
    * Init the communicate engine with the ip and port
@@ -113,6 +113,7 @@ class CommunicateEngine {
     virtual ~ResidencyProvider() = default;
     virtual bool is_hot(const std::string& tensor_key, uint64_t offset, uint64_t bytes) = 0;
   };
+
   void set_residency_provider(std::shared_ptr<ResidencyProvider> provider) {
     residency_provider_ = std::move(provider);
   }
@@ -193,6 +194,7 @@ class CommunicateEngine {
     // Remember which stager produced the buffer (CPU or GPU)
     MemoryStager* stager_ptr = nullptr;
   };
+
   // key: request key "<tensor_key>:<offset>"
   absl::Mutex staged_mu_;
   misc::Map<std::string, StagedRdmaSegment> staged_segments_;

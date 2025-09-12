@@ -940,7 +940,7 @@ absl::Status MemoryManager::copy_from_peer(const MemoryManager& source, cudaStre
 absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
     MemoryLocation location,
     absl::Span<const uint32_t> chunks,
-    communicator::engine::CommunicateEngine& comm_engine) {
+    communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
   auto info_or = export_service_->export_chunks(replica_key_, location, chunks, comm_engine);
   if (!info_or.ok()) {
@@ -960,7 +960,7 @@ absl::StatusOr<CommRegistrationInfo> MemoryManager::export_chunks_for_p2p(
 absl::Status MemoryManager::unexport_chunks_for_p2p(
     MemoryLocation location,
     absl::Span<const uint32_t> /*chunks*/,
-    communicator::engine::CommunicateEngine& comm_engine) {
+    communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
   if (location == MemoryLocation::GPU && gpu_.comm_registered) {
     auto st = export_service_->unexport_chunks(replica_key_, gpu_.comm_registration_info, comm_engine);

@@ -33,12 +33,12 @@ class ChunkExportService {
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
-      communicator::engine::CommunicateEngine& comm_engine);
+      communicator::engine::Communicator& comm_engine);
 
   absl::Status unexport_chunks(
       const loading::ReplicaKey& key,
       const CommRegistrationInfo& info,
-      communicator::engine::CommunicateEngine& comm_engine);
+      communicator::engine::Communicator& comm_engine);
 
  private:
   static std::vector<std::pair<uint32_t, uint32_t>> coalesce_ranges(std::vector<uint32_t> chunks);

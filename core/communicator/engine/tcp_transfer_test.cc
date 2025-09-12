@@ -32,14 +32,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     // Create source and target engines in TCP mode
     communicator::v1::CommunicatorConfig cfg1;
     cfg1.set_enable_rdma(false); /* disable RDMA */
-    auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg1);
+    auto source_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg1);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::v1::CommunicatorConfig cfg2;
     cfg2.set_enable_rdma(false); /* disable RDMA */
-    auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg2);
+    auto target_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg2);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
@@ -54,7 +54,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
-    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts;
+    tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;
@@ -109,14 +109,14 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     // Create source engine in TCP mode
     communicator::v1::CommunicatorConfig cfg3;
     cfg3.set_enable_rdma(false); /* disable RDMA */
-    auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg3);
+    auto source_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::v1::CommunicatorConfig cfg4;
     cfg4.set_enable_rdma(false); /* disable RDMA */
-    auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg4);
+    auto target_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
@@ -131,7 +131,7 @@ TEST_CASE("TCP Mode GPU to GPU Transfer", "[communicator][tcp][gpu][integration]
     REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register source tensor
-    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts2;
+    tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts2;
     opts2.register_mr = false;
     opts2.needs_staging = true;
     opts2.async = false;
@@ -188,14 +188,14 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
 
     communicator::v1::CommunicatorConfig cfg5;
     cfg5.set_enable_rdma(false); /* disable RDMA */
-    auto source_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg5);
+    auto source_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg5);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
     communicator::v1::CommunicatorConfig cfg6;
     cfg6.set_enable_rdma(false); /* disable RDMA */
-    auto target_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg6);
+    auto target_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg6);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
@@ -224,7 +224,7 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     }
 
     // Register and transfer
-    tensorcast::communicator::engine::CommunicateEngine::RegisterTensorOptions opts3;
+    tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts3;
     opts3.register_mr = false;
     opts3.needs_staging = true;
     opts3.async = false;

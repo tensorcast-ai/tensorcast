@@ -9,7 +9,7 @@
 #include "core/testing/test_helpers.h"
 
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
-using tensorcast::communicator::engine::CommunicateEngine;
+using tensorcast::communicator::engine::Communicator;
 using tensorcast::communicator::v1::CommunicatorConfig;
 using namespace tensorcast::testing;
 
@@ -20,7 +20,7 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     // Create engine in TCP mode
     CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
-    auto engine = std::make_shared<CommunicateEngine>(cfg);
+    auto engine = std::make_shared<Communicator>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
     // Allocate GPU memory
@@ -33,7 +33,7 @@ TEST_CASE("TCP Mode GPU Tensor Registration", "[communicator][tcp][gpu]") {
     REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
 
     // Register GPU tensor
-    CommunicateEngine::RegisterTensorOptions opts;
+    Communicator::RegisterTensorOptions opts;
     opts.register_mr = false;
     opts.needs_staging = true;
     opts.async = false;

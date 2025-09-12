@@ -223,8 +223,8 @@ class P2PTestServer {
     // Set environment variable for P2P server to listen on the correct port
     setenv("TENSORCAST_COMM_LOCAL_PORT", std::to_string(server_port).c_str(), 1);
 
-    // Initialize Global CommunicateEngine
-    LOG(INFO) << "Initializing Global CommunicateEngine for Server on port " << server_port << "...";
+    // Initialize Global Communicator
+    LOG(INFO) << "Initializing Global Communicator for Server on port " << server_port << "...";
     auto comm_mgr = std::make_shared<CommunicationManager>();
     // The communication engine needs to listen on the same port that clients will connect to
     absl::Status engine_status = comm_mgr->initialize("0.0.0.0", server_port);
@@ -468,10 +468,10 @@ class P2PTestClient {
 
     // Client doesn't need to listen, just connect
     // Create a communication manager without initializing a server
-    LOG(INFO) << "Creating CommunicateEngine for Client (no server listening)...";
+    LOG(INFO) << "Creating Communicator for Client (no server listening)...";
     tensorcast::communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false);
-    auto client_comm_engine = std::make_shared<tensorcast::communicator::engine::CommunicateEngine>(cfg);
+    auto client_comm_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg);
     // Bind to a dedicated, available client port to facilitate P2P connections
     int client_port = find_available_port(server_port + 1);
     if (client_port <= 0 || client_port == server_port) {
