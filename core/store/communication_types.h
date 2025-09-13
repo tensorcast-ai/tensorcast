@@ -14,7 +14,7 @@ namespace tensorcast::store {
 /**
  * @brief Holds information about memory registered for communication.
  */
-struct CommRegistrationInfo {
+struct ExportRegistration {
   uint64_t artifact_size = 0;
   common::memory::MemoryLocation location = common::memory::MemoryLocation::NONE;
   int device_id = -1; // -1 for CPU, device id for GPU

@@ -41,8 +41,8 @@ grpc::Status RegistrationController::begin(
     return {StatusCode::INVALID_ARGUMENT, "owner_pid is required (>0)"};
   }
   RegistrationManager::RegPlan plan = RegistrationManager::RegPlan::COALESCED;
-  if (req.has_dvmp())
-    plan = RegistrationManager::RegPlan::DVMP;
+  if (req.has_cpu())
+    plan = RegistrationManager::RegPlan::CPU;
   else if (req.has_lease())
     plan = RegistrationManager::RegPlan::LEASE;
   RegistrationManager::RegMeta meta;
@@ -90,7 +90,7 @@ grpc::Status RegistrationController::begin(
     rctx.mark_success();
     return Status::OK;
   }
-  if (plan == RegistrationManager::RegPlan::DVMP) {
+  if (plan == RegistrationManager::RegPlan::CPU) {
     store::StoreEngine::ArtifactRegistration a;
     a.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
     if (req.has_tensor_index_key())
@@ -105,21 +105,21 @@ grpc::Status RegistrationController::begin(
     a.enable_p2p = true;
     if (req.has_ttl_ms())
       a.ttl_ms = req.ttl_ms();
-    auto begin_or = d_.engine.begin_register_artifact_dvmp(a);
+    auto begin_or = d_.engine.begin_register_artifact_cpu(a);
     if (!begin_or.ok())
       return to_grpc_status(begin_or.status());
     const auto& out = begin_or.value();
     resp.set_registration_id(out.registration_id);
-    auto* hs = resp.mutable_dvmp()->mutable_stream();
+    auto* hs = resp.mutable_cpu()->mutable_stream();
     hs->set_token(out.registration_id);
     resp.set_device_id(out.device_id);
     resp.set_total_size(out.size_bytes);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_begin_dvmp_total");
+      static auto counter = meter->CreateDoubleCounter("tc_register_begin_cpu_total");
       counter->Add(1.0);
     } catch (...) {
-      VLOG(1) << "metrics counter tc_register_begin_dvmp_total unavailable";
+      VLOG(1) << "metrics counter tc_register_begin_va_space_total unavailable";
     }
     d_.reg.set_meta(out.registration_id, meta);
     rctx.mark_success();
@@ -186,9 +186,9 @@ grpc::Status RegistrationController::feed_stream(
         }
       }
     }
-    if (req.has_dvmp_chunk()) {
-      const auto& ck = req.dvmp_chunk();
-      auto st = d_.engine.feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
+    if (req.has_cpu_chunk()) {
+      const auto& ck = req.cpu_chunk();
+      auto st = d_.engine.feed_register_cpu_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
       if (!st.ok())
         return to_grpc_status(st);
     } else if (req.has_lease_segments()) {
@@ -250,9 +250,9 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         }
       }
     }
-    if (req.has_dvmp_chunk()) {
-      const auto& ck = req.dvmp_chunk();
-      auto st = d_.engine.feed_register_dvmp_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
+    if (req.has_cpu_chunk()) {
+      const auto& ck = req.cpu_chunk();
+      auto st = d_.engine.feed_register_cpu_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
       if (!st.ok())
         return to_grpc_status(st);
     } else if (req.has_lease_segments()) {
@@ -313,7 +313,7 @@ grpc::Status RegistrationController::commit(
   RegistrationManager::RegMeta meta;
   if (meta_opt.has_value())
     meta = *meta_opt;
-  if (meta.plan == RegistrationManager::RegPlan::DVMP) {
+  if (meta.plan == RegistrationManager::RegPlan::CPU) {
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
       d_.reg.erase_meta(req.registration_id());
       try {
@@ -339,7 +339,7 @@ grpc::Status RegistrationController::commit(
     desc->set_total_size(out.size_bytes);
     resp.set_existed(out.existed);
     if (out.existed) {
-      // Join a lightweight reference to the existing replica (CPU for DVMP)
+      // Join a lightweight reference to the existing replica (CPU VS path)
       store::loading::ReplicaKey key{
           .artifact_id = out.artifact_id,
           .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
@@ -354,10 +354,10 @@ grpc::Status RegistrationController::commit(
     }
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_commit_dvmp_total");
+      static auto counter = meter->CreateDoubleCounter("tc_register_commit_cpu_total");
       counter->Add(1.0);
     } catch (...) {
-      VLOG(1) << "metrics counter tc_register_commit_dvmp_total unavailable";
+      VLOG(1) << "metrics counter tc_register_commit_cpu_total unavailable";
     }
     rctx.mark_success();
     return Status::OK;
@@ -687,9 +687,9 @@ REVOKE_DONE:
   if (meta_opt.has_value() && meta_opt->joined_existing) {
     const auto& m = *meta_opt;
     // Release lifecycle UseLease precisely, if recorded
-    if (m.use_lease_id != 0 && m.plan != RegistrationManager::RegPlan::DVMP) {
+    if (m.use_lease_id != 0 && m.plan != RegistrationManager::RegPlan::CPU) {
       d_.lifecycle->release_lease(static_cast<SessionLifecycleManager::LeaseId>(m.use_lease_id));
-    } else if (m.plan != RegistrationManager::RegPlan::DVMP) {
+    } else if (m.plan != RegistrationManager::RegPlan::CPU) {
       // Fallback by subject+pid
       SessionLifecycleManager::ReplicaSubject subj{.artifact_id = m.artifact_id_mi2, .device_id = m.device_id};
       auto st = d_.lifecycle->release_use_lease(subj, m.owner_pid);
@@ -699,8 +699,8 @@ REVOKE_DONE:
       }
     }
     store::DeviceKey dev_key{
-        .type = (m.plan == RegistrationManager::RegPlan::DVMP ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (m.plan == RegistrationManager::RegPlan::DVMP ? -1 : m.device_id),
+        .type = (m.plan == RegistrationManager::RegPlan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (m.plan == RegistrationManager::RegPlan::CPU ? -1 : m.device_id),
         .uuid = ""};
     store::loading::ReplicaKey key{.artifact_id = m.artifact_id_mi2, .device = dev_key, .replica = 0};
     d_.refs.drop_ref(key, m.owner_pid);

@@ -18,18 +18,18 @@
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/memory_location.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
-#include "core/store/direct_write.h"
 #include "core/store/loader/source.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/chunk_meta.h"
 #include "core/store/replica/memory_state.h"
-#include "core/store/replica/replica_memory_coordinator.h"
+#include "core/store/replica/types/direct_write_grant.h"
+#include "core/store/replica/unified_memory_authority.h"
 
 namespace tensorcast::store::replica {
 
@@ -40,38 +40,38 @@ namespace tensorcast::store::replica {
  * and contiguous GPU memory, supporting both pool-based allocation and borrowing external pointers.
  * It ensures thread-safe access to memory resources and their states.
  */
-class MemoryManager {
+class ReplicaLoadController {
  public:
   /**
-   * @brief Constructs a MemoryManager.
+   * @brief Constructs a ReplicaLoadController.
    * @param artifact_identifier A unique name for the replica, used for logging.
    * @param local_device_id The target local GPU device ID.
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
-   * @param dvmp Shared Distributed Virtual Memory Pool.
+   * @param virtual_addr_space Shared Virtual Address Space (VS).
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
    * @param artifact_size Total artifact size in bytes. Must be non-zero.
    *
-   * Note: UMA (DVMP-backed virtual address space) is allocated eagerly during
+   * Note: UMA (VS-managed virtual memory) is allocated eagerly during
    * construction. This does not consume physical memory and simplifies later
    * code paths by avoiding conditional UMA allocation.
    */
-  MemoryManager(
+  ReplicaLoadController(
       std::string artifact_identifier,
       int local_device_id,
-      const gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>& pinned_pool,
-      const gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>& dvmp,
+      const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
+      const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
       uint64_t artifact_size);
 
-  ~MemoryManager() noexcept;
+  ~ReplicaLoadController() noexcept;
 
   // Disable copy and move
-  MemoryManager(const MemoryManager&) = delete;
-  MemoryManager& operator=(const MemoryManager&) = delete;
-  MemoryManager(MemoryManager&&) = delete;
-  MemoryManager& operator=(MemoryManager&&) = delete;
+  ReplicaLoadController(const ReplicaLoadController&) = delete;
+  ReplicaLoadController& operator=(const ReplicaLoadController&) = delete;
+  ReplicaLoadController(ReplicaLoadController&&) = delete;
+  ReplicaLoadController& operator=(ReplicaLoadController&&) = delete;
 
   /**
    * @brief Gets the configured artifact size.
@@ -86,32 +86,18 @@ class MemoryManager {
     return replica_key_.device.ordinal;
   }
 
-  /**
-   * @brief Sets the CUDA device that this memory manager should use. This will lazily
-   *        create an internal non-blocking stream bound to the device. This function
-   *        must be called (directly or indirectly) before any GPU allocation or copy
-   *        operation when the device ID was not provided during construction.
-   *
-   * @param device_id The local CUDA device ID that subsequent GPU operations should
-   *                  run on.
-   * @return absl::Status OkStatus on success, or an error if stream creation fails or
-   *         if attempting to change the device id **after** GPU memory has
-   *         already been allocated.  The device id can be changed
-   *         freely while no GPU memory is owned by this manager.
-   */
-  // [[deprecated("MemoryManager is device-bound at construction time; avoid changing after creation")]]
-  // absl::Status set_local_device_id(int device_id) ABSL_LOCKS_EXCLUDED(mutex_);
+  // Device id is bound at construction; no post-ctor mutation API is provided.
 
   /**
-   * @brief Copies data from a peer MemoryManager located on another device.
+   * @brief Copies data from a peer ReplicaLoadController located on another device.
    *        This enables GPU↔GPU direct P2P transfers.
    */
-  [[nodiscard]] absl::Status copy_from_peer(const MemoryManager& source, cudaStream_t stream = nullptr);
+  [[nodiscard]] absl::Status copy_from_peer(const ReplicaLoadController& source, cudaStream_t stream = nullptr);
 
   /**
    * @brief Allocates memory at the specified location using the configured memory pools.
    * Transitions state from UNALLOCATED to ALLOCATED on success.
-   * @param location MemoryLocation::PAGEABLE_CPU or GPU.
+   * @param location MemoryLocation::CPU or GPU.
    * @return absl::Status OkStatus on success, or an error status.
    */
   [[nodiscard]] absl::Status allocate_memory(common::memory::MemoryLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -120,7 +106,7 @@ class MemoryManager {
    * @brief Releases memory at the specified location.
    * If the memory was allocated by this manager, it's returned to the pool or freed.
    * Transitions state to UNALLOCATED or UNINITIALIZED.
-   * @param location PAGEABLE_CPU or GPU.
+   * @param location CPU or GPU.
    * @param safe_release If true, refuses to release if state is LOADING.
    * @return absl::Status OkStatus or error (e.g., if safe_release is true and state is LOADING).
    */
@@ -135,9 +121,9 @@ class MemoryManager {
   /**
    * @brief Gets raw pointer(s) for the specified location.
    * - For GPU: returns one pointer when state is ALLOCATED, LOADING, or LOADED.
-   * - For PAGEABLE_CPU: returns the DVMP base pointer when state is ALLOCATED or LOADED.
+   * - For CPU: returns the VS base pointer when state is ALLOCATED or LOADED.
    * Returns an empty vector otherwise.
-   * @param location PAGEABLE_CPU or GPU.
+   * @param location CPU or GPU.
    * @return std::vector<void*> Vector with zero or one pointer.
    */
   [[nodiscard]] std::vector<void*> get_pointer(common::memory::MemoryLocation location) const
@@ -146,7 +132,7 @@ class MemoryManager {
   /**
    * @brief Retrieves the CUDA IPC memory handle associated with the managed GPU
    *        memory. The replica must have its GPU memory buffer allocated and the
-   *        underlying CudaMemory object initialised.
+   *        underlying GpuDeviceMemory object initialised.
    *
    * The IPC handle can be obtained once the GPU buffer is allocated (states
    * ALLOCATED, LOADING, or LOADED).
@@ -154,10 +140,10 @@ class MemoryManager {
    * @return absl::StatusOr<cudaIpcMemHandle_t>  The CUDA IPC handle on success
    *         or an error status if the memory is not available.
    */
-  [[nodiscard]] absl::StatusOr<cudaIpcMemHandle_t> get_cuda_ipc_handle() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::StatusOr<cudaIpcMemHandle_t> get_ipc_handle() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Asynchronously copies data between PAGEABLE_CPU and GPU memory managed by this instance.
+   * @brief Asynchronously copies data between CPU and GPU memory managed by this instance.
    * Assumes source location is in LOADED state and destination is ALLOCATED.
    * Manages state transitions (LOADING -> LOADED/FAILED) for the destination.
    * Uses asynchronous CUDA operations on a dedicated stream.
@@ -182,7 +168,7 @@ class MemoryManager {
 
   /**
    * @brief Waits for the memory at the specified location to reach the LOADED state.
-   * @param location PAGEABLE_CPU or GPU.
+   * @param location CPU or GPU.
    * @param timeout Optional timeout duration.
    * @return absl::Status OkStatus if LOADED, DeadlineExceeded if timeout, FailedPrecondition if FAILED state reached,
    * Cancelled if interrupted.
@@ -193,12 +179,12 @@ class MemoryManager {
       absl::Duration timeout = absl::InfiniteDuration()) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Registers the loaded memory (PAGEABLE_CPU or GPU) for communication access via the communicator engine.
+   * @brief Registers the loaded memory (CPU or GPU) for communication access via the communicator engine.
    * Requires the memory to be in the LOADED state at the specified location.
    * NOTE: Deprecated. Use chunk-scoped APIs `export_chunks_for_p2p`/`unexport_chunks_for_p2p`.
-   * @param location The memory location to register (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The memory location to register (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param comm_engine The communicator engine to use for communication registration.
-   * @return absl::StatusOr<CommRegistrationInfo> Information needed by remote peers to access the memory, or an error.
+   * @return absl::StatusOr<ExportRegistration> Information needed by remote peers to access the memory, or an error.
    */
 
   // Convenience wrappers for buffer sizing
@@ -212,7 +198,7 @@ class MemoryManager {
    * Checks if the state is currently LOADING for the given location. If so,
    * transitions it to LOADED on success or FAILED on error. If the state
    * is not LOADING, it logs a warning and does nothing.
-   * @param location The memory location (PAGEABLE_CPU or GPU).
+   * @param location The memory location (CPU or GPU).
    * @param final_status The status of the completed load/copy operation.
    * @return absl::Status OkStatus, or the final_status if the state transition failed.
    */
@@ -222,14 +208,14 @@ class MemoryManager {
 
   // Streaming buffer helpers moved to TransferService
 
-  // (Deprecated) DVMP region reservation moved to UMA
+  // VS region reservation is handled by UMA
 
   // --- Internal State Management ---
   // These might be called by Loaders or copy operations.
 
   /**
    * @brief Sets the memory state for a location, performing checks and logging. Internal use mostly.
-   * @param location PAGEABLE_CPU or GPU.
+   * @param location CPU or GPU.
    * @param new_state The target state.
    * @return absl::Status Ok if transition is valid, error otherwise.
    */
@@ -237,7 +223,7 @@ class MemoryManager {
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Thin wrappers delegating to services -------------------------------------
-  [[nodiscard]] absl::StatusOr<CommRegistrationInfo> export_chunks_for_p2p(
+  [[nodiscard]] absl::StatusOr<ExportRegistration> export_chunks_for_p2p(
       common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
       tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
@@ -246,20 +232,21 @@ class MemoryManager {
       absl::Span<const uint32_t> chunks,
       tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // --- New DVMP accessors ---------------------------------------------------
+  // --- VA Space accessors ---------------------------------------------------
   /**
-   * @brief Exposes the underlying DistributedVirtualMemoryPool instance used by this
-   *        MemoryManager. Loaders can use this to allocate or lock chunks.
+   * @brief Exposes the underlying VirtualAddressSpace instance. Loaders can
+   *        use this to allocate/map/pin ranges in the CPU VA region.
    */
-  [[nodiscard]] gsl::not_null<common::memory::DistributedVirtualMemoryPool*> get_dvmp() ABSL_LOCKS_EXCLUDED(mutex_);
-  [[nodiscard]] gsl::not_null<const common::memory::DistributedVirtualMemoryPool*> get_dvmp() const
+  [[nodiscard]] gsl::not_null<common::memory::VirtualAddressSpace*> get_va_space() ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] gsl::not_null<const common::memory::VirtualAddressSpace*> get_va_space() const
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Returns an immutable snapshot view of ChunkMeta for the replica.
-   *        Empty span if DVMP not available or replica not allocated.
+   * @brief Returns an immutable snapshot view of VS ChunkMeta for telemetry.
+   *        Empty span if VS not available or replica not allocated.
+   *        UMA is authoritative; prefer UMA-based getters for state.
    */
-  [[nodiscard]] absl::Span<const ChunkMeta> chunk_snapshot() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Span<const ChunkMeta> chunk_telemetry_snapshot() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Globally-unique key identifying this replica replica (artifact_id + device + replica).
   loading::ReplicaKey replica_key_;
@@ -273,7 +260,7 @@ class MemoryManager {
 
   /**
    * @brief Allocate per-replica memory bookkeeping in the coordinator.
-   * Reserves DRAM via DVMP for this replica. GPU allocations remain lazy.
+   * Reserves DRAM via VS for this replica. GPU allocations remain lazy.
    * @return Status of allocation.
    */
   [[nodiscard]] absl::Status allocate_replica_memory() ABSL_LOCKS_EXCLUDED(mutex_);
@@ -295,15 +282,16 @@ class MemoryManager {
       common::memory::MemoryLocation target,
       std::optional<int> device_id = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // Plan a direct-write token for destination VA ranges (PAGEABLE_CPU).
-  [[nodiscard]] absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges)
+  // Plan a direct-write grant for destination VA ranges (CPU).
+  [[nodiscard]] absl::StatusOr<DirectWriteGrant> plan_direct_write(absl::Span<const VaRange> ranges)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // Explicit finalize hook to update UMA states after a load into a location
-  // completes (replaces UnifiedMemorySink close-time updates).
-  [[nodiscard]] absl::Status finalize_load(
+  // UMA-backed chunk state snapshot for a target location. Returns a vector
+  // of per-chunk states derived from UMA's ledger (device-aware for GPU).
+  // On error, returns an empty vector.
+  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_uma(
       common::memory::MemoryLocation location,
-      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
+      std::optional<int> device_id = std::nullopt) const ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
   /**
@@ -313,7 +301,7 @@ class MemoryManager {
       ABSL_SHARED_LOCKS_REQUIRED(mutex_);
 
   /**
-   * @brief Returns base pointer for PAGEABLE_CPU or GPU using UMA/local cache.
+   * @brief Returns base pointer for CPU or GPU using UMA/local cache.
    * Expects mutex_ to be held by the caller.
    * Returns nullptr if state is not eligible or pointer unavailable.
    */
@@ -350,9 +338,9 @@ class MemoryManager {
   // --- Internal copy refactor helpers (no behavior change) ---------------
   struct CopyLaunchParams {
     std::shared_ptr<common::memory::StreamingPinnedBuffer> streaming_buffer;
-    std::shared_ptr<common::memory::DistributedVirtualMemoryPool> dvmp;
-    void* dvmp_base = nullptr;
-    std::shared_ptr<common::memory::CudaMemory> cuda_mem;
+    std::shared_ptr<common::memory::VirtualAddressSpace> virtual_addr_space;
+    void* va_space_base = nullptr;
+    std::shared_ptr<common::memory::GpuDeviceMemory> cuda_mem;
     size_t total_size = 0;
     cudaStream_t stream = nullptr;
     uint32_t device_id = 0;
@@ -389,10 +377,8 @@ class MemoryManager {
     MemoryState state = MemoryState::UNINITIALIZED;
     absl::CondVar cond;
     bool comm_registered = false;
-    CommRegistrationInfo comm_registration_info;
-    std::vector<common::memory::DistributedVirtualMemoryPool::ChunkResidencyLease> pin_leases;
-    // DVMP-backed VA info
-    [[deprecated("Use UMA's get_cpu_base_ptr() instead")]] void* dvmp_base = nullptr; // Now managed by UMA
+    ExportRegistration comm_registration_info;
+    // VS base pointer is managed by UMA; no local cache here
     // Last failure reason for observability
     std::string last_error;
   };
@@ -400,13 +386,13 @@ class MemoryManager {
   struct GpuPod {
     MemoryState state = MemoryState::UNINITIALIZED;
     absl::CondVar cond;
-    std::shared_ptr<common::memory::CudaMemory> cuda_mem;
+    std::shared_ptr<common::memory::GpuDeviceMemory> cuda_mem;
     // Dedicated CUDA stream for memory copies
     cudaStream_t stream = nullptr;
     bool stream_initialized = false;
     // Communication registration
     bool comm_registered = false;
-    CommRegistrationInfo comm_registration_info;
+    ExportRegistration comm_registration_info;
     // Last failure reason for observability
     std::string last_error;
   };
@@ -420,7 +406,7 @@ class MemoryManager {
   const uint64_t artifact_size_;
 
   // Memory Pools (immutable handles; lock-free reads)
-  const gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pinned_pool_;
+  const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_pool_;
 
   // Streaming buffer configuration
   const size_t max_buffer_bytes_; // 1 GB default
@@ -428,17 +414,17 @@ class MemoryManager {
   // Pinned memory allocation timeout
   const std::chrono::milliseconds pinned_memory_timeout_;
 
-  // Whether to fail transfer if DVMP chunk locking fails
-  // [[maybe_unused]] const bool require_dvmp_lock_success_;
+  // Whether to fail transfer if VS chunk locking fails (unused in final UMA V3)
+  // [[maybe_unused]] const bool require_va_space_lock_success_;
 
-  const gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_;
+  const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_;
 
   // Unified memory management instance
-  const gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> memory_coordinator_;
+  const gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> memory_coordinator_;
 
   // New services introduced by RFC 0004
   const gsl::not_null<std::shared_ptr<class TransferService>> transfer_service_;
-  const gsl::not_null<std::shared_ptr<class ChunkExportService>> export_service_;
+  const gsl::not_null<std::shared_ptr<class MemoryExportRegistry>> export_service_;
 
   // Ensure GPU stream is initialised (create if needed). Expects mutex_ held.
   [[nodiscard]] absl::Status ensure_gpu_stream_initialized_locked_() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);

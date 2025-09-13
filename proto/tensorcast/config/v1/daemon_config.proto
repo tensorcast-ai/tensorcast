@@ -58,7 +58,7 @@ message HighAvailability {
 message Engine {
   uint64 mem_pool_size_bytes = 1;
   uint64 chunk_bytes = 2;
-  uint64 dvmp_chunk_size_bytes = 3;
+  uint64 cpu_chunk_size_bytes = 3;
   uint32 streaming_buffer_max_concurrent_sessions = 4;
   google.protobuf.Duration pinned_allocation_timeout = 5;
   string p2p_fallback_disk_dir = 6;

@@ -49,7 +49,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
   SECTION("Staging buffer exhaustion recovery") {
     // Create a GPU stager with very limited buffers
-    auto pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2 * 1024 * 1024, 1024 * 1024);
     tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 1, pool);
 
     // Allocate GPU memory
@@ -134,7 +134,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Out of bounds staging") {
-    auto pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(2 * 1024 * 1024, 1024 * 1024);
+    auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2 * 1024 * 1024, 1024 * 1024);
     tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 2, pool);
 
     void* gpu_ptr;

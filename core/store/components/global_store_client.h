@@ -156,7 +156,7 @@ class GlobalStoreClient {
 
   bool is_connected() const;
 
-  // Batch chunk-state updates (DVMP -> Global Store)
+  // Batch chunk-state updates (VS telemetry -> Global Store)
   struct ChunkStateUpdate {
     std::string artifact_id;
     uint32_t chunk_idx{0};
@@ -164,6 +164,7 @@ class GlobalStoreClient {
     std::string device_uuid;
     uint32_t replica{0};
   };
+
   absl::Status batch_update_chunk_states(
       std::string_view worker_id,
       std::string_view node_id,

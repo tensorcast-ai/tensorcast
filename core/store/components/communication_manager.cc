@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
-#include "core/store/components/uma_lease_provider.h"
 
 namespace tensorcast::store::components {
 
@@ -32,8 +31,7 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   }
 
   enabled_ = true;
-  // Inject UMA-backed lease provider for CPU staging (DRAM)
-  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
+  // DRAM stager uses default no-op lease provider; UMA export keepalive holds leases.
   LOG(INFO) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
@@ -52,13 +50,12 @@ absl::Status CommunicationManager::initialize_with_config(
   }
 
   enabled_ = true;
-  // Inject UMA-backed lease provider for CPU staging (DRAM)
-  comm_engine_->set_dram_lease_provider(UmaLeaseProvider::instance());
+  // DRAM stager uses default no-op lease provider; UMA export keepalive holds leases.
   LOG(INFO) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
   return absl::OkStatus();
 }
 
-absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
+absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
     const std::vector<void*>& buffer_addresses,
     const std::vector<size_t>& buffer_sizes,
     int device_id) {
@@ -99,7 +96,7 @@ absl::StatusOr<CommRegistrationInfo> CommunicationManager::register_memory(
   }
 
   // Build registration info
-  CommRegistrationInfo info;
+  ExportRegistration info;
   // Convert void* vector to uintptr_t vector
   for (void* addr : buffer_addresses) {
     info.buffer_addresses.push_back(reinterpret_cast<uintptr_t>(addr));

@@ -33,7 +33,7 @@ class LipManager {
 
   // Register staged export for the given LIP lease over specified chunk indices.
   // Returns an opaque lock token which can be used to release the export via
-  // release_staged_export(). This does not DVMP-lock chunks; it registers GPU
+  // release_staged_export(). This does not lock VS chunks; it registers GPU
   // ranges for transport and records CUDA IPC mappings for later cleanup.
   [[nodiscard]] absl::StatusOr<std::string> create_staged_export(
       const LipLeaseEntry& lip,

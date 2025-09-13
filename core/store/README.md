@@ -10,12 +10,12 @@ This document explains the internal implementation of the C++ Store Engine based
 
 - Public API surface and data contracts used by Python bindings and the Daemon
 - Data flows for disk and P2P loading, and for in-memory registration
-- Memory model (DVMP/UMA), state machines, and eviction
+- Memory model (VS/UMA), state machines, and eviction
 - Component responsibilities and how they collaborate
 
 Key files:
 - StoreEngine: core/store/store_engine.h, core/store/store_engine.cc
-- Replica + MemoryManager: core/store/replica/*
+- Replica + ReplicaLoadController: core/store/replica/*
 - Loaders and pump: core/store/loader/*
 - Components: core/store/components/*
 - Types: core/store/loading/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
@@ -39,15 +39,15 @@ graph TB
 
   subgraph Replica Runtime
     REP[Replica]
-    MM[MemoryManager]
-    UMA[ReplicaMemoryCoordinator]
+    MM[ReplicaLoadController]
+    UMA[UnifiedMemoryAuthority]
   end
 
   subgraph Memory
-    DVMP[DistributedVirtualMemoryPool]
-    PMP[PinnedMemoryPool]
+    VS[VirtualAddressSpace]
+    PMP[PinnedBufferPool]
     SPB[StreamingPinnedBuffer]
-    CUMEM[CudaMemory]
+    CUMEM[GpuDeviceMemory]
   end
 
   subgraph IO & Transfer
@@ -69,7 +69,7 @@ graph TB
   RR --> REP
   REP --> MM
   MM --> UMA
-  MM --> DVMP
+  MM --> VS
   MM --> PMP
   MM --> SPB
   MM --> CUMEM
@@ -82,10 +82,15 @@ graph TB
   TS --> PUMP
 ```
 
+## UMA V3 Cutover (aliases and flags)
+
+- Final cutover (V3): alias headers removed; UnifiedMemoryAuthority/VirtualAddressSpace are the canonical names. Incremental rollout flags are removed; transactional Plan→Execute→Commit path and UMA-ledger authority are always enabled.
+- Canonical Bazel targets: `//core/store/replica:unified_memory_authority`, `//core/common:virtual_address_space_lib`, and `//core/store/replica:memory_export_registry`.
+
 ## Public API Surface (StoreEngine)
 
 - Construction: `StoreEngine::StoreEngine(const StoreEngineOptions& opts)`
-  - Configures `storage_path`, pinned pool size/chunk size, DVMP chunk size, and optional `CommunicationManager` and `GlobalStore` address.
+  - Configures `storage_path`, pinned pool size/chunk size, VS chunk size, and optional `CommunicationManager` and `GlobalStore` address.
 
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
@@ -107,13 +112,18 @@ graph TB
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
   - `get_resident_devices(artifact_id)`, `list_device_replicas(DeviceKey)`
+  - VS telemetry (read-only, non-authoritative): `get_chunk_states_telemetry(artifact_id)` returns VS `ChunkMeta.state`
+  - UMA states (authoritative):
+    - GPU: `get_chunk_states_for_device(artifact_id, device_id)`
+    - CPU (artifact-level convenience): `get_chunk_states_cpu_uma(artifact_id)`
+      - Selection rule when multiple replicas exist: prefer a CPU instance if present; otherwise choose the GPU instance with the smallest device ordinal.
 
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`
   - `register_replica_with_global_store(ReplicaKey, artifact_id_override)`
 
-- DVMP chunk API passthrough:
-  - `lock_chunks(ReplicaKey, Span<uint32_t>)`, `unlock_chunks(ReplicaKey, Span<uint32_t>, bool copied_gpu)`
+// VS lock APIs have been removed in UMA V3 final state.
+// Use UMA plan/commit and VS pin_range for CPU residency leasing.
 
 ## Data Paths
 
@@ -125,7 +135,7 @@ sequenceDiagram
   participant SE as StoreEngine
   participant MO as MaterializeOrchestrator
   participant GS as GlobalStoreClient
-  participant REP as Replica/MemoryManager
+  participant REP as Replica/ReplicaLoadController
   participant P2L as P2PLoader
 
   Client->>SE: materialize_replica(target, AUTO, hints)
@@ -152,7 +162,7 @@ sequenceDiagram
 sequenceDiagram
   participant SE as StoreEngine
   participant REP as Replica
-  participant MM as MemoryManager
+  participant MM as ReplicaLoadController
   participant DLD as DiskLoader
   participant TS as TransferService
 
@@ -163,7 +173,7 @@ sequenceDiagram
   DLD-->>MM: SeekableSource (FilePartition/MultiSafetensors)
   MM->>TS: load_from_source(..., ranges)
   TS->>PUMP: pump_ranges (concurrency)
-  PUMP->>MM: write into DVMP or GPU via sinks
+  PUMP->>MM: write into VS or GPU via sinks
   MM->>MM: finalize_load and set_state(LOADED)
 ```
 
@@ -173,12 +183,12 @@ sequenceDiagram
 sequenceDiagram
   participant Client
   participant SE as StoreEngine
-  participant REP as Replica/MemoryManager
+  participant REP as Replica/ReplicaLoadController
   participant CMN as CommunicationManager
   participant GS as GlobalStoreClient
 
   Client->>SE: begin_register_artifact(reg)
-  SE->>REP: allocate GPU (CudaMemory + DVMP)
+  SE->>REP: allocate GPU (GpuDeviceMemory + VS)
   SE-->>Client: CUDA IPC handle + registration_id
   Client->>REP: write tensor bytes via IPC handle
   Client->>SE: commit_registered_artifact(registration_id)
@@ -192,9 +202,9 @@ sequenceDiagram
 
 ## Memory Model and State Machines
 
-Store Engine uses DVMP (DistributedVirtualMemoryPool) for contiguous per-replica CPU virtual address space and UMA (ReplicaMemoryCoordinator) for unified CPU/GPU chunk bookkeeping. MemoryManager orchestrates allocation, state transitions, and transfers.
+Store Engine uses VS (VirtualAddressSpace) for contiguous per-replica CPU virtual address space and UMA (UnifiedMemoryAuthority) for unified CPU/GPU chunk bookkeeping. ReplicaLoadController orchestrates allocation, state transitions, and transfers.
 
-### MemoryManager Location States
+### ReplicaLoadController Location States
 
 ```mermaid
 stateDiagram-v2
@@ -208,15 +218,15 @@ stateDiagram-v2
   LOADED --> UNALLOCATED: release_memory
 ```
 
-- CPU is represented as `common::memory::MemoryLocation::PAGEABLE_CPU`.
-- GPU allocations are lazily created via UMA on first use; DVMP CPU region is reserved at construction.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedMemoryPool`.
+
+- GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
+  - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`.
 
 ### Async Copy Manager Integration
 
 - H2D/D2H transfers now submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks.
 - SPB slots are returned in the ACM completion callback; per-chunk `stream_synchronize` calls have been removed.
-- For H2D, UMA state is advanced per DVMP-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
+- For H2D, UMA state is advanced per CPU-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
 - ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
 
 #### ACM Usage Quick Guide
@@ -243,47 +253,37 @@ stateDiagram-v2
                             (void)spb->mark_chunk_ready(slot_id, gid, bytes);
                           }}});
   ```
-- Same-device D2D: use `submit_d2d` and wait on handles as needed. Cross-device D2D remains under `MemoryManager` (peer or staged fallback).
+- Same-device D2D: use `submit_d2d` and wait on handles as needed. Cross-device D2D remains under `ReplicaLoadController` (peer or staged fallback).
 - Tests and CPU-only flows can use `submit_h2h` to exercise the async pump path without CUDA.
 
-### Chunk States (DVMP/UMA)
+### Chunk States (UMA Authority)
 
-```mermaid
-flowchart LR
-  HOT -->|lock_chunks| LOCKED_TX
-  LOCKED_TX -->|copy ok| COPIED_GPU
-  LOCKED_TX -->|abort| HOT
-  HOT --> COLD --> EVICTED
-  HOT --> PREEMPTIBLE
-  COLD -->|lock| LOCKED_TX
-  PREEMPTIBLE -->|lock| LOCKED_TX
-```
-
-- StoreEngine exposes `lock_chunks`/`unlock_chunks` which forward to DVMP for safe H2D/P2P transfers.
-- UMA tracks per-chunk state for CPU and per-GPU VRAM, enabling partial loads and post-GPU policies (e.g., `mark_cpu_preemptible()`).
+UMA is the sole ledger for chunk residency and export flags. VS no longer performs
+transfer locking; instead, it provides CPU pin leases via `pin_range()` and basic
+IO helpers (`write_at`, `map_file_segments`).
 
 ## Component Responsibilities
 
 - StoreEngine
   - Coordinates materialization, memory registration and eviction
   - Owns `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, optional `GlobalStoreClient`, and optional `CommunicationManager`
-  - Implements helpers for DVMP chunk locks, remote access registration, and Global Store registration
+  - Implements helpers for VS chunk locks, remote access registration, and Global Store registration
 
 - Replica
   - Facade for a single instance bound to a specific `DeviceKey`
   - Provides `ensure_loaded_async`, `copy_from`, `release_memory`, verification, and remote access enable/disable
 
-- MemoryManager
+- ReplicaLoadController
   - Manages CPU/GPU memory allocation and state; exposes pointers and CUDA IPC handle
   - Performs copy and load via `copy_data_async` and `load_async_from_source`
-  - Uses UMA + DVMP for chunk metadata and virtual address ownership
+  - Uses UMA + VS for chunk metadata and virtual address ownership
 
 - Loaders (`DiskLoader`, `P2PLoader`)
   - Abstracted via `IArtifactLoader` to produce a `SeekableSource`
   - P2P path muxes a remote source with an optional on-disk fallback (`MuxSeekableSource`)
 
 - TransferService
-  - Builds target sinks (GPU or DVMP region) and computes ranges from chunk indices
+  - Builds target sinks (GPU or VS region) and computes ranges from chunk indices
   - Enforces per-GPU concurrency (1 active session per GPU)
   - Streams data using a per-session `StreamingPinnedBuffer`
 
@@ -323,11 +323,11 @@ flowchart TD
   Done --> Result{OK or ResourceExhausted}
 ```
 
-Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU DVMP memory is not freed here.
+Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory is not freed here.
 
 ## Concurrency and Error Semantics
 
-- MemoryManager uses a single `absl::Mutex` with per-location condition variables to gate state transitions.
+- ReplicaLoadController uses a single `absl::Mutex` with per-location condition variables to gate state transitions.
 - `ready_future` from `ReplicaHandle` resolves with the final `absl::Status` of the load/copy.
 - Unsafe releases during LOADING mark the destination `FAILED` with last error preserved for diagnostics.
 - TransferService limits one active transfer per GPU; disk read/write concurrency is configured via `MaterializeHints::pipeline_concurrency` (propagated to `pump_ranges`).
@@ -344,7 +344,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU DVMP memor
 
 - `DeviceKey` (core/store/device_types.h): logical device id `{type, ordinal, uuid}` used across APIs.
 - `ReplicaKey` (core/store/loading/loading_spec.h): `{artifact_id, device, replica}` uniquely identifies an instance.
-- `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `PAGEABLE_CPU`, `DISK`, `REMOTE`.
+- `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `CPU`, `DISK`, `REMOTE`.
 - `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, and a `ready_future`.
 
 ## Test Coverage (selected)
@@ -352,7 +352,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU DVMP memor
 - Disk → GPU: core/store/store_engine_test.cc
 - P2P (TCP) → GPU with communicator: core/store/store_engine_p2p_loader_test.cc
 - Streaming and sinks: core/store/loader/*_test.cc
-- UMA/DVMP chunk semantics and locking: exercised through MemoryManager and loaders
+- UMA/VS chunk semantics and locking: exercised through ReplicaLoadController and loaders
 
 ## Notes and Limitations
 

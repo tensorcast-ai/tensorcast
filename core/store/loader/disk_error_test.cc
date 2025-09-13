@@ -7,15 +7,15 @@
 #include <filesystem>
 
 #include "absl/status/status.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
 using Catch::Matchers::ContainsSubstring;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::Replica;
 using tensorcast::store::replica::ReplicaConfig;
@@ -31,11 +31,11 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
 
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 256 * 1024;
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
+  // Create VS
+  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
 
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource
@@ -49,8 +49,8 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Replica::create(cfg);
@@ -78,8 +78,8 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = 1024 // wrong expected size
     };
 

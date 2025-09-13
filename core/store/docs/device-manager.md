@@ -13,7 +13,7 @@ The **Device Manager** is responsible for GPU discovery, CUDA stream creation, a
 ## Responsibilities
 
 1. **GPU Enumeration** — Queries CUDA runtime to determine the number of available devices and gathers per-GPU properties.
-2. **Stream Management** — Creates one long-lived default `cudaStream_t` per device to execute copy kernels and other asynchronous operations triggered by the `MemoryManager`.
+2. **Stream Management** — Creates one long-lived default `cudaStream_t` per device to execute copy kernels and other asynchronous operations triggered by the `ReplicaLoadController`.
 3. **Memory Metrics** — Periodically polls `cudaMemGetInfo` and updates Prometheus gauges so operators can observe GPU utilisation.
 4. **UUID Mapping** — Populates `DeviceRegistry` with the ordinal⇆UUID mapping discovered at start-up.
 

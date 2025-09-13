@@ -5,7 +5,7 @@
 #include <string>
 
 // OpenTelemetry Metrics API (types used in member declarations)
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 // Prefer explicit includes over forward declarations
@@ -14,7 +14,7 @@
 
 namespace tensorcast::store::components {
 
-// Note: PinnedMemoryPool lives under tensorcast::common::memory
+// Note: PinnedBufferPool lives under tensorcast::common::memory
 
 /**
  * @brief Centralized metrics collection for the store engine.
@@ -41,7 +41,7 @@ class MetricsCollector {
    * @brief Update memory pool metrics.
    * @param memory_pool Reference to the memory pool
    */
-  void update_memory_pool_metrics(const common::memory::PinnedMemoryPool& memory_pool);
+  void update_memory_pool_metrics(const common::memory::PinnedBufferPool& memory_pool);
 
   /**
    * @brief Update replica-related metrics.
@@ -92,7 +92,7 @@ class MetricsCollector {
    * This is a convenience method that updates all metric types.
    */
   void update_all_metrics(
-      const tensorcast::common::memory::PinnedMemoryPool& memory_pool,
+      const tensorcast::common::memory::PinnedBufferPool& memory_pool,
       const ReplicaRegistry& replica_registry,
       DeviceManager& device_manager);
 

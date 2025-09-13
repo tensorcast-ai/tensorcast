@@ -270,7 +270,7 @@ sequenceDiagram
 
 ## Chunk-aware Remote Memory Export
 
-- The source replica exports chunk metadata from DVMP and registers remote-access handles via `Replica::enable_remote_memory_access()` which internally calls `export_chunks_for_p2p(...)`.
+- The source replica exports chunk metadata from the VS-backed CPU region and registers remote-access handles via `Replica::enable_remote_memory_access()` which internally calls `export_chunks_for_p2p(...)`.
 - The Global Store carries these as `remote_memory_keys` and `buffer_sizes` in `MemoryInfo`. The orchestrator passes them into `P2PSource` so the engine can fetch efficiently.
 - When RDMA is disabled, GPU→GPU transfers over TCP use staging buffers and mark registration options with `needs_staging=true`.
 

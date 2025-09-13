@@ -10,7 +10,7 @@
 
 namespace tensorcast::store::loader {
 
-class GPUMemorySink : public Sink, public PositionedSink, public AsyncPositionedSink {
+class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositionedSink {
  public:
   struct Options {
     gsl::not_null<void*> gpu_base_ptr;
@@ -19,8 +19,8 @@ class GPUMemorySink : public Sink, public PositionedSink, public AsyncPositioned
     int device_id = 0;
   };
 
-  explicit GPUMemorySink(Options options);
-  ~GPUMemorySink() override;
+  explicit GpuMemorySink(Options options);
+  ~GpuMemorySink() override;
 
   absl::Status write(const void* src, size_t bytes) override;
 
@@ -33,11 +33,10 @@ class GPUMemorySink : public Sink, public PositionedSink, public AsyncPositioned
 
  private:
   Options options_;
-  cudaStream_t h2d_stream_ = nullptr;
   uint64_t current_offset_ = 0;
-  bool stream_created_ = false;
   absl::Status overall_status_;
-  // Tracks total bytes successfully enqueued via write_at to validate completeness
+  // Tracks total bytes successfully transferred via write/write_at for
+  // compatibility with tests that validate completeness on close().
   uint64_t total_bytes_written_ = 0;
 };
 

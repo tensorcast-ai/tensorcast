@@ -53,8 +53,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
     // API behavior flags
     // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
-    // ordering (artifact_id, device_id). If false (default), retains numeric
-    // index tokens for backward compatibility.
+    // ordering (artifact_id, device_id). If false (default), uses numeric
+    // index tokens.
     bool use_cursor_pagination{false};
   };
 
@@ -168,7 +168,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
       const v1::BeginRegisterArtifactRequest* req,
-      v1::BeginRegisterArtifactResponse* resp) override;
+      v1::BeginRegisterArtifactResponse* resp);
 
   grpc::Status CommitRegisteredArtifact(
       grpc::ServerContext* ctx,

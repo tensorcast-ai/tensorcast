@@ -12,7 +12,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 
 namespace tensorcast::common::memory {
 
@@ -31,7 +31,7 @@ class StreamingPinnedBuffer {
    * @param chunk_size Size of each chunk (must match pool's chunk size)
    * @param pool Shared pinned memory pool to allocate from
    */
-  StreamingPinnedBuffer(size_t num_chunks, size_t chunk_size, std::shared_ptr<PinnedMemoryPool> pool);
+  StreamingPinnedBuffer(size_t num_chunks, size_t chunk_size, std::shared_ptr<PinnedBufferPool> pool);
   ~StreamingPinnedBuffer();
 
   // Disable copy and move
@@ -131,6 +131,7 @@ class StreamingPinnedBuffer {
   size_t chunk_size() const {
     return chunk_size_;
   }
+
   size_t num_chunks() const {
     return num_chunks_;
   }
@@ -159,7 +160,7 @@ class StreamingPinnedBuffer {
  private:
   const size_t num_chunks_;
   const size_t chunk_size_;
-  std::shared_ptr<PinnedMemoryPool> pool_;
+  std::shared_ptr<PinnedBufferPool> pool_;
 
   // Chunk buffers allocated from the pool
   std::vector<char*> chunk_buffers_;

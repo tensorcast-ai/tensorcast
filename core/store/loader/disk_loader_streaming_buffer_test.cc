@@ -10,20 +10,20 @@
 
 #include "absl/status/status.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/source.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/replica/memory_manager.h"
+#include "core/store/replica/replica_load_controller.h"
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::DiskLoader;
 using tensorcast::store::loading::DiskSource;
-using tensorcast::store::replica::MemoryManager;
 using tensorcast::store::replica::MemoryState;
+using tensorcast::store::replica::ReplicaLoadController;
 using tensorcast::testing::create_dummy_file;
 using tensorcast::testing::is_cuda_available;
 using tensorcast::testing::read_file_content;
@@ -74,16 +74,16 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const uint64_t artifact_size = *size_status;
   REQUIRE(artifact_size == total_size);
 
-  // Setup MemoryManager with streaming enabled
+  // Setup ReplicaLoadController with streaming enabled
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096;
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
-  auto dvmp = std::make_shared<tensorcast::common::memory::DistributedVirtualMemoryPool>();
-  auto memmgr = std::make_shared<MemoryManager>(
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
+  auto virtual_addr_space = std::make_shared<tensorcast::common::memory::VirtualAddressSpace>();
+  auto memmgr = std::make_shared<ReplicaLoadController>(
       "loader_stream_artifact",
       /*device=*/0,
       pool,
-      dvmp,
+      virtual_addr_space,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming
       std::chrono::milliseconds::zero(),
       artifact_size);

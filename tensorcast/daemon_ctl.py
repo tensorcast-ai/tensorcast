@@ -28,9 +28,9 @@ from tensorcast.types import (
     BeginRegisterArtifactResult,
     CoalescedHandshake,
     CommitResult,
-    DVMPEmptyHandshake,
-    DVMPRingHandshake,
-    DVMPStreamHandshake,
+    CpuEmptyHandshake,
+    CpuRingHandshake,
+    CpuStreamHandshake,
     LeaseHandshake,
     LeaseSegment,
     Plan,
@@ -571,17 +571,17 @@ class DaemonCtl:
         Args:
             device_id: target device ordinal (single-GPU invariant per RFC-0014).
             total_size_bytes: AVBS total size (8B aligned).
-            ttl_ms: optional TTL used by Lease/DVMP plans.
+            ttl_ms: optional TTL used by Lease/UMA/VS plans.
             tensor_index_key: optional hex key of canonical index.
             tensor_index_data: optional canonical index bytes (preferred).
             encoding: "json" or "cbor" for index bytes.
             schema_version: index schema version (e.g., "v2").
-            plan: oneof plan options dict: {"kind": "coalesced"|"dvmp"|"lease", ...}.
+            plan: oneof plan options dict: {"kind": "coalesced"|"uma_vs"|"lease", ...}.
 
         Returns:
             Dict with registration_id, device_id, total_size, and optional handshake:
             - coalesced: {"daemon_ipc_handle": bytes}
-            - dvmp: {"dvmp": {"stream_token" or ring info}}
+            - uma_vs: {"vs": {"stream_token" or ring info}}
         """
         if device_id < 0 or total_size_bytes <= 0:
             raise ValueError("Invalid arguments for begin_register_artifact")
@@ -652,21 +652,21 @@ class DaemonCtl:
                 handshake = CoalescedHandshake(
                     daemon_ipc_handle=bytes(resp.coalesced.daemon_ipc_handle)
                 )
-            elif resp.HasField("dvmp"):
-                if resp.dvmp.HasField("ring"):
-                    handshake = DVMPRingHandshake(
-                        name=resp.dvmp.ring.name,
-                        ring_bytes=int(resp.dvmp.ring.ring_bytes),
+            elif resp.HasField("cpu"):
+                if resp.cpu.HasField("ring"):
+                    handshake = CpuRingHandshake(
+                        name=resp.cpu.ring.name,
+                        ring_bytes=int(resp.cpu.ring.ring_bytes),
                     )
-                elif resp.dvmp.HasField("stream"):
-                    handshake = DVMPStreamHandshake(stream_token=resp.dvmp.stream.token)
+                elif resp.cpu.HasField("stream"):
+                    handshake = CpuStreamHandshake(stream_token=resp.cpu.stream.token)
                 else:
-                    handshake = DVMPEmptyHandshake()
+                    handshake = CpuEmptyHandshake()
             elif resp.HasField("lease"):
                 handshake = LeaseHandshake()
             else:
                 # Should not happen given daemon oneof
-                handshake = DVMPEmptyHandshake()
+                handshake = CpuEmptyHandshake()
 
             return BeginRegisterArtifactResult(
                 registration_id=resp.registration_id,
@@ -771,19 +771,19 @@ class DaemonCtl:
             return True
 
     # ------------------------------------------------------------------
-    # Registration feed/keepalive helpers (Lease/DVMP)
+    # Registration feed/keepalive helpers (Lease/CPU)
     # ------------------------------------------------------------------
 
-    def feed_register_artifact_dvmp_chunk(
+    def feed_register_artifact_cpu_chunk(
         self, registration_id: str, offset: int, data: bytes, last: bool = True
     ) -> bool:
         # Unified stream-only implementation: build single-frame stream
         stream_req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
             registration_id=registration_id
         )
-        stream_req.dvmp_chunk.offset = int(offset)
-        stream_req.dvmp_chunk.data = data
-        stream_req.dvmp_chunk.last = bool(last)
+        stream_req.cpu_chunk.offset = int(offset)
+        stream_req.cpu_chunk.data = data
+        stream_req.cpu_chunk.last = bool(last)
         try:
             self._unary_call(
                 self.stub.FeedRegisterArtifactStream,
@@ -793,10 +793,10 @@ class DaemonCtl:
             )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifactStream(dvmp) failed: {e}")
+            logger.error(f"FeedRegisterArtifactStream(cpu) failed: {e}")
             return False
 
-    def feed_register_artifact_dvmp_stream_data(
+    def feed_register_artifact_cpu_stream_data(
         self,
         registration_id: str,
         data: bytes,
@@ -805,7 +805,7 @@ class DaemonCtl:
         chunk_size: int | None = None,
         timeout_s: float = 60.0,
     ) -> bool:
-        """Stream DVMP bytes using FeedRegisterArtifactStream.
+        """Stream CPU bytes using FeedRegisterArtifactStream.
 
         Splits payload by daemon chunk_size when not provided.
         """
@@ -825,10 +825,10 @@ class DaemonCtl:
                 req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
                     registration_id=registration_id
                 )
-                req.dvmp_chunk.offset = int(offset + pos)
-                req.dvmp_chunk.data = data[pos : pos + take]
+                req.cpu_chunk.offset = int(offset + pos)
+                req.cpu_chunk.data = data[pos : pos + take]
                 pos += take
-                req.dvmp_chunk.last = pos >= n
+                req.cpu_chunk.last = pos >= n
                 yield req
 
         try:
@@ -840,7 +840,7 @@ class DaemonCtl:
             )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifactStream(dvmp,data) failed: {e}")
+            logger.error(f"FeedRegisterArtifactStream(cpu,data) failed: {e}")
             return False
 
     def feed_register_artifact_lease_segments(

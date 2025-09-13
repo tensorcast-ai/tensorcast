@@ -13,7 +13,7 @@ from tensorcast.api import register_artifact
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast._C import get_cuda_memory_handle
-from tensorcast.types import DVMPPlan, LeasePlan, LeaseSegment, CoalescedHandshake
+from tensorcast.types import CpuPlan, LeasePlan, LeaseSegment, CoalescedHandshake
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
 from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
 import subprocess
@@ -60,7 +60,7 @@ def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Pop
         "engine": {
             "mem_pool_size_bytes": 268435456,
             "chunk_bytes": 8388608,
-            "dvmp_chunk_size_bytes": 8388608,
+            "cpu_chunk_size_bytes": 8388608,
             "streaming_buffer_max_concurrent_sessions": 1,
         },
         "communicator": {"enable_rdma": False},
@@ -103,7 +103,7 @@ def _skip_if_no_cuda() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_register_dvmp_stream_commit(tmp_path: Path):
+def test_register_cpu_stream_commit(tmp_path: Path):
     listen = "127.0.0.1:50730"
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
@@ -111,13 +111,13 @@ def test_register_dvmp_stream_commit(tmp_path: Path):
         pytest.fail(str(e))
 
     try:
-        # Build small CPU tensors, enforce DVMP plan by passing device_id
+        # Build small CPU tensors, enforce CPU plan by passing device_id
         t1 = torch.zeros((4, 4), dtype=torch.float32)
         t2 = torch.ones((2, 8), dtype=torch.float32)
         state = {"a": t1, "b": t2}
 
-        opts = RegisterArtifactOptions(plan="dvmp")
-        # device_id enforces CPU input mode for dvmp path in SDK
+        opts = RegisterArtifactOptions(plan="cpu")
+        # device_id enforces CPU input mode for cpu path in SDK
         res = register_artifact(state, options=opts, device_id=0, daemon_address=listen)
         desc = res.descriptor
         assert desc.artifact_id.startswith("mi2:")
@@ -262,7 +262,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
 
 @pytest.mark.timeout(60)
 def test_dvmp_ttl_expiry(tmp_path: Path):
-    """DVMP commit should fail if TTL expires before commit."""
+    """CPU commit should fail if TTL expires before commit."""
     listen = "127.0.0.1:50732"
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
@@ -280,20 +280,20 @@ def test_dvmp_ttl_expiry(tmp_path: Path):
         tensor_index_v2 = {"x": [0, size_bytes, shape, stride, "torch.float32", 0]}
         index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-        # Begin with dvmp plan and TTL using SDK handle
+        # Begin with cpu plan and TTL using SDK handle
         handle, _hs = begin_register_artifact_sdk(
             device_id=0,
             total_size_bytes=size_bytes,
             ttl_ms=ttl,
             tensor_index_data=index_bytes,
-            plan=DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0),
+            plan=CpuPlan(kind="cpu", preferred_channel=2, ring_bytes=0),
             daemon_address=listen,
         )
 
-        # Feed dvmp chunk
+        # Feed cpu chunk
         buf = (np.zeros((2, 2), dtype=np.float32)).tobytes()
         ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, buf, offset=0)
+        ok = ctl.feed_register_artifact_cpu_stream_data(handle.registration_id, buf, offset=0)
         assert ok
 
         # Sleep beyond TTL to force expiry
@@ -311,8 +311,8 @@ def test_dvmp_ttl_expiry(tmp_path: Path):
 
 
 @pytest.mark.timeout(60)
-def test_dvmp_ttl_keepalive_success(tmp_path: Path):
-    """DVMP commit should succeed even after TTL, if keepalive is sent periodically."""
+def test_cpu_ttl_keepalive_success(tmp_path: Path):
+    """CPU commit should succeed even after TTL, if keepalive is sent periodically."""
     listen = "127.0.0.1:50733"
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
@@ -328,14 +328,14 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
         tensor_index_v2 = {"x": [0, size_bytes, shape, stride, "torch.float32", 0]}
         index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-        # Begin with dvmp plan and TTL using SDK handle (auto-keepalive)
+        # Begin with cpu plan and TTL using SDK handle (auto-keepalive)
         ttl = 100  # ms
         handle, _hs = begin_register_artifact_sdk(
             device_id=0,
             total_size_bytes=size_bytes,
             ttl_ms=ttl,
             tensor_index_data=index_bytes,
-            plan=DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0),
+            plan=CpuPlan(kind="cpu", preferred_channel=2, ring_bytes=0),
             daemon_address=listen,
         )
         reg_id = handle.registration_id
@@ -353,11 +353,11 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
         th = threading.Thread(target=_ka, daemon=True)
         th.start()
 
-        # Feed dvmp chunk
+        # Feed cpu chunk
         import numpy as np
         buf = (np.zeros((2, 2), dtype=np.float32)).tobytes()
         ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, buf, offset=0)
+        ok = ctl.feed_register_artifact_cpu_stream_data(handle.registration_id, buf, offset=0)
         assert ok
 
         # Sleep beyond initial TTL so that commit would have failed without keepalive
@@ -377,7 +377,7 @@ def test_dvmp_ttl_keepalive_success(tmp_path: Path):
 
 @pytest.mark.timeout(60)
 def test_ttl_expiry_on_feed_paths(tmp_path: Path):
-    """TTL expiry should fail fast in Feed for DVMP and Lease."""
+    """TTL expiry should fail fast in Feed for CPU and Lease."""
     # Start daemon
     listen = "127.0.0.1:50737"
     try:
@@ -386,7 +386,7 @@ def test_ttl_expiry_on_feed_paths(tmp_path: Path):
         pytest.fail(str(e))
 
     try:
-        # DVMP: begin with very short TTL, then attempt to feed after expiry
+        # CPU: begin with very short TTL, then attempt to feed after expiry
         import json
         size_bytes = 64
         tensor_index_v2 = {"x": [0, size_bytes, [2, 32], [32, 1], "torch.uint8", 0]}
@@ -397,13 +397,13 @@ def test_ttl_expiry_on_feed_paths(tmp_path: Path):
             total_size_bytes=size_bytes,
             ttl_ms=50,
             tensor_index_data=index_bytes,
-            plan=DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0),
+            plan=CpuPlan(kind="cpu", preferred_channel=2, ring_bytes=0),
             daemon_address=listen,
         )
         time.sleep(0.08)
         ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_dvmp_stream_data(handle.registration_id, bytes([0] * size_bytes), offset=0)
-        assert not ok, "DVMP feed should fail after TTL expiry"
+        ok = ctl.feed_register_artifact_cpu_stream_data(handle.registration_id, bytes([0] * size_bytes), offset=0)
+        assert not ok, "CPU feed should fail after TTL expiry"
 
         # Lease path: if CUDA available
         if torch.cuda.is_available():

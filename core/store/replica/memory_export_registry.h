@@ -14,22 +14,24 @@
 #include "absl/types/span.h"
 #include "gsl/pointers"
 
-#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/communication_types.h"
-#include "core/store/direct_write.h"
-#include "core/store/replica/replica_memory_coordinator.h"
+// no direct write token needed in export service
+#include "core/store/replica/unified_memory_authority.h"
+// OpenTelemetry Metrics API (types used in member declarations)
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/observer_result.h"
 
 namespace tensorcast::store::replica {
 
-class ChunkExportService {
+class MemoryExportRegistry {
  public:
-  ChunkExportService(
-      gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma,
-      gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp)
-      : uma_(std::move(uma)), dvmp_(std::move(dvmp)) {}
+  MemoryExportRegistry(
+      gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma,
+      gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space);
 
-  absl::StatusOr<CommRegistrationInfo> export_chunks(
+  absl::StatusOr<ExportRegistration> export_chunks(
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location,
       absl::Span<const uint32_t> chunks,
@@ -37,7 +39,7 @@ class ChunkExportService {
 
   absl::Status unexport_chunks(
       const loading::ReplicaKey& key,
-      const CommRegistrationInfo& info,
+      const ExportRegistration& info,
       communicator::engine::Communicator& comm_engine);
 
  private:
@@ -64,17 +66,28 @@ class ChunkExportService {
   };
 
   struct ExportRecord {
-    CommRegistrationInfo info;
-    // Keepalive tokens for CPU leases; empty for GPU
-    std::vector<DirectWriteToken> cpu_tokens;
+    ExportRegistration info;
+    // UMA-managed keepalive for CPU VS pin leases (nullptr for GPU)
+    std::shared_ptr<void> uma_keepalive;
+    // Coalesced chunk ranges used for this export (for UMA ledger updates on unexport)
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
   };
 
-  gsl::not_null<std::shared_ptr<ReplicaMemoryCoordinator>> uma_;
-  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_;
+  gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma_;
+  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_;
 
   // Cache per (ReplicaKey, Location) to support precise unexport and lease lifetime
   std::unordered_map<ExportKey, ExportRecord, ExportKeyHash> records_;
   std::mutex records_mu_;
+
+  // --- Metrics ---
+  // Meter and instruments for export metrics
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> ex_reg_total_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> ex_keepalive_gauge_;
+
+  static void keepalive_gauge_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  double keepalive_count_snapshot_ = 0.0; // last snapshot used when callback cannot lock
 };
 
 } // namespace tensorcast::store::replica

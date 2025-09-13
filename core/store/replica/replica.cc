@@ -14,7 +14,7 @@
 #include "core/store/loader/inline_buffer_loader.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loader/p2p_loader.h"
-#include "core/store/replica/memory_manager.h"
+#include "core/store/replica/replica_load_controller.h"
 
 namespace tensorcast::store::replica {
 
@@ -30,7 +30,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
     return absl::InvalidArgumentError("Replica identifier cannot be empty.");
   }
 
-  // MemoryManager will be constructed after resolving artifact size
+  // ReplicaLoadController will be constructed after resolving artifact size
 
   // --- Create Loader based on Source ---
   std::unique_ptr<IArtifactLoader> loader;
@@ -58,7 +58,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
             [&](const loading::InlineBufferSource& buffer_source) -> absl::Status {
               VLOG(1) << "Replica(" << config.artifact_identifier << "): Configuring InlineBufferLoader";
               loader = std::make_unique<InlineBufferLoader>(buffer_source);
-              source_type = common::memory::MemoryLocation::PAGEABLE_CPU; // semantic placeholder for in-memory
+              source_type = common::memory::MemoryLocation::CPU; // semantic placeholder for in-memory
               return absl::OkStatus();
             }},
         config.source);
@@ -106,12 +106,12 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
     return absl::FailedPreconditionError("Artifact size mismatch between loader and config expectation.");
   }
 
-  // --- Create MemoryManager ---
-  auto memory_manager = std::make_shared<MemoryManager>(
+  // --- Create ReplicaLoadController ---
+  auto memory_manager = std::make_shared<ReplicaLoadController>(
       config.artifact_identifier,
       config.local_device_id,
-      config.pinned_memory_pool,
-      config.dvmp,
+      config.pinned_buffer_pool,
+      config.virtual_addr_space,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
       artifact_size);
@@ -144,7 +144,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
 Replica::Replica(
     loading::ReplicaKey key,
     std::unique_ptr<IArtifactLoader> loader,
-    std::shared_ptr<MemoryManager> memory_manager,
+    std::shared_ptr<ReplicaLoadController> memory_manager,
     common::memory::MemoryLocation source_type)
     : key_(std::move(key)),
       loader_(std::move(loader)),
@@ -211,14 +211,14 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     return std::async(std::launch::deferred, [st] { return st; }).share();
   };
 
-  // Dynamic device re-configuration is no longer supported. The MemoryManager
+  // Dynamic device re-configuration is no longer supported. The ReplicaLoadController
   // is now permanently bound to the device id supplied at construction time.
 
   // ------------------------------------------------------------------
   // Quick recovery path: if previous operation left the target location in
   // FAILED state, attempt to reset the memory so that the caller can retry.
   // This is done *before* taking the Replica-level mutex to avoid deadlock
-  // with MemoryManager::release_memory which takes its own mutex.
+  // with ReplicaLoadController::release_memory which takes its own mutex.
   // ------------------------------------------------------------------
   MemoryState initial_state = memory_manager_->get_state(target_location);
   if (initial_state == MemoryState::FAILED) {
@@ -235,7 +235,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     // Invalidate the cached future for this location (if any).
     {
       absl::MutexLock fut_lock(&mutex_);
-      if (target_location == MemoryLocation::PAGEABLE_CPU) {
+      if (target_location == MemoryLocation::CPU) {
         cpu_load_future_ = std::shared_future<absl::Status>();
       } else {
         gpu_load_future_ = std::shared_future<absl::Status>();
@@ -250,7 +250,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
   // ------------------------------------------------------------------
   MemoryState current_state = MemoryState::UNINITIALIZED;
   std::shared_future<absl::Status>* member_future = nullptr;
-  MemoryManager* mm_ptr = nullptr; // raw pointer is safe as Replica owns MemoryManager lifetime
+  ReplicaLoadController* mm_ptr = nullptr; // raw pointer is safe as Replica owns orchestrator lifetime
   MemoryLocation source_location = MemoryLocation::NONE;
   bool need_allocation = false;
   absl::StatusOr<MemoryLocation> src_status; // Declare here
@@ -261,7 +261,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     // Get raw pointer under lock
     mm_ptr = memory_manager_.get().get();
 
-    if (target_location == MemoryLocation::PAGEABLE_CPU) {
+    if (target_location == MemoryLocation::CPU) {
       member_future = &cpu_load_future_;
     } else if (target_location == MemoryLocation::GPU) {
       member_future = &gpu_load_future_;
@@ -309,7 +309,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     // LOADING.  Launching an additional load task here would result in
     // duplicate disk reads and, more importantly, a second call to
     // allocate_buffer_pool() which fails with AlreadyExists, ultimately
-    // placing the MemoryManager in FAILED state.  Instead, we treat the
+    // placing the ReplicaLoadController in FAILED state.  Instead, we treat the
     // ALLOCATED state as a signal that a load is imminent and simply wait
     // for the first thread to transition the state to LOADED or FAILED.
     // ------------------------------------------------------------------
@@ -342,7 +342,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     // thread performs the initial allocation.  This prevents a race where
     // another thread observes the still-UNALLOCATED state before the first
     // thread has finished allocation, leading to duplicate allocation and
-    // duplicate load tasks (which can leave the MemoryManager in FAILED
+    // duplicate load tasks (which can leave the ReplicaLoadController in FAILED
     // state).  The allocation itself may be moderately expensive (e.g.
     // UMA allocation) but is still far cheaper than the full disk load we perform
     // later and only happens once per instance, so holding the mutex here is
@@ -380,16 +380,16 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
 
   // Dispatch appropriate task
   std::shared_future<absl::Status> new_future;
-  if (source_location == MemoryLocation::PAGEABLE_CPU && target_location == MemoryLocation::GPU) {
-    new_future = mm_ptr->copy_data_async(MemoryLocation::PAGEABLE_CPU, MemoryLocation::GPU).share();
-  } else if (source_location == MemoryLocation::GPU && target_location == MemoryLocation::PAGEABLE_CPU) {
-    new_future = mm_ptr->copy_data_async(MemoryLocation::GPU, MemoryLocation::PAGEABLE_CPU).share();
+  if (source_location == MemoryLocation::CPU && target_location == MemoryLocation::GPU) {
+    new_future = mm_ptr->copy_data_async(MemoryLocation::CPU, MemoryLocation::GPU).share();
+  } else if (source_location == MemoryLocation::GPU && target_location == MemoryLocation::CPU) {
+    new_future = mm_ptr->copy_data_async(MemoryLocation::GPU, MemoryLocation::CPU).share();
   } else if (source_location == MemoryLocation::DISK || source_location == MemoryLocation::REMOTE) {
     auto src_or = loader_->open_source();
     if (!src_or.ok()) {
       return make_ready_future(src_or.status());
     }
-    // Delegate orchestration to MemoryManager using the provided source
+    // Delegate orchestration to ReplicaLoadController using the provided source
     new_future = memory_manager_->load_async_from_source(std::move(*src_or), target_location, concurrency).share();
   } else {
     return make_ready_future(absl::InternalError("Invalid source/target combination."));
@@ -411,10 +411,10 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
 absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_target(
     common::memory::MemoryLocation target_location) const {
   // Assumes mutex_ is held. (Now called within lock scope in ensure_loaded_async)
-  MemoryState cpu_state = memory_manager_->get_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  MemoryState cpu_state = memory_manager_->get_state(common::memory::MemoryLocation::CPU);
   MemoryState gpu_state = memory_manager_->get_state(common::memory::MemoryLocation::GPU);
 
-  if (target_location == common::memory::MemoryLocation::PAGEABLE_CPU) {
+  if (target_location == common::memory::MemoryLocation::CPU) {
     // If GPU is loaded, copy from GPU. Otherwise, load from original source.
     if (gpu_state == MemoryState::LOADED) {
       return common::memory::MemoryLocation::GPU;
@@ -431,7 +431,7 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
   if (target_location == common::memory::MemoryLocation::GPU) {
     // If CPU is loaded, copy from CPU. Otherwise, load from original source.
     if (cpu_state == MemoryState::LOADED) {
-      return common::memory::MemoryLocation::PAGEABLE_CPU;
+      return common::memory::MemoryLocation::CPU;
     } // Can load from DISK (via CPU staging implicitly handled by DiskLoader->copy)
     // or directly from REMOTE if P2P->GPU is supported.
     if (original_source_type_ == common::memory::MemoryLocation::DISK) {
@@ -464,7 +464,7 @@ absl::Status Replica::release_memory(MemoryLocation location, bool safe_release)
   // If release was successful and state is now unallocated, invalidate the future
   if (status.ok() && memory_manager_->get_state(location) <= MemoryState::UNALLOCATED) {
     std::shared_future<absl::Status>* relevant_future = nullptr;
-    if (location == MemoryLocation::PAGEABLE_CPU) {
+    if (location == MemoryLocation::CPU) {
       relevant_future = &cpu_load_future_;
     } else if (location == MemoryLocation::GPU) {
       relevant_future = &gpu_load_future_;
@@ -497,18 +497,18 @@ absl::Status Replica::wait_until_loaded(MemoryLocation location, absl::Duration 
   return memory_manager_->wait_for_state(location, MemoryState::LOADED, timeout);
 }
 
-MemoryManager& Replica::get_memory_manager() const {
+ReplicaLoadController& Replica::get_memory_manager() const {
   // Returning reference to unique_ptr's managed object. Okay if Replica lifetime > caller usage.
   return *memory_manager_;
 }
 
-absl::StatusOr<CommRegistrationInfo> Replica::enable_remote_memory_access(
+absl::StatusOr<ExportRegistration> Replica::enable_remote_memory_access(
     MemoryLocation location,
     tensorcast::communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
-  // Build full chunk list using DVMP metadata snapshot.
-  absl::Span<const ChunkMeta> meta = memory_manager_->chunk_snapshot();
+  // Build full chunk list using VS metadata snapshot.
+  absl::Span<const ChunkMeta> meta = memory_manager_->chunk_telemetry_snapshot();
   std::vector<uint32_t> chunks;
   chunks.reserve(meta.size());
   for (uint32_t i = 0; i < meta.size(); ++i) {
@@ -542,7 +542,7 @@ absl::StatusOr<tensorcast::common::ArtifactVerificationInfo> Replica::generate_v
   std::vector<size_t> data_sizes;
   uint64_t artifact_size = memory_manager_->get_artifact_size();
 
-  // Single contiguous buffer for both GPU and CPU under DVMP
+  // Single contiguous buffer for both GPU and CPU under VS
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
@@ -580,7 +580,7 @@ absl::Status Replica::verify_artifact_data(
   std::vector<size_t> data_sizes;
   uint64_t artifact_size = memory_manager_->get_artifact_size();
 
-  // Single contiguous buffer for both GPU and CPU under DVMP
+  // Single contiguous buffer for both GPU and CPU under VS
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
@@ -617,7 +617,7 @@ absl::Status Replica::verify_key_points(
   std::vector<size_t> data_sizes;
   uint64_t artifact_size = memory_manager_->get_artifact_size();
 
-  // Single contiguous buffer for both GPU and CPU under DVMP
+  // Single contiguous buffer for both GPU and CPU under VS
   data_sizes.push_back(artifact_size);
 
   // Determine device ID for verification
@@ -652,7 +652,7 @@ absl::Status Replica::copy_from(const Replica& src) {
   }
 
   // Ensure source GPU memory is LOADED.  We purposefully do not acquire src.mutex_
-  // here because MemoryManager::get_state is internally thread-safe.
+  // here because ReplicaLoadController::get_state is internally thread-safe.
   if (src.get_memory_state(MemoryLocation::GPU) != MemoryState::LOADED) {
     return absl::FailedPreconditionError("Source replica GPU memory not in LOADED state");
   }
@@ -660,7 +660,7 @@ absl::Status Replica::copy_from(const Replica& src) {
   // ────────────────────────────────────────────────────────────────────────────
   // Prepare destination GPU memory: allocate if necessary.
   // ────────────────────────────────────────────────────────────────────────────
-  MemoryManager& dst_mm = get_memory_manager();
+  ReplicaLoadController& dst_mm = get_memory_manager();
   MemoryState dst_state = dst_mm.get_state(MemoryLocation::GPU);
   if (dst_state == MemoryState::UNALLOCATED) {
     absl::Status alloc_st = dst_mm.allocate_memory(MemoryLocation::GPU);

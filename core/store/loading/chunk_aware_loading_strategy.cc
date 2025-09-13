@@ -17,8 +17,8 @@
 #include "core/store/device_registry.h"
 #include "core/store/loader/disk_loader.h"
 // p2p_loader.h and source.h are included indirectly via other headers. Avoid unused includes.
-#include "core/store/replica/memory_manager.h"
-#include "core/store/replica/replica_memory_coordinator.h"
+#include "core/store/replica/replica_load_controller.h"
+#include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::loading {
@@ -26,73 +26,39 @@ namespace tensorcast::store::loading {
 ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_plan(
     const ReplicaKey& key,
     common::memory::MemoryLocation target,
-    const replica::ReplicaMemoryCoordinator& memory,
+    const replica::UnifiedMemoryAuthority& memory,
     components::GlobalStoreClient& global_store) {
   LoadPlan plan;
   plan.target = target;
 
-  // Get chunk availability across all locations
-  auto chunk_mappings = memory.get_chunk_mappings(key);
-  std::vector<uint32_t> missing_chunks;
-
+  // Determine missing chunks using UMA record-based query
   const size_t chunk_size = memory.get_chunk_size();
-  // Retrieve total artifact size (may fail if not allocated yet)
   size_t artifact_size = 0;
-  if (auto size_or = memory.get_artifact_size(key); size_or.ok()) {
+  if (auto size_or = memory.get_artifact_size(key); size_or.ok())
     artifact_size = *size_or;
-  }
-  plan.total_chunks = chunk_mappings.size();
+  int device_id = 0; // TODO: Obtain actual device id from context
+  std::vector<uint32_t> missing_chunks = memory.get_missing_chunks(key, target, device_id);
+  // Compute total_chunks from artifact_size when available
+  plan.total_chunks = (artifact_size > 0 && chunk_size > 0) ? ((artifact_size + chunk_size - 1) / chunk_size) : 0;
   plan.total_bytes = 0;
-
-  // Determine which chunks are missing at target
-  for (size_t i = 0; i < chunk_mappings.size(); ++i) {
-    const auto& mapping = chunk_mappings[i];
-    bool available_at_target = false;
-
-    if (target == common::memory::MemoryLocation::GPU) {
-      // For GPU target, check if chunk is already in the target GPU
-      // TODO: Get actual device ID from context
-      int device_id = 0; // TODO: Obtain real device id from context
-      DeviceKey dev_key = DeviceRegistry::instance().gpu_key(device_id);
-      auto it = mapping.gpu_state.find(dev_key);
-      available_at_target =
-          (it != mapping.gpu_state.end() &&
-           (it->second == replica::ChunkState::HOT || it->second == replica::ChunkState::COPIED_GPU));
-    } else if (target == common::memory::MemoryLocation::PAGEABLE_CPU) {
-      // For CPU target, check if chunk is resident
-      available_at_target =
-          (mapping.cpu_state == replica::ChunkState::HOT || mapping.cpu_state == replica::ChunkState::COLD);
-    }
-
-    if (!available_at_target) {
-      missing_chunks.push_back(i);
-      if (artifact_size > 0) {
-        plan.total_bytes += std::min(chunk_size, artifact_size - i * chunk_size);
-      }
-    }
+  for (uint32_t i : missing_chunks) {
+    if (artifact_size > 0)
+      plan.total_bytes += std::min(chunk_size, artifact_size - static_cast<size_t>(i) * chunk_size);
   }
 
   // Group chunks by best available source
   std::map<ChunkSource, std::vector<uint32_t>> source_groups;
 
   for (uint32_t chunk_idx : missing_chunks) {
-    const auto& mapping = chunk_mappings[chunk_idx];
     bool chunk_assigned = false;
-
-    // Priority 1: Local copy (CPU→GPU or GPU→CPU)
-    if (target == common::memory::MemoryLocation::GPU &&
-        (mapping.cpu_state == replica::ChunkState::HOT || mapping.cpu_state == replica::ChunkState::COLD)) {
+    // Ask UMA for best local source
+    auto best = memory.get_best_source_for_chunk(key, chunk_idx, target);
+    if (best.type == replica::UnifiedMemoryAuthority::ChunkSource::LOCAL_CPU) {
       source_groups[ChunkSource::LOCAL_CPU].push_back(chunk_idx);
       chunk_assigned = true;
-    } else if (target == common::memory::MemoryLocation::PAGEABLE_CPU) {
-      // Check if chunk is available on any local GPU
-      for (const auto& [device_key, state] : mapping.gpu_state) {
-        if (state == replica::ChunkState::HOT || state == replica::ChunkState::COPIED_GPU) {
-          source_groups[ChunkSource::LOCAL_GPU].push_back(chunk_idx);
-          chunk_assigned = true;
-          break;
-        }
-      }
+    } else if (best.type == replica::UnifiedMemoryAuthority::ChunkSource::LOCAL_GPU) {
+      source_groups[ChunkSource::LOCAL_GPU].push_back(chunk_idx);
+      chunk_assigned = true;
     }
 
     if (!chunk_assigned) {
@@ -107,7 +73,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
           src.size_bytes = 0; // Unknown at this stage
           src.ip = loc.node_address;
           src.port = static_cast<uint16_t>(loc.p2p_port);
-          src.location.type = common::memory::MemoryLocation::PAGEABLE_CPU; // Assume CPU for now
+          src.location.type = common::memory::MemoryLocation::CPU; // Assume CPU for now
           candidates.push_back(std::move(src));
         }
 
@@ -149,8 +115,8 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
 
 std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
     const LoadPlan& plan,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager) {
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager) {
   return std::async(std::launch::async, [plan, &memory, mem_manager]() {
     return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {}); // No-op progress callback
   });
@@ -158,8 +124,8 @@ std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
 
 absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
     const LoadPlan& plan,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
   if (plan.operations.empty()) {
     return absl::OkStatus(); // Nothing to do
@@ -194,7 +160,7 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
     const auto& replica_key = mem_manager->replica_key();
 
     // Check if this was a DRAM load
-    if (plan.target == common::memory::MemoryLocation::PAGEABLE_CPU) {
+    if (plan.target == common::memory::MemoryLocation::CPU) {
       // After initial DRAM load, mark configured ratio as preemptible
       float preemptible_ratio = 0.5F; // TODO: Make configurable
       auto preempt_status = mem_manager->mark_cpu_preemptible(preemptible_ratio);
@@ -223,8 +189,8 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
 
 absl::Status ChunkAwareLoadingStrategy::execute_operation(
     const LoadOperation& op,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
   switch (op.source) {
     case ChunkSource::LOCAL_CPU:
@@ -248,22 +214,30 @@ absl::Status ChunkAwareLoadingStrategy::execute_operation(
 absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     const std::vector<uint32_t>& chunks,
     common::memory::MemoryLocation target,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
   if (target != common::memory::MemoryLocation::GPU) {
     return absl::InvalidArgumentError("Local CPU copy only supports GPU target");
   }
 
-  // Lock chunks for transfer
-  absl::Status lock_status = memory.lock_chunks_for_transfer(
-      mem_manager->replica_key(), common::memory::MemoryLocation::PAGEABLE_CPU, target, chunks);
-  if (!lock_status.ok()) {
-    return lock_status;
+  // Plan transfer via UMA (transactional)
+  const auto device_id = mem_manager->get_local_device_id();
+  auto plan_or = memory.plan_load(
+      mem_manager->replica_key(),
+      common::memory::MemoryLocation::GPU,
+      std::optional<int>(device_id),
+      std::optional<absl::Span<const uint32_t>>(absl::MakeSpan(chunks)));
+  if (!plan_or.ok()) {
+    return plan_or.status();
+  }
+  const auto plan = *plan_or;
+  if (plan.chunk_indices.empty()) {
+    return absl::OkStatus(); // Nothing to do
   }
 
   // Get pointers
-  auto cpu_ptrs = mem_manager->get_pointer(common::memory::MemoryLocation::PAGEABLE_CPU);
+  auto cpu_ptrs = mem_manager->get_pointer(common::memory::MemoryLocation::CPU);
   auto gpu_ptrs = mem_manager->get_pointer(common::memory::MemoryLocation::GPU);
 
   if (cpu_ptrs.empty() || gpu_ptrs.empty() || cpu_ptrs[0] == nullptr || gpu_ptrs[0] == nullptr) {
@@ -271,17 +245,8 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   }
   gsl::not_null<void*> cpu_base{cpu_ptrs[0]};
   gsl::not_null<void*> gpu_base{gpu_ptrs[0]};
-  const size_t chunk_size = memory.get_chunk_size();
 
-  // Get total artifact size
-  size_t artifact_size = 0;
-  if (auto size_or = memory.get_artifact_size(mem_manager->replica_key()); size_or.ok()) {
-    artifact_size = *size_or;
-  } else {
-    return size_or.status();
-  }
-
-  // Copy each chunk using ACM with UMA advancement in callbacks
+  // Copy plan ranges using ACM; UMA ledger is finalized via commit() below.
   size_t completed = 0;
   absl::Status copy_status = absl::OkStatus();
   absl::Mutex first_err_mu;
@@ -289,46 +254,27 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   common::CopyHandle last_handle;
   bool last_set = false;
 
-  for (uint32_t chunk_idx : chunks) {
-    size_t offset = chunk_idx * chunk_size;
-    size_t size = std::min(chunk_size, artifact_size - offset);
-
+  for (const auto& range : plan.ranges) {
+    const uint64_t offset = range.first;
+    const size_t size = range.second;
     void* src = static_cast<char*>(cpu_base.get()) + offset;
     void* dst = static_cast<char*>(gpu_base.get()) + offset;
 
-    // Schedule H2D via ACM; UMA state advanced in callback for this chunk
+    // Schedule H2D via ACM; UMA state will be recorded on commit()
     common::HostRegion h{.base = src, .length = size, .pinned = false};
-    common::DeviceRegion d{.device_id = mem_manager->get_local_device_id(), .dev_ptr = dst, .length = size};
-    auto on_done = [&memory,
-                    key = mem_manager->replica_key(),
-                    dev = mem_manager->get_local_device_id(),
-                    chunk_idx,
-                    &first_err_mu,
-                    &first_err]() {
-      auto st = memory.update_chunk_states(
-          key,
-          common::memory::MemoryLocation::GPU,
-          std::vector<uint32_t>{chunk_idx},
-          replica::ChunkState::COPIED_GPU,
-          dev);
-      if (!st.ok()) {
-        absl::MutexLock lk(&first_err_mu);
-        if (first_err.ok())
-          first_err = st;
-      }
-    };
-    common::CopyOptions opts{.tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = on_done}};
+    common::DeviceRegion d{.device_id = device_id, .dev_ptr = dst, .length = size};
+    common::CopyOptions opts{.tracing_stage = "H2D/Copy"};
     auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
     if (!hdl_or.ok()) {
       copy_status = hdl_or.status();
-      LOG(ERROR) << "Failed to schedule H2D for chunk " << chunk_idx << ": " << copy_status;
+      LOG(ERROR) << "Failed to schedule H2D for range off=" << offset << " len=" << size << ": " << copy_status;
       break;
     }
     last_handle = std::move(*hdl_or);
     last_set = true;
 
-    completed++;
-    progress_cb(completed, chunks.size());
+    completed += 1;
+    progress_cb(completed, plan.ranges.size());
   }
 
   // Wait for the last submitted copy to complete and propagate any UMA callback error
@@ -336,21 +282,25 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
     auto wst = last_handle.wait();
     if (!wst.ok()) {
       copy_status = wst;
-    } else {
-      absl::MutexLock lk(&first_err_mu);
-      if (!first_err.ok()) {
-        copy_status = first_err;
-      }
     }
   }
 
-  return copy_status;
+  if (!copy_status.ok()) {
+    // Abort UMA session on failure
+    (void)memory.abort(plan.session_id);
+    return copy_status;
+  }
+
+  // Commit UMA plan for all chunks covered by this copy
+  absl::Status commit_status = memory.commit(
+      plan.session_id, common::memory::MemoryLocation::GPU, absl::MakeSpan(plan.chunk_indices), device_id);
+  return commit_status;
 }
 
 absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
     const LoadOperation& op,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Group chunks by remote source
   std::map<std::string, std::vector<uint32_t>> chunks_by_source;
@@ -377,13 +327,30 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
       break;
     }
 
-    // Load chunks via open_source + MemoryManager
+    // Plan transfer through UMA first
+    auto plan_or = memory.plan_load(
+        mem_manager->replica_key(),
+        op.target,
+        (op.target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
+                                                           : std::optional<int>(std::nullopt),
+        std::optional<absl::Span<const uint32_t>>(absl::MakeSpan(chunks)));
+    if (!plan_or.ok()) {
+      overall_status = plan_or.status();
+      break;
+    }
+    const auto plan = *plan_or;
+    if (plan.chunk_indices.empty()) {
+      continue; // Nothing to do for this source
+    }
+
+    // Load chunks via open_source + ReplicaLoadController
     auto src_or = loader->open_source();
     if (!src_or.ok()) {
       overall_status = src_or.status();
       break;
     }
-    auto future = mem_manager->load_async_from_source(std::move(*src_or), op.target, 4, absl::MakeSpan(chunks));
+    auto future =
+        mem_manager->load_async_from_source(std::move(*src_or), op.target, 4, absl::MakeSpan(plan.chunk_indices));
 
     absl::Status load_status = future.get();
     if (!load_status.ok()) {
@@ -391,23 +358,22 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
       break;
     }
 
-    completed += chunks.size();
+    completed += plan.chunk_indices.size();
     progress_cb(completed, op.chunks.size());
-
     if (load_status.ok()) {
-      // Update chunk states after successful P2P transfer
-      auto state = (op.target == common::memory::MemoryLocation::GPU) ? replica::ChunkState::COPIED_GPU
-                                                                      : replica::ChunkState::HOT;
-      auto upd_status = memory.update_chunk_states(
-          mem_manager->replica_key(),
+      // Commit UMA plan
+      auto cst = memory.commit(
+          plan.session_id,
           op.target,
-          chunks,
-          state,
+          absl::MakeSpan(plan.chunk_indices),
           (op.target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
-                                                             : std::nullopt);
-      if (!upd_status.ok()) {
-        VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+                                                             : std::optional<int>(std::nullopt));
+      if (!cst.ok()) {
+        overall_status = cst;
+        break;
       }
+    } else {
+      (void)memory.abort(plan.session_id);
     }
   }
 
@@ -417,11 +383,11 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
 absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     const std::vector<uint32_t>& chunks,
     common::memory::MemoryLocation target,
-    replica::ReplicaMemoryCoordinator& memory,
-    const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+    replica::UnifiedMemoryAuthority& memory,
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
   // Create disk loader
-  // Note: We'd need the actual disk source path from MemoryManager
+  // Note: We'd need the actual disk source path from ReplicaLoadController
   // For now, use the instance key to construct the path
   const std::string& artifact_id = mem_manager->replica_key().artifact_id;
   if (absl::StartsWith(artifact_id, "mi2:")) {
@@ -437,30 +403,44 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     return init_status;
   }
 
-  // Load chunks via open_source + MemoryManager
+  // Plan transfer via UMA
+  auto plan_or = memory.plan_load(
+      mem_manager->replica_key(),
+      target,
+      (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
+                                                      : std::optional<int>(std::nullopt),
+      std::optional<absl::Span<const uint32_t>>(absl::MakeSpan(chunks)));
+  if (!plan_or.ok()) {
+    return plan_or.status();
+  }
+  const auto plan = *plan_or;
+  if (plan.chunk_indices.empty()) {
+    return absl::OkStatus();
+  }
+
+  // Load chunks via open_source + ReplicaLoadController
   auto src_or = loader->open_source();
   if (!src_or.ok()) {
     return src_or.status();
   }
-  auto future = mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(chunks));
+  auto future = mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(plan.chunk_indices));
 
   absl::Status load_status = future.get();
 
   if (load_status.ok()) {
-    // Update chunk states
-    auto state =
-        (target == common::memory::MemoryLocation::GPU) ? replica::ChunkState::COPIED_GPU : replica::ChunkState::HOT;
-    auto upd_status = memory.update_chunk_states(
-        mem_manager->replica_key(),
+    // Commit UMA plan on success
+    auto cst = memory.commit(
+        plan.session_id,
         target,
-        chunks,
-        state,
+        absl::MakeSpan(plan.chunk_indices),
         (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
-                                                        : std::nullopt);
-    if (!upd_status.ok()) {
-      VLOG(1) << "ChunkAwareLoadingStrategy: update_chunk_states failed: " << upd_status;
+                                                        : std::optional<int>(std::nullopt));
+    if (!cst.ok()) {
+      return cst;
     }
-    progress_cb(chunks.size(), chunks.size());
+    progress_cb(plan.chunk_indices.size(), plan.chunk_indices.size());
+  } else {
+    (void)memory.abort(plan.session_id);
   }
 
   return load_status;

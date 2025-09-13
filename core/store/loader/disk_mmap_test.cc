@@ -9,14 +9,14 @@
 #include <unistd.h>
 #include <filesystem>
 
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using tensorcast::common::memory::DistributedVirtualMemoryPool;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
+using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -66,11 +66,11 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   // Pinned pool setup
   const size_t pool_total = 1024 * 1024 * 8; // 8 MiB
   const size_t pool_chunk = 1024;
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create DVMP
-  auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+  // Create VS
+  auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
 
   // Create DiskSource
   DiskSource disk_src;
@@ -83,8 +83,8 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
-      .pinned_memory_pool = pool,
-      .dvmp = dvmp,
+      .pinned_buffer_pool = pool,
+      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -93,13 +93,13 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   auto replica = std::move(*mstatus);
 
   SECTION("Load via mmap and verify content") {
-    auto fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+    auto fut = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(fut.valid());
     auto status = fut.get();
     REQUIRE(status.ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
-    auto ptrs = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    auto ptrs = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE_FALSE(ptrs.empty());
 
     // Lightweight verification: inspect first byte of the mapped region.

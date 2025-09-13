@@ -82,7 +82,7 @@ class CommunicationManager {
    * @param device_id Device ID for GPU memory
    * @return Registration info or error
    */
-  absl::StatusOr<CommRegistrationInfo> register_memory(
+  absl::StatusOr<ExportRegistration> register_memory(
       const std::vector<void*>& buffer_addresses,
       const std::vector<size_t>& buffer_sizes,
       int device_id);

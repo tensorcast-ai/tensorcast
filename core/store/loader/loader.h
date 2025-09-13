@@ -13,7 +13,7 @@ namespace tensorcast::store {
 
 /**
  * @brief Interface for loading replica data from a source (Disk, P2P)
- *        into memory managed by a MemoryManager.
+ *        into memory managed by a ReplicaLoadController.
  */
 class IArtifactLoader {
  public:

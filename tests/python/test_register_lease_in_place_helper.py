@@ -48,7 +48,7 @@ def _start_daemon_binary(listen_addr: str, storage_path: Path):
         "engine": {
             "mem_pool_size_bytes": 268435456,
             "chunk_bytes": 8388608,
-            "dvmp_chunk_size_bytes": 8388608,
+            "cpu_chunk_size_bytes": 8388608,
             "streaming_buffer_max_concurrent_sessions": 1,
         },
         "communicator": {"enable_rdma": False},
@@ -117,4 +117,3 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
             proc.wait(timeout=3)
         except Exception:
             pass
-

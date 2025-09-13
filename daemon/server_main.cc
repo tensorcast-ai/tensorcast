@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
   opts.num_thread = static_cast<int>(cfg.server().num_threads());
   opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
   opts.chunk_size = static_cast<size_t>(cfg.engine().chunk_bytes());
-  opts.dvmp_chunk_size = static_cast<size_t>(cfg.engine().dvmp_chunk_size_bytes());
+  opts.cpu_chunk_size = static_cast<size_t>(cfg.engine().cpu_chunk_size_bytes());
   opts.streaming_buffer_max_concurrent_sessions =
       static_cast<int>(cfg.engine().streaming_buffer_max_concurrent_sessions());
   if (cfg.engine().has_pinned_allocation_timeout()) {
@@ -97,7 +97,6 @@ int main(int argc, char** argv) {
     gs_addr = absl::StrCat(ep.host(), ":", ep.port());
   }
   opts.global_store_address = gs_addr;
-  opts.force_full_digest_on_load = cfg.compatibility().force_full_digest_on_load();
 
   // Apply logging level/VLOG, install optional sinks, then initialize OTel
   common::otel::apply_absl_log_level_from_config(cfg.observability().logging());

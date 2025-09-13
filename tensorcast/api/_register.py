@@ -51,7 +51,7 @@ from tensorcast.types import (
     ArtifactDescriptor,
     CoalescedHandshake,
     CoalescedPlan,
-    DVMPPlan,
+    CpuPlan,
     Handshake,
     LeasePlan,
     LeaseSegment,
@@ -66,7 +66,7 @@ DEFAULT_ALIGN = 1
 class RegistrationResult:
     """Unified result for registration APIs.
 
-    - state_dict: destination state dict for coalesced/DVMP; original artifact for lease
+    - state_dict: destination state dict for coalesced/UMA/VS; original artifact for lease
     - descriptor: content-addressed artifact descriptor
     - lease: post-commit lease handle when using lease-in-place; otherwise None
     """
@@ -234,7 +234,7 @@ def begin_register_artifact_sdk(
     total_size_bytes: int,
     ttl_ms: int | None,
     tensor_index_data: bytes,
-    plan: CoalescedPlan | DVMPPlan | LeasePlan,
+    plan: CoalescedPlan | CpuPlan | LeasePlan,
     daemon_address: str,
 ) -> tuple[RegisteredArtifact, Handshake]:
     ctl = get_daemon_client(daemon_address)
@@ -467,7 +467,7 @@ def _prepare_build(
 
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
-) -> CoalescedPlan | DVMPPlan | LeasePlan:
+) -> CoalescedPlan | CpuPlan | LeasePlan:
     plan_type = cast(PlanType, options.plan)
     if plan_type is PlanType.VRAM_COALESCED:
         return CoalescedPlan(
@@ -475,11 +475,11 @@ def make_plan_model(
             max_inflight_bytes=options.max_inflight_bytes,
             release_on_tensor_commit=options.release_on_tensor_commit,
         )
-    if plan_type is PlanType.DVMP:
-        return DVMPPlan(
-            kind="dvmp",
-            preferred_channel=int(options.dvmp_preferred_channel),  # pyright: ignore[reportArgumentType]
-            ring_bytes=int(options.dvmp_ring_bytes),
+    if plan_type is PlanType.CPU:
+        return CpuPlan(
+            kind="cpu",
+            preferred_channel=int(options.cpu_preferred_channel),  # pyright: ignore[reportArgumentType]
+            ring_bytes=int(options.cpu_ring_bytes),
         )
     if plan_type is PlanType.VRAM_LEASED:
         return LeasePlan(
@@ -534,7 +534,7 @@ class _CoalescedUploader:
         return dest_state_dict
 
 
-class _DVMPUploader:
+class _CpuUploader:
     def upload(
         self,
         *,
@@ -563,7 +563,7 @@ class _DVMPUploader:
 
         ok_all = True
         for off, data_bytes in frames:
-            ok = ctl.feed_register_artifact_dvmp_stream_data(
+            ok = ctl.feed_register_artifact_cpu_stream_data(
                 handle.registration_id,
                 data_bytes,
                 offset=int(off),
@@ -574,7 +574,7 @@ class _DVMPUploader:
                 ok_all = False
                 break
         if not ok_all:
-            raise FeedFailed("DVMP feed failed")
+            raise FeedFailed("CPU feed failed")
         return artifact
 
 
@@ -615,7 +615,7 @@ class _LeaseUploader:
 
 PLAN_REGISTRY: dict[PlanType, object] = {
     PlanType.VRAM_COALESCED: _CoalescedUploader(),
-    PlanType.DVMP: _DVMPUploader(),
+    PlanType.CPU: _CpuUploader(),
     PlanType.VRAM_LEASED: _LeaseUploader(),
 }
 
@@ -663,9 +663,9 @@ def _register_artifact_core(
         plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints
-    if plan_type is PlanType.DVMP and ctx.input_mode != "cpu":
+    if plan_type is PlanType.CPU and ctx.input_mode != "cpu":
         raise DeviceMismatch(
-            "dvmp plan requires CPU tensors (specify device_id to enforce CPU input)"
+            "cpu plan requires CPU tensors (specify device_id to enforce CPU input)"
         )
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
@@ -674,7 +674,7 @@ def _register_artifact_core(
 
     span_names = {
         PlanType.VRAM_COALESCED: "Client/RegisterArtifact.Coalesced",
-        PlanType.DVMP: "Client/RegisterArtifact.DVMP",
+        PlanType.CPU: "Client/RegisterArtifact.CPU",
         PlanType.VRAM_LEASED: "Client/RegisterArtifact.Lease",
     }
 
@@ -709,7 +709,7 @@ def _register_artifact_core(
                     state_dict=state_dict, descriptor=desc, lease=None
                 )
 
-            if isinstance(registrar, _DVMPUploader):
+            if isinstance(registrar, _CpuUploader):
                 state_dict = registrar.upload(
                     artifact=artifact,
                     ctx=ctx,
@@ -769,7 +769,7 @@ def register_artifact(
 ) -> RegistrationResult:
     """Unified high-level API returning a structured result.
 
-    - For Coalesced/DVMP: returns destination state dict and descriptor.
+    - For Coalesced/UMA/VS: returns destination state dict and descriptor.
     - For Lease (in_place according to options): returns original artifact as state_dict and descriptor.
     - If create_post_commit_lease is True and plan is lease in-place, also returns a RegisteredLease.
     """

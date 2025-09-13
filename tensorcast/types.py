@@ -34,25 +34,25 @@ class CoalescedHandshake(BaseModel):
     daemon_ipc_handle: bytes
 
 
-class DVMPRingHandshake(BaseModel):
+class CpuRingHandshake(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["dvmp_ring"] = "dvmp_ring"
+    kind: Literal["cpu_ring"] = "cpu_ring"
     name: str
     ring_bytes: int
 
 
-class DVMPStreamHandshake(BaseModel):
+class CpuStreamHandshake(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["dvmp_stream"] = "dvmp_stream"
+    kind: Literal["cpu_stream"] = "cpu_stream"
     stream_token: str
 
 
-class DVMPEmptyHandshake(BaseModel):
+class CpuEmptyHandshake(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["dvmp"] = "dvmp"
+    kind: Literal["cpu"] = "cpu"
 
 
 class LeaseHandshake(BaseModel):
@@ -63,9 +63,9 @@ class LeaseHandshake(BaseModel):
 
 Handshake = Union[
     CoalescedHandshake,
-    DVMPRingHandshake,
-    DVMPStreamHandshake,
-    DVMPEmptyHandshake,
+    CpuRingHandshake,
+    CpuStreamHandshake,
+    CpuEmptyHandshake,
     LeaseHandshake,
 ]
 
@@ -135,9 +135,9 @@ class CoalescedPlan(PlanBase):
         req.coalesced.CopyFrom(co)
 
 
-class DVMPPlan(PlanBase):
-    # Aliases supported for UMA/CPU pathways; treated as DVMP in daemon
-    kind: Literal["dvmp", "uma", "cpu"] = "dvmp"
+class CpuPlan(PlanBase):
+    # UMA/CPU VS streaming pathway
+    kind: Literal["cpu", "uma"] = "cpu"
     # 1: SHM_RING, 2: GRPC_STREAM (daemon enum mapping handled by client)
     preferred_channel: Literal[1, 2] = 2
     ring_bytes: int = 0
@@ -145,16 +145,16 @@ class DVMPPlan(PlanBase):
     def apply_to_begin_request(
         self, req: store_daemon_pb2.BeginRegisterArtifactRequest
     ) -> None:
-        dv = store_daemon_pb2.DvmpOptions()
+        dv = store_daemon_pb2.CpuOptions()
         if int(self.preferred_channel) == 1:
-            dv.preferred_channel = store_daemon_pb2.DvmpOptions.Channel.CHANNEL_SHM_RING
+            dv.preferred_channel = store_daemon_pb2.CpuOptions.Channel.CHANNEL_SHM_RING
             if int(self.ring_bytes) > 0:
                 dv.ring_bytes = int(self.ring_bytes)
         else:
             dv.preferred_channel = (
-                store_daemon_pb2.DvmpOptions.Channel.CHANNEL_GRPC_STREAM
+                store_daemon_pb2.CpuOptions.Channel.CHANNEL_GRPC_STREAM
             )
-        req.dvmp.CopyFrom(dv)
+        req.cpu.CopyFrom(dv)
 
 
 class LeasePlan(PlanBase):
@@ -175,7 +175,7 @@ class LeasePlan(PlanBase):
         req.lease.CopyFrom(lo)
 
 
-Plan = Union[CoalescedPlan, DVMPPlan, LeasePlan]
+Plan = Union[CoalescedPlan, CpuPlan, LeasePlan]
 
 
 # ---------------------------- Segment feed model ---------------------------
@@ -200,9 +200,9 @@ class LeaseSegment(BaseModel):
 __all__ = [
     "ServerConfig",
     "CoalescedHandshake",
-    "DVMPRingHandshake",
-    "DVMPStreamHandshake",
-    "DVMPEmptyHandshake",
+    "CpuRingHandshake",
+    "CpuStreamHandshake",
+    "CpuEmptyHandshake",
     "LeaseHandshake",
     "Handshake",
     "BeginRegisterArtifactResult",
@@ -210,7 +210,7 @@ __all__ = [
     "CommitResult",
     "PlanBase",
     "CoalescedPlan",
-    "DVMPPlan",
+    "CpuPlan",
     "LeasePlan",
     "Plan",
     "LeaseSegment",

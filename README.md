@@ -4,6 +4,8 @@
 
 [Developer Guide](web-docs/docs/developer-guides/README.md)
 
+Note on UMA V3: The codebase has completed the UMA V3 final cutover. UMA (UnifiedMemoryAuthority) is the sole ledger; VirtualAddressSpace (VS) handles CPU VA and IO; Transfer handles data movement; MemoryExportRegistry handles exports. SDK and docs have been aligned to the final state (UMA/VS/CpuVaSink/GpuMemorySink).
+
 ## Prerequisites
 
 ```bash
@@ -149,57 +151,9 @@ CLI duplicate protection: `tensorcast start` refuses to start a new local daemon
 
 ## Advanced SDK: RegisteredArtifact with Context Manager
 
-For advanced in-memory registration workflows (explicit feed for DVMP, TTL keepalive, manual revoke/abort), use the SDK handle API with a Python context manager. When `ttl_ms` is provided, a background keepalive thread refreshes TTL every TTL/2 until commit/close.
+For advanced in-memory registration workflows (explicit CPU VA feed via UMA/VS, TTL keepalive, manual revoke/abort), use the SDK handle API with a Python context manager. When `ttl_ms` is provided, a background keepalive thread refreshes TTL every TTL/2 until commit/close.
 
-Example (DVMP streaming, single CPU tensor):
-
-```python
-import json
-import numpy as np
-from tensorcast.api import begin_register_artifact_sdk
-from tensorcast.daemon_ctl import get_daemon_client
-from tensorcast.types import DVMPPlan
-
-# Prepare a tiny tensor and canonical v2 index JSON bytes
-arr = np.zeros((2, 2), dtype=np.float32)
-buf = arr.tobytes()
-size_bytes = len(buf)
-tensor_index_v2 = {
-    "x": [
-        0,                 # dst_offset
-        size_bytes,        # storage_size
-        [2, 2],            # shape
-        [2, 1],            # stride
-        "torch.float32",  # dtype
-        0,                 # storage_offset
-    ]
-}
-index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-daemon_addr = "127.0.0.1:50730"  # Ensure the C++ daemon is running at this address
-
-# Begin registration with DVMP plan, and keep TTL alive automatically
-handle, handshake = begin_register_artifact_sdk(
-    device_id=0,
-    total_size_bytes=size_bytes,
-    tensor_index_data=index_bytes,
-    plan=DVMPPlan(kind="dvmp", preferred_channel=2, ring_bytes=0),
-    ttl_ms=1000,
-    daemon_address=daemon_addr,
-)
-
-ctl = get_daemon_client(daemon_addr)
-with handle as h:
-    # Stream DVMP bytes in SegmentPlan order (here only one piece)
-    ok = ctl.feed_register_artifact_dvmp_stream_data(h.registration_id, buf, offset=0)
-    if not ok:
-        raise RuntimeError("DVMP feed failed")
-
-    # Finalize and get RFC-0007 descriptor
-    commit = h.commit()
-    desc = commit.descriptor
-    print("Artifact:", desc.artifact_id)  # mi2:<index_multihash>:<data_multihash>
-```
+Note: SDK examples have been aligned to UMA V3 final naming; CPU streaming uses the VirtualAddressSpace (VS) path with UMA-managed leases and commit. Refer to tensorcast.api helpers for current usage.
 
 Notes:
 - For VRAM lease (FDML), begin with `LeasePlan(kind="lease", ...)` and feed `LeaseSegment` items using IPC handles exported from unique CUDA storage blocks. Each `LeaseSegment` includes `dst_offset` so segment order is irrelevant; the daemon zero-fills PAD and places bytes at the specified destination offsets.

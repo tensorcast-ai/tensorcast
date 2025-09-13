@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,12 +17,12 @@
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/device_types.h"
-#include "core/store/direct_write.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/chunk_meta.h"
+#include "core/store/replica/types/direct_write_grant.h"
 
 namespace tensorcast::store::replica {
 
@@ -29,23 +30,29 @@ namespace tensorcast::store::replica {
  * @brief Unified memory management for artifacts/replicas across DRAM and VRAM.
  *
  * This class manages chunk-based memory state for replicas, tracking:
- * - One contiguous DRAM allocation per replica (via DVMP)
+ * - One contiguous DRAM allocation per replica (via VS)
  * - One contiguous VRAM allocation per GPU device
  * - Per-chunk state tracking for fine-grained memory management
  *
  * The design enables efficient P2P transfers, intelligent memory eviction,
  * and automatic memory reclamation while maintaining zero-copy access.
  */
-class ReplicaMemoryCoordinator {
+class UnifiedMemoryAuthority {
  public:
-  /**
-   * @brief Chunk mapping tracking state across memory locations.
-   */
-  struct ChunkMapping {
-    uint32_t chunk_idx;
-    ChunkState cpu_state; // State in DRAM (from DVMP)
-    std::unordered_map<DeviceKey, ChunkState, DeviceKeyHash> gpu_state; // Per-device VRAM state
-    uint64_t last_access_ns{0};
+  struct ArtifactLayout {
+    uint64_t artifact_bytes{0};
+    size_t artifact_chunk_bytes{0};
+    size_t transfer_slice_bytes{0};
+  };
+
+  struct TransferPlan {
+    uint64_t session_id{0};
+    // Chunk-aligned byte ranges (offset, length)
+    std::vector<std::pair<uint64_t, size_t>> ranges;
+    // Explicit chunk indices included in plan
+    std::vector<uint32_t> chunk_indices;
+    // Optional direct-write grant for CPU target
+    std::optional<DirectWriteGrant> cpu_direct_grant;
   };
 
   /**
@@ -58,22 +65,24 @@ class ReplicaMemoryCoordinator {
       REMOTE_P2P, // Available via P2P transfer
       DISK // Must load from disk
     };
+
     Type type;
     int device_id{-1}; // For LOCAL_GPU sources
     std::string remote_node; // For REMOTE_P2P sources
   };
 
-  explicit ReplicaMemoryCoordinator(gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp);
-  ~ReplicaMemoryCoordinator() = default;
+  explicit UnifiedMemoryAuthority(
+      gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space);
+  ~UnifiedMemoryAuthority() = default;
 
   // Disable copy/move
-  ReplicaMemoryCoordinator(const ReplicaMemoryCoordinator&) = delete;
-  ReplicaMemoryCoordinator& operator=(const ReplicaMemoryCoordinator&) = delete;
+  UnifiedMemoryAuthority(const UnifiedMemoryAuthority&) = delete;
+  UnifiedMemoryAuthority& operator=(const UnifiedMemoryAuthority&) = delete;
 
   /**
    * @brief Allocate unified memory for a replica.
    *
-   * Reserves virtual address space in DRAM via DVMP. GPU allocations
+   * Reserves virtual address space in DRAM via VS. GPU allocations
    * are created lazily on first use.
    *
    * @param key Replica instance key
@@ -90,19 +99,11 @@ class ReplicaMemoryCoordinator {
    *
    * @param key Replica instance key
    * @param device_id GPU device ID
-   * @return CudaMemory pointer or error
+   * @return GpuDeviceMemory pointer or error
    */
-  absl::StatusOr<std::shared_ptr<common::memory::CudaMemory>> get_or_create_gpu_allocation(
+  absl::StatusOr<std::shared_ptr<common::memory::GpuDeviceMemory>> get_or_create_gpu_allocation(
       const loading::ReplicaKey& key,
       int device_id);
-
-  /**
-   * @brief Get chunk mappings for scheduling decisions.
-   *
-   * @param key Replica instance key
-   * @return View of chunk mappings
-   */
-  absl::Span<const ChunkMapping> get_chunk_mappings(const loading::ReplicaKey& key) const;
 
   /**
    * @brief Get missing chunks for a target location.
@@ -116,41 +117,6 @@ class ReplicaMemoryCoordinator {
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation target,
       std::optional<int> device_id = std::nullopt) const;
-
-  /**
-   * @brief Lock chunks for transfer operation.
-   *
-   * Atomically transitions chunks to LOCKED_TX state. Must be
-   * followed by update_chunk_states() after transfer.
-   *
-   * @param key Replica instance key
-   * @param source Source memory location
-   * @param target Target memory location
-   * @param chunks Chunk indices to lock
-   * @return Status of lock operation
-   */
-  absl::Status lock_chunks_for_transfer(
-      const loading::ReplicaKey& key,
-      common::memory::MemoryLocation source,
-      common::memory::MemoryLocation target,
-      const std::vector<uint32_t>& chunks);
-
-  /**
-   * @brief Update chunk states after transfer.
-   *
-   * @param key Replica instance key
-   * @param location Memory location that was updated
-   * @param chunks Chunk indices that were transferred
-   * @param new_state New state for chunks
-   * @param device_id Device ID for GPU operations
-   * @return Status of update
-   */
-  absl::Status update_chunk_states(
-      const loading::ReplicaKey& key,
-      common::memory::MemoryLocation location,
-      const std::vector<uint32_t>& chunks,
-      ChunkState new_state,
-      std::optional<int> device_id = std::nullopt);
 
   /**
    * @brief Get best source for loading a chunk.
@@ -187,14 +153,59 @@ class ReplicaMemoryCoordinator {
   bool has_allocation(const loading::ReplicaKey& key) const;
 
   /**
-   * @brief Convenience: return the global chunk size used by DVMP.
+   * @brief Convenience: return the global chunk size used by VS.
    */
   size_t get_chunk_size() const;
+
+  // Record-based queries (preferred over deprecated mapping view)
+  absl::StatusOr<ChunkState> get_cpu_chunk_state(const loading::ReplicaKey& key, uint32_t chunk_idx) const;
+  absl::StatusOr<ChunkState> get_gpu_chunk_state(const loading::ReplicaKey& key, int device_id, uint32_t chunk_idx)
+      const;
+
+  /**
+   * @brief Retrieve the artifact layout (bytes, chunk size, slice size).
+   *
+   * transfer_slice_bytes is derived from env var TCAST_TX_SLICE_BYTES if set;
+   * otherwise may be 0 to indicate default (caller should fall back to
+   * PinnedBufferPool::chunk_size()).
+   */
+  absl::StatusOr<ArtifactLayout> get_layout(const loading::ReplicaKey& key) const;
+
+  // Phase 2 — Transactional transfer (lightweight, idempotent)
+  absl::StatusOr<TransferPlan> plan_load(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation target,
+      std::optional<int> device_id,
+      std::optional<absl::Span<const uint32_t>> chunk_indices);
+
+  absl::Status commit(
+      uint64_t session_id,
+      common::memory::MemoryLocation target,
+      absl::Span<const uint32_t> committed_chunks,
+      std::optional<int> device_id);
+
+  absl::Status abort(uint64_t session_id);
+
+  // Export ledger and lease management (UMA‑owned export lifecycle)
+  struct ExportRegistration {
+    // Coalesced chunk ranges [start_idx, end_idx] (inclusive)
+    std::vector<std::pair<uint32_t, uint32_t>> chunk_ranges;
+    // Opaque keepalive for CPU VS pin leases (nullptr for GPU)
+    std::shared_ptr<void> keepalive;
+  };
+
+  // Set exported flag for the given chunks at a location and return coalesced
+  // ranges along with an optional keepalive for CPU pin leases when turning on.
+  absl::StatusOr<ExportRegistration> set_exported(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
+      absl::Span<const uint32_t> chunks,
+      bool on);
 
   /**
    * @brief Mark a ratio of CPU chunks as PREEMPTIBLE.
    *
-   * Relies on DVMP's mark_preemptible implementation. The number of
+   * Relies on VS's mark_preemptible implementation. The number of
    * chunks selected is `ratio * total_chunks`, rounded down. Selection
    * order is from the beginning of the replica (lowest indices first)
    * which matches the existing test expectations.
@@ -258,35 +269,9 @@ class ReplicaMemoryCoordinator {
    */
   absl::Status release(const loading::ReplicaKey& key);
 
-  /**
-   * @brief Sync CPU chunk states from DVMP metadata.
-   *
-   * Updates the internal CPU chunk mappings based on DVMP's authoritative
-   * metadata. This ensures consistency after operations that modify DVMP
-   * directly (e.g., GPU->CPU transfers using write_at).
-   *
-   * @param key Replica instance key
-   */
-  void sync_cpu_chunk_states(const loading::ReplicaKey& key);
-
-  /**
-   * @brief Sync CPU chunk states for specific ranges from DVMP.
-   *
-   * Range-based variant that only syncs specified chunk ranges, reducing
-   * overhead when only a subset of chunks have been modified.
-   *
-   * @param key Replica instance key
-   * @param ranges Vector of chunk range pairs (start_idx, end_idx inclusive)
-   */
-  void sync_cpu_chunk_states(const loading::ReplicaKey& key, absl::Span<const std::pair<uint32_t, uint32_t>> ranges);
-
-  /**
-   * @brief Encapsulate DVMP pin and VA translation for direct writes into CPU region.
-   * Returns a DirectWriteToken with keepalive to hold leases.
-   */
-  absl::StatusOr<DirectWriteToken> create_direct_write_token(
-      const loading::ReplicaKey& key,
-      absl::Span<const VaRange> ranges);
+  // UMA V3: Direct write grant returning windowed authorization directly.
+  // Exposes DirectWriteGrant with Window entries and keepalive semantics.
+  absl::StatusOr<DirectWriteGrant> grant_direct_write(const loading::ReplicaKey& key, absl::Span<const VaRange> ranges);
 
   enum class PostGpuLoadPolicy : std::uint8_t { EvictCPU, MarkPreemptible, Keep };
 
@@ -295,16 +280,55 @@ class ReplicaMemoryCoordinator {
    */
   absl::Status post_gpu_load_policy(const loading::ReplicaKey& key, size_t bytes, PostGpuLoadPolicy policy);
 
+  // UMA-side telemetry for CPU writes via VS write hook
+  void record_cpu_write(const loading::ReplicaKey& key, uint64_t va_offset, uint64_t bytes);
+
  private:
+  // Internal helpers that assume mutex_ is already held. These avoid re-entrant
+  // locking bugs when called from methods that already hold mutex_.
+  std::vector<uint32_t> get_missing_chunks_locked_(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation target,
+      std::optional<int> device_id) const;
+
+  struct SessionRecord {
+    loading::ReplicaKey key;
+    common::memory::MemoryLocation target;
+    std::optional<int> device_id;
+    std::vector<uint32_t> chunks;
+    // RAII: pin leases for CPU ranges held during session
+    std::vector<common::memory::VirtualAddressSpace::CpuPinLease> cpu_leases;
+  };
+
+  static std::vector<std::pair<uint32_t, uint32_t>> coalesce_runs_(absl::Span<const uint32_t> sorted);
+
   struct ReplicaAllocation {
-    // DRAM allocation info from DVMP
-    tensorcast::common::memory::DistributedVirtualMemoryPool::VirtualRegion dram_region;
+    // DRAM allocation info from VS
+    tensorcast::common::memory::VirtualAddressSpace::VirtualRegion dram_region;
 
     // GPU allocations per device (lazy creation)
-    std::unordered_map<DeviceKey, std::shared_ptr<common::memory::CudaMemory>, DeviceKeyHash> gpu_allocations;
+    std::unordered_map<DeviceKey, std::shared_ptr<common::memory::GpuDeviceMemory>, DeviceKeyHash> gpu_allocations;
 
-    // Chunk mappings (shared across all devices)
-    std::vector<ChunkMapping> chunk_mappings;
+    // Phase 1: Internal orthogonal chunk record (not exported). Mirrors UMA ledger
+    // without relying on VS. Over time, APIs will migrate to this structure.
+    struct ChunkRecord {
+      uint32_t chunk_idx{0};
+      // CPU residency (ChunkState used as enum carrier; semantics under UMA)
+      ChunkState cpu{ChunkState::COLD};
+      // GPU residency per device
+      std::unordered_map<DeviceKey, ChunkState, DeviceKeyHash> gpu;
+      // Export flags
+      bool exported_cpu{false};
+      std::unordered_map<DeviceKey, bool, DeviceKeyHash> exported_gpu;
+      // UMA-level pin refcount placeholder (VS manages actual page pins)
+      uint32_t pin_refcnt{0};
+      // Last access timestamp (ns since steady_clock epoch)
+      uint64_t last_access_ns{0};
+      // Monotonic version; incremented on state updates
+      uint64_t version{0};
+    };
+
+    std::vector<ChunkRecord> chunk_records;
 
     // Total artifact size
     size_t total_bytes{0};
@@ -316,8 +340,12 @@ class ReplicaMemoryCoordinator {
   };
 
   mutable std::mutex mutex_;
-  gsl::not_null<std::shared_ptr<tensorcast::common::memory::DistributedVirtualMemoryPool>> dvmp_;
+  gsl::not_null<std::shared_ptr<tensorcast::common::memory::VirtualAddressSpace>> va_space_;
   std::unordered_map<loading::ReplicaKey, ReplicaAllocation, loading::ReplicaKeyHash> allocations_;
+
+  // Sessions for plan/commit/abort
+  std::unordered_map<uint64_t, SessionRecord> sessions_;
+  uint64_t next_session_id_{1};
 };
 
 } // namespace tensorcast::store::replica

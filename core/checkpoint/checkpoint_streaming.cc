@@ -33,7 +33,7 @@ std::unordered_map<std::string, uint64_t> save_tensors_streaming(
             << "async_write=" << (final_config.enable_async_write ? "enabled" : "disabled");
 
   // Create pinned memory pool
-  auto pinned_pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(pool_size, chunk_size);
+  auto pinned_pool = std::make_shared<common::memory::PinnedBufferPool>(pool_size, chunk_size);
 
   // Create streaming writer
   StreamingTensorWriter writer(tensor_filename, final_config, pinned_pool);

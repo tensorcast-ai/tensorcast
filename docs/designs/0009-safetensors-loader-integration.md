@@ -33,7 +33,7 @@ flowchart LR
     MSS[MultiSafetensorsSource]
   end
   P[pump_ranges]
-  SNK["PositionedSink (DVMP/GPU/CPU)"]
+  SNK["PositionedSink (VS/GPU/CPU)"]
 
   DL -->|tensor.data*| FPS
   DL -->|"*.safetensors (1)"| SS

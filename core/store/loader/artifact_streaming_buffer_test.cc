@@ -15,8 +15,8 @@
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
@@ -25,7 +25,7 @@
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -165,11 +165,11 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   // Pinned pool for streaming
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096; // Use 4 KiB-aligned chunk size per alignment requirements
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
+  // Create VA
+  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -180,8 +180,8 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
-      .pinned_memory_pool = pool,
-      .dvmp = dvmp,
+      .pinned_buffer_pool = pool,
+      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = std::nullopt,
       .max_buffer_bytes = 1024 * 2 // 2 KB buffer to force streaming
   };

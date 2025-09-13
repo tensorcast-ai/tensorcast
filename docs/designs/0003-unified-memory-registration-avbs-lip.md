@@ -22,19 +22,19 @@ Core elements:
 - AVBS (Artifact Virtual Byte Stream) as the canonical linearization of artifact bytes, driven by Canonical Index v2 and a SegmentPlan of DATA and PAD segments.
 - Unified identity: `mi2:` IDs computed over canonical index and AVBS bytes (with PAD=0) that are invariant across plans.
 - One RPC family for Begin/Feed/KeepAlive/Commit/Abort/Revoke across all plans.
-- Clear plan behaviors: Coalesced VRAM, DVMP (UMA), Lease (materialize‑on‑Commit), and Lease‑In‑Place (LIP, ephemeral, TTL‑bound).
+- Clear plan behaviors: Coalesced VRAM, CPU (UMA/VS), Lease (materialize‑on‑Commit), and Lease‑In‑Place (LIP, ephemeral, TTL‑bound).
 
 # Goals / Non‑Goals
 
 Goals
-- Provide a single registration model that covers VRAM coalescing, DVMP/UMA, and lease workflows with consistent identity and RPCs.
+- Provide a single registration model that covers VRAM coalescing, CPU/UMA (VS), and lease workflows with consistent identity and RPCs.
 - Preserve same‑machine zero‑copy via daemon‑owned coalesced VRAM; make cross‑machine transfers staged‑only.
 - Ensure byte‑equivalence of identities across plans via SegmentPlan(PAD=0) hashing.
 - Establish clear liveness, ownership, and safety properties (PID‑bound KeepAlive; TTL‑gated LIP).
 
 Non‑Goals
 - Multi‑device single‑artifact layouts (left for a future revision).
-- Direct RNIC memory registration on non‑daemon‑owned memory (DVMP/Lease/LIP).
+- Direct RNIC memory registration on non‑daemon‑owned memory (CPU/Lease/LIP).
 - Identity for sparse/quantized/special layouts beyond the covered dense strided tensors.
 
 # Architecture & Interfaces
@@ -47,7 +47,7 @@ Non‑Goals
 - Unified identity (mi2): `artifact_id = "mi2:" + index_multihash + ":" + data_multihash`.
 - Replica types:
   - COALESCED_VRAM: Daemon‑owned contiguous GPU memory (zero‑copy via CUDA IPC on the same machine).
-  - DVMP: UMA/DRAM resident bytes; materialized to coalesced VRAM upon first local use.
+  - CPU: UMA/DRAM resident bytes (VS); materialized to coalesced VRAM upon first local use.
   - VRAM_LEASED: Lease plan materialized to daemon VRAM at Commit (`in_place=false`).
   - VRAM_LEASE_IN_PLACE (LIP): Ephemeral, post‑Commit lease over producer VRAM; TTL‑bound, PID‑owned; same‑device consumption disallowed.
 
@@ -60,7 +60,7 @@ def register_artifact(
     state_dict: dict[str, "torch.Tensor"],
     artifact_key: str | None = None,
     *,
-    plan: Literal["vram_coalesced", "dvmp", "vram_leased"] = "vram_coalesced",
+    plan: Literal["vram_coalesced", "cpu", "vram_leased"] = "vram_coalesced",
     enable_p2p: bool = True,
     daemon_address: str | None = None,
     lease_in_place: bool = False,
@@ -72,9 +72,9 @@ def register_artifact(
 Behavioral notes
 - Builds Canonical Index v2 (8‑byte alignment) and computes index key.
 - Computes AVBS SegmentPlan; zero‑fills PAD for hashing and materialization.
-- Runs Begin → Feed (streaming for DVMP/Lease) → optional KeepAlive → Commit.
+- Runs Begin → Feed (streaming for CPU/Lease) → optional KeepAlive → Commit.
 - vram_coalesced: Daemon allocates coalesced VRAM; client writes via IPC; Commit registers COALESCED_VRAM.
-- dvmp: Client streams to UMA; Commit registers DVMP; first local use materializes COALESCED_VRAM.
+- cpu: Client streams to UMA/VS; Commit registers CPU; first local use materializes COALESCED_VRAM.
 - vram_leased: If `lease_in_place` is False, Commit materializes to COALESCED_VRAM; if True, registers LIP (ephemeral, TTL/KeepAlive).
 
 ## Control Plane RPCs (Unified)
@@ -89,7 +89,7 @@ The daemon exposes one RPC family shared across plans:
 
 Key fields and behaviors
 - Begin validates device/size/index and emits plan‑specific handshakes (e.g., IPC mapping for coalesced VRAM).
-- Feed for DVMP streams UMA chunks; Lease provides `lease_segments(dst_offset,len,...)` covering DATA ranges; PAD is implicit and zero‑filled by the daemon.
+- Feed for CPU streams UMA/VS chunks; Lease provides `lease_segments(dst_offset,len,...)` covering DATA ranges; PAD is implicit and zero‑filled by the daemon.
 - KeepAlive requires `owner_pid` matching Begin; extends registration or LIP lease.
 - Commit computes `mi2:` over AVBS with PAD=0 and registers the replica type.
 
@@ -112,7 +112,7 @@ sequenceDiagram
   autonumber
   participant CL as Client
   participant DM as Daemon
-  participant DV as DVMP
+  participant VS as VS
 
   CL->>DM: BeginRegisterArtifact(device,total_size,index,plan,owner_pid)
   alt vram_coalesced
@@ -132,12 +132,12 @@ sequenceDiagram
     CL->>DM: CommitRegisteredArtifact
     DM->>DM: Hash leased view (PAD=0) → mi2:
     DM->>DM: Register VRAM_LEASE_IN_PLACE{ttl,owner_pid}
-  else dvmp
-    DM-->>CL: handshake.dvmp.channel
-    CL->>DM: FeedRegisterArtifactStream{dvmp_chunk}
-    DM->>DV: DVMPRegionSink.write_at
+  else cpu
+    DM-->>CL: handshake.cpu.channel
+    CL->>DM: FeedRegisterArtifactStream{cpu_chunk}
+    DM->>VS: CpuVaSink.write_at
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: "Hash → mi2, register DVMP"
+    DM->>DM: "Hash → mi2, register CPU"
   end
 ```
 
@@ -152,8 +152,8 @@ sequenceDiagram
   CON->>DM: Materialize(artifact_id, device=Y)
   alt Coalesced on Y exists
     DM-->>CON: Map CUDA IPC (zero‑copy)
-  else Source = DVMP
-    DM->>DM: DVMP→VRAM coalesce + zero PAD → IPC
+  else Source = CPU
+    DM->>DM: CPU(VS)→VRAM coalesce + zero PAD → IPC
   else Source = LEASE (in_place=false)
     DM->>DM: Lease→VRAM coalesce + zero PAD → IPC
   else Source = LIP on device X
@@ -170,7 +170,7 @@ sequenceDiagram
 Invariants
 - Identity invariance: `mi2:` computed from Canonical Index v2 and AVBS with PAD=0 is identical across plans.
 - Same‑machine zero‑copy: Only daemon‑owned COALESCED_VRAM is exported via CUDA IPC to consumers.
-- Staged‑only cross‑machine: No direct RNIC MR on DVMP/Lease/LIP memory.
+- Staged‑only cross‑machine: No direct RNIC MR on VS/lease/LIP memory.
 - Liveness and ownership: `owner_pid` is required on Begin/KeepAlive; LIP leases are TTL‑bound and PID‑owned.
 - Safety: LIP same‑device consumption is rejected; PAD is never transmitted and is zero‑filled by receivers.
 
@@ -223,7 +223,7 @@ Observability
 
 Security & policy
 - Same‑process CUDA IPC fallback is disabled.
-- No direct RNIC MR on DVMP/Lease/LIP memory; cross‑machine is staged‑only.
+- No direct RNIC MR on VS/lease/LIP memory; cross‑machine is staged‑only.
 - LIP exports use short‑lived IPC mappings; policy may require receiver‑side verification for P2P.
 - Access control and audit logging on index retrieval, replica registration, and transport key export.
 
@@ -232,4 +232,3 @@ Security & policy
 - Canonical index and AVBS linearization within TensorCast Store Engine (core/store).
 - Unified stagers for P2P (GPU/DRAM) and staged‑only transfer policy (daemon, communicator).
 - Global Store key‑first indices, descriptors, replicas; index lookup via `GetArtifactIndex`.
-

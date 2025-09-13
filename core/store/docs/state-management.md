@@ -106,14 +106,14 @@ graph TB
 
 ## State Manager
 
-### MemoryManager State Management
+### ReplicaLoadController State Management
 
-Each MemoryManager instance independently manages states at both CPU and GPU locations:
+Each ReplicaLoadController instance independently manages states at both CPU and GPU locations:
 
 ```mermaid
 graph TB
-    subgraph "MemoryManager Instance"
-        MM[MemoryManager]
+    subgraph "ReplicaLoadController Instance"
+        MM[ReplicaLoadController]
 
         subgraph "CPU State Management"
             CS[cpu_state_]
@@ -150,7 +150,7 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant Client
-    participant MM as MemoryManager
+    participant MM as ReplicaLoadController
     participant Pool as MemoryPool
 
     Client->>MM: allocate_memory(CPU)
@@ -170,7 +170,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant MM as MemoryManager
+    participant MM as ReplicaLoadController
     participant Loader
 
     Client->>MM: Trigger loading
@@ -196,7 +196,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant MM as MemoryManager
+    participant MM as ReplicaLoadController
     participant Pool as MemoryPool
 
     Client->>MM: release_memory(safe=true)
@@ -225,8 +225,8 @@ The system adopts fine-grained lock design to avoid deadlocks:
 
 ```mermaid
 graph TB
-    subgraph "MemoryManager 锁层次"
-        MM[MemoryManager::mutex_]
+    subgraph "ReplicaLoadController 锁层次"
+        MM[ReplicaLoadController::mutex_]
 
         subgraph "Condition Variables"
             CC[cpu_cond_]
@@ -255,14 +255,24 @@ graph TB
 | `streaming_buffer_` | Optional `StreamingPinnedBuffer` pool used by high-throughput producer/consumer pipelines. Allocated via `allocate_buffer_pool()` and released with `release_buffer_pool()`. |
 | `pinned_memory_timeout_` | Maximum duration to wait for pinned memory allocation from the pool before aborting with `ResourceExhausted`. |
 
+### UMA Ledger Internals (Orthogonal ChunkRecord)
+
+UMA 作为唯一账本引入了内部正交的 `ChunkRecord` 结构（Phase 1，内部使用，不对外导出），用于按维度记录：
+- CPU/GPU 驻留（GPU 为 per‑device map）
+- Export 标志（CPU 与 per‑device GPU）
+- 上次访问时间 `last_access_ns` 与单调版本号 `version`
+- 预留 `pin_refcnt`（VS 负责真实页 pin；UMA 仅做抽象计数）
+
+对外兼容的 `ChunkMapping` 只读视图已移除；以 UMA 内部正交 `ChunkRecord` 为唯一依据，对外提供所需聚合/查询接口。历史 `ChunkState` 仅用于 VS 遥测展示，不再承载权威含义。
+
 > These additions do **not** change the state machine itself, but introduce auxiliary resources and configuration options that improve throughput and memory efficiency.
 
 ### Mandatory CPU Memory Release (RFC 0001)
 
 As of RFC 0001 §4.3, CPU memory release after GPU copy is **mandatory**. When a replica is successfully copied from CPU to GPU:
 
-1. **DVMP Integration**: The system automatically marks chunks as `COPIED_GPU` via `unlock_chunks()`
-2. **Memory Eviction**: Physical pages are reclaimed through `evict_tail_bytes()`
-3. **State Transition**: CPU memory state transitions to `UNALLOCATED` (virtual address space retained)
+1. **UMA Integration**: UMA ledger marks GPU residency on `commit()`; VS does not participate in transfer locks. CPU residency is managed via UMA policies and VS pin leases (`pin_range()`).
+2. **Memory Eviction**: Physical pages are reclaimed through `evict_tail_bytes()` as an IO hint (MADV). VS no longer encodes eviction into authoritative state when UMA is the ledger.
+3. **State Transition**: CPU memory policy may mark CPU chunks PREEMPTIBLE/EVICTED per UMA policy; virtual address space reservation remains intact.
 
 This ensures optimal memory utilization and prevents RSS bloat in multi-replica scenarios.

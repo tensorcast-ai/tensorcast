@@ -13,8 +13,8 @@
 #include <unordered_map>
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
@@ -116,14 +116,14 @@ class StoreEngine {
    */
   absl::StatusOr<RegistrationBeginResult> begin_register_artifact(const ArtifactRegistration& reg);
 
-  // DVMP (CPU UMA) registration begin. Allocates DVMP-backed PAGEABLE_CPU region
-  // and prepares a pending registration tracked by registration_id. No GPU memory
-  // is allocated in this path.
-  absl::StatusOr<RegistrationBeginResult> begin_register_artifact_dvmp(const ArtifactRegistration& reg);
+  // CPU (VS) registration begin. Allocates VS-backed CPU region and prepares a
+  // pending registration tracked by registration_id. No GPU memory is allocated
+  // in this path.
+  absl::StatusOr<RegistrationBeginResult> begin_register_artifact_cpu(const ArtifactRegistration& reg);
 
-  // Writes a DVMP data chunk into the pending registration's DVMP region at the
-  // specified virtual address offset. Updates DVMP chunk metadata accordingly.
-  absl::Status feed_register_dvmp_chunk(
+  // Writes a CPU data chunk into the pending registration's VS region at the
+  // specified virtual address offset. Updates CPU chunk metadata accordingly.
+  absl::Status feed_register_cpu_chunk(
       std::string_view registration_id,
       uint64_t offset,
       const void* data,
@@ -197,7 +197,7 @@ class StoreEngine {
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key);
 
   // Remote memory registration helpers (ReplicaKey version)
-  [[nodiscard]] absl::StatusOr<CommRegistrationInfo> enable_remote_replica_access(
+  [[nodiscard]] absl::StatusOr<ExportRegistration> enable_remote_replica_access(
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location);
   [[nodiscard]] absl::Status disable_remote_replica_access(
@@ -249,38 +249,23 @@ class StoreEngine {
   absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
   absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
 
-  // DVMP chunk-state snapshot API for daemon observers (read-only).
-  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states(std::string_view artifact_id) const;
+  // VS chunk-state snapshot API for daemon observers (read-only, non-authoritative telemetry).
+  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_telemetry(std::string_view artifact_id) const;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Distributed Memory Pool (DVMP) chunk locking API
-  // ─────────────────────────────────────────────────────────────────────────
+  // UMA-backed per-device chunk state snapshot for a given artifact. Returns
+  // device-aware GPU states when device_id >= 0; returns an empty vector if
+  // the replica for the given device is not found. Intended for daemon sync.
+  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_for_device(
+      std::string_view artifact_id,
+      int device_id) const;
 
-  /**
-   * @brief Lock chunks for H2D or P2P transfer to prevent concurrent eviction.
-   *
-   * @param replica_key Fully-qualified key identifying the concrete replica.
-   * @param chunk_indices List of chunk indices to lock.
-   *
-   * @return absl::Status OK on success, ResourceExhausted if any chunk is already locked.
-   */
-  [[nodiscard]] absl::Status lock_chunks(
-      const loading::ReplicaKey& replica_key,
-      absl::Span<const uint32_t> chunk_indices);
+  // UMA CPU states (authoritative): artifact-level accessor. When multiple
+  // replicas exist, chooses a primary instance deterministically: prefer a CPU
+  // instance if present; otherwise pick the GPU instance with the smallest
+  // device ordinal. Returns empty on miss.
+  [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_cpu_uma(std::string_view artifact_id) const;
 
-  /**
-   * @brief Unlock chunks after H2D or P2P transfer completion.
-   *
-   * @param replica_key Same ReplicaKey that was previously passed to lock_chunks().
-   * @param chunk_indices List of chunk indices to unlock.
-   * @param copied_gpu Whether the chunks were successfully copied to GPU.
-   *
-   * @return absl::Status OK on success.
-   */
-  [[nodiscard]] absl::Status unlock_chunks(
-      const loading::ReplicaKey& replica_key,
-      absl::Span<const uint32_t> chunk_indices,
-      bool copied_gpu);
+  // VS chunk locking APIs have been removed in UMA V3 final state.
 
   // Expose the configured communication manager to daemon for P2P export paths
   // that are not bound to a loaded replica (e.g., LIP-backed staged transfers).
@@ -310,8 +295,8 @@ class StoreEngine {
   gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
   std::unique_ptr<components::GlobalStoreClient> global_store_client_;
   gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
-  gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> memory_pool_;
-  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp_; // NEW: System-wide DVMP instance
+  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
+  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_; // System-wide VS instance
   // ═══════════════════════════════════════════════════════════════════════════
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════
@@ -366,7 +351,7 @@ class StoreEngine {
     void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
     std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
-    enum class Plan : uint8_t { COALESCED = 0, DVMP = 1 } plan{Plan::COALESCED};
+    enum class Plan : uint8_t { COALESCED = 0, CPU = 1 } plan{Plan::COALESCED};
   };
 
   std::mutex pending_mutex_;

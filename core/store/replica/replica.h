@@ -19,9 +19,9 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
 #include "core/store/loader/loader.h"
-#include "core/store/replica/memory_manager.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
+#include "core/store/replica/replica_load_controller.h"
 
 namespace tensorcast::store::replica {
 
@@ -30,7 +30,7 @@ namespace tensorcast::store::replica {
  *        including loading from different sources and memory management.
  *
  * This class orchestrates the interactions between Loaders (Disk, RDMA)
- * and the MemoryManager to provide a simplified interface for accessing replica data
+ * and the ReplicaLoadController to provide a simplified interface for accessing replica data
  * on CPU or GPU.
  */
 class Replica {
@@ -89,7 +89,7 @@ class Replica {
    * 2. Initiate loading from the source (Disk/RDMA) via the appropriate Loader, OR
    * 3. Initiate a copy from another location (e.g., CPU -> GPU) if data is already loaded elsewhere.
    *
-   * @param target_location The desired location (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param target_location The desired location (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param concurrency Hint for loader concurrency (e.g., disk read threads). Defaults to 4.
    * @param device_id Optional device ID for GPU operations.
    * @return std::shared_future<absl::Status> A future indicating the completion status of the load/copy operation.
@@ -101,7 +101,7 @@ class Replica {
 
   /**
    * @brief Releases the memory associated with the specified location.
-   * @param location The location to release (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The location to release (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param safe_release If true, fails if the memory is currently being loaded into.
    * @return absl::Status OkStatus on success, error otherwise.
    */
@@ -110,7 +110,7 @@ class Replica {
 
   /**
    * @brief Gets the current state of the memory for the specified location.
-   * @param location MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU.
+   * @param location MemoryLocation::CPU or MemoryLocation::GPU.
    * @return MemoryState The current state of the memory at the specified location.
    */
   replica::MemoryState get_memory_state(common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
@@ -119,14 +119,14 @@ class Replica {
    * @brief Gets a pointer to the replica data at the specified location.
    * Returns nullptr if the data is not in the LOADED state at that location.
    * Note: For CPU, direct access to chunked memory might require `get_memory_manager()`.
-   * @param location MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU.
+   * @param location MemoryLocation::CPU or MemoryLocation::GPU.
    * @return std::vector<void*> Vector of pointers to the data, or empty vector if not loaded.
    */
   std::vector<void*> get_data_pointer(common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits until the replica data is fully loaded at the specified location or an error occurs.
-   * @param location The location to wait for (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The location to wait for (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param timeout Optional maximum duration to wait.
    * @return absl::Status OkStatus if loaded, DeadlineExceeded if timeout, FailedPrecondition if loading failed.
    */
@@ -135,25 +135,25 @@ class Replica {
       absl::Duration timeout = absl::InfiniteDuration()) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
-   * @brief Provides access to the underlying MemoryManager. Use with caution.
+   * @brief Provides access to the underlying ReplicaLoadController. Use with caution.
    * Allows advanced operations like accessing CPU chunks directly if needed.
    */
-  MemoryManager& get_memory_manager() const;
+  ReplicaLoadController& get_memory_manager() const;
 
   /**
    * @brief Registers the loaded memory (CPU or GPU) for communication access via the communicator engine.
    * Requires the replica to be loaded at the specified location.
-   * @param location The memory location to register (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The memory location to register (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param comm_engine The communicator engine to use for communication registration.
-   * @return absl::StatusOr<CommRegistrationInfo> Information needed by remote peers to access the memory, or an error.
+   * @return absl::StatusOr<ExportRegistration> Information needed by remote peers to access the memory, or an error.
    */
-  absl::StatusOr<CommRegistrationInfo> enable_remote_memory_access(
+  absl::StatusOr<ExportRegistration> enable_remote_memory_access(
       common::memory::MemoryLocation location,
       tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Disables the communication access for the specified location.
-   * @param location The memory location to disable communication access for (MemoryLocation::PAGEABLE_CPU or
+   * @param location The memory location to disable communication access for (MemoryLocation::CPU or
    * MemoryLocation::GPU).
    * @param comm_engine The communicator engine to use for communication disconnection.
    * @return absl::Status OkStatus on success, error if location not loaded or communication disconnection fails.
@@ -165,7 +165,7 @@ class Replica {
   /**
    * @brief Generates verification information for the replica data at the specified location.
    * The replica must be loaded at the specified location before calling this method.
-   * @param location The memory location to generate verification info for (MemoryLocation::PAGEABLE_CPU or
+   * @param location The memory location to generate verification info for (MemoryLocation::CPU or
    * MemoryLocation::GPU).
    * @return absl::StatusOr<ArtifactVerificationInfo> Generated verification information or an error.
    */
@@ -174,7 +174,7 @@ class Replica {
 
   /**
    * @brief Verifies the replica data at the specified location against expected verification information.
-   * @param location The memory location to verify (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The memory location to verify (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param expected_info The expected verification information to compare against.
    * @param level The verification level to use (default: SEGMENT_HASHES for balanced speed/accuracy).
    * @return absl::Status OkStatus if verification passes, error if verification fails or location not loaded.
@@ -187,7 +187,7 @@ class Replica {
   /**
    * @brief Fast key-point verification of replica data (first, middle, last positions).
    * Provides near-zero overhead integrity checking for critical scenarios.
-   * @param location The memory location to verify (MemoryLocation::PAGEABLE_CPU or MemoryLocation::GPU).
+   * @param location The memory location to verify (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param expected_info The expected verification information containing key values.
    * @return absl::Status OkStatus if key points match, error if verification fails.
    */
@@ -203,7 +203,7 @@ class Replica {
   Replica(
       loading::ReplicaKey key,
       std::unique_ptr<IArtifactLoader> loader,
-      std::shared_ptr<MemoryManager> memory_manager,
+      std::shared_ptr<ReplicaLoadController> memory_manager,
       common::memory::MemoryLocation source_type);
 
   // Helper to determine the optimal source location for loading `target_location`
@@ -213,7 +213,7 @@ class Replica {
   mutable absl::Mutex mutex_; // Protects internal state consistency, loader/manager access
 
   const gsl::not_null<std::unique_ptr<IArtifactLoader>> loader_;
-  const gsl::not_null<std::shared_ptr<MemoryManager>> memory_manager_;
+  const gsl::not_null<std::shared_ptr<ReplicaLoadController>> memory_manager_;
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
   const common::memory::MemoryLocation original_source_type_;

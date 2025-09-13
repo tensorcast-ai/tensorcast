@@ -11,7 +11,7 @@ related_code:
   - core/communicator/engine/memory_stager.*
   - core/communicator/engine/dram_stager.*
   - core/communicator/engine/gpu_net_stager.*
-  - core/common/memory/pinned_memory_pool.*
+  - core/common/memory/pinned_buffer_pool.h (alias of pinned_buffer_pool.*)
   - core/communicator/transport/mtcp_transport.*
   - core/store/replica/chunk_export_service.*
 created: 2025-09-09
@@ -22,14 +22,14 @@ links:
 
 # Summary
 
-Unify CPU/GPU staging for network transfers behind a single MemoryStager interface and make cross-machine transfers staged-only. Instead of registering DVMP (UMA) virtual addresses or producer VRAM directly with the RNIC, the system stages requested ranges into small, reusable host‑pinned buffers. RDMA paths advertise the pre‑registered MR of those pool buffers; MTCP paths use the same buffer for socket I/O. Staging tokens are reference‑counted/RAII and are released on explicit ACK (RDMA) or send completion (MTCP). This design removes large‑region pinning, aligns with DVMP eviction policy, and provides NUMA‑aware pool selection.
+Unify CPU/GPU staging for network transfers behind a single MemoryStager interface and make cross-machine transfers staged-only. Instead of registering VS (UMA) virtual addresses or producer VRAM directly with the RNIC, the system stages requested ranges into small, reusable host‑pinned buffers. RDMA paths advertise the pre‑registered MR of those pool buffers; MTCP paths use the same buffer for socket I/O. Staging tokens are reference‑counted/RAII and are released on explicit ACK (RDMA) or send completion (MTCP). This design removes large‑region pinning, aligns with VS eviction policy, and provides NUMA‑aware pool selection.
 
 # Goals / Non‑Goals
 
 Goals
 - Unified staging abstraction that hides CPU/GPU and RDMA/TCP differences.
-- Eliminate direct RDMA over DVMP VA and producer VRAM; use staged‑only responses for safety and performance predictability.
-- Bound memory and pinning: small chunked staging, immediate DVMP lease release after memcpy, and permanent MR registration only on stable pool buffers.
+- Eliminate direct RDMA over VS VA and producer VRAM; use staged‑only responses for safety and performance predictability.
+- Bound memory and pinning: small chunked staging, immediate VS lease release after memcpy, and permanent MR registration only on stable pool buffers.
 - NUMA‑aware pool selection for better locality to NICs and GPUs.
 - Protocol evolution using EX variants and ACKs for staged RDMA.
 
@@ -42,11 +42,11 @@ Non‑Goals
 
 ## Concepts
 
-- MemoryStager: component that produces host‑pinned slices suitable for transport from either DVMP (CPU) or VRAM (GPU) sources.
+- MemoryStager: component that produces host‑pinned slices suitable for transport from either VS (CPU) or VRAM (GPU) sources.
 - StageToken: scoped handle carrying `host_ptr`, `bytes`, and optional `RdmaMr`, plus `complete()` to return resources.
-- DRAMStager: DVMP VA → host‑pinned copy; holds a DVMP lease only for the duration of memcpy and then releases it.
+- DRAMStager: VS VA → host‑pinned copy; holds a VS lease only for the duration of memcpy and then releases it.
 - GpuNetStager: VRAM → host‑pinned D2H via `cudaMemcpyAsync`; emits token upon completion.
-- PinnedMemoryPool: per‑NUMA pools of pinned buffers; each buffer is permanently registered per RNIC PD with cached `ibv_mr`.
+- PinnedBufferPool: per‑NUMA pools of pinned buffers; each buffer is permanently registered per RNIC PD with cached `ibv_mr`.
 
 ## Class model (Mermaid)
 
@@ -110,13 +110,13 @@ Selection rules
 # Invariants & Error Model
 
 Invariants
-- DVMP leases are held only during memcpy in DRAMStager; leases are released before tokens are returned to callers.
-- MR registration never occurs over DVMP VA or producer VRAM; only over pool buffers.
+- VS leases are held only during memcpy in DRAMStager; leases are released before tokens are returned to callers.
+- MR registration never occurs over VS VA or producer VRAM; only over pool buffers.
 - StageToken must be completed exactly once. RDMA tokens require ACK; MTCP tokens are completed upon send completion.
 - Staged‑only across machines: PAD bytes are never transmitted and are zero‑filled by receivers.
 
 Error model
-- Submission errors surface as immediate status failures (e.g., DVMP lease failure, CUDA copy launch failure).
+- Submission errors surface as immediate status failures (e.g., VS lease failure, CUDA copy launch failure).
 - Runtime failures propagate via transport completion paths; tokens are still completed or reaped by TTL.
 - Missing ACKs trigger TTL reaping; repeated occurrences are logged and metered.
 
@@ -133,8 +133,8 @@ Risks and mitigations
 - Throughput regressions from chunk sizing → configurable defaults with headroom; later autotune can adjust at runtime.
 
 # Acceptance Criteria
-- No RDMA MRs over DVMP VA or producer VRAM; MRs only on pool buffers.
-- No DVMP leases held beyond memcpy duration.
+- No RDMA MRs over VS VA or producer VRAM; MRs only on pool buffers.
+- No VS leases held beyond memcpy duration.
 - End‑to‑end throughput within ±5% of baseline for 10–50 GB and scalable without pinning blowups; staged RDMA shows stable latency distribution.
 - Bounded pool memory and observed back‑pressure instead of system‑wide pin growth.
 
@@ -144,7 +144,7 @@ Risks and mitigations
 - Key code paths:
   - `core/store/replica/chunk_export_service.*` (window export and registration behavior)
   - `core/communicator/engine/engine.*` (registration options, staged READ path, inflight tracking)
-  - `core/common/memory/pinned_memory_pool.*` (pinned pools, MR registry)
+  - `core/common/memory/pinned_buffer_pool.h` (alias of pinned_buffer_pool.*; pinned pools, MR registry)
   - `core/communicator/transport/mtcp_transport.*` (staged send path)
 
 # Appendix — Proposed Interfaces (sketch)
@@ -167,7 +167,7 @@ class MemoryStager {
 };
 
 struct RegisterTensorOptions {
-  bool register_mr = true;    // false for DVMP/GPU logical windows
+  bool register_mr = true;    // false for VS/GPU logical windows
   bool needs_staging = false; // true for GPU; true for CPU when policy requires
   int device_id = -1;
 };

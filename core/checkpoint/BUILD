@@ -84,7 +84,7 @@ sc_cc_library(
         ":tensor_writer_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/store/loader:safetensors_util",
         "@abseil-cpp//absl/log:check",
         "@libtorch",

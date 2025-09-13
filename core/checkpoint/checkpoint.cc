@@ -46,7 +46,7 @@
 
 #include "core/common/artifact_verification.h" // Add verification support
 #include "core/common/cuda_api.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/loader/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"
@@ -121,6 +121,7 @@ std::unordered_map<std::string, uint64_t> save_tensors(
     uint64_t max_size{0};
     std::string owner_name; // name whose (ptr,size) corresponds to max_size
   };
+
   std::unordered_map<const char*, StorageMeta> ptr_meta;
 
   for (const auto& n : tensor_names) {
@@ -431,7 +432,7 @@ tensorcast::common::ArtifactVerificationInfo generate_verification_info_from_dis
 
 // Mapping from string to at::ScalarType
 at::ScalarType string_to_scalar_type(const std::string& dtype_str) {
-  static const std::unordered_map<std::string, at::ScalarType> dtype_map = {
+  static const std::unordered_map<std::string, at::ScalarType> kDTypeMap = {
       {"torch.float16", torch::kFloat16},
       {"torch.float32", torch::kFloat32},
       {"torch.float64", torch::kFloat64},
@@ -443,8 +444,8 @@ at::ScalarType string_to_scalar_type(const std::string& dtype_str) {
       {"torch.bfloat16", torch::kBFloat16},
       {"torch.float8_e4m3fn", torch::kFloat8_e4m3fn}};
 
-  auto it = dtype_map.find(dtype_str);
-  if (it != dtype_map.end()) {
+  auto it = kDTypeMap.find(dtype_str);
+  if (it != kDTypeMap.end()) {
     return it->second;
   }
 
@@ -515,8 +516,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
           state_dict[name] = real_tensor;
         }
       } else {
-        std::cerr << "Cannot find device " << device << std::endl;
-        exit(1);
+        LOG(FATAL) << "Cannot find device " << device;
       }
     }
   }
@@ -591,7 +591,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
               << "GB, device_id=" << device_id;
 
     // Create pinned memory pool and allocate host buffers
-    auto pinned_pool = std::make_shared<tensorcast::common::memory::PinnedMemoryPool>(pool_size, chunk_size);
+    auto pinned_pool = std::make_shared<common::memory::PinnedBufferPool>(pool_size, chunk_size);
     std::vector<char*> pinned_buffers;
     if (pinned_pool->allocate(num_buffers * chunk_size, pinned_buffers) != 0) {
       LOG(FATAL) << "Failed to allocate pinned buffers from pool";
@@ -727,9 +727,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
         num_elements *= s;
       }
     }
-    if (num_elements < 0) {
-      num_elements = 0; // Safety for overflow
-    }
+    num_elements = std::max<int64_t>(num_elements, 0);
 
     size_t element_size_bytes = c10::elementSize(dtype);
     uint64_t tensor_size_bytes = static_cast<uint64_t>(num_elements) * element_size_bytes;
@@ -904,8 +902,7 @@ std::unordered_map<int, std::string> get_device_uuid_map() {
   std::unordered_map<int, std::string> device_uuid_map;
   for (const auto& p : gpu_uuid) {
     if (device_uuid_map.find(p.second) != device_uuid_map.end()) {
-      std::cerr << "Duplicate device id: " << p.second << std::endl;
-      exit(1);
+      LOG(FATAL) << "Duplicate device id: " << p.second;
     }
     device_uuid_map[p.second] = p.first;
   }

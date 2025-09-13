@@ -85,7 +85,7 @@ sequenceDiagram
 - Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:
   - Coalesced VRAM: daemon allocates a single VRAM segment and exposes CUDA IPC to the SDK which writes tensor bytes directly.
-  - DVMP: client streams CPU chunks via a client‑streaming RPC; the daemon writes into DVMP memory and computes data hash over SegmentPlan (PAD=0). Each stream frame refreshes TTL (if set), and TTL is also propagated into the engine so that commit checks honor keepalives.
+  - UMA/VS (CPU path): client streams CPU chunks via a client‑streaming RPC; the daemon writes into VS memory and computes data hash over SegmentPlan (PAD=0). Each stream frame refreshes TTL (if set), and TTL is also propagated into the engine so that commit checks honor keepalives.
 - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by linearizing SegmentPlan (PAD=0) from leased memory.
 
 ### LeaseSegments ↔ SegmentPlan
@@ -103,7 +103,7 @@ Recommended: use `RegisteredArtifact` as a context manager to benefit from autom
 
 ```
 with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
-    # feed DVMP chunks or LeaseSegments here if needed
+    # feed UMA/VS chunks or LeaseSegments here if needed
     commit = handle.commit()
     desc = commit.descriptor
 ```
@@ -116,15 +116,15 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 - Lifecycle handle: `tensorcast.api.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
   - Auto-sends keepalive when `ttl_ms` is provided
   - Exposes `commit()`, `abort()`, `revoke()` and context manager semantics
-  - Allows advanced callers to perform manual feed (e.g., DVMP chunks) before commit
+  - Allows advanced callers to perform manual feed (e.g., UMA/VS CPU chunks) before commit
 
 ### Python SDK Updates
 
 - Plan selection uses a typed enum `PlanType` instead of raw strings to avoid typos:
   - `PlanType.VRAM_COALESCED` (aliases: `"coalesced"`)
-  - `PlanType.DVMP` (aliases: `"uma"`, `"cpu"`)
+  - `PlanType.CPU` (aliases: `"uma"`, `"cpu"`)
   - `PlanType.VRAM_LEASED` (aliases: `"lease"`)
-- `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability. DVMP knobs `dvmp_preferred_channel` and `dvmp_ring_bytes` are surfaced here.
+- `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability.
 - Loading helpers with fixed return types:
   - Synchronous: `load_dict_sync(...) -> dict[str, torch.Tensor]` and `get_artifact_sync(...) -> dict[str, torch.Tensor]`
   - Asynchronous: `load_dict_async(...) -> LoadHandle` and `get_artifact_async(...) -> LoadHandle`

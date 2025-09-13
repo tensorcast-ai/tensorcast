@@ -34,7 +34,7 @@ class RemoteKeySource : public SeekableSource {
 
   // Enable direct-write when RDMA is available on the engine.
   [[nodiscard]] bool supports_direct_write() const override;
-  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override;
+  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override;
 
  private:
   Options options_;

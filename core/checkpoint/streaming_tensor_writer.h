@@ -42,10 +42,7 @@ class StreamingTensorWriter {
    * @param config Configuration parameters
    * @param pool Shared pinned memory pool
    */
-  StreamingTensorWriter(
-      std::string filename,
-      Config config,
-      std::shared_ptr<tensorcast::common::memory::PinnedMemoryPool> pool);
+  StreamingTensorWriter(std::string filename, Config config, std::shared_ptr<common::memory::PinnedBufferPool> pool);
 
   ~StreamingTensorWriter();
 

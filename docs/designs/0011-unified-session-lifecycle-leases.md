@@ -51,7 +51,7 @@ Scope: unify all ephemeral lifecycle into a single Lease/Guard/Finalizer system 
 We standardize artifact replica lifecycle across two ownership modes and three reference classes created by different call paths (register/load/load_dict) so that a single abstraction can drive correct cleanup and eviction decisions.
 
 - Ownership modes
-  - Daemon‑owned (VRAM_COALESCED / DVMP): daemon owns the VRAM allocation and exports CUDA IPC handles to clients. Clients only hold mappings; daemon decides placement and eviction.
+  - Daemon‑owned (VRAM_COALESCED / CPU): daemon owns the VRAM allocation and exports CUDA IPC handles to clients. Clients only hold mappings; daemon decides placement and eviction.
   - Client‑owned (VRAM_LEASED): a user process owns the VRAM allocation; daemon tracks the commit as a unique, device‑level ownership record and does metadata/book‑keeping. Memory itself is freed by the OS/driver when the process exits.
 
 - Reference classes (all modeled as Leases; see below)
@@ -97,7 +97,7 @@ Note: device_commit_key encodes (artifact_id, device_uuid|ordinal). The daemon e
 
 # Ownership‑Specific Semantics
 
-## Daemon‑owned (VRAM_COALESCED / DVMP)
+## Daemon‑owned (VRAM_COALESCED / CPU)
 
 - Register/Load paths
   - register_artifact: creates PlacementLease per target device, optionally with ManualGuard or TTL via DeadlineGuard.

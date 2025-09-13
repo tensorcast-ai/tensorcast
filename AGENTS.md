@@ -121,7 +121,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 ## Architecture Overview
 
 ### Core Components
-- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides DVMP/UMA memory model, replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
@@ -144,7 +144,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
     ┌───────────▼───────────┐                       ┌───────────▼───────────┐
     │   Store Daemon #1     │  RDMA/TCP (P2P data)  │    Store Daemon #N    │
     │  (C++ over StoreEngine)│<-------------------->│  (C++ over StoreEngine)│
-    │ - DVMP/UMA memory     │                       │ - DVMP/UMA memory     │
+    │ - VS/UMA memory       │                       │ - VS/UMA memory       │
     │ - Disk & P2P loaders  │                       │ - Disk & P2P loaders  │
     │ - CUDA IPC export     │                       │ - CUDA IPC export     │
     └───────────┬───────────┘                       └───────────┬───────────┘
@@ -177,7 +177,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 - ./core/store/README.md — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
   - ./core/store/docs/architecture.md — Detailed engine architecture and component responsibilities.
-  - ./core/store/docs/state-management.md — UMA/DVMP state model and lifecycle.
+  - ./core/store/docs/state-management.md — UMA/VS state model and lifecycle.
   - ./core/store/docs/device-manager.md — Device discovery, UUID/ordinal mapping, and per-device state.
   - ./core/store/docs/device-registry.md — Replica/device registry structures and indexing.
 
@@ -229,6 +229,13 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 #### Includes vs. Forward Declarations
 - Avoid forward declarations; include the correct headers for any types used in headers and translation units.
 - Follow include-what-you-use: include the minimal header that directly provides the symbols you reference.
+
+#### UMA V3 canonical headers (required)
+- Use canonical headers after UMA V3 final cutover. Legacy and alias headers are forbidden in new/modified code:
+  - `core/common/memory/virtual_address_space.h` (canonical; DVMP removed)
+  - `core/store/replica/unified_memory_authority.h` (canonical; alias under `core/store/uma/*` removed)
+  - `core/store/replica/memory_export_registry.h` (canonical; replaces `chunk_export_service.h`)
+- The helper script `tools/lint/check_uma_aliases.sh` enforces this policy (error-level) and fails on legacy includes.
 
 #### C++ Naming Conventions
 - **Variables/Functions**: `snake_case`

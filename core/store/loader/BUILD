@@ -17,7 +17,7 @@ sc_header_only_library(
     hdrs = ["source.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/store:direct_write",
+        "//core/store/replica:direct_write",
     ],
 )
 
@@ -27,7 +27,7 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:async_copy_manager_lib",
-        "//core/store:direct_write",
+        "//core/store/replica:direct_write",
         "@abseil-cpp//absl/types:span",
     ],
 )
@@ -49,9 +49,10 @@ sc_cc_library(
         ":sink",
         ":source",
         ":streaming_buffer_adapter",
-        "//core/store:direct_write",
+        "//core/store/replica:direct_write",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -196,19 +197,20 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
 ## Removed separate in-memory source targets in favor of local classes in source_hash.cc
 
 sc_cc_library(
-    name = "dvmp_region_sink",
-    srcs = ["dvmp_region_sink.cc"],
-    hdrs = ["dvmp_region_sink.h"],
+    name = "cpu_va_sink",
+    srcs = ["cpu_va_sink.cc"],
+    hdrs = ["cpu_va_sink.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":sink",
-        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "@abseil-cpp//absl/types:span",
     ],
 )
@@ -296,7 +298,7 @@ cc_test(
     }),
     tags = ["requires_cuda"],
     deps = [
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/store/replica",
         "//core/store/replica:replica_config",
         "//core/testing:catch_main",
@@ -314,8 +316,8 @@ cc_test(
     }),
     tags = ["requires_cuda"],
     deps = [
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -338,8 +340,8 @@ cc_test(
         ":gpu_memory_sink",
         ":pump",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -361,10 +363,10 @@ cc_test(
         ":disk_loader",
         ":source",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
-        "//core/store/replica:memory_manager",
+        "//core/store/replica:replica_load_controller",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -380,8 +382,8 @@ cc_test(
     }),
     tags = ["requires_cuda"],
     deps = [
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -445,8 +447,8 @@ cc_test(
         ":gpu_memory_sink",
         ":pump",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store/replica",
         "//core/store/replica:replica_config",
         "//core/testing:catch_main",
@@ -485,8 +487,8 @@ cc_test(
     deps = [
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -519,8 +521,8 @@ cc_test(
         ":gpu_memory_sink",
         ":pump",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -590,8 +592,8 @@ cc_test(
         ":streaming_buffer_adapter",
         "//core/common:artifact_hash_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
         "//core/store/replica",
         "//core/store/replica:replica_config",
@@ -611,10 +613,10 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":p2p_loader",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
-        "//core/store/replica:memory_manager",
+        "//core/store/replica:replica_load_controller",
         "//core/testing:catch_main",
         "//core/testing:common",
         "//core/testing:test_helpers",

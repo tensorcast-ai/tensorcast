@@ -14,24 +14,24 @@ namespace tensorcast::common::memory {
  * Manages the lifetime of the memory, supporting direct allocation,
  * or adoption of an external pointer.
  */
-class CudaMemory {
+class GpuDeviceMemory {
  public:
   /**
-   * @brief Default constructor, creates an uninitialized CudaMemory object.
+   * @brief Default constructor, creates an uninitialized GpuDeviceMemory object.
    */
-  CudaMemory() = default;
+  GpuDeviceMemory() = default;
 
-  ~CudaMemory();
+  ~GpuDeviceMemory();
 
   // Disable copy and move semantics to prevent double frees/mismanagement.
-  CudaMemory(const CudaMemory&) = delete;
-  CudaMemory& operator=(const CudaMemory&) = delete;
-  CudaMemory(CudaMemory&&) = delete; // Could potentially implement move, but disable for simplicity/safety
-  CudaMemory& operator=(CudaMemory&&) = delete;
+  GpuDeviceMemory(const GpuDeviceMemory&) = delete;
+  GpuDeviceMemory& operator=(const GpuDeviceMemory&) = delete;
+  GpuDeviceMemory(GpuDeviceMemory&&) = delete; // Could potentially implement move, but disable for simplicity/safety
+  GpuDeviceMemory& operator=(GpuDeviceMemory&&) = delete;
 
   /**
    * @brief Allocates memory directly using cudaMalloc.
-   * The CudaMemory object owns this memory and will call cudaFree on destruction.
+   * The GpuDeviceMemory object owns this memory and will call cudaFree on destruction.
    * @param size Number of bytes to allocate.
    * @param device_id The target GPU device ID.
    * @return absl::Status OK on success or detailed error status.

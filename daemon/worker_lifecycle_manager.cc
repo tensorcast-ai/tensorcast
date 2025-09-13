@@ -378,7 +378,8 @@ void WorkerLifecycleManager::chunk_sync_loop() {
       for (const auto& info : engine_->get_all_replicas_info()) {
         if (info.gpu_state == common::memory::MemoryLocation::NONE)
           continue;
-        auto states = engine_->get_chunk_states(info.artifact_id);
+        // Use UMA-backed per-device states to reflect actual GPU residency
+        auto states = engine_->get_chunk_states_for_device(info.artifact_id, info.gpu_device_id);
         updates.reserve(updates.size() + states.size());
         for (size_t i = 0; i < states.size(); ++i) {
           store::components::GlobalStoreClient::ChunkStateUpdate u;

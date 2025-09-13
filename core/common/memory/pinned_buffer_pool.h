@@ -28,20 +28,21 @@
 
 namespace tensorcast::common::memory {
 
-class PinnedMemoryPool {
+class PinnedBufferPool {
  public:
   // Alignment requirements for DIRECT_IO support
   static constexpr size_t kMemoryAlignment = 4096; // Page size for optimal alignment
   static constexpr size_t kDirectIOAlignment = 512; // Minimum alignment for DIRECT_IO
 
-  PinnedMemoryPool(size_t total_size, size_t chunk_size);
-  ~PinnedMemoryPool();
+  PinnedBufferPool(size_t total_size, size_t chunk_size);
+  ~PinnedBufferPool();
 
   int allocate(
       size_t size,
       std::vector<char*>& buffers,
       const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero());
   int deallocate(std::vector<char*>& buffers);
+
   size_t chunk_size() const {
     return chunk_size_;
   }
@@ -53,8 +54,8 @@ class PinnedMemoryPool {
   std::vector<gsl::not_null<char*>> list_buffers() const;
 
   // Forbid copy and assignment
-  PinnedMemoryPool(const PinnedMemoryPool&) = delete;
-  PinnedMemoryPool& operator=(const PinnedMemoryPool&) = delete;
+  PinnedBufferPool(const PinnedBufferPool&) = delete;
+  PinnedBufferPool& operator=(const PinnedBufferPool&) = delete;
 
  private:
   mutable std::mutex mutex_;

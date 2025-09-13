@@ -59,10 +59,9 @@ grpc::Status TransportController::lock(
     }
   }
 
+  // UMA V3: No engine-level transfer locks; UMA plan/commit supersedes any prior locking.
+  // Maintain a daemon-local token workflow strictly for bookkeeping.
   std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
-  auto st = d_.engine.lock_chunks(key, absl::MakeSpan(indices));
-  if (!st.ok())
-    return to_grpc_status(st);
   std::string token = d_.locks.mint_token();
   d_.locks.put(token, key, std::move(indices));
   resp.set_lock_token(token);
@@ -89,9 +88,7 @@ grpc::Status TransportController::unlock(
     rctx.mark_success();
     return Status::OK;
   }
-  auto st = d_.engine.unlock_chunks(entry->key, absl::MakeSpan(entry->chunk_indices), /*copied_gpu=*/false);
-  if (!st.ok())
-    return to_grpc_status(st);
+  // UMA V3: No engine-level unlock; treat daemon unlock as idempotent bookkeeping: just erase the token.
   d_.locks.erase(req.lock_token());
   rctx.mark_success();
   return Status::OK;

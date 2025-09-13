@@ -333,9 +333,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   }
 
   // Enrich log with plan type and basic context. We infer plan from device type:
-  // - CPU device ⇒ DVMP (UMA)
+  // - CPU device ⇒ VS (UMA)
   // - GPU device ⇒ VRAM_COALESCED (including materialized Lease)
-  const char* plan_str = (device.type == DeviceType::CPU) ? "dvmp" : "vram_coalesced";
+  const char* plan_str = (device.type == DeviceType::CPU) ? "virtual_addr_space" : "vram_coalesced";
   const char* dev_kind = (device.type == DeviceType::CPU) ? "cpu" : "gpu";
   LOG(INFO) << "Registered memory replica: " << artifact_id << " plan=" << plan_str << " device=" << dev_kind << ":"
             << device.ordinal << " size=" << memory_size << "B"
@@ -529,7 +529,7 @@ tensorcast::common::v1::MemoryType GlobalStoreClient::convert_to_proto_memory_ty
   switch (location) {
     case MemoryLocation::GPU:
       return tensorcast::common::v1::MEMORY_TYPE_GPU;
-    case MemoryLocation::PAGEABLE_CPU:
+    case MemoryLocation::CPU:
       return tensorcast::common::v1::MEMORY_TYPE_RAM;
     case MemoryLocation::DISK:
       return tensorcast::common::v1::MEMORY_TYPE_DISK;
@@ -545,7 +545,7 @@ MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(tensorcast::com
     case tensorcast::common::v1::MEMORY_TYPE_GPU:
       return MemoryLocation::GPU;
     case tensorcast::common::v1::MEMORY_TYPE_RAM:
-      return MemoryLocation::PAGEABLE_CPU;
+      return MemoryLocation::CPU;
     case tensorcast::common::v1::MEMORY_TYPE_DISK:
       return MemoryLocation::DISK;
     default:

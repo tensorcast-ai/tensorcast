@@ -10,15 +10,15 @@
 
 #include "absl/status/status.h"
 #include "absl/time/time.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -33,7 +33,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   const std::string artifact_dir_name = "basic_cpu_model_files";
   const std::string p0 = "tensor.data_0";
   const std::string p1 = "tensor.data_1";
-  // Use page-aligned sizes to trigger DVMP mmap path
+  // Use page-aligned sizes to trigger VS mmap path
   const size_t page_size = 4096; // Common page size
   const size_t size0 = page_size * 2; // 8192 bytes
   const size_t size1 = page_size * 3; // 12288 bytes
@@ -65,11 +65,11 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   // Pinned pool setup
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 1024;
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
+  // Create VS
+  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -81,8 +81,8 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
-      .pinned_memory_pool = pool,
-      .dvmp = dvmp,
+      .pinned_buffer_pool = pool,
+      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -97,27 +97,27 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   }
 
   SECTION("Load to CPU and verify content") {
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
-    auto fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
+    auto fut = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(fut.valid());
-    auto wait_status = replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15));
+    auto wait_status = replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15));
     REQUIRE(wait_status.ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
-    // With DVMP, get_data_pointer returns a single pointer to the contiguous memory block
-    auto ptrs = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    // With VS, get_data_pointer returns a single pointer to the contiguous memory block
+    auto ptrs = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(ptrs.size() == 1);
     REQUIRE(ptrs[0] != nullptr);
 
     // The entire replica is now in a single contiguous memory block
-    // Note: With DVMP and mmap-based loading, we need to be careful about accessing memory
+    // Note: With VS and mmap-based loading, we need to be careful about accessing memory
     // that might be lazily mapped. Let's verify the content safely.
     char* data_ptr = static_cast<char*>(ptrs[0]);
 
     // Create a buffer to read into to avoid potential page faults
     std::vector<char> loaded(total_size);
 
-    // Copy data from DVMP memory to our buffer
+    // Copy data from VS memory to our buffer
     // This ensures we trigger any page faults in a controlled manner
     std::memcpy(loaded.data(), data_ptr, total_size);
 
@@ -125,13 +125,13 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   }
 
   SECTION("Release CPU memory") {
-    replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU).wait();
-    replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).IgnoreError();
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
-    auto status = replica->release_memory(MemoryLocation::PAGEABLE_CPU);
+    replica->ensure_loaded_async(MemoryLocation::CPU).wait();
+    replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).IgnoreError();
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
+    auto status = replica->release_memory(MemoryLocation::CPU);
     REQUIRE(status.ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
-    auto ptrs_after = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
+    auto ptrs_after = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(ptrs_after.empty());
   }
 

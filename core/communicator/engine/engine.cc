@@ -20,7 +20,6 @@
 #include "core/communicator/engine/gpu_net_stager.h"
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/protocol.h"
-#include "core/communicator/engine/uma_residency_provider.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
 
@@ -61,8 +60,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   server_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
   client_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
 
-  // Default UMA-backed residency provider
-  residency_provider_ = std::static_pointer_cast<ResidencyProvider>(std::make_shared<UmaResidencyProvider>());
+  // No default residency provider required; staging policy no longer consults UMA bridges.
 
   // Staging resources sized from config
   const size_t gpu_chunk_size =
@@ -76,17 +74,17 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
       : gpu_chunk_size * (num_buffers + recv_num_buffers);
 
   // GPU staging pool and stager
-  gpu_memory_pool_ = std::make_shared<common::memory::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
+  gpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
   gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
 
   // CPU staging pool honors CPU chunk size; size conservatively for one flow
   if (cpu_chunk_size != gpu_chunk_size) {
     const size_t cpu_pool_size = cpu_chunk_size * num_buffers; // minimal to honor buffers_per_flow
-    cpu_memory_pool_ = std::make_shared<common::memory::PinnedMemoryPool>(cpu_pool_size, cpu_chunk_size);
+    cpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(cpu_pool_size, cpu_chunk_size);
   }
   auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
   memory_stager_ = std::make_shared<DRAMStager>(
-      gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
+      gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
   if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
     ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
   }
@@ -100,10 +98,10 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
     if (config_.simple_numa().enable()) {
       for (const auto& node : config_.simple_numa().nodes()) {
-        auto pool = std::make_shared<common::memory::PinnedMemoryPool>(total_pool_size, gpu_chunk_size);
+        auto pool = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
         numa_pools_.push_back(pool);
         auto cpu_stager = std::make_shared<DRAMStager>(
-            gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>{pool}, /*num_buffers_hint=*/num_buffers);
+            gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{pool}, /*num_buffers_hint=*/num_buffers);
         if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
           ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
         }
@@ -121,7 +119,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
     // Preregister MRs for all pools
     int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-    std::vector<std::shared_ptr<common::memory::PinnedMemoryPool>> pools;
+    std::vector<std::shared_ptr<common::memory::PinnedBufferPool>> pools;
     pools.push_back(gpu_memory_pool_);
     if (cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
       pools.push_back(cpu_memory_pool_);
@@ -288,8 +286,10 @@ absl::Status Communicator::register_tensor_ex(
 }
 
 absl::Status Communicator::unregister_tensor(const std::string& tensor_key) {
+  // Make unregister idempotent: return OK if the key does not exist.
   if (store_.get_tensor(tensor_key) == nullptr) {
-    return absl::InternalError("failed to unregister a non-existed tensor");
+    VLOG(1) << "[unregister_tensor] key not found, treating as idempotent OK: " << tensor_key;
+    return absl::OkStatus();
   }
   store_.unregister_tensor(tensor_key);
   return absl::OkStatus();

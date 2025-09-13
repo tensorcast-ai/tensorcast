@@ -108,7 +108,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         "engine": {
             "mem_pool_size_bytes": 64 * 1024 * 1024,
             "chunk_bytes": 1 * 1024 * 1024,
-            "dvmp_chunk_size_bytes": 1 * 1024 * 1024,
+            "cpu_chunk_size_bytes": 1 * 1024 * 1024,
             "streaming_buffer_max_concurrent_sessions": 1,
         },
         "high_availability": {

@@ -47,17 +47,8 @@ class LockTtlTask final : public IBackgroundTask {
     for (const auto& tok : locks_.tokens()) {
       auto expired = locks_.remove_if_expired(tok);
       if (expired.has_value()) {
-        auto st = engine_.unlock_chunks(expired->key, absl::MakeSpan(expired->chunk_indices), /*copied_gpu=*/false);
-        if (!st.ok()) {
-          LOG(WARNING) << "LockTtlTask.unlock_chunks failed for artifact_id=" << expired->key.artifact_id << ": " << st;
-          try {
-            static auto meter =
-                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-            static auto ctr = meter->CreateDoubleCounter("tc_unlock_failed_total");
-            ctr->Add(1.0);
-          } catch (...) {
-          }
-        }
+        // UMA final: no engine-level unlock; TTL sweep clears daemon bookkeeping only.
+        VLOG(1) << "LockTtlTask: expired transport lock cleared for artifact_id=" << expired->key.artifact_id;
       }
     }
   }

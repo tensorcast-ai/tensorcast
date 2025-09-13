@@ -10,7 +10,7 @@
 #include "gsl/pointers"
 
 #include "core/common/cuda_api.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
@@ -20,7 +20,7 @@ namespace tensorcast::communicator::engine {
 // GPU MemoryStager implementation using a StreamingPinnedBuffer for D2H staging.
 class GpuNetStager : public MemoryStager {
  public:
-  GpuNetStager(size_t chunk_size, size_t num_buffers, std::shared_ptr<common::memory::PinnedMemoryPool> pool)
+  GpuNetStager(size_t chunk_size, size_t num_buffers, std::shared_ptr<common::memory::PinnedBufferPool> pool)
       : chunk_size_(chunk_size), num_buffers_(num_buffers), pool_(std::move(pool)) {}
 
   absl::StatusOr<void*> stage(
@@ -103,7 +103,7 @@ class GpuNetStager : public MemoryStager {
  private:
   size_t chunk_size_;
   size_t num_buffers_;
-  std::shared_ptr<common::memory::PinnedMemoryPool> pool_;
+  std::shared_ptr<common::memory::PinnedBufferPool> pool_;
   std::unique_ptr<common::memory::StreamingPinnedBuffer> streaming_;
   mutable absl::Mutex mu_;
   std::unordered_map<void*, int> ptr_to_slot_ ABSL_GUARDED_BY(mu_);

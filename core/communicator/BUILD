@@ -266,7 +266,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "@opentelemetry-cpp//api:api",
     ],
@@ -287,19 +287,8 @@ sc_header_only_library(
     deps = [
         ":memory_stager_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
-    ],
-)
-
-# UMA residency provider bridge (header-only)
-sc_header_only_library(
-    name = "uma_residency_provider_lib",
-    hdrs = ["engine/uma_residency_provider.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":channel_lib",
-        "//core/store:uma_lease_provider",
     ],
 )
 
@@ -312,7 +301,7 @@ sc_cc_library(
     deps = [
         ":memory_stager_lib",
         ":partition_tensor_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/synchronization",
@@ -347,14 +336,12 @@ sc_cc_library(
         ":rdma_lib",
         ":store_lib",
         ":tcp_lib",
-        ":uma_residency_provider_lib",
         ":utils_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/common:system_capabilities_lib",
-        "//core/store:uma_lease_provider",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
@@ -514,7 +501,7 @@ sc_header_only_library(
         ":request_lib",
         ":store_lib",
         ":tcp_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",

@@ -2,39 +2,120 @@
 
 #include "core/store/loader/gpu_memory_sink.h"
 
+#include <cstdlib>
+#include <string_view>
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
+#include "absl/synchronization/mutex.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
+// OpenTelemetry Metrics for inflight bytes gauge
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/observer_result.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store::loader {
 
-GPUMemorySink::GPUMemorySink(Options options) : options_(std::move(options)) {
-  // Create non-blocking CUDA stream for H2D transfers
-  common::DeviceGuard guard(options_.device_id);
-  if (!guard.status().ok()) {
-    overall_status_ = guard.status();
-    return;
-  }
+namespace {
+// Simple per-GPU copy scheduler with inflight bytes and copy count limits.
+struct GpuSchedDev {
+  size_t inflight_bytes{0};
+  size_t inflight_copies{0};
+  size_t limit_bytes{512ull * 1024ull * 1024ull}; // default 512 MiB
+  size_t limit_copies{2};
+  absl::CondVar cv;
+};
 
-  auto stream_status = cuda::stream_create_with_flags(&h2d_stream_, cudaStreamNonBlocking);
-  if (!stream_status.ok()) {
-    overall_status_ = stream_status;
-    LOG(ERROR) << "Failed to create CUDA stream: " << stream_status;
+ABSL_CONST_INIT absl::Mutex g_sched_mu(absl::kConstInit);
+absl::flat_hash_map<int, std::unique_ptr<GpuSchedDev>> g_sched ABSL_GUARDED_BY(g_sched_mu);
+
+// OTel gauge for inflight bytes
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> g_meter;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_if_bytes_gauge;
+
+static void inflight_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs)
     return;
+  absl::MutexLock lk(&g_sched_mu);
+  for (const auto& kv : g_sched) {
+    const int gpu = kv.first;
+    const GpuSchedDev* dev = kv.second.get();
+    if (!dev)
+      continue;
+    obs->Observe(
+        static_cast<double>(dev->inflight_bytes),
+        {{"gpu", opentelemetry::common::AttributeValue(std::to_string(gpu))}});
   }
-  stream_created_ = true;
 }
 
-GPUMemorySink::~GPUMemorySink() {
-  if (stream_created_) {
-    auto destroy_status = cuda::stream_destroy(h2d_stream_);
-    if (!destroy_status.ok()) {
-      LOG(ERROR) << "Failed to destroy CUDA stream: " << destroy_status;
-    }
+inline void ensure_metrics_init_() {
+  if (!g_meter) {
+    g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  }
+  if (!g_if_bytes_gauge) {
+    g_if_bytes_gauge = g_meter->CreateDoubleObservableGauge("tc_tx_inflight_bytes_gauge");
+    g_if_bytes_gauge->AddCallback(&inflight_bytes_callback, nullptr);
   }
 }
 
-absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
+inline bool gpu_sched_enabled() {
+  return true;
+}
+
+inline void maybe_init_limits_(GpuSchedDev& dev) {
+  // In V3 final state, use built-in defaults; no env overrides.
+  (void)dev; // defaults already set in struct initializer
+}
+
+inline void sched_acquire(int device_id, size_t bytes) {
+  if (!gpu_sched_enabled())
+    return;
+  absl::MutexLock lk(&g_sched_mu);
+  ensure_metrics_init_();
+  auto& ptr = g_sched[device_id];
+  if (!ptr)
+    ptr = std::make_unique<GpuSchedDev>();
+  GpuSchedDev* dev = ptr.get();
+  maybe_init_limits_(*dev);
+  while ((dev->inflight_bytes + bytes > dev->limit_bytes) || (dev->inflight_copies >= dev->limit_copies)) {
+    dev->cv.Wait(&g_sched_mu);
+  }
+  dev->inflight_bytes += bytes;
+  dev->inflight_copies += 1;
+  // Metrics hooks can be added here (omitted to avoid extra deps in loader).
+}
+
+inline void sched_release(int device_id, size_t bytes) {
+  if (!gpu_sched_enabled())
+    return;
+  absl::MutexLock lk(&g_sched_mu);
+  ensure_metrics_init_();
+  auto it = g_sched.find(device_id);
+  if (it != g_sched.end() && it->second) {
+    GpuSchedDev* dev = it->second.get();
+    if (dev->inflight_bytes >= bytes)
+      dev->inflight_bytes -= bytes;
+    else
+      dev->inflight_bytes = 0;
+    if (dev->inflight_copies > 0)
+      dev->inflight_copies -= 1;
+    else
+      dev->inflight_copies = 0;
+    dev->cv.Signal();
+  }
+  // Metrics hooks can be added here (omitted to avoid extra deps in loader).
+}
+} // namespace
+
+GpuMemorySink::GpuMemorySink(Options options) : options_(std::move(options)) {}
+
+GpuMemorySink::~GpuMemorySink() {}
+
+absl::Status GpuMemorySink::write(const void* src, size_t bytes) {
   if (!overall_status_.ok()) {
     return overall_status_;
   }
@@ -45,12 +126,12 @@ absl::Status GPUMemorySink::write(const void* src, size_t bytes) {
   return st;
 }
 
-absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t bytes) {
+absl::Status GpuMemorySink::write_at(uint64_t offset, const void* src, size_t bytes) {
   if (!overall_status_.ok()) {
     return overall_status_;
   }
 
-  if (offset + bytes > options_.total_size) {
+  if (options_.total_size > 0 && offset + bytes > options_.total_size) {
     return absl::InvalidArgumentError("Write would exceed total GPU memory size");
   }
 
@@ -80,16 +161,17 @@ absl::Status GPUMemorySink::write_at(uint64_t offset, const void* src, size_t by
     return st;
   }
 
-  total_bytes_written_ += bytes;
   VLOG(3) << "Copied " << bytes << " bytes to GPU at offset " << offset;
+  // Maintain compatibility with tests that check completeness on close().
+  total_bytes_written_ += bytes;
   return absl::OkStatus();
 }
 
-absl::StatusOr<common::CopyHandle> GPUMemorySink::write_at_async(uint64_t offset, const void* src, size_t bytes) {
+absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset, const void* src, size_t bytes) {
   if (!overall_status_.ok()) {
     return overall_status_;
   }
-  if (offset + bytes > options_.total_size) {
+  if (options_.total_size > 0 && offset + bytes > options_.total_size) {
     return absl::InvalidArgumentError("Write would exceed total GPU memory size");
   }
   // Set device context
@@ -101,51 +183,36 @@ absl::StatusOr<common::CopyHandle> GPUMemorySink::write_at_async(uint64_t offset
 
   // Submit H2D via ACM; caller is responsible for waiting before reusing src
   // memory (e.g., pump will defer returning SPB slot until handle completes).
+  // Apply per-GPU scheduling limits when enabled.
+  sched_acquire(options_.device_id, bytes);
   char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr.get()) + offset;
   common::HostRegion h{.base = src, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
-  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, {.tracing_stage = "H2D/Copy"});
+  common::CopyOptions copts;
+  copts.tracing_stage = "H2D/Copy";
+  copts.callbacks.on_copy_done = [dev_id = options_.device_id, bytes]() { sched_release(dev_id, bytes); };
+  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, copts);
   if (!hdl_or.ok()) {
+    // Release budget on immediate failure path
+    sched_release(options_.device_id, bytes);
     overall_status_ = hdl_or.status();
     LOG(ERROR) << "Failed to schedule H2D async copy: " << overall_status_;
     return overall_status_;
   }
-  total_bytes_written_ += bytes;
   return hdl_or;
 }
 
-absl::Status GPUMemorySink::close() {
-  if (!overall_status_.ok()) {
+absl::Status GpuMemorySink::close() {
+  // No-op: All synchronization responsibility lies with callers via CopyHandles.
+  // For synchronous write_at callers, we already waited for completion.
+  if (!overall_status_.ok())
     return overall_status_;
-  }
-
-  if (!stream_created_) {
-    return absl::OkStatus();
-  }
-
-  // Validate that all expected data was written
-  if (total_bytes_written_ != options_.total_size) {
+  if (options_.total_size > 0 && total_bytes_written_ != options_.total_size) {
     LOG(ERROR) << "GPU memory sink closed with incomplete transfer. "
                << "Expected " << options_.total_size << " bytes, "
                << "but only " << total_bytes_written_ << " bytes were written.";
     return absl::OutOfRangeError("incomplete GPU transfer: bytes written do not match expected total");
   }
-
-  // Set device context
-  common::DeviceGuard guard(options_.device_id);
-  if (!guard.status().ok()) {
-    return guard.status();
-  }
-
-  // Synchronize stream to ensure all transfers complete
-  auto sync_status = cuda::stream_synchronize(h2d_stream_);
-  if (!sync_status.ok()) {
-    LOG(ERROR) << "Failed to synchronize CUDA stream: " << sync_status;
-    return sync_status;
-  }
-
-  VLOG(2) << "GPU memory sink closed successfully. Total bytes written: " << current_offset_;
-
   return absl::OkStatus();
 }
 

@@ -135,8 +135,8 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> P2PLoader::open_source()
       return inner_->supports_direct_write();
     }
 
-    absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {
-      return inner_->read_into(dest_va_offset, bytes, token);
+    absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
+      return inner_->read_into(dest_va_offset, bytes, grant);
     }
 
    private:

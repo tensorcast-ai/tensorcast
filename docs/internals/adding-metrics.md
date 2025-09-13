@@ -7,7 +7,7 @@ sidebar_position: 9
 # 📊 Adding New Metrics
 
 This guide explains **how to add a new Prometheus metric** to the TensorCast with minimal effort.
-The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedMemoryPool`, future CUDA kernels) and integrates with the unified metrics exporter.
+The workflow is the same for all C++ core modules (e.g. `StoreEngine`, `PinnedBufferPool`, future CUDA kernels) and integrates with the unified metrics exporter.
 
 > The mechanism relies on the lightweight `MetricsRegistry` singleton (`core/common/metrics/metrics_registry.{h,cpp}`) and a unified exporter. No per-component HTTP endpoints.
 
@@ -181,7 +181,7 @@ graph TD
     subgraph "C++ Core"
         MR[MetricsRegistry<br/>Singleton]
         CS[StoreEngine]
-        PM[PinnedMemoryPool]
+        PM[PinnedBufferPool]
         CE[CommunicatorEngine]
         MO[metric_objects.h<br/>Helpers]
 

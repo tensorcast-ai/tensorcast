@@ -73,7 +73,7 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
   // Use engine's configured Global Store client for upsert.
   auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), req->disk_path());
   if (!up.ok()) {
-    // For conflicts, return OK with ok=false for compatibility.
+    // For conflicts, return OK with ok=false for idempotency.
     if (absl::IsAlreadyExists(up)) {
       resp->set_ok(false);
       resp->set_conflict_reason(std::string(up.message()));

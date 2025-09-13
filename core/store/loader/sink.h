@@ -8,7 +8,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
-#include "core/store/direct_write.h"
+#include "core/store/replica/types/direct_write_grant.h"
 
 namespace tensorcast::store::loader {
 
@@ -55,14 +55,14 @@ class AsyncPositionedSink {
 };
 
 // Optional capability: destination can plan direct writes into its VA ranges.
-class DirectWritableSink {
+class DirectWriteCapable {
  public:
-  virtual ~DirectWritableSink() = default;
+  virtual ~DirectWriteCapable() = default;
 
   // Plan a direct write token for the given destination VA ranges.
   // The returned token authorizes writing into these ranges and carries
-  // any required keepalive resources (e.g., DVMP pin leases).
-  virtual absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) = 0;
+  // any required keepalive resources (e.g., VS pin leases).
+  virtual absl::StatusOr<DirectWriteGrant> plan_direct_write(absl::Span<const VaRange> ranges) = 0;
 };
 
 } // namespace tensorcast::store::loader
