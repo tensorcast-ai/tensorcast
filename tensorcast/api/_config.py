@@ -11,7 +11,7 @@ from ._errors import InvalidPlan
 # Module-level constants
 DEFAULT_ALIGN: int = 8
 DEFAULT_PINNED_TIMEOUT_MS: int = 30000
-DEFAULT_CPU_CHUNK_SIZE: int = 4 * 1024 * 1024
+# Final model: no default CPU stream chunking heuristic
 
 
 # Global daemon address configuration

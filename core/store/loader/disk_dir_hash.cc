@@ -74,7 +74,7 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
     opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
   }
   opts.total_size = total_size;
-  opts.chunk_size = 128 * 1024 * 1024;
+  opts.io_batch_bytes = 128 * 1024 * 1024;
   opts.use_direct_io = (total_size > 5ULL * 1024 * 1024 * 1024);
   FilePartitionSource src(std::move(opts));
   return compute_data_multihash_from_seekable_source(src, total_size);

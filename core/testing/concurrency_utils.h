@@ -156,7 +156,7 @@ inline std::unique_ptr<store::StoreEngine> make_test_store(
   store::StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_mb * 1024 * 1024;
-  opts.chunk_size = chunk_size_kb * 1024;
+  opts.tx_slice_bytes = chunk_size_kb * 1024;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(30000);
   // P2P is configured via p2p_port (already has default)

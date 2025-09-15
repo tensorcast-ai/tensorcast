@@ -43,8 +43,7 @@ def test_unary_call_rebinds_stub_after_refresh(monkeypatch):
     # Pass the bound method from the bad stub; retries=1 allows one retry after failure
     resp = ctl._unary_call(ctl.stub.GetServerConfig, request=None, retries=1)
 
-    assert resp.chunk_size == 123
+    assert resp.tx_slice_bytes == 123
     assert resp.mem_pool_size == 456
     assert refreshed_count["n"] == 1
-
 

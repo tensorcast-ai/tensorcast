@@ -190,7 +190,7 @@ class ReplicaLoadController {
   // Convenience wrappers for buffer sizing
   // These are lock-free since members are immutable after construction.
   [[nodiscard]] size_t get_pool_chunk_size() const noexcept {
-    return pinned_pool_->chunk_size();
+    return pinned_pool_->slice_bytes();
   }
 
   /**

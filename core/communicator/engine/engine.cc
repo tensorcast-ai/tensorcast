@@ -130,7 +130,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
       for (auto& pool : pools) {
         auto buffers = pool->list_buffers();
         for (auto ptr : buffers) {
-          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->chunk_size(), access);
+          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->slice_bytes(), access);
           if (mr == nullptr) {
             LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
           }

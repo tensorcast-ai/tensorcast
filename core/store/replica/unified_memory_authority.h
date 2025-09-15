@@ -153,9 +153,9 @@ class UnifiedMemoryAuthority {
   bool has_allocation(const loading::ReplicaKey& key) const;
 
   /**
-   * @brief Convenience: return the global chunk size used by VS.
+   * @brief Convenience: return the UMA/VS artifact chunk size (bytes).
    */
-  size_t get_chunk_size() const;
+  size_t get_artifact_chunk_bytes() const;
 
   // Record-based queries (preferred over deprecated mapping view)
   absl::StatusOr<ChunkState> get_cpu_chunk_state(const loading::ReplicaKey& key, uint32_t chunk_idx) const;
@@ -165,9 +165,9 @@ class UnifiedMemoryAuthority {
   /**
    * @brief Retrieve the artifact layout (bytes, chunk size, slice size).
    *
-   * transfer_slice_bytes is derived from env var TCAST_TX_SLICE_BYTES if set;
-   * otherwise may be 0 to indicate default (caller should fall back to
-   * PinnedBufferPool::chunk_size()).
+   * transfer_slice_bytes is reported as 0 here (caller uses pinned pool slice
+   * size). UMA does not consult environment variables in V3; data-plane
+   * window size comes from the configured PinnedBufferPool.
    */
   absl::StatusOr<ArtifactLayout> get_layout(const loading::ReplicaKey& key) const;
 

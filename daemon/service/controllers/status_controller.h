@@ -35,7 +35,9 @@ class StatusController {
     auto& e = d_.engine;
     (void)rctx;
     resp.set_mem_pool_size(static_cast<int64_t>(e.get_mem_pool_size()));
-    resp.set_chunk_size(static_cast<int64_t>(e.get_chunk_size()));
+    // Canonical fields (no gRPC frame size surfaced)
+    resp.set_artifact_chunk_bytes(static_cast<uint64_t>(e.get_artifact_chunk_bytes()));
+    resp.set_tx_slice_bytes(static_cast<uint64_t>(e.get_tx_slice_bytes()));
     rctx.mark_success();
     return grpc::Status::OK;
   }

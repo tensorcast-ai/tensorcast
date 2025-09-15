@@ -686,7 +686,7 @@ void MTcpTransport::recv_loop() {
       CHECK(memory_pool_ != nullptr) << "MTcpTransport requires memory_pool_ to be configured for GPU receive";
 
       // Determine pool chunk size once for this tensor receive
-      size_t pool_chunk_size = memory_pool_->chunk_size();
+      size_t pool_chunk_size = memory_pool_->slice_bytes();
 
       if (!gpu_recv_buffer_) {
         // Lazily construct StreamingPinnedBuffer using the configured memory pool.

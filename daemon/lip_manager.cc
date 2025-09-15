@@ -100,7 +100,25 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
             .len = seg.length,
             .dst = seg.dst_offset});
   }
+  const size_t chunk_size = engine_->get_artifact_chunk_bytes();
+  if (chunk_size == 0) {
+    return absl::FailedPreconditionError("invalid artifact_chunk_bytes (0)");
+  }
+  auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
   for (const auto& o : opened) {
+    const bool is_tail = (o.dst + o.len == total_size);
+    if (!is_aligned(o.dst) || !is_aligned(o.base) || (!is_aligned(o.len) && !is_tail)) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
+              o.base,
+              ", dst_offset=",
+              o.dst,
+              ", length=",
+              o.len,
+              ", chunk=",
+              chunk_size));
+    }
     if (o.dst > total_size || o.len > total_size || o.dst + o.len > total_size) {
       return absl::OutOfRangeError("LIP segment dst range out of bounds");
     }
@@ -138,7 +156,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     return absl::UnavailableError("communication engine not enabled");
   }
   auto& comm_engine = comm_mgr->get_engine();
-  const size_t chunk_size = engine.get_chunk_size();
+  const size_t chunk_size = engine.get_artifact_chunk_bytes();
   if (chunk_size == 0) {
     return absl::FailedPreconditionError("invalid chunk_size (0)");
   }
@@ -164,6 +182,23 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
             .base = seg.base_offset,
             .len = seg.length,
             .dst = seg.dst_offset});
+  }
+  // Enforce alignment of LIP segments to artifact_chunk_bytes
+  auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
+  for (const auto& s : opened) {
+    const bool is_tail = (s.dst + s.len == lip.total_size);
+    if (!is_aligned(s.dst) || !is_aligned(s.base) || (!is_aligned(s.len) && !is_tail)) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
+              s.base,
+              ", dst_offset=",
+              s.dst,
+              ", length=",
+              s.len,
+              ", chunk=",
+              chunk_size));
+    }
   }
   auto find_covering = [&](uint64_t off, uint64_t len) -> const OpenedSeg* {
     for (const auto& s : opened) {

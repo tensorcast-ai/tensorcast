@@ -17,7 +17,7 @@ namespace fs = std::filesystem;
 static tensorcast::store::StoreEngineOptions make_opts_small() {
   tensorcast::store::StoreEngineOptions opts;
   opts.memory_pool_size = 64ULL * 1024 * 1024; // 64 MiB
-  opts.chunk_size = 1ULL << 20; // 1 MiB
+  opts.tx_slice_bytes = 1ULL << 20; // 1 MiB
   opts.num_thread = 2;
   return opts;
 }

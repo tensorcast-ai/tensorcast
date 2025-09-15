@@ -31,7 +31,7 @@ TEST_CASE("Immediate unload on last UseLease with no pins", "[daemon][lifecycle]
   StoreEngineOptions opts;
   opts.storage_path = std::filesystem::temp_directory_path().string();
   opts.memory_pool_size = 16ULL * 1024 * 1024; // 16MB
-  opts.chunk_size = 1ULL << 20; // 1MB
+  opts.tx_slice_bytes = 1ULL << 20; // 1MB
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);

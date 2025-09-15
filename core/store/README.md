@@ -129,6 +129,17 @@ graph TB
 // VS lock APIs have been removed in UMA V3 final state.
 // Use UMA plan/commit and VS pin_range for CPU residency leasing.
 
+### Granularity and Invariants
+
+- Canonical sizes:
+  - Artifact chunk (layout/state): `artifact_chunk_bytes`
+  - Transfer slice/window (pump, pinned blocks): `tx_slice_bytes`
+  - Hash leaf (content-addressed leaf): `hash_leaf_bytes`
+- Invariants enforced at startup:
+  - `artifact_chunk_bytes % tx_slice_bytes == 0`
+  - Pinned buffer pool slice size aligned to 512 B and page size
+- Transfer ranges never cross artifact chunk boundaries; pump slices always align to `tx_slice_bytes`.
+
 ## Data Paths
 
 ### AUTO Materialize (P2P-first)
@@ -366,3 +377,11 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
 Note on verification: When the P2P source provides `verification_json` (e.g., via a sender daemon’s LockTransportChunks), `StoreEngine::ingest_from_p2p_internal()` parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a DataLoss error and aborts materialization.
+## Granularity Terminology and Invariants
+
+- Artifact layout chunk: `artifact_chunk_bytes` (VS/UMA)
+- Transfer slice/window: `tx_slice_bytes` (pinned buffer block)
+- Invariant: `artifact_chunk_bytes % tx_slice_bytes == 0`
+- Pinned pool block is aligned to 512 B and 4096 B (page) and validated at startup.
+
+Defaults are defined in `core/common/const/granularity.h` and exposed to Python via the extension module.

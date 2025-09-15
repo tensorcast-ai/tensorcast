@@ -29,7 +29,7 @@ static StoreEngine make_store(
   StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_bytes;
-  opts.chunk_size = chunk_size_bytes;
+  opts.tx_slice_bytes = chunk_size_bytes;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   return StoreEngine(opts);

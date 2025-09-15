@@ -66,7 +66,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_paths = {file_path};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.chunk_size = 1024;
+    options.io_batch_bytes = 1024;
     options.use_direct_io = false; // Disable for simplicity
 
     FilePartitionSource source(options);
@@ -97,7 +97,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_paths = {file1, file2, file3};
     options.partition_sizes = {part1_size, part2_size, part3_size};
     options.total_size = part1_size + part2_size + part3_size;
-    options.chunk_size = 1024;
+    options.io_batch_bytes = 1024;
     options.use_direct_io = false;
 
     FilePartitionSource source(options);
@@ -413,7 +413,7 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     options.partition_paths = {file};
     options.partition_sizes = {aligned_size};
     options.total_size = aligned_size;
-    options.chunk_size = 512;
+    options.io_batch_bytes = 512;
     options.use_direct_io = true; // Request Direct I/O
 
     FilePartitionSource source(options);

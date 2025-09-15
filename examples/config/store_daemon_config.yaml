@@ -9,8 +9,8 @@ server:
   num_threads: 16
 engine:
   mem_pool_size_bytes: 8GB
-  chunk_bytes: 256MB
-  cpu_chunk_size_bytes: 256MB
+  tx_slice_bytes: 256MB
+  artifact_chunk_bytes: 256MB
   streaming_buffer_max_concurrent_sessions: 1
   pinned_allocation_timeout: 30s
   p2p_fallback_disk_dir: ""

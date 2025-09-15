@@ -25,7 +25,7 @@ class StatusAssembler {
     mp->set_available_bytes(engine.get_available_memory());
     mp->set_allocated_bytes(engine.get_mem_pool_size() - engine.get_available_memory());
     mp->set_allocated_chunks_count(0);
-    mp->set_chunk_size_bytes(engine.get_chunk_size());
+    mp->set_chunk_size_bytes(engine.get_tx_slice_bytes());
 
     uint64_t total_bytes = 0;
     int32_t total_replicas = 0;
@@ -34,6 +34,7 @@ class StatusAssembler {
       v1::GpuDeviceInfo* out;
       bool mem_filled{false};
     };
+
     absl::flat_hash_map<int, GpuAgg> gpu_map;
 
     for (const auto& info : engine.get_all_replicas_info()) {

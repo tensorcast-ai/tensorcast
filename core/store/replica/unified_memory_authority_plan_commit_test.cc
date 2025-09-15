@@ -76,7 +76,9 @@ TEST_CASE("UnifiedMemoryAuthority allocation", "[unified_memory]") {
     auto layout = *layout_or;
     REQUIRE(layout.artifact_bytes == size);
     size_t expected_chunks = (size + layout.artifact_chunk_bytes - 1) / layout.artifact_chunk_bytes;
-    REQUIRE(expected_chunks == (size + unified_memory.get_chunk_size() - 1) / unified_memory.get_chunk_size());
+    REQUIRE(
+        expected_chunks ==
+        (size + unified_memory.get_artifact_chunk_bytes() - 1) / unified_memory.get_artifact_chunk_bytes());
   }
 
   SECTION("allocation failure") {
@@ -251,7 +253,7 @@ TEST_CASE("UnifiedMemoryAuthority chunk calculations", "[unified_memory]") {
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
   // Test chunk size
-  size_t chunk_size = unified_memory.get_chunk_size();
+  size_t chunk_size = unified_memory.get_artifact_chunk_bytes();
   REQUIRE(chunk_size == 256ULL * 1024 * 1024); // 256MB default
 
   SECTION("various artifact sizes") {

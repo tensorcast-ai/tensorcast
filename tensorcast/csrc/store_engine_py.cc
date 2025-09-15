@@ -11,6 +11,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "core/common/const/granularity.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/memory_location.h"
 #include "core/communicator/config_io.h"
@@ -270,7 +271,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Prepare a replica instance on the specified device and return a ReplicaHandle.")
       .def("clear_mem", &StoreEngine::clear_mem, "Clear all allocated memory.")
       .def("get_mem_pool_size", &StoreEngine::get_mem_pool_size, "Get the memory pool size.")
-      .def("get_chunk_size", &StoreEngine::get_chunk_size, "Get the chunk size.")
+      .def("get_tx_slice_bytes", &StoreEngine::get_tx_slice_bytes, "Get the transfer slice size (bytes).")
       .def(
           "get_available_memory", &StoreEngine::get_available_memory, "Get available memory in the pinned memory pool.")
       .def(
@@ -422,7 +423,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         opts.storage_path = get_or("storage_path", opts.storage_path);
         opts.memory_pool_size = get_or("memory_pool_size", opts.memory_pool_size);
         opts.num_thread = get_or("num_thread", opts.num_thread);
-        opts.chunk_size = get_or("chunk_size", opts.chunk_size);
+        // Canonical only: do not accept legacy keys.
+        if (cfg.contains("tx_slice_bytes")) {
+          opts.tx_slice_bytes = cfg["tx_slice_bytes"].cast<size_t>();
+        }
         opts.pinned_memory_timeout = std::chrono::milliseconds(
             get_or("pinned_memory_timeout_ms", static_cast<int>(opts.pinned_memory_timeout.count())));
         opts.p2p_port = get_or("p2p_port", opts.p2p_port);
@@ -450,7 +454,7 @@ Expected keys (all optional):
     storage_path: str
     memory_pool_size: int (bytes)
     num_thread: int
-    chunk_size: int (bytes)
+    tx_slice_bytes: int (bytes)
     pinned_memory_timeout_ms: int
     p2p_port: int
     global_store_address: str
@@ -640,3 +644,7 @@ This overload calls the typed-config initialization path in C++.)pbdoc")
 }
 
 // NOLINTEND(google-build-using-namespace,fuchsia-statically-constructed-objects,misc-const-correctness,misc-use-anonymous-namespace,)
+// Expose canonical granularity constants for Python callers
+m.attr("artifact_chunk_default_bytes") = py::int_(tensorcast::common::consts::kArtifactChunkDefault);
+m.attr("tx_slice_default_bytes") = py::int_(tensorcast::common::consts::kTxSliceDefault);
+m.attr("hash_leaf_bytes") = py::int_(tensorcast::common::consts::kHashLeafBytes);

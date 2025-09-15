@@ -14,6 +14,7 @@
 #include "core/checkpoint/checkpoint.h"
 #include "core/checkpoint/checkpoint_streaming.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/const/granularity.h"
 #include "core/common/logging_init.h"
 
 #include <filesystem>
@@ -354,7 +355,7 @@ static py::dict save_model_to_disk_wrapper(
       opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
     }
     opts.total_size = total_size;
-    opts.chunk_size = 128 * 1024 * 1024;
+    opts.io_batch_bytes = 128 * 1024 * 1024;
     opts.use_direct_io = (total_size > 5ULL * 1024 * 1024 * 1024);
     tensorcast::store::loader::FilePartitionSource src(std::move(opts));
     return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
@@ -378,7 +379,8 @@ static py::dict save_model_to_disk_wrapper(
   desc["encoding"] = "json";
   desc["total_size"] = total_size;
   nlohmann::json hash_params;
-  hash_params["chunk_size"] = 4 * 1024 * 1024;
+  // Hash leaf size (protocol constant)
+  hash_params["chunk_size"] = tensorcast::common::consts::kHashLeafBytes;
   hash_params["fanout"] = 2;
   desc["hash_params"] = hash_params;
 
@@ -487,7 +489,7 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
       opts2.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
     }
     opts2.total_size = total_size2;
-    opts2.chunk_size = 128 * 1024 * 1024;
+    opts2.io_batch_bytes = 128 * 1024 * 1024;
     opts2.use_direct_io = (total_size2 > 5ULL * 1024 * 1024 * 1024);
     tensorcast::store::loader::FilePartitionSource src2(std::move(opts2));
     return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src2, total_size2);
@@ -518,7 +520,8 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
   desc["encoding"] = "json";
   desc["total_size"] = total_size;
   nlohmann::json hash_params;
-  hash_params["chunk_size"] = 4 * 1024 * 1024;
+  // Hash leaf size (protocol constant)
+  hash_params["chunk_size"] = tensorcast::common::consts::kHashLeafBytes;
   hash_params["fanout"] = 2;
   desc["hash_params"] = hash_params;
 
@@ -574,6 +577,7 @@ static py::bytes build_canonical_index_from_safetensors_wrapper(const std::strin
   const std::string& bytes = idx_bytes_or.value();
   return py::bytes(bytes);
 }
+
 // define pybind11 module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Initialize logging only once across all modules

@@ -921,7 +921,7 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
 
     // Staged fallback using StreamingPinnedBuffer
     auto spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-        /*num_chunks=*/4, pinned_pool_->chunk_size(), pinned_pool_);
+        /*num_chunks=*/4, pinned_pool_->slice_bytes(), pinned_pool_);
     auto init_status = spb->initialize(pinned_memory_timeout_);
     if (!init_status.ok()) {
       ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
@@ -929,7 +929,7 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
     }
     uint64_t offset = 0;
     while (offset < bytes) {
-      size_t step = std::min<size_t>(pinned_pool_->chunk_size(), static_cast<size_t>(bytes - offset));
+      size_t step = std::min<size_t>(pinned_pool_->slice_bytes(), static_cast<size_t>(bytes - offset));
       auto slot_or = spb->get_free_chunk();
       if (!slot_or.ok()) {
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));
@@ -1272,7 +1272,7 @@ std::vector<replica::ChunkState> ReplicaLoadController::get_chunk_states_uma(
     return out;
   }
   const size_t total_bytes = *sz_or;
-  const size_t chunk_size = memory_coordinator_->get_chunk_size();
+  const size_t chunk_size = memory_coordinator_->get_artifact_chunk_bytes();
   if (chunk_size == 0) {
     return out;
   }

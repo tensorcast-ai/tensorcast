@@ -199,15 +199,15 @@ void normalize_size_fields(nlohmann::json& root) {
     }
   };
 
-  // engine.* bytes
+  // engine.* bytes (final canonical names only)
   if (root.contains("engine") && root["engine"].is_object()) {
     auto& e = root["engine"];
     if (e.contains("mem_pool_size_bytes"))
       to_bytes(e["mem_pool_size_bytes"]);
-    if (e.contains("chunk_bytes"))
-      to_bytes(e["chunk_bytes"]);
-    if (e.contains("cpu_chunk_size_bytes"))
-      to_bytes(e["cpu_chunk_size_bytes"]);
+    if (e.contains("tx_slice_bytes"))
+      to_bytes(e["tx_slice_bytes"]);
+    if (e.contains("artifact_chunk_bytes"))
+      to_bytes(e["artifact_chunk_bytes"]);
   }
   // checkpoint.streaming.* bytes
   if (root.contains("checkpoint") && root["checkpoint"].is_object()) {
@@ -291,10 +291,10 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   auto* e = cfg->mutable_engine();
   if (e->mem_pool_size_bytes() == 0)
     e->set_mem_pool_size_bytes(8ULL * 1024 * 1024 * 1024);
-  if (e->chunk_bytes() == 0)
-    e->set_chunk_bytes(256ULL * 1024 * 1024);
-  if (e->cpu_chunk_size_bytes() == 0)
-    e->set_cpu_chunk_size_bytes(256ULL * 1024 * 1024);
+  if (e->tx_slice_bytes() == 0)
+    e->set_tx_slice_bytes(32ULL * 1024 * 1024);
+  if (e->artifact_chunk_bytes() == 0)
+    e->set_artifact_chunk_bytes(256ULL * 1024 * 1024);
   if (e->streaming_buffer_max_concurrent_sessions() == 0)
     e->set_streaming_buffer_max_concurrent_sessions(1);
 

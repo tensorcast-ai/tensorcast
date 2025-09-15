@@ -20,8 +20,10 @@ class ServerConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    chunk_size: int
+    # Canonical transfer slice size
+    tx_slice_bytes: int
     mem_pool_size: int
+    artifact_chunk_bytes: int = 0
 
 
 # ----------------------------- Handshake models ----------------------------
