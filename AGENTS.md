@@ -355,4 +355,4 @@ if (fd < 0) {
 ## Development Principles
 
 ### Code Fixing and Testing
-- When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.
+- When debugging or fixing tests—or investigating/fixing any issue—first identify the root cause and implement the fundamental solution. Make tests reflect the real, reasonable system behavior rather than bending the system to fit an original test, and avoid quick or convenient workarounds. Never modify the system merely to make a test pass; find the root cause and design a fundamental fix, aiming for the minimal sufficient change. When a test must change, update it to assert the clearly documented, reasonable system behavior. Solve from a system-wide perspective, aiming for globally optimal changes, not local patches.
