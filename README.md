@@ -64,6 +64,7 @@ uv run tensorcast-cli --help
 
 # Run specific file
 uv run xxx/xxx.py
+```
 
 ### StoreDaemon (C++)
 
