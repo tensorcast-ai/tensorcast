@@ -1,10 +1,17 @@
-# TensorCast
+<div align="center">
+
+TensorCast
+===========================
+<h4> The shared tensor layer — load once, share everywhere. </h4>
+</div>
+
+
+TensorCast provides the shared tensor layer. Load weights and KV cache once, make them available everywhere, and let services attach on demand. Startup becomes fast, scaling becomes smooth, and infrastructure stays efficient.
 
 ## Introduction
 
-[Developer Guide](web-docs/docs/developer-guides/README.md)
+[AGENTS.md](AGENTS.md)
 
-Note on UMA V3: The codebase has completed the UMA V3 final cutover. UMA (UnifiedMemoryAuthority) is the sole ledger; VirtualAddressSpace (VS) handles CPU VA and IO; Transfer handles data movement; MemoryExportRegistry handles exports. SDK and docs have been aligned to the final state (UMA/VS/CpuVaSink/GpuMemorySink).
 
 ## Prerequisites
 

@@ -4,7 +4,90 @@ This file provides guidance to AI when working with code in this repository.
 
 ## Project Overview
 
-TensorCast is a high-performance distributed artifact storage and loading system for machine learning inference and training. It uses a distributed master-worker architecture; see Architecture Overview below for details.
+TensorCast is a high-performance distributed artifact storage and loading system. It uses a distributed master-worker architecture; see Architecture Overview below for details.
+
+## Architecture Overview
+
+### Runtime Topology
+```
+                          ┌─────────────────────────────┐
+                          │         Global Store        │
+                          │  (Metadata & Coordination)  │
+                          └──────────────┬──────────────┘
+                                         │ gRPC (metadata only)
+                ┌────────────────────────┴────────────────────────┐
+                │                                               │
+    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
+    │   Store Daemon #1     │  RDMA/TCP (P2P data)  │    Store Daemon #N    │
+    │  (C++ over StoreEngine)│<-------------------->│  (C++ over StoreEngine)│
+    │ - VS/UMA memory       │                       │ - VS/UMA memory       │
+    │ - Disk & P2P loaders  │                       │ - Disk & P2P loaders  │
+    │ - CUDA IPC export     │                       │ - CUDA IPC export     │
+    └───────────┬───────────┘                       └───────────┬───────────┘
+                │                                               │
+                │ CUDA IPC (GPU mapping)                        │
+    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
+    │ User Process Worker   │                       │ User Process Worker   │
+    │  (PyTorch client)     │                       │  (PyTorch client)     │
+    └───────────────────────┘                       └───────────────────────┘
+```
+
+### Core Components
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
+- **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
+- **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
+- **User Process Worker**: Client process consuming artifacts via `tensorcast.api` (e.g., `load_dict_sync()`), mapping CUDA IPC handles for zero‑copy GPU access.
+
+### Build Systems
+- **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
+- **Secondary**: setuptools + `uv` for Python packaging/clients
+- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.6+, gRPC, Protocol Buffers
+
+## Documentation Structure and Project Hierarchy
+
+This repository’s documentation has been organized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
+Note: When writing documentation, you may use Mermaid diagrams to illustrate flows, state machines, hierarchies, and architecture where appropriate.
+
+### Repository-level docs
+
+- ./README.md — Top-level guide for setup, builds, tests, and running key services.
+- ./docs/README.md — Entry point to component development, architecture, and workflows.
+- ./docs/architecture/README.md — Architecture docs index and quick navigation by concern.
+- ./docs/architecture/architecture-overview.md — High-level component overview and interactions.
+- ./docs/architecture/high-availability-design.md — HA design, recovery, and state synchronization details.
+- ./docs/architecture/p2p-transfer-strategies.md — P2P transfer strategies, load balancing, and performance notes.
+- ./docs/internals/model-loading.md — Internal model loading flow and integration points.
+- ./docs/internals/save_dict_flow.md — End-to-end save_dict data path and artifacts produced.
+- ./docs/internals/adding-metrics.md — How to add and expose new metrics.
+
+### Modules (C++ core and services, tests)
+
+- ./core/store/README.md — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
+  - ./core/store/docs/architecture.md — Detailed engine architecture and component responsibilities.
+  - ./core/store/docs/state-management.md — UMA/VS state model and lifecycle.
+  - ./core/store/docs/device-manager.md — Device discovery, UUID/ordinal mapping, and per-device state.
+  - ./core/store/docs/device-registry.md — Replica/device registry structures and indexing.
+- ./core/checkpoint/README.md — Overview and streaming save/restore.
+  - ./core/checkpoint/docs/architecture.md — Detailed design and relationships.
+  - ./core/checkpoint/docs/data-format.md — Binary file format and index schema.
+  - ./core/checkpoint/docs/verification-integration.md — Integrity verification and integration paths.
+- ./core/communicator/README.md — TCP/MTCP/RDMA data-movement engine internals.
+- ./daemon/README.md — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
+- ./tensorcast/global_store/README.md — Control plane internals (layered architecture, data model, services, flows).
+  - ./tensorcast/global_store/webui_frontend/README.md — Web UI features, development, and integration.
+- tests/python/README.md — Python test layout and commands for running suites.
+
+### Doc sync rule (required for agents)
+
+- When you change any module code, you must also update its docs:
+  - Update the module’s README.md and any linked docs under docs/ that describe behavior you changed.
+  - Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
+  - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
+  - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
+
+- When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-reorg-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
+
 
 ## Platform Assumptions
 
@@ -117,89 +200,6 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 1. **Protocol buffer changes not reflected**: Always run `bash tools/build_proto_python.sh` after modifying `.proto` files
 2. **C++ changes not visible in Python**: Ensure both `BUILD_CORE=1` and `BUILD_EXTENSION=1` are set
 3. **Clean build needed**: Run `bazel clean --expunge` and `rm -rf build/` for a complete clean build
-
-## Architecture Overview
-
-### Core Components
-- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
-- **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
-- **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
-- **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
-- **User Process Worker**: Client process consuming artifacts via `tensorcast.api` (e.g., `load_dict_sync()`), mapping CUDA IPC handles for zero‑copy GPU access.
-
-### Build Systems
-- **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
-- **Secondary**: setuptools + `uv` for Python packaging/clients
-- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.6+, gRPC, Protocol Buffers
-
-### Runtime Topology
-```
-                          ┌─────────────────────────────┐
-                          │         Global Store        │
-                          │  (Metadata & Coordination)  │
-                          └──────────────┬──────────────┘
-                                         │ gRPC (metadata only)
-                ┌────────────────────────┴────────────────────────┐
-                │                                               │
-    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
-    │   Store Daemon #1     │  RDMA/TCP (P2P data)  │    Store Daemon #N    │
-    │  (C++ over StoreEngine)│<-------------------->│  (C++ over StoreEngine)│
-    │ - VS/UMA memory       │                       │ - VS/UMA memory       │
-    │ - Disk & P2P loaders  │                       │ - Disk & P2P loaders  │
-    │ - CUDA IPC export     │                       │ - CUDA IPC export     │
-    └───────────┬───────────┘                       └───────────┬───────────┘
-                │                                               │
-                │ CUDA IPC (GPU mapping)                        │
-    ┌───────────▼───────────┐                       ┌───────────▼───────────┐
-    │ User Process Worker   │                       │ User Process Worker   │
-    │  (PyTorch client)     │                       │  (PyTorch client)     │
-    └───────────────────────┘                       └───────────────────────┘
-```
-
-## Documentation Structure and Project Hierarchy
-
-This repository’s documentation has been organized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
-Note: When writing documentation, you may use Mermaid diagrams to illustrate flows, state machines, hierarchies, and architecture where appropriate.
-
-### Repository-level docs
-
-- ./README.md — Top-level guide for setup, builds, tests, and running key services.
-- ./docs/README.md — Entry point to component development, architecture, and workflows.
-- ./docs/architecture/README.md — Architecture docs index and quick navigation by concern.
-- ./docs/architecture/architecture-overview.md — High-level component overview and interactions.
-- ./docs/architecture/high-availability-design.md — HA design, recovery, and state synchronization details.
-- ./docs/architecture/p2p-transfer-strategies.md — P2P transfer strategies, load balancing, and performance notes.
-- ./docs/internals/model-loading.md — Internal model loading flow and integration points.
-- ./docs/internals/save_dict_flow.md — End-to-end save_dict data path and artifacts produced.
-- ./docs/internals/adding-metrics.md — How to add and expose new metrics.
-
-### Modules (C++ core and services, tests)
-
-- ./core/store/README.md — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
-  - ./core/store/docs/architecture.md — Detailed engine architecture and component responsibilities.
-  - ./core/store/docs/state-management.md — UMA/VS state model and lifecycle.
-  - ./core/store/docs/device-manager.md — Device discovery, UUID/ordinal mapping, and per-device state.
-  - ./core/store/docs/device-registry.md — Replica/device registry structures and indexing.
-- ./core/checkpoint/README.md — Overview and streaming save/restore.
-  - ./core/checkpoint/docs/architecture.md — Detailed design and relationships.
-  - ./core/checkpoint/docs/data-format.md — Binary file format and index schema.
-  - ./core/checkpoint/docs/verification-integration.md — Integrity verification and integration paths.
-- ./core/communicator/README.md — TCP/MTCP/RDMA data-movement engine internals.
-- ./daemon/README.md — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
-- ./tensorcast/global_store/README.md — Control plane internals (layered architecture, data model, services, flows).
-  - ./tensorcast/global_store/webui_frontend/README.md — Web UI features, development, and integration.
-- tests/python/README.md — Python test layout and commands for running suites.
-
-### Doc sync rule (required for agents)
-
-- When you change any module code, you must also update its docs:
-  - Update the module’s README.md and any linked docs under docs/ that describe behavior you changed.
-  - Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
-  - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
-  - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
-
-- When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-reorg-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
-
 
 ## Coding Standards
 
