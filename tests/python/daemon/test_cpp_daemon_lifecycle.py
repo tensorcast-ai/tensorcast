@@ -103,12 +103,12 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
             "p2p_listen": {"host": "localhost", "port": 65090},
             "storage_path": str(storage_dir),
             "num_threads": 2,
-            "grpc": {"max_message_size_mb": 16, "tcp_nodelay": True, "so_reuseport": False},
+            "grpc": {"tcp_nodelay": True, "so_reuseport": False},
         },
         "engine": {
             "mem_pool_size_bytes": 64 * 1024 * 1024,
             "chunk_bytes": 1 * 1024 * 1024,
-            "cpu_chunk_size_bytes": 1 * 1024 * 1024,
+            "artifact_chunk_bytes": 1 * 1024 * 1024,
             "streaming_buffer_max_concurrent_sessions": 1,
         },
         "high_availability": {

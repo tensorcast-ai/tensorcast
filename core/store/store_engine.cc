@@ -128,7 +128,7 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       storage_path_(opts.storage_path),
       memory_pool_size_(opts.memory_pool_size),
       num_thread_(opts.num_thread),
-      chunk_size_(opts.chunk_size),
+      tx_slice_bytes_(opts.tx_slice_bytes),
       pinned_memory_timeout_(opts.pinned_memory_timeout),
       device_manager_(
           gsl::not_null<std::unique_ptr<components::DeviceManager>>(std::make_unique<components::DeviceManager>())),
@@ -142,20 +142,31 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
               std::make_shared<components::CommunicationManager>())),
       memory_pool_(
           gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
-              std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, chunk_size_))),
+              std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
       va_space_(
           gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
-              std::make_shared<common::memory::VirtualAddressSpace>(opts.cpu_chunk_size))) {
+              std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
   LOG(INFO) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
-  LOG(INFO) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::misc::MB << "MB";
+  LOG(INFO) << "I/O threads: " << num_thread_ << ", tx_slice_bytes: " << tx_slice_bytes_ / communicator::misc::MB
+            << "MB";
 
-  // Enforce alignment invariant: transfer chunk_size must divide VS cpu_chunk_size
-  ABSL_CHECK_EQ(opts.cpu_chunk_size % chunk_size_, 0)
-      << "StoreEngine: cpu_chunk_size=" << opts.cpu_chunk_size
-      << " must be a multiple of transfer chunk_size=" << chunk_size_ << " to avoid cross-chunk slices";
+  // Enforce invariants:
+  // 1) Transfer slice (tx_slice_bytes) must divide artifact chunk (artifact_chunk_bytes)
+  ABSL_CHECK_EQ(opts.artifact_chunk_bytes % tx_slice_bytes_, 0)
+      << "StoreEngine: artifact_chunk_bytes=" << opts.artifact_chunk_bytes
+      << " must be a multiple of transfer slice (tx_slice_bytes)=" << tx_slice_bytes_ << " to avoid cross-chunk slices";
+
+  // 2) Pinned pool block size must be aligned to DIRECT_IO and page size
+  const size_t pool_block = memory_pool_->slice_bytes();
+  ABSL_CHECK_EQ(pool_block % common::memory::PinnedBufferPool::kDirectIOAlignment, 0)
+      << "Pinned buffer block size (" << pool_block << ") not aligned to DIRECT_IO ("
+      << common::memory::PinnedBufferPool::kDirectIOAlignment << ")";
+  ABSL_CHECK_EQ(pool_block % common::memory::PinnedBufferPool::kMemoryAlignment, 0)
+      << "Pinned buffer block size (" << pool_block << ") not aligned to page size ("
+      << common::memory::PinnedBufferPool::kMemoryAlignment << ")";
 
   initialize_components();
   initialize_global_store(opts);
@@ -1071,7 +1082,7 @@ absl::Status StoreEngine::try_evict_memory_for_replica(size_t required_size) {
 }
 
 size_t StoreEngine::get_num_chunk_from_tensor_size(size_t tensor_size) const {
-  return (tensor_size + chunk_size_ - 1) / chunk_size_;
+  return (tensor_size + tx_slice_bytes_ - 1) / tx_slice_bytes_;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

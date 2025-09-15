@@ -18,7 +18,8 @@ class FilePartitionSource : public SeekableSource {
     std::vector<std::filesystem::path> partition_paths;
     std::vector<size_t> partition_sizes;
     uint64_t total_size = 0;
-    size_t chunk_size = 128 * 1024 * 1024; // 128MB default
+    // Rename: io_batch_bytes (cap per read iteration)
+    size_t io_batch_bytes = 128 * 1024 * 1024; // 128MB default
     bool use_direct_io = false; // Auto-detected if not set
   };
 

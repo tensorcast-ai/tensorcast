@@ -30,17 +30,6 @@ namespace tensorcast::store::replica {
 using common::memory::MemoryLocation;
 
 namespace {
-inline size_t env_tx_slice_bytes_or(size_t fallback) {
-  if (const char* v = std::getenv("TCAST_TX_SLICE_BYTES")) {
-    char* endp = nullptr;
-    unsigned long long parsed = std::strtoull(v, &endp, 10);
-    if (endp != v && parsed > 0) {
-      return static_cast<size_t>(parsed);
-    }
-  }
-  return fallback;
-}
-
 // No compatibility mode: enforce that transfer slice is a divisor of chunk size
 
 // Minimal per-GPU scheduler scaffold (Phase B stub):
@@ -133,11 +122,11 @@ TransferService::TransferService(
       spb_(
           std::make_shared<common::memory::StreamingPinnedBuffer>(
               /*num_chunks=*/16,
-              pinned_pool_->chunk_size(),
+              pinned_pool_->slice_bytes(),
               pinned_pool_)) {}
 
 size_t TransferService::get_pool_chunk_size() const {
-  return pinned_pool_->chunk_size();
+  return pinned_pool_->slice_bytes();
 }
 
 absl::Status TransferService::copy_cpu_to_gpu_streaming(
@@ -156,7 +145,7 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   // Gate per GPU (1 active session per GPU)
   std::unique_ptr<GpuSchedHandle> sched = std::make_unique<GpuSchedHandle>(static_cast<int>(device_id));
   // Create a per-session streaming buffer backed by the shared pinned pool
-  const size_t slice_bytes = env_tx_slice_bytes_or(get_pool_chunk_size());
+  const size_t slice_bytes = get_pool_chunk_size();
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
       /*num_chunks=*/16, slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
@@ -331,7 +320,7 @@ absl::Status TransferService::load_from_source(
   }
 
   // Create a per-session streaming buffer backed by the shared pinned pool
-  size_t slice_bytes = env_tx_slice_bytes_or(get_pool_chunk_size());
+  size_t slice_bytes = get_pool_chunk_size();
   if (slice_bytes == 0 || layout_chunk_size == 0) {
     return absl::FailedPreconditionError("slice_bytes or layout_chunk_size is zero");
   }
@@ -420,7 +409,7 @@ absl::Status TransferService::execute(
     if (l.ok() && l->artifact_chunk_bytes > 0)
       layout_chunk_size = l->artifact_chunk_bytes;
   }
-  size_t slice_bytes = env_tx_slice_bytes_or(get_pool_chunk_size());
+  size_t slice_bytes = get_pool_chunk_size();
   if (slice_bytes == 0 || layout_chunk_size == 0) {
     return absl::FailedPreconditionError("slice_bytes or layout_chunk_size is zero");
   }

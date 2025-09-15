@@ -25,17 +25,26 @@ def _skip_if_no_cuda() -> None:
 
 
 def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Popen:
+    """Start the daemon using unified --config_text (no legacy flags).
+
+    The minimal config sets server.listen, storage_path, engine.mem_pool_size_bytes,
+    engine.tx_slice_bytes and engine.artifact_chunk_bytes. P2P listen is optional.
+    """
     bin_path = Path(__file__).resolve().parents[2] / "tensorcast" / "bin" / "tensorcast_daemon"
     assert bin_path.exists() and os.access(bin_path, os.X_OK)
+    host, port_str = listen_addr.split(":")
+    port = int(port_str)
+    # Use 8MiB tx_slice_bytes and 256MiB artifact chunk for tests
+    config_text = (
+        "{"
+        f"\"server\": {{\"listen\": {{\"host\": \"{host}\", \"port\": {port}}}, "
+        f"\"storage_path\": \"{str(storage_path)}\", \"num_threads\": 2}}, "
+        "\"engine\": {\"mem_pool_size_bytes\": 268435456, \"tx_slice_bytes\": 8388608, \"artifact_chunk_bytes\": 268435456}"
+        "}"
+    )
     args = [
         str(bin_path),
-        f"--listen_addr={listen_addr}",
-        f"--storage_path={str(storage_path)}",
-        "--p2p_port=9090",
-        "--mem_pool_size=268435456",  # 256MB
-        "--chunk_size=8388608",       # 8MB
-        "--io_threads=2",
-        "--enable_p2p_access=true",
+        f"--config_text={config_text}",
     ]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # Wait for readiness

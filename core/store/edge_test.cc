@@ -221,7 +221,7 @@ TEST_CASE("E5: Double enable/disable remote access", "[store_engine][edge][e5]")
   opts.storage_path = fixture.root().string();
   // Keep test-friendly pool sizes similar to make_test_store
   opts.memory_pool_size = 512ULL * 1024 * 1024;
-  opts.chunk_size = 64ULL * 1024;
+  opts.tx_slice_bytes = 64ULL * 1024;
   opts.num_thread = 4;
   opts.pinned_memory_timeout = std::chrono::milliseconds(30000);
   opts.p2p_port = static_cast<uint16_t>(comm_port);

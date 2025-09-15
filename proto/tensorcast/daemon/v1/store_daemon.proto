@@ -64,7 +64,16 @@ message GetServerConfigRequest {}
 
 message GetServerConfigResponse {
   int64 mem_pool_size = 1;
-  int64 chunk_size = 2;
+  // Reserved: previously chunk_size (legacy transfer slice)
+  reserved 2;
+  reserved "chunk_size";
+  // Reserved: previously grpc_frame_max_bytes
+  reserved 3;
+  reserved "grpc_frame_max_bytes";
+  // Artifact chunk size used by UMA/VS layout (bytes). Ranges should not cross this boundary.
+  uint64 artifact_chunk_bytes = 4;
+  // Canonical transfer slice/window size (pinned pool block size).
+  uint64 tx_slice_bytes = 5;
 }
 
 message RegisterRequest {

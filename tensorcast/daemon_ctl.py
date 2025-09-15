@@ -532,7 +532,7 @@ class DaemonCtl:
         with self._client_span("Client/GetServerConfig") as span:
             request = store_daemon_pb2.GetServerConfigRequest()
             try:
-                response = self._unary_call(
+                response: store_daemon_pb2.GetServerConfigResponse = self._unary_call(
                     self.stub.GetServerConfig,
                     request,
                     timeout=5.0,
@@ -544,9 +544,13 @@ class DaemonCtl:
                 logger.error(f"Error: {e}")
                 raise RuntimeError("GetServerConfig failed") from e
             else:
+                # Map both legacy and new fields for smooth migration
                 return ServerConfig(
-                    chunk_size=int(response.chunk_size),
-                    mem_pool_size=int(response.mem_pool_size),
+                    tx_slice_bytes=int(getattr(response, "tx_slice_bytes", 0)),
+                    mem_pool_size=int(getattr(response, "mem_pool_size", 0)),
+                    artifact_chunk_bytes=int(
+                        getattr(response, "artifact_chunk_bytes", 0)
+                    ),
                 )
 
     # ------------------------------------------------------------------
@@ -805,26 +809,24 @@ class DaemonCtl:
         data: bytes,
         *,
         offset: int = 0,
-        chunk_size: int | None = None,
+        frame_bytes: int | None = None,
         timeout_s: float = 60.0,
     ) -> bool:
         """Stream CPU bytes using FeedRegisterArtifactStream.
 
-        Splits payload by daemon chunk_size when not provided.
+        Default is a single-frame send. Specify frame_bytes to segment the
+        payload client-side when needed (e.g., very large payloads).
         """
-        if chunk_size is None:
-            try:
-                cfg = self.get_server_config()
-                chunk_size = max(1, int(cfg.chunk_size))
-            except Exception:
-                chunk_size = 4 * 1024 * 1024
+        if frame_bytes is None:
+            # Default: single frame
+            frame_bytes = len(data)
 
         def _iter():
             nonlocal offset
             n = len(data)
             pos = 0
             while pos < n:
-                take = min(chunk_size, n - pos)
+                take = min(frame_bytes, n - pos)
                 req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
                     registration_id=registration_id
                 )

@@ -12,7 +12,7 @@ using tensorcast::daemon::StoreDaemonServiceImpl;
 static tensorcast::store::StoreEngineOptions opts_small() {
   tensorcast::store::StoreEngineOptions opts;
   opts.memory_pool_size = 32ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   return opts;
 }

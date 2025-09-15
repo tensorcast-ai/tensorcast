@@ -12,7 +12,9 @@ message SocketAddress {
 
 // Common gRPC server knobs used by Daemon and Global Store.
 message GrpcServer {
-  int32 max_message_size_mb = 1;
+  // Reserved: previously max_message_size_mb
+  reserved 1;
+  reserved "max_message_size_mb";
   int32 max_concurrent_streams = 2; // 0 = gRPC default
   google.protobuf.Duration keepalive_time = 3;
   google.protobuf.Duration keepalive_timeout = 4;

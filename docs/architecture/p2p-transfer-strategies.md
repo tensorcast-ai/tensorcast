@@ -354,7 +354,7 @@ grpc_port: 50052                        # Local gRPC port
 
 # Memory settings
 mem_pool_size: 8589934592               # Memory pool size (8GB)
-chunk_size: 134217728                   # Chunk size (128MB)
+tx_slice_bytes: 134217728               # Transfer slice/window size (128MB)
 pinned_memory_timeout_ms: 30000         # Pinned memory timeout (30s)
 
 # Lifecycle settings

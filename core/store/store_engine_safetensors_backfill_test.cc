@@ -52,7 +52,7 @@ static StoreEngine make_store(const std::filesystem::path& root) {
   StoreEngineOptions opts;
   opts.storage_path = root.string();
   opts.memory_pool_size = 32ULL * 1024 * 1024;
-  opts.chunk_size = 64ULL * 1024;
+  opts.tx_slice_bytes = 64ULL * 1024;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   return StoreEngine(opts);

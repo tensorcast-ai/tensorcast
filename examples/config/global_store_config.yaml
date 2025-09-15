@@ -6,7 +6,6 @@ server:
     port: 50051
   max_workers: 20
   grpc:
-    max_message_size_mb: 128
     keepalive_time: 120s
 worker_policy:
   heartbeat_timeout: 30s

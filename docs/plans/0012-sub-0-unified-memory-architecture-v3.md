@@ -39,8 +39,8 @@ links:
 
 ## Phase 0 — 统一分块与对齐（ArtifactLayout）
 - [x] **M0.1** UMA 提供 `get_layout(ReplicaKey)`，含 `artifact_bytes / artifact_chunk_bytes / transfer_slice_bytes`
-  - 代码：在 `ReplicaMemoryCoordinator` 增加 `ArtifactLayout` 结构与 `get_layout()`，`artifact_chunk_bytes` 取 VS 实例的 `chunk_size()`（避免与配置漂移），`transfer_slice_bytes` 通过配置/环境（见下）
-  - 配置：引入 `TCAST_TX_SLICE_BYTES` 环境变量（可选），默认取 `PinnedBufferPool::chunk_size()`；后续合入集中配置
+  - 代码：在 `ReplicaMemoryCoordinator` 增加 `ArtifactLayout` 结构与 `get_layout()`，`artifact_chunk_bytes` 取 VS 实例的 `chunk_size()`（避免与配置漂移），`transfer_slice_bytes` 由数据面窗口决定。
+  - 更新（V3 最终）：不再读取 `TCAST_TX_SLICE_BYTES` 环境变量；传输窗口由 `PinnedBufferPool` 的块大小（tx_slice_bytes）决定。
 - [x] **M0.2** Transfer **只按 layout 生成 ranges**（不跨 Chunk），Slice 切分放在 Pump（受 `TCAST_V3_LAYOUT` 保护）
   - 代码：`TransferService::build_ranges_` 在 `chunk_indices` 缺省时改为生成全量 Chunk 对齐 ranges；并新增从 UMA `get_layout()` 取 chunk 大小
   - 验证：`//core/store/loader:disk_cpu_load_test`、`disk_cpu_gpu_transfer_test` 通过且 bytes 对齐一致

@@ -558,8 +558,8 @@ class _CpuUploader:
             frames.append((int(dst_off), b))
 
         ctl = handle.client
-        cfg = ctl.get_server_config()
-        chunk_size = int(cfg.chunk_size) if int(cfg.chunk_size) > 0 else 8 * 1024 * 1024
+        # Final model: single-frame by default; allow explicit frame_bytes override
+        frame_bytes = None
 
         ok_all = True
         for off, data_bytes in frames:
@@ -567,7 +567,7 @@ class _CpuUploader:
                 handle.registration_id,
                 data_bytes,
                 offset=int(off),
-                chunk_size=chunk_size,
+                frame_bytes=frame_bytes,
                 timeout_s=60.0,
             )
             if not ok:

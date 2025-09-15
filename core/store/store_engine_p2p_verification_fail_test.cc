@@ -99,7 +99,7 @@ TEST_CASE("P2P receiver verification fails with mismatched verification_json", "
   opts.storage_path = (std::filesystem::temp_directory_path() / "store_engine_p2p_verify_fail").string();
   opts.memory_pool_size = 64ull * 1024 * 1024;
   opts.num_thread = 2;
-  opts.chunk_size = 2ull * 1024 * 1024; // 2 MiB
+  opts.tx_slice_bytes = 2ull * 1024 * 1024; // 2 MiB
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   opts.p2p_port = comm_port;
   opts.comm_manager = comm_manager;

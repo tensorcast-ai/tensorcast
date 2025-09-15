@@ -51,6 +51,11 @@ class VirtualAddressSpace {
     return chunk_size_;
   }
 
+  // Canonical public name for UMA/VS artifact chunk size.
+  [[nodiscard]] size_t artifact_chunk_bytes() const noexcept {
+    return chunk_size_;
+  }
+
   // ===== Allocation =====
   // Reserve contiguous VA range for the whole replica. Physical pages are mapped
   // on-demand. NUMA affinity is optional. Returns VirtualRegion on success.

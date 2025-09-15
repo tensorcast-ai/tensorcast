@@ -42,20 +42,25 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
   void set_heartbeat_obsolete(std::vector<std::string> ids) {
     hb_obsolete_ids_ = std::move(ids);
   }
+
   void set_heartbeat_sync_required(bool required, uint64_t expected_ver) {
     hb_state_sync_required_ = required;
     hb_expected_state_version_ = expected_ver;
   }
+
   void set_sync_remove_ids(std::vector<std::string> ids) {
     sync_remove_ids_ = std::move(ids);
   }
+
   void set_sync_should_fail(bool v) {
     sync_should_fail_ = v;
   }
+
   void reset_chunk_updates() {
     std::lock_guard<std::mutex> l(mu_);
     total_chunk_updates_ = 0;
   }
+
   uint32_t total_chunk_updates() const {
     std::lock_guard<std::mutex> l(mu_);
     return total_chunk_updates_;
@@ -189,7 +194,7 @@ static StoreEngine make_store(const fs::path& storage_root) {
   StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   // Tests default pinned timeout to 0 (wait indefinitely)
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
@@ -233,7 +238,7 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
@@ -331,7 +336,7 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
@@ -414,7 +419,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
@@ -494,7 +499,7 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
@@ -562,7 +567,7 @@ TEST_CASE("WorkerLifecycleManager sends batch chunk state updates", "[daemon][ha
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
@@ -626,7 +631,7 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   StoreEngineOptions opts;
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);

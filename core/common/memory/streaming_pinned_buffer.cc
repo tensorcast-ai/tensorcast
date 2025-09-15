@@ -17,8 +17,9 @@ StreamingPinnedBuffer::StreamingPinnedBuffer(
   chunk_buffers_.reserve(num_chunks_);
 
   // Verify that chunk_size from pool is aligned for DIRECT_IO
-  if (pool_ && pool_->chunk_size() % PinnedBufferPool::kDirectIOAlignment != 0) {
-    LOG(WARNING) << "StreamingPinnedBuffer: Pool chunk size " << pool_->chunk_size() << " is not aligned for DIRECT_IO";
+  if (pool_ && pool_->slice_bytes() % PinnedBufferPool::kDirectIOAlignment != 0) {
+    LOG(WARNING) << "StreamingPinnedBuffer: Pool chunk size " << pool_->slice_bytes()
+                 << " is not aligned for DIRECT_IO";
   }
 }
 

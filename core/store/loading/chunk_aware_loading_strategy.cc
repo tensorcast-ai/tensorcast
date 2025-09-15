@@ -32,7 +32,7 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
   plan.target = target;
 
   // Determine missing chunks using UMA record-based query
-  const size_t chunk_size = memory.get_chunk_size();
+  const size_t chunk_size = memory.get_artifact_chunk_bytes();
   size_t artifact_size = 0;
   if (auto size_or = memory.get_artifact_size(key); size_or.ok())
     artifact_size = *size_or;

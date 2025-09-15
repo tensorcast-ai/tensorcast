@@ -115,7 +115,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     ranges = reg_or->chunk_ranges;
     rec.uma_keepalive = reg_or->keepalive; // Hold VS pin leases across registration lifetime
     // Derive chunk size from UMA layout to ensure alignment across VS/UMA
-    uint64_t kChunk = static_cast<uint64_t>(va_space_->chunk_size());
+    uint64_t kChunk = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {
       kChunk = static_cast<uint64_t>(layout_or->artifact_chunk_bytes);
     }
@@ -190,7 +190,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       return reg_or.status();
     }
     ranges = reg_or->chunk_ranges;
-    uint64_t kChunk = static_cast<uint64_t>(va_space_->chunk_size());
+    uint64_t kChunk = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {
       kChunk = static_cast<uint64_t>(layout_or->artifact_chunk_bytes);
     }

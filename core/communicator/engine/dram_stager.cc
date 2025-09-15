@@ -29,7 +29,7 @@ std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider(
 }
 
 DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool, size_t num_buffers_hint)
-    : pool_(std::move(pool)), chunk_size_(pool_->chunk_size()), num_buffers_hint_(num_buffers_hint) {}
+    : pool_(std::move(pool)), chunk_size_(pool_->slice_bytes()), num_buffers_hint_(num_buffers_hint) {}
 
 absl::StatusOr<void*> DRAMStager::stage(
     const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,

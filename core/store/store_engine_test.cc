@@ -27,6 +27,7 @@ using tensorcast::store::loading::ReplicaKey;
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
 }
+
 static StoreEngine make_store(
     const fs::path& storage_root,
     size_t pool_size_bytes = 32ULL * 1024 * 1024,
@@ -35,11 +36,12 @@ static StoreEngine make_store(
   StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.memory_pool_size = pool_size_bytes;
-  opts.chunk_size = chunk_size_bytes;
+  opts.tx_slice_bytes = chunk_size_bytes;
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   return StoreEngine(opts);
 }
+
 static absl::Status wait_ready(
     tensorcast::store::loading::ReplicaHandle& handle,
     absl::Duration timeout = absl::Seconds(60)) {

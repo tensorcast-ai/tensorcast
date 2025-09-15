@@ -233,8 +233,15 @@ class StoreEngine {
     return memory_pool_size_;
   }
 
-  [[nodiscard]] size_t get_chunk_size() const {
-    return chunk_size_;
+  // New canonical name for transfer window size (bytes).
+  [[nodiscard]] size_t get_tx_slice_bytes() const {
+    return tx_slice_bytes_;
+  }
+
+  // UMA/VS artifact chunk size (bytes). Public read-only accessor for daemon status APIs
+  // and controllers that need the authoritative artifact granularity.
+  [[nodiscard]] size_t get_artifact_chunk_bytes() const {
+    return va_space_->artifact_chunk_bytes();
   }
 
   [[nodiscard]] size_t get_available_memory() const;
@@ -283,7 +290,7 @@ class StoreEngine {
   const std::filesystem::path storage_path_;
   const size_t memory_pool_size_;
   const int num_thread_;
-  const size_t chunk_size_;
+  const size_t tx_slice_bytes_;
   const std::chrono::milliseconds pinned_memory_timeout_;
 
   // ═══════════════════════════════════════════════════════════════════════════

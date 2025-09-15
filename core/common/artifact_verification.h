@@ -35,7 +35,6 @@ struct ArtifactVerificationInfo {
 
 class ArtifactVerifier {
  public:
-  static constexpr size_t CHUNK_SIZE = 1024 * 1024; // 1MB processing chunks
   // Fixed buffer size used for segment hashing in both generation and verification
   // This constant defines the protocol; do not diverge per device or call site
   static constexpr size_t SEGMENT_HASH_BUFFER_SIZE = 256 * 1024; // 256KB

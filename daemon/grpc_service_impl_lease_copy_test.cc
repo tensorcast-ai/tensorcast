@@ -23,7 +23,7 @@ tensorcast::store::StoreEngineOptions make_opts() {
   std::filesystem::create_directories(opts.storage_path);
   opts.p2p_port = 0;
   opts.memory_pool_size = 64ull << 20; // 64 MiB
-  opts.chunk_size = 1ull << 20; // 1 MiB
+  opts.tx_slice_bytes = 1ull << 20; // 1 MiB
   opts.num_thread = 2;
   return opts;
 }

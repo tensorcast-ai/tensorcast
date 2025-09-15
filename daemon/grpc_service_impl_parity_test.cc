@@ -13,7 +13,7 @@ static tensorcast::store::StoreEngineOptions make_opts_basic() {
   tensorcast::store::StoreEngineOptions opts;
   // Small pool for test environments
   opts.memory_pool_size = 64ULL * 1024 * 1024;
-  opts.chunk_size = 1ULL << 20;
+  opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
   return opts;
 }

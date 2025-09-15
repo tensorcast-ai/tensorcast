@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include "core/common/const/granularity.h"
 #include "core/store/components/communication_manager.h"
 
 namespace tensorcast::store {
@@ -28,8 +29,9 @@ struct StoreEngineOptions {
   // Number of I/O worker threads.
   int num_thread{10};
 
-  // Chunk size in bytes for streaming transfers.
-  size_t chunk_size{128ULL << 20}; // 128 MiB
+  // Transfer slice size in bytes for streaming transfers (pinned pool block size).
+  // Canonical name: tx_slice_bytes
+  size_t tx_slice_bytes{common::consts::kTxSliceDefault};
 
   // Timeout for pinned-memory allocations.
   std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds{30000}}; // 30 s
@@ -53,10 +55,9 @@ struct StoreEngineOptions {
   // instance (lease). Defaults to 1 (fully serialized).
   int streaming_buffer_max_concurrent_sessions{1};
 
-  // CPU Virtual Address Space (VS) chunk size for CPU-side allocations.
-  // This controls the granularity of memory allocations for replica chunks.
-  // Default: 256 MiB for optimal GPU transfer performance.
-  size_t cpu_chunk_size{256ULL << 20}; // 256 MiB
+  // UMA/VS artifact chunk size for CPU-side allocations (bytes).
+  // Canonical name: artifact_chunk_bytes
+  size_t artifact_chunk_bytes{common::consts::kArtifactChunkDefault};
 
   // RFC-0007: Enable strong verification (FULL_DIGEST) by default on load.
   // When true, the loader will compute the data_multihash from the loaded

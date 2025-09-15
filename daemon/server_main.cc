@@ -60,8 +60,8 @@ int main(int argc, char** argv) {
   opts.storage_path = cfg.server().storage_path();
   opts.num_thread = static_cast<int>(cfg.server().num_threads());
   opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
-  opts.chunk_size = static_cast<size_t>(cfg.engine().chunk_bytes());
-  opts.cpu_chunk_size = static_cast<size_t>(cfg.engine().cpu_chunk_size_bytes());
+  opts.tx_slice_bytes = static_cast<size_t>(cfg.engine().tx_slice_bytes());
+  opts.artifact_chunk_bytes = static_cast<size_t>(cfg.engine().artifact_chunk_bytes());
   opts.streaming_buffer_max_concurrent_sessions =
       static_cast<int>(cfg.engine().streaming_buffer_max_concurrent_sessions());
   if (cfg.engine().has_pinned_allocation_timeout()) {
@@ -154,9 +154,7 @@ int main(int argc, char** argv) {
   // gRPC server
   const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
   grpc::ServerBuilder builder;
-  if (cfg.server().grpc().max_message_size_mb() > 0) {
-    builder.SetMaxReceiveMessageSize(static_cast<int>(cfg.server().grpc().max_message_size_mb()) * 1024 * 1024);
-  }
+  // Do not override gRPC max receive size; defaults are sufficient for metadata-only RPCs
   if (cfg.server().grpc().max_concurrent_streams() > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", cfg.server().grpc().max_concurrent_streams());
   }

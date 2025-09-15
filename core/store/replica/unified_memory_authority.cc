@@ -50,7 +50,7 @@ absl::Status UnifiedMemoryAuthority::allocate(const loading::ReplicaKey& key, si
   }
   alloc.total_bytes = bytes;
   // Derive number of chunks from the actual VA chunk size to avoid drift
-  const size_t va_chunk = va_space_->chunk_size();
+  const size_t va_chunk = va_space_->artifact_chunk_bytes();
   alloc.num_chunks = (bytes + va_chunk - 1) / va_chunk;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
@@ -313,8 +313,8 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
   return absl::OkStatus();
 }
 
-size_t UnifiedMemoryAuthority::get_chunk_size() const {
-  return va_space_->chunk_size();
+size_t UnifiedMemoryAuthority::get_artifact_chunk_bytes() const {
+  return va_space_->artifact_chunk_bytes();
 }
 
 absl::StatusOr<ChunkState> UnifiedMemoryAuthority::get_cpu_chunk_state(
@@ -454,7 +454,7 @@ void UnifiedMemoryAuthority::record_cpu_write(const loading::ReplicaKey& key, ui
   if (it == allocations_.end()) {
     return;
   }
-  const size_t chunk_size = va_space_->chunk_size();
+  const size_t chunk_size = va_space_->artifact_chunk_bytes();
   const uint64_t first = va_offset / chunk_size;
   const uint64_t last = (va_offset + bytes - 1) / chunk_size;
   uint64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -472,18 +472,9 @@ absl::StatusOr<UnifiedMemoryAuthority::ArtifactLayout> UnifiedMemoryAuthority::g
   }
   ArtifactLayout layout;
   layout.artifact_bytes = it->second.total_bytes;
-  layout.artifact_chunk_bytes = va_space_->chunk_size();
-  // Optional: transfer slice bytes from env
-  size_t slice = 0;
-  if (const char* env = std::getenv("TCAST_TX_SLICE_BYTES")) {
-    // Simple decimal parse; ignore invalid
-    char* endp = nullptr;
-    uint64_t v = std::strtoull(env, &endp, 10);
-    if (endp != env && v > 0ULL) {
-      slice = static_cast<size_t>(v);
-    }
-  }
-  layout.transfer_slice_bytes = slice; // 0 indicates caller default
+  layout.artifact_chunk_bytes = va_space_->artifact_chunk_bytes();
+  // UMA does not own tx_slice_bytes; report 0 and let callers use pool slice size.
+  layout.transfer_slice_bytes = 0;
   return layout;
 }
 
@@ -542,7 +533,7 @@ absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::pla
   chunks.erase(std::unique(chunks.begin(), chunks.end()), chunks.end());
 
   // Build byte ranges (chunk-aligned)
-  const size_t chunk_size = va_space_->chunk_size();
+  const size_t chunk_size = va_space_->artifact_chunk_bytes();
   const uint64_t total_bytes = it->second.total_bytes;
   std::vector<std::pair<uint64_t, size_t>> ranges;
   for (const auto& [start_idx, end_idx] : coalesce_runs_(absl::MakeSpan(chunks))) {
@@ -771,7 +762,7 @@ absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthorit
 
     auto keep = std::make_shared<Keep>();
     const uint64_t total_bytes = it->second.total_bytes;
-    const uint64_t chunk_sz = static_cast<uint64_t>(va_space_->chunk_size());
+    const uint64_t chunk_sz = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
     size_t lease_count = 0;
     for (const auto& [start_idx, end_idx] : ranges) {
       const uint64_t off = static_cast<uint64_t>(start_idx) * chunk_sz;

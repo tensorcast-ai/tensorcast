@@ -119,7 +119,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   opts.storage_path = temp_root.string();
   opts.memory_pool_size = pool_size;
   opts.num_thread = io_threads;
-  opts.chunk_size = chunk_size;
+  opts.tx_slice_bytes = chunk_size;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   opts.p2p_port = comm_port;
   opts.comm_manager = comm_manager;

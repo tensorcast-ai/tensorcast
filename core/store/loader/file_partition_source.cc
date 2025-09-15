@@ -23,7 +23,7 @@ FilePartitionSource::FilePartitionSource(Options options) : options_(std::move(o
 
   // Allocate aligned buffer for O_DIRECT if needed
   if (using_direct_io_) {
-    aligned_buffer_size_ = options_.chunk_size + kDirectIOAlignment;
+    aligned_buffer_size_ = options_.io_batch_bytes + kDirectIOAlignment;
     aligned_buffer_.reset(new char[aligned_buffer_size_]);
   }
 }
@@ -238,8 +238,8 @@ absl::StatusOr<size_t> FilePartitionSource::ReadFromPartition(
       uint64_t aligned_offset = (cur_off / kDirectIOAlignment) * kDirectIOAlignment;
       auto offset_diff = static_cast<size_t>(cur_off - aligned_offset);
 
-      // Limit each iteration's payload to chunk_size
-      size_t payload = std::min(remaining, options_.chunk_size);
+      // Limit each iteration's payload to io_batch_bytes
+      size_t payload = std::min(remaining, options_.io_batch_bytes);
 
       // Round up to alignment, then cap to bounce buffer capacity if needed
       size_t aligned_size =

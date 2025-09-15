@@ -65,6 +65,9 @@ sc_header_only_library(
     name = "store_engine_options",
     hdrs = ["store_engine_options.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:const_granularity_lib",
+    ],
 )
 
 # ========== Loading specifications ==========

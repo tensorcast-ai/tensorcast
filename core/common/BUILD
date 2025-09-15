@@ -191,6 +191,13 @@ sc_cc_library(
     ],
 )
 
+# Canonical granularity constants (artifact chunk, tx slice, hash leaf)
+sc_header_only_library(
+    name = "const_granularity_lib",
+    hdrs = ["const/granularity.h"],
+    visibility = ["//visibility:public"],
+)
+
 # Memory management - Distributed virtual memory pool
 ## distributed_virtual_memory_pool_lib removed in UMA V3 cutover
 

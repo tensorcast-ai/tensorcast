@@ -48,7 +48,7 @@ class PinnedMemory {
   }
 
   size_t chunk_size() const {
-    return mempool_->chunk_size();
+    return mempool_->slice_bytes();
   }
 
  private:
