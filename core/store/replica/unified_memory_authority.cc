@@ -277,6 +277,44 @@ absl::Status UnifiedMemoryAuthority::release(const loading::ReplicaKey& key) {
   return absl::OkStatus();
 }
 
+absl::Status UnifiedMemoryAuthority::release_gpu_device(
+    const loading::ReplicaKey& key,
+    int device_id,
+    bool drop_allocation) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+
+  DeviceKey dev_key = DeviceRegistry::instance().gpu_key(device_id);
+
+  // Reset per-chunk GPU residency for this device and update counters
+  size_t& counter = it->second.loaded_chunk_counts[dev_key];
+  counter = 0;
+  for (auto& rec : it->second.chunk_records) {
+    auto gr = rec.gpu.find(dev_key);
+    if (gr != rec.gpu.end()) {
+      gr->second = ChunkState::EVICTED;
+      rec.version += 1;
+    }
+  }
+
+  if (drop_allocation) {
+    auto& gpu_allocs = it->second.gpu_allocations;
+    auto ga_it = gpu_allocs.find(dev_key);
+    if (ga_it != gpu_allocs.end()) {
+      // Drop UMA-owned shared_ptr to allow VRAM to be reclaimed
+      gpu_allocs.erase(ga_it);
+    }
+  }
+
+  VLOG(1) << "UnifiedMemoryAuthority: released GPU device state for replica " << key.artifact_id << " on device "
+          << device_id << (drop_allocation ? " (allocation dropped)" : "");
+  return absl::OkStatus();
+}
+
 size_t UnifiedMemoryAuthority::get_chunk_size() const {
   return va_space_->chunk_size();
 }

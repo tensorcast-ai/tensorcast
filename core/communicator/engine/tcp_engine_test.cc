@@ -122,11 +122,11 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     REQUIRE(status.ok());
   }
 
-  SECTION("Unregister non-existent tensor fails") {
+  SECTION("Unregister non-existent tensor is idempotent OK") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
     auto status = fixture.server_->unregister_tensor(KEY);
-    REQUIRE_FALSE(status.ok());
+    REQUIRE(status.ok());
   }
 
   SECTION("Read CPU tensor") {

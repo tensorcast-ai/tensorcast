@@ -785,11 +785,14 @@ class DaemonCtl:
         stream_req.cpu_chunk.data = data
         stream_req.cpu_chunk.last = bool(last)
         try:
+            # Do not retry streaming feeds; on TTL expiry the server returns
+            # DEADLINE_EXCEEDED and we should fail fast without reusing the
+            # request iterator across channels.
             self._unary_call(
                 self.stub.FeedRegisterArtifactStream,
                 iter([stream_req]),
                 timeout=30.0,
-                retries=1,
+                retries=0,
             )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
@@ -832,11 +835,12 @@ class DaemonCtl:
                 yield req
 
         try:
+            # Do not retry streaming feeds; iterator cannot be reused safely.
             self._unary_call(
                 self.stub.FeedRegisterArtifactStream,
                 _iter(),
                 timeout=timeout_s,
-                retries=1,
+                retries=0,
             )
             return True
         except grpc.RpcError as e:  # noqa: BLE001
@@ -861,8 +865,9 @@ class DaemonCtl:
             yield req
 
         try:
+            # Do not retry streaming feeds; iterator cannot be reused safely.
             self._unary_call(
-                self.stub.FeedRegisterArtifactStream, _iter(), timeout=30.0, retries=1
+                self.stub.FeedRegisterArtifactStream, _iter(), timeout=30.0, retries=0
             )
             return True
         except grpc.RpcError as e:  # noqa: BLE001

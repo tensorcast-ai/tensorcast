@@ -269,6 +269,18 @@ class UnifiedMemoryAuthority {
    */
   absl::Status release(const loading::ReplicaKey& key);
 
+  /**
+   * @brief Release GPU residency and optional allocation for a specific device.
+   *
+   * Clears UMA ledger residency for all chunks on the given GPU device and,
+   * when drop_allocation is true, removes the UMA-owned VRAM allocation handle
+   * so that VRAM is actually returned when no other owners exist.
+   *
+   * This method acquires only UMA's internal mutex and does not invoke VS or
+   * external registries, preserving the UMA→VS→Export lock order.
+   */
+  absl::Status release_gpu_device(const loading::ReplicaKey& key, int device_id, bool drop_allocation = true);
+
   // UMA V3: Direct write grant returning windowed authorization directly.
   // Exposes DirectWriteGrant with Window entries and keepalive semantics.
   absl::StatusOr<DirectWriteGrant> grant_direct_write(const loading::ReplicaKey& key, absl::Span<const VaRange> ranges);

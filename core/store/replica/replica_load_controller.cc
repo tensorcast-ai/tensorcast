@@ -303,6 +303,17 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location, bool
   // Proceed with GPU resource release
   release_gpu_resources_locked();
 
+  // Inform UMA to drop GPU residency and allocation for this device to keep
+  // the authoritative ledger in sync and actually reclaim VRAM.
+  if (location == MemoryLocation::GPU) {
+    auto uma_st =
+        memory_coordinator_->release_gpu_device(replica_key_, replica_key_.device.ordinal, /*drop_allocation=*/true);
+    if (!uma_st.ok() && uma_st.code() != absl::StatusCode::kNotFound) {
+      LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
+                   << "): UMA release_gpu_device returned: " << uma_st;
+    }
+  }
+
   // Clear communication registration if releasing the registered GPU location
   if (location == MemoryLocation::GPU && gpu_.comm_registered) {
     VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id
@@ -1071,42 +1082,6 @@ gsl::not_null<common::memory::VirtualAddressSpace*> ReplicaLoadController::get_v
 gsl::not_null<const common::memory::VirtualAddressSpace*> ReplicaLoadController::get_va_space() const {
   return gsl::not_null<const common::memory::VirtualAddressSpace*>{va_space_.get().get()};
 }
-
-// Opaque keepalive container for VS pin leases held by a DirectWriteGrant
-namespace {
-//------------------------------------------------------------------------------
-// Helper: coalesce a sorted list of chunk indices into contiguous [start, end]
-// ranges.  This utility is used by finalize_load when syncing CPU chunk states
-// with the UMA coordinator.  Behaviour is identical to the in-line implementation
-// previously found in finalize_load but is now shared and unit-testable.
-//------------------------------------------------------------------------------
-std::vector<std::pair<uint32_t, uint32_t>> coalesce_indices_to_ranges(absl::Span<const uint32_t> indices) {
-  std::vector<std::pair<uint32_t, uint32_t>> ranges;
-  if (indices.empty()) {
-    return ranges;
-  }
-
-  // Make a local copy for sorting & dedup in-place to avoid mutating caller data.
-  std::vector<uint32_t> sorted(indices.begin(), indices.end());
-  std::ranges::sort(sorted);
-  sorted.erase(std::ranges::unique(sorted).begin(), sorted.end());
-
-  uint32_t range_start = sorted.front();
-  uint32_t range_end = range_start;
-
-  for (size_t i = 1; i < sorted.size(); ++i) {
-    const uint32_t idx = sorted[i];
-    if (idx == range_end + 1) {
-      range_end = idx;
-    } else {
-      ranges.emplace_back(range_start, range_end);
-      range_start = range_end = idx;
-    }
-  }
-  ranges.emplace_back(range_start, range_end);
-  return ranges;
-}
-} // namespace
 
 absl::StatusOr<DirectWriteGrant> ReplicaLoadController::plan_direct_write(absl::Span<const VaRange> ranges) {
   {

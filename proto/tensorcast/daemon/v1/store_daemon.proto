@@ -42,6 +42,8 @@ service StoreDaemonService {
 
   // ========== Memory Artifact Registration ==========
   // New canonical RPC names
+  // Begin a registration session; returns a registration_id and plan-specific handshake.
+  rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
   // Clients should prefer FeedRegisterArtifactStream.
   rpc FeedRegisterArtifactStream(stream FeedRegisterArtifactStreamRequest) returns (FeedRegisterArtifactStreamResponse) {}
   rpc KeepAliveRegisterArtifact(KeepAliveRegisterArtifactRequest) returns (KeepAliveRegisterArtifactResponse) {}
