@@ -19,7 +19,7 @@
 
 namespace tensorcast::store {
 
-// MemoryManager is already defined in this namespace via included header.
+// ReplicaLoadController is already defined in this namespace via included header.
 
 /**
  * @brief Loader implementation for reading replica data partitions from disk.

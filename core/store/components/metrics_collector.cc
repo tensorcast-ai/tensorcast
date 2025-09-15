@@ -2,7 +2,7 @@
 
 #include "metrics_collector.h"
 
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/replica_registry.h"
 
@@ -42,7 +42,7 @@ MetricsCollector::MetricsCollector() {
   cpu_memory_available_gauge_->AddCallback(&cpu_mem_available_callback, this);
 }
 
-void MetricsCollector::update_memory_pool_metrics(const common::memory::PinnedMemoryPool& memory_pool) {
+void MetricsCollector::update_memory_pool_metrics(const common::memory::PinnedBufferPool& memory_pool) {
   // Track available size via ObservableGauge snapshot
   size_t available_size = memory_pool.get_available_size();
   cpu_available_bytes_last_ = static_cast<double>(available_size);
@@ -76,7 +76,7 @@ void MetricsCollector::record_memory_eviction() {
 }
 
 void MetricsCollector::update_all_metrics(
-    const common::memory::PinnedMemoryPool& memory_pool,
+    const common::memory::PinnedBufferPool& memory_pool,
     const ReplicaRegistry& replica_registry,
     DeviceManager& device_manager) {
   update_memory_pool_metrics(memory_pool);

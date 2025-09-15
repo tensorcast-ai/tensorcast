@@ -82,7 +82,7 @@ struct MaterializeHints {
   // Hint: Prefer loading the replica into the Pageable-Chunk CPU Cache (UPC-Cache)
   // instead of the traditional pinned host memory path. When set to true the
   // StoreEngine and Loader pipeline should attempt to allocate the replica
-  // in PAGEABLE_CPU memory if the underlying components support it.
+  // in CPU memory if the underlying components support it.
   bool prefer_pageable_cpu{false};
 
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
@@ -160,6 +160,7 @@ struct ReplicaHandle {
   [[nodiscard]] const ReplicaKey& key() const {
     return replica_key;
   }
+
   [[nodiscard]] replica::MemoryState state(DeviceType type) const;
   absl::Status wait_ready(std::chrono::milliseconds timeout);
 };

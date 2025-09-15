@@ -19,7 +19,7 @@
 #include "pinned_memory.h"
 
 #include "absl/log/log.h"
-#include "pinned_memory_pool.h"
+#include "pinned_buffer_pool.h"
 
 namespace tensorcast::common::memory {
 
@@ -34,7 +34,7 @@ PinnedMemory::~PinnedMemory() {
 
 int PinnedMemory::allocate(
     size_t size,
-    std::shared_ptr<PinnedMemoryPool> mempool,
+    std::shared_ptr<PinnedBufferPool> mempool,
     const std::chrono::milliseconds& timeout) {
   if (!buffers_.empty()) {
     LOG(ERROR) << "Memory already allocated";
@@ -47,7 +47,7 @@ int PinnedMemory::allocate(
   if (result == 0) {
     // Verify all buffers are aligned for DIRECT_IO
     for (size_t i = 0; i < buffers_.size(); ++i) {
-      if (reinterpret_cast<uintptr_t>(buffers_[i]) % PinnedMemoryPool::kDirectIOAlignment != 0) {
+      if (reinterpret_cast<uintptr_t>(buffers_[i]) % PinnedBufferPool::kDirectIOAlignment != 0) {
         LOG(WARNING) << "PinnedMemory: Buffer " << i << " is not aligned for DIRECT_IO";
       }
     }

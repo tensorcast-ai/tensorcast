@@ -10,15 +10,14 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -67,11 +66,11 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   // Setup pinned pool
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 512;
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create DVMP
-  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
+  // Create VS
+  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
 
   // Use new DiskSource
   DiskSource disk_src;
@@ -84,8 +83,8 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
       .artifact_identifier = artifact_id,
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
-      .pinned_memory_pool = pool,
-      .dvmp = dvmp,
+      .pinned_buffer_pool = pool,
+      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -94,11 +93,11 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   auto replica = std::move(*mstatus);
 
   // Load to CPU
-  REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
-  auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+  REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
+  auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
   REQUIRE(cpu_fut.valid());
-  REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
-  REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+  REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
+  REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
   // Copy to GPU
   absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);

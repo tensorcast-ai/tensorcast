@@ -12,8 +12,8 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/replica/memory_manager.h"
-#include "core/store/replica/replica_memory_coordinator.h"
+#include "core/store/replica/replica_load_controller.h"
+#include "core/store/replica/unified_memory_authority.h"
 // Prefer explicit includes over forward declarations
 #include "core/store/components/global_store_client.h"
 
@@ -82,7 +82,7 @@ class ChunkAwareLoadingStrategy {
    * @brief Generate optimal loading plan for missing chunks
    *
    * @param key Replica instance key
-   * @param target Target location (GPU or PAGEABLE_CPU)
+   * @param target Target location (GPU or CPU)
    * @param memory Unified memory to query current chunk states
    * @param global_store Client to query remote chunk locations
    * @return Optimized loading plan
@@ -90,7 +90,7 @@ class ChunkAwareLoadingStrategy {
   static LoadPlan create_loading_plan(
       const ReplicaKey& key,
       common::memory::MemoryLocation target,
-      const replica::ReplicaMemoryCoordinator& memory,
+      const replica::UnifiedMemoryAuthority& memory,
       components::GlobalStoreClient& global_store);
 
   /**
@@ -103,8 +103,8 @@ class ChunkAwareLoadingStrategy {
    */
   static std::future<absl::Status> execute_plan(
       const LoadPlan& plan,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager);
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager);
 
   /**
    * @brief Execute loading plan with progress tracking
@@ -117,8 +117,8 @@ class ChunkAwareLoadingStrategy {
    */
   static absl::Status execute_plan_with_progress(
       const LoadPlan& plan,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
       const ProgressCallback& progress_cb);
 
  private:
@@ -131,31 +131,31 @@ class ChunkAwareLoadingStrategy {
   // Execute a single load operation
   static absl::Status execute_operation(
       const LoadOperation& op,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
       const ProgressCallback& progress_cb);
 
   // Execute local CPU->GPU copy
   static absl::Status execute_local_cpu_copy(
       const std::vector<uint32_t>& chunks,
       common::memory::MemoryLocation target,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
       const ProgressCallback& progress_cb);
 
   // Execute P2P transfer
   static absl::Status execute_p2p_transfer(
       const LoadOperation& op,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
       const ProgressCallback& progress_cb);
 
   // Execute disk load
   static absl::Status execute_disk_load(
       const std::vector<uint32_t>& chunks,
       common::memory::MemoryLocation target,
-      replica::ReplicaMemoryCoordinator& memory,
-      const std::shared_ptr<store::replica::MemoryManager>& mem_manager,
+      replica::UnifiedMemoryAuthority& memory,
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
       const ProgressCallback& progress_cb);
 };
 

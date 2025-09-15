@@ -332,7 +332,7 @@ message HealthCheckResponse {
 
 // ========== Chunk Directory Messages ==========
 
-// Chunk state enum (matches DVMP ChunkState)
+// Chunk state enum (matches historical ChunkState (telemetry))
 enum ChunkState {
   CHUNK_STATE_UNSPECIFIED = 0; // Unspecified state
   CHUNK_STATE_LOCKED_TX = 1; // Being transferred

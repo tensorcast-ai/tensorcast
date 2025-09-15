@@ -11,7 +11,7 @@ from ._errors import InvalidPlan
 # Module-level constants
 DEFAULT_ALIGN: int = 8
 DEFAULT_PINNED_TIMEOUT_MS: int = 30000
-DEFAULT_DVMP_CHUNK_SIZE: int = 4 * 1024 * 1024
+DEFAULT_CPU_CHUNK_SIZE: int = 4 * 1024 * 1024
 
 
 # Global daemon address configuration
@@ -39,7 +39,7 @@ def get_global_store_address() -> str:
 
 class PlanType(Enum):
     VRAM_COALESCED = "vram_coalesced"
-    DVMP = "dvmp"
+    CPU = "cpu"
     VRAM_LEASED = "vram_leased"
 
     @staticmethod
@@ -51,8 +51,8 @@ class PlanType(Enum):
             return PlanType.VRAM_COALESCED
         if s in ("vram_leased", "lease"):
             return PlanType.VRAM_LEASED
-        if s in ("dvmp", "uma", "cpu"):
-            return PlanType.DVMP
+        if s in ("cpu", "uma"):
+            return PlanType.CPU
         raise InvalidPlan(f"Unknown plan: {value}")
 
 
@@ -67,8 +67,8 @@ class RegisterArtifactOptions:
     lease_bytes_limit: int = 0
     # Lease/LIP specific: opt-in in-place mode per RFC-0014
     lease_in_place: bool = False
-    dvmp_preferred_channel: int = 2
-    dvmp_ring_bytes: int = 0
+    cpu_preferred_channel: int = 2
+    cpu_ring_bytes: int = 0
     key: str | None = None
     disk_path: str | None = None
 

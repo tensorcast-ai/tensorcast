@@ -12,6 +12,7 @@
 #include <random>
 // For reading/writing descriptor and canonical index files
 #include <fstream>
+#include <limits>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
@@ -23,7 +24,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/loading/loading_spec.h"
@@ -140,16 +141,21 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
           gsl::not_null<std::shared_ptr<components::CommunicationManager>>(
               std::make_shared<components::CommunicationManager>())),
       memory_pool_(
-          gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>>(
-              std::make_shared<common::memory::PinnedMemoryPool>(memory_pool_size_, chunk_size_))),
-      dvmp_(
-          gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>>(
-              std::make_shared<common::memory::DistributedVirtualMemoryPool>(opts.dvmp_chunk_size))) {
+          gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
+              std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, chunk_size_))),
+      va_space_(
+          gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
+              std::make_shared<common::memory::VirtualAddressSpace>(opts.cpu_chunk_size))) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
   LOG(INFO) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
   LOG(INFO) << "I/O threads: " << num_thread_ << ", chunk size: " << chunk_size_ / communicator::misc::MB << "MB";
+
+  // Enforce alignment invariant: transfer chunk_size must divide VS cpu_chunk_size
+  ABSL_CHECK_EQ(opts.cpu_chunk_size % chunk_size_, 0)
+      << "StoreEngine: cpu_chunk_size=" << opts.cpu_chunk_size
+      << " must be a multiple of transfer chunk_size=" << chunk_size_ << " to avoid cross-chunk slices";
 
   initialize_components();
   initialize_global_store(opts);
@@ -184,7 +190,7 @@ void StoreEngine::initialize_global_store(const StoreEngineOptions& opts) {
 }
 
 void StoreEngine::initialize_communication_manager(const StoreEngineOptions& opts) {
-  // Initialize system-wide DVMP instance and CommunicationManager handling
+  // Initialize CommunicationManager handling (P2P, RDMA, etc.)
   if (opts.comm_manager) {
     // Use externally supplied manager (already initialised by caller)
     comm_manager_ = gsl::not_null<std::shared_ptr<components::CommunicationManager>>(opts.comm_manager);
@@ -231,7 +237,7 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
     auto size_result = replica->get_artifact_size();
     info.size_bytes = size_result.ok() ? size_result.value() : 0;
 
-    auto cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+    auto cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
     auto gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
     auto is_present = [](replica::MemoryState st) {
@@ -239,8 +245,7 @@ std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const
           st == replica::MemoryState::LOADED;
     };
 
-    info.cpu_state =
-        is_present(cpu_state) ? common::memory::MemoryLocation::PAGEABLE_CPU : common::memory::MemoryLocation::NONE;
+    info.cpu_state = is_present(cpu_state) ? common::memory::MemoryLocation::CPU : common::memory::MemoryLocation::NONE;
     info.gpu_state = is_present(gpu_state) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::NONE;
 
     info.gpu_device_id = -1;
@@ -311,7 +316,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_disk_internal");
 
   // Convert Location to legacy MemoryLocation
-  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::PAGEABLE_CPU;
+  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::CPU;
   if (target.location.type == common::memory::MemoryLocation::GPU) {
     target_location = common::memory::MemoryLocation::GPU;
   }
@@ -351,8 +356,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       .artifact_identifier = artifact_identifier,
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
-      .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
+      .pinned_buffer_pool = memory_pool_,
+      .virtual_addr_space = va_space_,
       .expected_artifact_size = std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
@@ -489,8 +494,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           LOG(WARNING) << "Data multihash computation (GPU) failed: " << data_mh_or.status();
         }
       }
-    } else if (target_location == MemoryLocation::PAGEABLE_CPU) {
-      const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+    } else if (target_location == MemoryLocation::CPU) {
+      const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
       if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && verify_size > 0) {
         auto data_mh_or =
             loader::compute_data_multihash_from_cpu_memory(gsl::not_null<const void*>{cpu_ptrs[0]}, verify_size);
@@ -626,7 +631,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
                 dev_id = target_device_id;
               }
             } else {
-              const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+              const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
               if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
                 ptrs.push_back(cpu_ptrs[0]);
                 sizes.push_back(static_cast<size_t>(sz_for_verify));
@@ -662,7 +667,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             dev_id = target_device_id;
           }
         } else {
-          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
           if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
             ptrs.push_back(cpu_ptrs[0]);
             sizes.push_back(static_cast<size_t>(sz_for_verify));
@@ -711,7 +716,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             }
           }
         } else {
-          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::PAGEABLE_CPU);
+          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
           if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
             auto mh_or = loader::compute_data_multihash_from_cpu_memory(gsl::not_null<const void*>{cpu_ptrs[0]}, total);
             if (mh_or.ok()) {
@@ -794,7 +799,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
   // Loading future and states
   handle.ready_future = load_future;
-  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
   if (target_location == common::memory::MemoryLocation::GPU) {
@@ -802,7 +807,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
     // Attempt to obtain CUDA IPC handle bytes for the allocated GPU buffer.
-    auto ipc_or = replica->get_memory_manager().get_cuda_ipc_handle();
+    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
       std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
     }
@@ -852,7 +857,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
     return absl::FailedPreconditionError("Communication not enabled");
   }
 
-  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::PAGEABLE_CPU;
+  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::CPU;
   if (target.location.type == common::memory::MemoryLocation::GPU) {
     target_location = common::memory::MemoryLocation::GPU;
   }
@@ -868,8 +873,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
       .artifact_identifier = artifact_identifier,
       .device_type = (target_location == common::memory::MemoryLocation::GPU ? DeviceType::GPU : DeviceType::CPU),
       .local_device_id = target.location.device_id,
-      .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
+      .pinned_buffer_pool = memory_pool_,
+      .virtual_addr_space = va_space_,
       .expected_artifact_size = std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.local_device_id = target.location.device_id;
@@ -943,14 +948,14 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   promise.set_value(absl::OkStatus());
   handle.ready_future = promise.get_future().share();
 
-  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::PAGEABLE_CPU);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
 
   if (target_location == common::memory::MemoryLocation::GPU) {
     const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
     handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
-    auto ipc_or = replica->get_memory_manager().get_cuda_ipc_handle();
+    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
       std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
     }
@@ -1044,7 +1049,7 @@ absl::Status StoreEngine::try_evict_memory_for_replica(size_t required_size) {
 
     // Only attempt to free CPU memory for now – GPU eviction will be handled
     // in a future iteration.
-    auto free_status = replica->release_memory(common::memory::MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+    auto free_status = replica->release_memory(common::memory::MemoryLocation::CPU, /*safe_release=*/true);
     if (free_status.ok()) {
       metrics_collector_->record_memory_eviction();
       LOG(INFO) << "Evicted replica " << inst_key.artifact_id
@@ -1129,8 +1134,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
   if (auto existing_or = replica_registry_->find(dst_key); existing_or.ok()) {
     const auto& replica = existing_or.value();
 
-    MemoryLocation dst_loc =
-        (target_device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+    MemoryLocation dst_loc = (target_device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::CPU;
     std::optional<int> opt_dev;
     if (dst_loc == MemoryLocation::GPU) {
       opt_dev = target_device.ordinal;
@@ -1141,14 +1145,14 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     ReplicaHandle handle;
     handle.replica_key = dst_key;
     handle.ready_future = fut;
-    handle.cpu_state = replica->get_memory_state(MemoryLocation::PAGEABLE_CPU);
+    handle.cpu_state = replica->get_memory_state(MemoryLocation::CPU);
     handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
 
     if (dst_loc == MemoryLocation::GPU) {
       const auto gpu_ptrs = replica->get_data_pointer(MemoryLocation::GPU);
       handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
-      auto ipc_or = replica->get_memory_manager().get_cuda_ipc_handle();
+      auto ipc_or = replica->get_memory_manager().get_ipc_handle();
       if (ipc_or.ok()) {
         std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
       }
@@ -1171,8 +1175,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     }
 
     loading::ReplicaTarget target;
-    target.location.type = (dev_key.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                             : common::memory::MemoryLocation::PAGEABLE_CPU;
+    target.location.type =
+        (dev_key.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
     target.location.device_id = dev_key.ordinal;
 
     return ingest_from_disk_internal(
@@ -1225,8 +1229,8 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
             .artifact_identifier = hints.artifact_id,
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
-            .pinned_memory_pool = memory_pool_,
-            .dvmp = dvmp_,
+            .pinned_buffer_pool = memory_pool_,
+            .virtual_addr_space = va_space_,
             .expected_artifact_size = expected_size};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
@@ -1254,13 +1258,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         ReplicaHandle handle;
         handle.replica_key = dst_key;
         handle.ready_future = p.get_future().share();
-        handle.cpu_state = dst_replica->get_memory_state(MemoryLocation::PAGEABLE_CPU);
+        handle.cpu_state = dst_replica->get_memory_state(MemoryLocation::CPU);
         handle.gpu_state = dst_replica->get_memory_state(MemoryLocation::GPU);
         if (handle.gpu_state == MemoryState::LOADED) {
           const auto gpu_ptrs = dst_replica->get_data_pointer(MemoryLocation::GPU);
           handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
 
-          auto ipc_or = dst_replica->get_memory_manager().get_cuda_ipc_handle();
+          auto ipc_or = dst_replica->get_memory_manager().get_ipc_handle();
           if (ipc_or.ok()) {
             std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
           }
@@ -1320,7 +1324,7 @@ std::vector<DeviceKey> StoreEngine::get_resident_devices(std::string_view artifa
     };
 
     if (key.device.type == DeviceType::CPU) {
-      if (is_present(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU))) {
+      if (is_present(replica->get_memory_state(MemoryLocation::CPU))) {
         unique_devices.insert(DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""});
       }
     } else if (key.device.type == DeviceType::GPU) {
@@ -1361,7 +1365,7 @@ std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& devic
     };
 
     if (device.type == DeviceType::CPU) {
-      if (is_present(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU))) {
+      if (is_present(replica->get_memory_state(MemoryLocation::CPU))) {
         list.push_back(key);
       }
     } else if (device.type == DeviceType::GPU) {
@@ -1391,7 +1395,7 @@ int StoreEngine::wait_replica_ready(const ReplicaKey& key) {
     return 1; // Not found
   }
   const auto& replica = replica_or.value();
-  MemoryLocation loc = (key.device.type == DeviceType::CPU) ? MemoryLocation::PAGEABLE_CPU : MemoryLocation::GPU;
+  MemoryLocation loc = (key.device.type == DeviceType::CPU) ? MemoryLocation::CPU : MemoryLocation::GPU;
   absl::Status st = replica->wait_until_loaded(loc, absl::InfiniteDuration());
   return st.ok() ? 0 : 1;
 }
@@ -1403,7 +1407,7 @@ int StoreEngine::unload_replica(const ReplicaKey& key) {
   }
 
   const auto& replica = replica_or.value();
-  MemoryLocation loc = (key.device.type == DeviceType::CPU) ? MemoryLocation::PAGEABLE_CPU : MemoryLocation::GPU;
+  MemoryLocation loc = (key.device.type == DeviceType::CPU) ? MemoryLocation::CPU : MemoryLocation::GPU;
 
   // Inspect current state *before* attempting the release so we can tell if
   // there was anything to unload.  This avoids treating a no-op release as a
@@ -1425,7 +1429,7 @@ MemoryState StoreEngine::get_replica_state(const ReplicaKey& key, DeviceType mem
   if (!replica_or.ok()) {
     return MemoryState::UNINITIALIZED;
   }
-  MemoryLocation loc = (memory_type == DeviceType::CPU) ? MemoryLocation::PAGEABLE_CPU : MemoryLocation::GPU;
+  MemoryLocation loc = (memory_type == DeviceType::CPU) ? MemoryLocation::CPU : MemoryLocation::GPU;
   return replica_or.value()->get_memory_state(loc);
 }
 
@@ -1456,7 +1460,7 @@ absl::StatusOr<uint64_t> StoreEngine::get_replica_size(const ReplicaKey& key) {
   return *size_or;
 }
 
-absl::StatusOr<CommRegistrationInfo> StoreEngine::enable_remote_replica_access(
+absl::StatusOr<ExportRegistration> StoreEngine::enable_remote_replica_access(
     const ReplicaKey& key,
     MemoryLocation location) {
   if (!comm_manager_->is_enabled()) {
@@ -1490,7 +1494,7 @@ int StoreEngine::clear_mem() {
 
   for (const auto& [inst_key, replica] : replicas) {
     // Release CPU memory with proper error tracking
-    auto cpu_status = replica->release_memory(MemoryLocation::PAGEABLE_CPU);
+    auto cpu_status = replica->release_memory(MemoryLocation::CPU);
     if (!cpu_status.ok()) {
       LOG(WARNING) << "Failed to release CPU memory for " << inst_key << ": " << cpu_status.message();
       errors.push_back(cpu_status);
@@ -1527,7 +1531,7 @@ absl::Status StoreEngine::register_replica_with_global_store(
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
   // Determine memory location based on device type
-  MemoryLocation loc = (key.device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::PAGEABLE_CPU;
+  MemoryLocation loc = (key.device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::CPU;
 
   // Fetch total size for registration
   uint64_t size = 0;
@@ -1585,50 +1589,6 @@ absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Distributed Memory Pool (DVMP) chunk locking API
-// ═══════════════════════════════════════════════════════════════════════════
-
-absl::Status StoreEngine::lock_chunks(const ReplicaKey& replica_key, absl::Span<const uint32_t> chunk_indices) {
-  SC_TRACE_SCOPE("StoreEngine::lock_chunks");
-
-  // Locate the exact Replica based on ReplicaKey (device-specific).
-  auto replica_or2 = replica_registry_->find(replica_key);
-  if (!replica_or2.ok()) {
-    return absl::NotFoundError(
-        absl::StrCat("Replica not found: ", replica_key.artifact_id, " @ ", replica_key.device.to_string()));
-  }
-
-  const auto& replica = replica_or2.value();
-
-  // Get the DVMP instance via MemoryManager.
-  const auto dvmp = replica->get_memory_manager().get_dvmp();
-  // Forward the call to DVMP – DVMP is still keyed by artifact_id (shared CPU VA).
-  return dvmp->lock_chunks(replica_key.artifact_id, chunk_indices);
-}
-
-absl::Status StoreEngine::unlock_chunks(
-    const ReplicaKey& replica_key,
-    absl::Span<const uint32_t> chunk_indices,
-    bool copied_gpu) {
-  SC_TRACE_SCOPE("StoreEngine::unlock_chunks");
-
-  // Locate the exact Replica.
-  auto replica_or3 = replica_registry_->find(replica_key);
-  if (!replica_or3.ok()) {
-    return absl::NotFoundError(
-        absl::StrCat("Replica not found: ", replica_key.artifact_id, " @ ", replica_key.device.to_string()));
-  }
-
-  const auto& replica = replica_or3.value();
-
-  // Get the DVMP instance via MemoryManager.
-  const auto dvmp = replica->get_memory_manager().get_dvmp();
-
-  // Forward the call to DVMP.
-  return dvmp->unlock_chunks(replica_key.artifact_id, chunk_indices, copied_gpu);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // RFC-0006 – Memory Artifact Registration (coalesced)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1648,15 +1608,15 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
 
   // Prepare a memory-only Replica bound to target GPU to own the allocation.
   // Use InlineBufferSource with the known total size so Replica::create() can
-  // construct MemoryManager without requiring any on-disk layout.
+  // construct ReplicaLoadController without requiring any on-disk layout.
   InlineBufferSource ib_source{.data = nullptr, .size_bytes = reg.total_size_bytes};
   replica::ReplicaConfig cfg{
       .source = ib_source,
       .artifact_identifier = reg.artifact_id,
       .device_type = DeviceType::GPU,
       .local_device_id = reg.device_id,
-      .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
+      .pinned_buffer_pool = memory_pool_,
+      .virtual_addr_space = va_space_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
@@ -1705,7 +1665,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   }
 
   // Obtain CUDA IPC handle to return to caller.
-  auto ipc_or = replica->get_memory_manager().get_cuda_ipc_handle();
+  auto ipc_or = replica->get_memory_manager().get_ipc_handle();
   if (!ipc_or.ok()) {
     return ipc_or.status();
   }
@@ -1764,7 +1724,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   return out;
 }
 
-absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact_dvmp(
+absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact_cpu(
     const ArtifactRegistration& reg) {
   if (reg.total_size_bytes == 0) {
     return absl::InvalidArgumentError("total_size_bytes must be > 0");
@@ -1781,8 +1741,8 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
       .artifact_identifier = reg.artifact_id,
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
-      .pinned_memory_pool = memory_pool_,
-      .dvmp = dvmp_,
+      .pinned_buffer_pool = memory_pool_,
+      .virtual_addr_space = va_space_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
@@ -1792,8 +1752,8 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   }
   auto replica = std::shared_ptr<Replica>(std::move(create_or.value()));
 
-  // Allocate DVMP-backed PAGEABLE_CPU memory.
-  absl::Status st = replica->get_memory_manager().allocate_memory(MemoryLocation::PAGEABLE_CPU);
+  // Allocate VS-backed CPU memory.
+  absl::Status st = replica->get_memory_manager().allocate_memory(MemoryLocation::CPU);
   if (!st.ok()) {
     return st;
   }
@@ -1805,13 +1765,13 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
     absl::Status emplace_status =
         replica_registry_->emplace(inst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{replica});
     if (absl::IsAlreadyExists(emplace_status)) {
-      VLOG(1) << "Pending DVMP registry already had instance for key=" << inst_key.artifact_id;
+      VLOG(1) << "Pending CPU registry already had instance for key=" << inst_key.artifact_id;
     } else if (!emplace_status.ok()) {
       return emplace_status;
     }
   }
 
-  // Create registration id and track pending DVMP registration.
+  // Create registration id and track pending CPU registration.
   std::random_device rd;
   std::mt19937_64 gen(rd());
   std::uniform_int_distribution<uint64_t> dis;
@@ -1833,7 +1793,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   entry.replica = replica;
   entry.gpu_ptr = nullptr;
   std::memset(&entry.ipc_handle, 0, sizeof(entry.ipc_handle));
-  entry.plan = PendingRegistrationEntry::Plan::DVMP;
+  entry.plan = PendingRegistrationEntry::Plan::CPU;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     pending_regs_.emplace(reg_id, std::move(entry));
@@ -1843,11 +1803,11 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   out.registration_id = reg_id;
   out.device_id = reg.device_id;
   out.size_bytes = reg.total_size_bytes;
-  // IPC handle remains zero for DVMP plan
+  // IPC handle remains zero for CPU plan
   return out;
 }
 
-absl::Status StoreEngine::feed_register_dvmp_chunk(
+absl::Status StoreEngine::feed_register_cpu_chunk(
     std::string_view registration_id,
     uint64_t offset,
     const void* data,
@@ -1858,23 +1818,23 @@ absl::Status StoreEngine::feed_register_dvmp_chunk(
     std::lock_guard<std::mutex> lock(pending_mutex_);
     auto it = pending_regs_.find(std::string(registration_id));
     if (it == pending_regs_.end()) {
-      LOG(ERROR) << "DVMP feed: registration_id not found: " << registration_id;
+      LOG(ERROR) << "CPU feed: registration_id not found: " << registration_id;
       return absl::NotFoundError("registration_id not found");
     }
-    if (it->second.plan != PendingRegistrationEntry::Plan::DVMP) {
-      LOG(ERROR) << "DVMP feed: plan mismatch for reg_id=" << registration_id;
-      return absl::FailedPreconditionError("registration plan is not DVMP");
+    if (it->second.plan != PendingRegistrationEntry::Plan::CPU) {
+      LOG(ERROR) << "CPU feed: plan mismatch for reg_id=" << registration_id;
+      return absl::FailedPreconditionError("registration plan is not CPU");
     }
     if (offset + bytes > it->second.size_bytes) {
-      LOG(ERROR) << "DVMP feed OOB: offset=" << offset << ", bytes=" << bytes
-                 << ", total_size=" << it->second.size_bytes << ", reg_id=" << registration_id;
-      return absl::OutOfRangeError("DVMP feed write would exceed total size");
+      LOG(ERROR) << "CPU feed OOB: offset=" << offset << ", bytes=" << bytes << ", total_size=" << it->second.size_bytes
+                 << ", reg_id=" << registration_id;
+      return absl::OutOfRangeError("CPU feed write would exceed total size");
     }
     replica = it->second.replica;
     art_id = it->second.artifact_id;
   }
-  auto dvmp = replica->get_memory_manager().get_dvmp();
-  return dvmp->write_at(art_id, offset, data, bytes);
+  auto virtual_addr_space = replica->get_memory_manager().get_va_space();
+  return virtual_addr_space->write_at(art_id, offset, data, bytes);
 }
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
@@ -1920,9 +1880,9 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
 
   // 2) data_multihash via SegmentPlan linearization (PAD=0).
   absl::StatusOr<std::string> data_mh_or;
-  if (entry.plan == PendingRegistrationEntry::Plan::DVMP) {
-    // Hash directly from DVMP CPU memory (zero-initialized PAD regions).
-    auto region_or = dvmp_->region_info(entry.artifact_id);
+  if (entry.plan == PendingRegistrationEntry::Plan::CPU) {
+    // Hash directly from VS CPU memory (zero-initialized PAD regions).
+    auto region_or = va_space_->region_info(entry.artifact_id);
     if (!region_or.ok()) {
       return region_or.status();
     }
@@ -1974,8 +1934,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // created and no Global Store upsert is attempted.
   {
     DeviceKey dev_key{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
         .uuid = ""};
     loading::ReplicaKey check_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
     auto existing_or = replica_registry_->find(check_key);
@@ -1985,9 +1945,9 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         std::lock_guard<std::mutex> lock(pending_mutex_);
         pending_regs_.erase(std::string(registration_id));
       }
-      if (entry.plan == PendingRegistrationEntry::Plan::DVMP) {
-        // DVMP path allocated PAGEABLE_CPU memory
-        absl::Status _st = entry.replica->release_memory(MemoryLocation::PAGEABLE_CPU, /*safe_release=*/true);
+      if (entry.plan == PendingRegistrationEntry::Plan::CPU) {
+        // VS path allocated CPU memory
+        absl::Status _st = entry.replica->release_memory(MemoryLocation::CPU, /*safe_release=*/true);
         if (!_st.ok()) {
           VLOG(1) << "release_memory(CPU) failed during idempotent success cleanup: " << _st;
         }
@@ -2017,8 +1977,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // original logical artifact_id used during Begin/Commit).
   {
     DeviceKey dev_key{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
         .uuid = ""};
     ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
     {
@@ -2035,7 +1995,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Export remote memory keys if communication is enabled (GPU location).
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
-  if (entry.plan != PendingRegistrationEntry::Plan::DVMP && entry.enable_p2p && comm_manager_->is_enabled()) {
+  if (entry.plan != PendingRegistrationEntry::Plan::CPU && entry.enable_p2p && comm_manager_->is_enabled()) {
     auto reg_info_or = entry.replica->enable_remote_memory_access(MemoryLocation::GPU, comm_manager_->get_engine());
     if (!reg_info_or.ok()) {
       return reg_info_or.status();
@@ -2050,8 +2010,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Register with Global Store (memory replica). Provide tensor_index_key and optional UPSERT data.
   if (global_store_client_ && global_store_client_->is_connected()) {
     DeviceKey device{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::DVMP ? -1 : entry.device_id),
+        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
         .uuid = ""};
     const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
     // Generate lightweight verification info (KEY_POINTS) for receiver-side validation
@@ -2139,13 +2099,33 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
   return absl::OkStatus();
 }
 
-std::vector<replica::ChunkState> StoreEngine::get_chunk_states(std::string_view artifact_id) const {
+std::vector<replica::ChunkState> StoreEngine::get_chunk_states_telemetry(std::string_view artifact_id) const {
   std::vector<replica::ChunkState> out;
-  auto span = dvmp_->chunk_snapshot(artifact_id);
+  auto span = va_space_->chunk_telemetry_snapshot(artifact_id);
   out.reserve(span.size());
   for (const auto& meta : span) {
     out.push_back(meta.state.load(std::memory_order_acquire));
   }
+  return out;
+}
+
+std::vector<replica::ChunkState> StoreEngine::get_chunk_states_for_device(std::string_view artifact_id, int device_id)
+    const {
+  std::vector<replica::ChunkState> out;
+  // Resolve the replica bound to the provided GPU device for this artifact.
+  auto keys = replica_registry_->find_by_artifact(artifact_id);
+  for (const auto& key : keys) {
+    if (key.device.type == DeviceType::GPU && key.device.ordinal == device_id) {
+      auto rep_or = replica_registry_->find(key);
+      if (!rep_or.ok() || !*rep_or) {
+        return out;
+      }
+      auto& rep = *rep_or;
+      auto& mm = rep->get_memory_manager();
+      return mm.get_chunk_states_uma(common::memory::MemoryLocation::GPU, device_id);
+    }
+  }
+  // No GPU replica matched; return empty.
   return out;
 }
 
@@ -2159,6 +2139,41 @@ absl::StatusOr<size_t> StoreEngine::get_device_total_memory(int device_id) const
 
 absl::StatusOr<size_t> StoreEngine::get_device_free_memory(int device_id) const {
   return device_manager_->get_free_memory(device_id);
+}
+
+std::vector<replica::ChunkState> StoreEngine::get_chunk_states_cpu_uma(std::string_view artifact_id) const {
+  std::vector<replica::ChunkState> out;
+  // Gather all instances for this artifact
+  auto keys = replica_registry_->find_by_artifact(artifact_id);
+  if (keys.empty()) {
+    return out;
+  }
+  // Choose primary: prefer CPU instance; otherwise GPU with smallest ordinal
+  std::optional<loading::ReplicaKey> chosen;
+  int min_gpu_ord = std::numeric_limits<int>::max();
+  for (const auto& k : keys) {
+    if (k.device.type == DeviceType::CPU) {
+      chosen = k;
+      break;
+    }
+    if (k.device.type == DeviceType::GPU) {
+      if (!chosen.has_value() || (chosen->device.type != DeviceType::CPU && k.device.ordinal < min_gpu_ord)) {
+        chosen = k;
+        min_gpu_ord = k.device.ordinal;
+      }
+    }
+  }
+  if (!chosen.has_value()) {
+    return out;
+  }
+
+  auto rep_or = replica_registry_->find(*chosen);
+  if (!rep_or.ok() || !*rep_or) {
+    return out;
+  }
+  auto& rep = *rep_or;
+  auto& mm = rep->get_memory_manager();
+  return mm.get_chunk_states_uma(common::memory::MemoryLocation::CPU);
 }
 
 } // namespace tensorcast::store

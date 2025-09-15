@@ -10,11 +10,7 @@ config_setting(
 # ========== Type definitions ==========
 
 # Header-only token and VA range types for direct-write capability
-sc_header_only_library(
-    name = "direct_write",
-    hdrs = ["direct_write.h"],
-    visibility = ["//visibility:public"],
-)
+# moved to //core/store/replica:direct_write to avoid subpackage file reference
 
 # Type header libraries
 sc_header_only_library(
@@ -48,6 +44,8 @@ sc_header_only_library(
         ":device_types",
     ],
 )
+
+# UMA target is canonical: depend on //core/store/replica:unified_memory_authority
 
 # ========== Core store components ==========
 
@@ -121,7 +119,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
-        ":uma_lease_provider",
         "//core/communicator:engine_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
@@ -151,7 +148,7 @@ sc_cc_library(
         ":memory_types",
         ":replica_registry",
         "//core/common:memory_location_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
@@ -175,8 +172,8 @@ sc_cc_library(
         "//core/store/loader:disk_loader",
         "//core/store/loader:p2p_loader",
         "//core/store/replica:chunk_meta",
-        "//core/store/replica:memory_manager",
-        "//core/store/replica:replica_memory_coordinator",
+        "//core/store/replica:replica_load_controller",
+        "//core/store/replica:unified_memory_authority",
         "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
@@ -223,10 +220,10 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store/loader",
         "//core/store/loader:canonical_index",
         "//core/store/loader:disk_loader",
@@ -429,29 +426,3 @@ cc_test(
 # Aggregate target removed; use fine-grained deps in dependents.
 
 # Concurrency utilities are provided by //core/testing:concurrency_utils
-
-sc_cc_library(
-    name = "uma_lease_provider",
-    srcs = ["components/uma_lease_provider.cc"],
-    hdrs = ["components/uma_lease_provider.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_types",
-        "//core/communicator:dram_stager_lib",
-        "//core/store/replica:replica_memory_coordinator",
-        "@abseil-cpp//absl/log:absl_log",
-        "@abseil-cpp//absl/synchronization",
-    ],
-)
-
-cc_test(
-    name = "uma_lease_provider_test",
-    srcs = ["components/uma_lease_provider_test.cc"],
-    deps = [
-        ":uma_lease_provider",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/store/replica:replica_memory_coordinator",
-        "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)

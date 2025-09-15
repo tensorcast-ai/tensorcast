@@ -235,7 +235,7 @@ Key components:
 
 1. **StreamingTensorWriter** – Orchestrates the streaming flow, maintains global offsets, and optionally spawns a dedicated disk-writer thread when `enable_async_write` is true.
 2. **StreamingPinnedBuffer** – A circular queue backed by pinned (page-locked) memory to enable high-throughput `cudaMemcpyAsync` transfers. Producers acquire free chunks, fill them, and consumers flush them to disk.
-3. **PinnedMemoryPool** – Re-usable pool of pinned buffers shared across multiple writers.
+3. **PinnedBufferPool** – Re-usable pool of pinned buffers shared across multiple writers.
 
 ```mermaid
 classDiagram

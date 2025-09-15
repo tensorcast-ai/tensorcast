@@ -11,15 +11,15 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
-using tensorcast::common::memory::DistributedVirtualMemoryPool;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
+using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -54,12 +54,12 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   // Setup pinned pool
   const size_t pool_total = 512 * 1024 * 1024; // 512MB
   const size_t pool_chunk = 1024 * 1024; // 1MB chunks
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
-    // Create DVMP
-    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+    // Create VS
+    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -72,8 +72,8 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = size0 + size1,
         .max_buffer_bytes = pool_total};
 
@@ -82,14 +82,14 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     auto replica = std::move(*mstatus);
 
     // Load to CPU first
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
-    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
+    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(cpu_fut.valid());
-    REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+    REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
     // Verify CPU data is accessible before GPU copy
-    auto cpu_ptrs = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    auto cpu_ptrs = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(!cpu_ptrs.empty());
     REQUIRE(cpu_ptrs[0] != nullptr);
 
@@ -105,10 +105,10 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
     // After GPU copy, CPU memory should be marked UNALLOCATED (physical pages released but virtual space retained)
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
 
     // CPU pointers should now be empty
-    auto cpu_ptrs_after = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    auto cpu_ptrs_after = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(cpu_ptrs_after.empty());
 
     // But GPU data should still be accessible
@@ -163,14 +163,14 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
   // Setup pinned pool
   const size_t pool_total = 1024 * 1024 * 1024; // 1GB
   const size_t pool_chunk = 4 * 1024 * 1024; // 4MB chunks
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
   SECTION("Sequential GPU loading with CPU auto-release") {
     // First GPU load
     {
-      // Create DVMP
-      auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+      // Create VS
+      auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -183,8 +183,8 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .artifact_identifier = artifact_id,
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 0,
-          .pinned_memory_pool = pool,
-          .dvmp = dvmp,
+          .pinned_buffer_pool = pool,
+          .virtual_addr_space = virtual_addr_space,
           .expected_artifact_size = total_size};
 
       auto mstatus = Replica::create(cfg);
@@ -192,8 +192,8 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto replica = std::move(*mstatus);
 
       // Load to CPU then GPU
-      auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
-      REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+      auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+      REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
 
       absl::Status set_dev = tensorcast::cuda::set_device(0);
       REQUIRE(set_dev.ok());
@@ -204,14 +204,14 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       REQUIRE(gpu_fut.get().ok());
 
       // Verify CPU was released
-      REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+      REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
       REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
     }
 
     // Second GPU load (different device)
     {
-      // Create DVMP
-      auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+      // Create VS
+      auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
 
       // Use new DiskSource
       DiskSource disk_src;
@@ -224,8 +224,8 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .artifact_identifier = artifact_id + "_gpu1",
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 1,
-          .pinned_memory_pool = pool,
-          .dvmp = dvmp,
+          .pinned_buffer_pool = pool,
+          .virtual_addr_space = virtual_addr_space,
           .expected_artifact_size = total_size2};
 
       auto mstatus = Replica::create(cfg);
@@ -233,8 +233,8 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto replica = std::move(*mstatus);
 
       // Load to CPU then GPU
-      auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
-      REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+      auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+      REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
 
       absl::Status set_dev = tensorcast::cuda::set_device(1);
       REQUIRE(set_dev.ok());
@@ -245,7 +245,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       REQUIRE(gpu_fut.get().ok());
 
       // Verify CPU was released
-      REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+      REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
       REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
     }
 
@@ -271,7 +271,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
   // Setup pinned pool
   const size_t pool_total = 128 * 1024 * 1024; // 128MB
   const size_t pool_chunk = 1024 * 1024; // 1MB chunks
-  auto pool = std::make_shared<PinnedMemoryPool>(pool_total, pool_chunk);
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
   SECTION("Replica smaller than one chunk") {
@@ -282,8 +282,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path, artifact_size, 'T'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create DVMP
-    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+    // Create VS
+    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -295,8 +295,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -305,9 +305,9 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     auto replica = std::move(*mstatus);
 
     // Load to CPU
-    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
-    REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+    REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
     // Copy to GPU
     absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
@@ -317,7 +317,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(gpu_fut.get().ok());
 
     // Verify CPU was released even for tiny replica
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
     REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
     LOG(INFO) << "Successfully verified CPU release for replica smaller than chunk size";
@@ -331,8 +331,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path2, artifact_size, 'C'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create DVMP
-    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+    // Create VS
+    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
 
     // Use new DiskSource
     DiskSource disk_src;
@@ -345,8 +345,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -355,8 +355,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     auto replica = std::move(*mstatus);
 
     // Load to CPU then GPU
-    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
-    REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+    REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
 
     absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
@@ -366,7 +366,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(gpu_fut.get().ok());
 
     // Verify CPU was released
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
     REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
     LOG(INFO) << "Successfully verified CPU release for replica exactly one chunk size";
@@ -380,8 +380,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path3, artifact_size, 'O'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create DVMP
-    auto dvmp = std::make_shared<DistributedVirtualMemoryPool>();
+    // Create VS
+    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -393,8 +393,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
-        .pinned_memory_pool = pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -403,8 +403,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     auto replica = std::move(*mstatus);
 
     // Load to CPU then GPU
-    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
-    REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(15)).ok());
+    auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+    REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
 
     absl::Status set_dev = tensorcast::cuda::set_device(cfg.local_device_id);
     REQUIRE(set_dev.ok());
@@ -414,7 +414,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(gpu_fut.get().ok());
 
     // Verify CPU was released
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
     REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
     LOG(INFO) << "Successfully verified CPU release for replica just over one chunk";

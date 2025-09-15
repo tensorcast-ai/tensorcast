@@ -206,8 +206,8 @@ void normalize_size_fields(nlohmann::json& root) {
       to_bytes(e["mem_pool_size_bytes"]);
     if (e.contains("chunk_bytes"))
       to_bytes(e["chunk_bytes"]);
-    if (e.contains("dvmp_chunk_size_bytes"))
-      to_bytes(e["dvmp_chunk_size_bytes"]);
+    if (e.contains("cpu_chunk_size_bytes"))
+      to_bytes(e["cpu_chunk_size_bytes"]);
   }
   // checkpoint.streaming.* bytes
   if (root.contains("checkpoint") && root["checkpoint"].is_object()) {
@@ -293,8 +293,8 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     e->set_mem_pool_size_bytes(8ULL * 1024 * 1024 * 1024);
   if (e->chunk_bytes() == 0)
     e->set_chunk_bytes(256ULL * 1024 * 1024);
-  if (e->dvmp_chunk_size_bytes() == 0)
-    e->set_dvmp_chunk_size_bytes(256ULL * 1024 * 1024);
+  if (e->cpu_chunk_size_bytes() == 0)
+    e->set_cpu_chunk_size_bytes(256ULL * 1024 * 1024);
   if (e->streaming_buffer_max_concurrent_sessions() == 0)
     e->set_streaming_buffer_max_concurrent_sessions(1);
 

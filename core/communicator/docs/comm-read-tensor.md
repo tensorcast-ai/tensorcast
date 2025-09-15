@@ -42,8 +42,8 @@
         2. recv 到 pinned 后异步/同步 `cudaMemcpy(Host→Device)`。
         3. 复制完成即 freeHost；保证不会无限占 pin-mem。
 
-5. MemoryManager / P2PLoader（若 load_async 调用）
-   read_tensor 最终只是数据面搬运，若由 P2PLoader 驱动，会在未来中回调 `MemoryManager::finalize_load_state()` 设置 LOADED 狀態。
+5. ReplicaLoadController / P2PLoader（若 load_async 调用）
+   read_tensor 最终只是数据面搬运，若由 P2PLoader 驱动，会在未来中回调 `ReplicaLoadController::finalize_load_state()` 设置 LOADED 狀態。
 
 ## 总览架构与数据流
 
@@ -62,7 +62,7 @@ flowchart LR
     CH_T["Channel (TCP/RDMA)"]
     MTCP_T["MTcpTransport (recv)"]
     STAGER_T["GpuNetStager (optional H2D)"]
-    MM_T["MemoryManager"]
+    MM_T["ReplicaLoadController"]
   end
 
   subgraph "Network"

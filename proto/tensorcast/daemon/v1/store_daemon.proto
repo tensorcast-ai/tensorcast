@@ -42,8 +42,8 @@ service StoreDaemonService {
 
   // ========== Memory Artifact Registration ==========
   // New canonical RPC names
+  // Begin a registration session; returns a registration_id and plan-specific handshake.
   rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
-  // NOTE: Deprecated for DVMP; retained for Lease and internal/tests compatibility.
   // Clients should prefer FeedRegisterArtifactStream.
   rpc FeedRegisterArtifactStream(stream FeedRegisterArtifactStreamRequest) returns (FeedRegisterArtifactStreamResponse) {}
   rpc KeepAliveRegisterArtifact(KeepAliveRegisterArtifactRequest) returns (KeepAliveRegisterArtifactResponse) {}
@@ -346,7 +346,7 @@ message BeginRegisterArtifactRequest {
   // Realization plan options
   oneof plan {
     CoalescedOptions coalesced = 10;
-    DvmpOptions dvmp = 11;
+    CpuOptions cpu = 11;
     LeaseOptions lease = 12;
   }
 }
@@ -363,7 +363,7 @@ message CoalescedOptions {
   bool release_on_tensor_commit = 2;
 }
 
-message DvmpOptions {
+message CpuOptions {
   enum Channel {
     CHANNEL_UNSPECIFIED = 0;
     CHANNEL_SHM_RING = 1;
@@ -387,7 +387,7 @@ message BeginRegisterArtifactResponse {
   uint64 total_size = 3; // Confirmed total size
   oneof handshake {
     CoalescedHandshake coalesced = 10;
-    DvmpHandshake dvmp = 11;
+    CpuHandshake cpu = 11;
     LeaseHandshake lease = 12;
   }
 }
@@ -396,17 +396,17 @@ message CoalescedHandshake {
   bytes daemon_ipc_handle = 1;
 }
 
-message DvmpHandshake {
+message CpuHandshake {
   oneof channel {
-    DvmpShmRing ring = 1;
-    DvmpGrpcStream stream = 2;
+    CpuShmRing ring = 1;
+    CpuGrpcStream stream = 2;
   }
 }
-message DvmpShmRing {
+message CpuShmRing {
   string name = 1;
   uint32 ring_bytes = 2;
 }
-message DvmpGrpcStream {
+message CpuGrpcStream {
   string token = 1;
 }
 message LeaseHandshake {}
@@ -415,13 +415,13 @@ message LeaseHandshake {}
 message FeedRegisterArtifactStreamRequest {
   string registration_id = 1;
   oneof feed {
-    DvmpChunk dvmp_chunk = 10;
+    CpuChunk cpu_chunk = 10;
     LeaseSegments lease_segments = 11;
   }
 }
 message FeedRegisterArtifactStreamResponse {}
 
-message DvmpChunk {
+message CpuChunk {
   uint64 offset = 1;
   bytes data = 2;
   bool last = 3;

@@ -14,8 +14,8 @@
 #include "absl/strings/match.h"
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
@@ -24,8 +24,8 @@
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
-using tensorcast::store::CommRegistrationInfo;
+using tensorcast::common::memory::PinnedBufferPool;
+using tensorcast::store::ExportRegistration;
 using tensorcast::store::components::CommunicationManager;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
@@ -80,11 +80,11 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   // Create memory pools (shared across sections)
   const size_t pool_total_size = 1024UL * 1024 * 32; // 32 MiB pool (increased size)
   const size_t pool_chunk_size = 64UL * 1024; // 64 KiB chunk size
-  std::shared_ptr<PinnedMemoryPool> pinned_pool = std::make_shared<PinnedMemoryPool>(pool_total_size, pool_chunk_size);
+  std::shared_ptr<PinnedBufferPool> pinned_pool = std::make_shared<PinnedBufferPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
-  // Create DVMP and StreamingPinnedBuffer required by ReplicaConfig
-  auto dvmp = std::make_shared<::tensorcast::common::memory::DistributedVirtualMemoryPool>();
-  REQUIRE(dvmp != nullptr);
+  // Create VS and StreamingPinnedBuffer required by ReplicaConfig
+  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
+  REQUIRE(virtual_addr_space != nullptr);
 
   // --- Test GPU Registration --- (Requires CUDA device)
   SECTION("Load to GPU and Register for Communication") {
@@ -119,8 +119,8 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = device_id,
-        .pinned_memory_pool = pinned_pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pinned_pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -136,13 +136,13 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Load to CPU first (as DiskLoader requires it)
     LOG(INFO) << "Loading replica to CPU (prerequisite for GPU load from disk)...";
-    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(load_future.valid());
     absl::Status load_status = load_future.get(); // Wait for completion
     INFO("CPU load status: " << load_status);
     REQUIRE(load_status.ok());
-    REQUIRE(replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(10)).ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
+    REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(10)).ok());
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
     // Now load to GPU
     LOG(INFO) << "Loading replica to GPU...";
@@ -166,7 +166,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Register GPU memory for communication
     LOG(INFO) << "Registering GPU memory for communication...";
-    absl::StatusOr<CommRegistrationInfo> reg_info_status =
+    absl::StatusOr<ExportRegistration> reg_info_status =
         replica->enable_remote_memory_access(MemoryLocation::GPU, comm_mgr->get_engine());
     INFO("Comm registration status (GPU): " << reg_info_status.status());
     REQUIRE(reg_info_status.ok()); // Expect registration to succeed
@@ -226,8 +226,8 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .artifact_identifier = artifact_id,
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dummy_device_id,
-        .pinned_memory_pool = pinned_pool,
-        .dvmp = dvmp,
+        .pinned_buffer_pool = pinned_pool,
+        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -239,23 +239,23 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     REQUIRE(replica != nullptr);
     REQUIRE(replica->artifact_id() == artifact_id);
 
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
 
     // Load to CPU
     LOG(INFO) << "Loading replica to CPU...";
-    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(load_future.valid());
     const absl::Status& load_status = load_future.get(); // Wait for completion
     INFO("CPU load status: " << load_status);
     REQUIRE(load_status.ok());
 
     // Wait until fully loaded on CPU
-    absl::Status wait_status = replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(10));
+    absl::Status wait_status = replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(10));
     INFO("CPU load wait status: " << wait_status);
     REQUIRE(wait_status.ok());
 
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) == MemoryState::LOADED);
-    auto data_ptrs_cpu = replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU);
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
+    auto data_ptrs_cpu = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE_FALSE(data_ptrs_cpu.empty());
     void* cpu_data_ptr = data_ptrs_cpu[0];
     REQUIRE(cpu_data_ptr != nullptr);
@@ -263,15 +263,15 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Register CPU memory for communication
     LOG(INFO) << "Registering CPU memory for communication...";
-    absl::StatusOr<CommRegistrationInfo> reg_info_status =
-        replica->enable_remote_memory_access(MemoryLocation::PAGEABLE_CPU, comm_mgr->get_engine());
+    absl::StatusOr<ExportRegistration> reg_info_status =
+        replica->enable_remote_memory_access(MemoryLocation::CPU, comm_mgr->get_engine());
     INFO("Comm registration status (CPU): " << reg_info_status.status());
     REQUIRE(reg_info_status.ok()); // Expect registration to succeed
     const auto& reg_info = *reg_info_status;
 
     // Verify returned registration info
     REQUIRE(reg_info.artifact_size == artifact_size);
-    REQUIRE(reg_info.location == MemoryLocation::PAGEABLE_CPU);
+    REQUIRE(reg_info.location == MemoryLocation::CPU);
     REQUIRE(reg_info.device_id == -1); // CPU device ID is -1
     REQUIRE_FALSE(reg_info.buffer_addresses.empty());
     REQUIRE(reg_info.buffer_addresses.size() == reg_info.buffer_sizes.size());
@@ -293,10 +293,10 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Release memory
     LOG(INFO) << "Releasing CPU memory...";
-    absl::Status release_status = replica->release_memory(MemoryLocation::PAGEABLE_CPU);
+    absl::Status release_status = replica->release_memory(MemoryLocation::CPU);
     REQUIRE(release_status.ok());
-    REQUIRE(replica->get_memory_state(MemoryLocation::PAGEABLE_CPU) <= MemoryState::UNALLOCATED);
-    REQUIRE(replica->get_data_pointer(MemoryLocation::PAGEABLE_CPU).empty());
+    REQUIRE(replica->get_memory_state(MemoryLocation::CPU) <= MemoryState::UNALLOCATED);
+    REQUIRE(replica->get_data_pointer(MemoryLocation::CPU).empty());
 
     // Clean up section-specific directory
     std::error_code ec;

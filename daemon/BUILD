@@ -629,17 +629,6 @@ cc_test(
 )
 
 cc_test(
-    name = "grpc_service_impl_compat_test",
-    srcs = ["grpc_service_impl_compat_test.cc"],
-    deps = [
-        ":grpc_service_impl",
-        "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "worker_lifecycle_manager_sync_test",
     srcs = ["worker_lifecycle_manager_sync_test.cc"],
     deps = [

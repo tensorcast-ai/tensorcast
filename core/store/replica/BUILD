@@ -35,32 +35,40 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:device_types_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
-        "//core/common:pinned_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
     ],
 )
 
-# Replica memory coordinator
+# Direct write grant types (moved from //core/store)
+sc_header_only_library(
+    name = "direct_write",
+    hdrs = ["types/direct_write_grant.h"],
+    visibility = ["//visibility:public"],
+)
+
+## Unified Memory Authority (canonical UMA target)
 sc_cc_library(
-    name = "replica_memory_coordinator",
-    srcs = ["replica_memory_coordinator.cc"],
-    hdrs = ["replica_memory_coordinator.h"],
+    name = "unified_memory_authority",
+    srcs = ["unified_memory_authority.cc"],
+    hdrs = ["unified_memory_authority.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":chunk_meta",
+        ":direct_write",
         "//core/common:cuda_memory_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:error_handling_lib",
         "//core/common:memory_location_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:device_registry",
         "//core/store:device_types",
-        "//core/store:direct_write",
         "//core/store:loading_spec",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -72,12 +80,12 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":chunk_meta",
-        ":replica_memory_coordinator",
+        ":unified_memory_authority",
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:device_types",
         "@opentelemetry-cpp//api:api",
     ],
@@ -97,14 +105,15 @@ sc_cc_library(
     hdrs = ["transfer_service.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":replica_memory_coordinator",
         ":transfer_constants",
         ":transfer_helpers",
+        ":unified_memory_authority",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/store:device_types",
         "//core/store:loading_spec",
-        "//core/store/loader:dvmp_region_sink",
+        "//core/store/loader:cpu_va_sink",
         "//core/store/loader:file_partition_source",
         "//core/store/loader:gpu_memory_sink",
         "//core/store/loader:multi_safetensors_source",
@@ -119,18 +128,18 @@ sc_cc_library(
 
 # Chunk export service
 sc_cc_library(
-    name = "chunk_export_service",
-    srcs = ["chunk_export_service.cc"],
-    hdrs = ["chunk_export_service.h"],
+    name = "memory_export_registry",
+    srcs = ["memory_export_registry.cc"],
+    hdrs = ["memory_export_registry.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":replica_memory_coordinator",
+        ":unified_memory_authority",
         ":transfer_constants",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
-        "//core/store:uma_lease_provider",
+        # UMA lease provider bridge removed; UMA keepalive is held within ExportRegistration
         "@abseil-cpp//absl/hash",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
@@ -138,31 +147,31 @@ sc_cc_library(
     ],
 )
 
-# Memory manager
+# Replica orchestrator (renamed from memory_manager)
 sc_cc_library(
-    name = "memory_manager",
-    srcs = ["memory_manager.cc"],
-    hdrs = ["memory_manager.h"],
+    name = "replica_load_controller",
+    srcs = ["replica_load_controller.cc"],
+    hdrs = ["replica_load_controller.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_export_service",
         ":chunk_meta",
+        ":direct_write",
+        ":memory_export_registry",
         ":memory_state",
-        ":replica_memory_coordinator",
         ":transfer_helpers",
         ":transfer_service",
+        ":unified_memory_authority",
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:device_types_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:device_types",
-        "//core/store:direct_write",
         "//core/store:loading_spec",
         "//core/store:memory_types",
-        "//core/store/loader:dvmp_region_sink",
+        "//core/store/loader:cpu_va_sink",
         "//core/store/loader:gpu_memory_sink",
         "//core/store/loader:pump",
         "//core/store/loader:streaming_buffer_adapter",
@@ -186,11 +195,11 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":chunk_meta",
-        ":memory_manager",
         ":memory_state",
+        ":replica_load_controller",
         "//core/common:cuda_api_lib",
-        "//core/common:distributed_virtual_memory_pool_lib",
         "//core/common:memory_location_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         "//core/store:device_types",
@@ -210,21 +219,13 @@ sc_cc_library(
 )
 
 # Tests
-cc_test(
-    name = "chunk_state_machine_test",
-    srcs = ["chunk_state_machine_test.cc"],
-    deps = [
-        ":chunk_meta",
-        "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)
 
 cc_test(
-    name = "replica_memory_coordinator_test",
-    srcs = ["replica_memory_coordinator_test.cc"],
+    name = "unified_memory_authority_plan_commit_test",
+    srcs = ["unified_memory_authority_plan_commit_test.cc"],
     deps = [
-        ":replica_memory_coordinator",
+        ":unified_memory_authority",
+        "//core/common:virtual_address_space_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -264,6 +265,24 @@ cc_test(
         "//core/common",
         "//core/communicator:engine_lib",
         "//core/store:store_engine",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+# UMA unit test
+cc_test(
+    name = "unified_memory_authority_test",
+    srcs = ["unified_memory_authority_test.cc"],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
+    deps = [
+        ":unified_memory_authority",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:virtual_address_space_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",

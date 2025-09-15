@@ -15,7 +15,7 @@ namespace tensorcast::checkpoint {
 StreamingTensorWriter::StreamingTensorWriter(
     std::string filename,
     Config config,
-    std::shared_ptr<common::memory::PinnedMemoryPool> pool)
+    std::shared_ptr<common::memory::PinnedBufferPool> pool)
     : filename_(std::move(filename)),
       config_(std::move(config)),
       buffer_size_(config_.buffer_size_mb << 20) { // Convert MB to bytes

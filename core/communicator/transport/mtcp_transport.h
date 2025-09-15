@@ -64,6 +64,7 @@ class MTcpTransportChunk {
   std::promise<chunk_result_t> result_;
   misc::Timer timer_;
 };
+
 using chunk_t = std::shared_ptr<MTcpTransportChunk>;
 
 class MTcpTransportTask {
@@ -90,6 +91,7 @@ class MTcpTransportTask {
   misc::Queue<chunk_t> send_queue_;
   misc::Queue<chunk_t> recv_queue_;
 };
+
 using task_t = std::shared_ptr<MTcpTransportTask>;
 
 class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
@@ -104,10 +106,12 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   misc::result_t recv(const read_request_t& request);
 
   void set_conn_count(int conn_count);
-  void set_memory_pool(std::shared_ptr<common::memory::PinnedMemoryPool> pool);
+  void set_memory_pool(std::shared_ptr<common::memory::PinnedBufferPool> pool);
+
   void set_memory_stager(std::shared_ptr<engine::MemoryStager> stager) {
     memory_stager_ = std::move(stager);
   }
+
   void set_gpu_memory_stager(std::shared_ptr<engine::MemoryStager> stager) {
     gpu_memory_stager_ = std::move(stager);
   }
@@ -144,7 +148,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
 
   // GPU receive buffer management
-  std::shared_ptr<common::memory::PinnedMemoryPool> memory_pool_;
+  std::shared_ptr<common::memory::PinnedBufferPool> memory_pool_;
   std::unique_ptr<common::memory::StreamingPinnedBuffer> gpu_recv_buffer_;
 
   // Unified memory stager for CPU staging in TCP path (required)
@@ -162,6 +166,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
     tcp_tos_ = tos;
   }
 };
+
 using mtcp_transport_t = std::shared_ptr<MTcpTransport>;
 
 } // namespace tensorcast::communicator::transport

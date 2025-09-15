@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "core/common/cuda_api.h" // Use unified CUDA API
-#include "core/common/memory/distributed_virtual_memory_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 
@@ -38,7 +38,7 @@
 namespace fs = std::filesystem;
 using tensorcast::common::ArtifactVerificationInfo;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::PinnedMemoryPool;
+using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::MB;
 using tensorcast::store::P2PSource;
 using tensorcast::store::components::CommunicationManager;
@@ -100,12 +100,12 @@ struct TestResources {
   fs::path temp_dir;
   fs::path artifact_dir;
   fs::path dummy_file_path;
-  std::shared_ptr<PinnedMemoryPool> pinned_pool;
+  std::shared_ptr<PinnedBufferPool> pinned_pool;
   size_t actual_artifact_size;
   bool is_cuda_available = false;
   int device_count = 0;
   size_t pinned_pool_chunk_size_bytes = 0; // Store the chunk size used
-  std::shared_ptr<tensorcast::common::memory::DistributedVirtualMemoryPool> dvmp;
+  std::shared_ptr<tensorcast::common::memory::VirtualAddressSpace> virtual_addr_space;
 
   bool setup(int gpu_id, size_t artifact_size) {
     actual_artifact_size = artifact_size;
@@ -123,17 +123,17 @@ struct TestResources {
 
     // Create memory pools
     pinned_pool_chunk_size_bytes = POOL_CHUNK_SIZE_KB * 1024;
-    pinned_pool = std::make_shared<PinnedMemoryPool>(POOL_SIZE_MB * MB, pinned_pool_chunk_size_bytes);
+    pinned_pool = std::make_shared<PinnedBufferPool>(POOL_SIZE_MB * MB, pinned_pool_chunk_size_bytes);
     if (!pinned_pool) {
-      LOG(ERROR) << "Failed to create PinnedMemoryPool";
+      LOG(ERROR) << "Failed to create PinnedBufferPool";
       return false;
     }
-    LOG(INFO) << "PinnedMemoryPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
+    LOG(INFO) << "PinnedBufferPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
 
-    // Create DVMP and StreamingPinnedBuffer
-    dvmp = std::make_shared<tensorcast::common::memory::DistributedVirtualMemoryPool>();
-    if (!dvmp) {
-      LOG(ERROR) << "Failed to create DistributedVirtualMemoryPool";
+    // Create VS and StreamingPinnedBuffer
+    virtual_addr_space = std::make_shared<tensorcast::common::memory::VirtualAddressSpace>();
+    if (!virtual_addr_space) {
+      LOG(ERROR) << "Failed to create VirtualAddressSpace";
       return false;
     }
 
@@ -204,7 +204,7 @@ class P2PTestServer {
     std::string register_loc_str = config_.register_location;
     MemoryLocation register_location;
     if (register_loc_str == "cpu") {
-      register_location = MemoryLocation::PAGEABLE_CPU;
+      register_location = MemoryLocation::CPU;
     } else if (register_loc_str == "gpu") {
       register_location = MemoryLocation::GPU;
     } else {
@@ -272,8 +272,8 @@ class P2PTestServer {
         .device_type =
             (register_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU : ::tensorcast::DeviceType::CPU,
         .local_device_id = (register_location == MemoryLocation::GPU) ? gpu_id : -1,
-        .pinned_memory_pool = resources.pinned_pool,
-        .dvmp = resources.dvmp,
+        .pinned_buffer_pool = resources.pinned_pool,
+        .virtual_addr_space = resources.virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -290,13 +290,13 @@ class P2PTestServer {
     // Load to CPU (always needed as source is disk)
     {
       LOG(INFO) << "Loading replica to CPU...";
-      auto load_future = replica->ensure_loaded_async(MemoryLocation::PAGEABLE_CPU);
+      auto load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
       if (!load_future.get().ok()) {
         LOG(ERROR) << "Failed to initiate CPU load";
         resources.cleanup();
         return;
       }
-      absl::Status wait_status = replica->wait_until_loaded(MemoryLocation::PAGEABLE_CPU, absl::Seconds(60));
+      absl::Status wait_status = replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(60));
       if (!wait_status.ok()) {
         LOG(ERROR) << "Failed to load replica to CPU: " << wait_status;
         resources.cleanup();
@@ -325,7 +325,7 @@ class P2PTestServer {
 
     // Register Memory based on the flag
     LOG(INFO) << "Registering " << register_loc_str << " memory for communication...";
-    absl::StatusOr<tensorcast::store::CommRegistrationInfo> reg_status =
+    absl::StatusOr<tensorcast::store::ExportRegistration> reg_status =
         replica->enable_remote_memory_access(register_location, *shared_engine);
 
     if (!reg_status.ok()) {
@@ -420,7 +420,7 @@ class P2PTestClient {
 
     MemoryLocation server_registered_location;
     if (server_reg_loc_str == "cpu") {
-      server_registered_location = MemoryLocation::PAGEABLE_CPU;
+      server_registered_location = MemoryLocation::CPU;
     } else if (server_reg_loc_str == "gpu") {
       server_registered_location = MemoryLocation::GPU;
     } else {
@@ -430,7 +430,7 @@ class P2PTestClient {
 
     MemoryLocation client_target_location;
     if (client_target_loc_str == "cpu") {
-      client_target_location = MemoryLocation::PAGEABLE_CPU;
+      client_target_location = MemoryLocation::CPU;
     } else if (client_target_loc_str == "gpu") {
       client_target_location = MemoryLocation::GPU;
     } else {
@@ -449,12 +449,12 @@ class P2PTestClient {
     LOG(INFO) << " Client Target Location: " << client_target_loc_str;
 
     // --- Check for Unsupported Transfer Combinations based on flags ---
-    if (server_registered_location == MemoryLocation::GPU && client_target_location == MemoryLocation::PAGEABLE_CPU) {
+    if (server_registered_location == MemoryLocation::GPU && client_target_location == MemoryLocation::CPU) {
       LOG(ERROR) << "Unsupported test configuration requested: Cannot load from remote GPU directly to local CPU "
                  << "via P2P in this version. Aborting.";
       return 1;
     }
-    if (server_registered_location == MemoryLocation::PAGEABLE_CPU && client_target_location == MemoryLocation::GPU) {
+    if (server_registered_location == MemoryLocation::CPU && client_target_location == MemoryLocation::GPU) {
       LOG(ERROR)
           << "Unsupported test configuration requested: Cannot load from remote CPU chunks directly to local GPU "
           << "via P2P in this version. Aborting.";
@@ -538,8 +538,8 @@ class P2PTestClient {
         .device_type = (client_target_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU
                                                                        : ::tensorcast::DeviceType::CPU,
         .local_device_id = (client_target_location == MemoryLocation::GPU) ? static_cast<int>(gpu_id) : -1,
-        .pinned_memory_pool = resources.pinned_pool,
-        .dvmp = resources.dvmp,
+        .pinned_buffer_pool = resources.pinned_pool,
+        .virtual_addr_space = resources.virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -600,7 +600,7 @@ class P2PTestClient {
     }
     if (client_target_location == MemoryLocation::GPU && allocation_mode == "pool") {
       LOG(INFO) << "Using internal memory pool for GPU allocation.";
-    } else if (client_target_location == MemoryLocation::PAGEABLE_CPU) {
+    } else if (client_target_location == MemoryLocation::CPU) {
       LOG(INFO) << "Target location is CPU, using internal PinnedMemory pool.";
       // No specific allocation needed here, Replica handles it via ensure_loaded_async
     }
@@ -670,7 +670,7 @@ class P2PTestClient {
       }
 
       if (!host_verification_buffer.empty()) {
-        if (client_target_location == MemoryLocation::PAGEABLE_CPU) {
+        if (client_target_location == MemoryLocation::CPU) {
           LOG(INFO) << "Copying data from client CPU buffer to host verification buffer...";
           if (data_ptrs.size() != 1 || data_ptrs[0] == nullptr) {
             LOG(ERROR) << "CPU should have exactly one valid pointer, got " << data_ptrs.size();

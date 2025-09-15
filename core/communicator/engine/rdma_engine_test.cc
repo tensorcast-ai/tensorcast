@@ -121,15 +121,15 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     REQUIRE(status.ok());
   }
 
-  SECTION("Unregister non-existent tensors fails") {
+  SECTION("Unregister non-existent tensors is idempotent OK") {
     REQUIRE(fixture.server_init_status_.ok());
     REQUIRE(fixture.client_init_status_.ok());
 
     auto status = fixture.server_->unregister_tensor(CPU_KEY);
-    REQUIRE_FALSE(status.ok());
+    REQUIRE(status.ok());
 
     status = fixture.server_->unregister_tensor(GPU_KEY);
-    REQUIRE_FALSE(status.ok());
+    REQUIRE(status.ok());
   }
 
   SECTION("Read tensors") {

@@ -16,8 +16,8 @@ enum class MemoryLocation : uint8_t {
   NONE = 0,
   DISK, // Represents data stored persistently on disk.
   GPU, // Represents data loaded into GPU device memory.
+  CPU, // Unified name for CPU memory
   REMOTE, // Represents data accessible via RDMA (source only for now).
-  PAGEABLE_CPU // Represents data loaded into Pageable-Chunk CPU cache (UPC-Cache).
 };
 
 // Add operator<< overload for MemoryLocation
@@ -32,11 +32,11 @@ inline std::ostream& operator<<(std::ostream& os, MemoryLocation loc) {
     case MemoryLocation::GPU:
       os << "GPU";
       break;
+    case MemoryLocation::CPU:
+      os << "CPU";
+      break;
     case MemoryLocation::REMOTE:
       os << "REMOTE";
-      break;
-    case MemoryLocation::PAGEABLE_CPU:
-      os << "PAGEABLE_CPU";
       break;
     default:
       os << "Unknown(" << static_cast<int>(loc) << ")";
@@ -54,10 +54,10 @@ inline std::string location_to_string(MemoryLocation loc) {
       return "DISK";
     case MemoryLocation::GPU:
       return "GPU";
+    case MemoryLocation::CPU:
+      return "CPU";
     case MemoryLocation::REMOTE:
       return "REMOTE";
-    case MemoryLocation::PAGEABLE_CPU:
-      return "PAGEABLE_CPU";
     default:
       return "Unknown(" + std::to_string(static_cast<int>(loc)) + ")";
   }

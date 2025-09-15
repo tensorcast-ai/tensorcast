@@ -123,7 +123,7 @@ class GPUMemoryFixture {
   bool cuda_available_ = false;
 };
 
-TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
+TEST_CASE("GpuMemorySink basic functionality", "[gpu_memory_sink]") {
   GPUMemoryFixture fixture(10 * 1024 * 1024); // 10MB
 
   if (!fixture.is_cuda_available()) {
@@ -131,13 +131,13 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   }
 
   SECTION("Simple write") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024, // matches write_size below
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Prepare test data
     size_t write_size = 1024;
@@ -156,13 +156,13 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   }
 
   SECTION("Multiple writes") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024 * 10, // chunk_size * num_chunks
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write multiple chunks
     size_t chunk_size = 1024;
@@ -183,13 +183,13 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   }
 
   SECTION("Write full buffer") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024 * 1024, // 1MB
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Fill and write entire buffer
     fixture.fill_host_buffer('C');
@@ -204,13 +204,13 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   }
 
   SECTION("Async transfer completion") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 5 * 1024 * 1024, // matches large_write below
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write large amount to test async
     size_t large_write = 5 * 1024 * 1024; // 5MB
@@ -228,7 +228,7 @@ TEST_CASE("GPUMemorySink basic functionality", "[gpu_memory_sink]") {
   }
 }
 
-TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
+TEST_CASE("GpuMemorySink error handling", "[gpu_memory_sink]") {
   // Null GPU pointer case is enforced at type level via gsl::not_null
 
   SECTION("Write exceeds total size") {
@@ -238,13 +238,13 @@ TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
       SKIP("CUDA not available");
     }
 
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024,
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Try to write more than total size
     std::vector<char> data(2048);
@@ -263,13 +263,13 @@ TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
       SKIP("CUDA not available");
     }
 
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024,
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 999, // Invalid device
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     std::vector<char> data(1024);
     status = sink.write(data.data(), 1024);
@@ -285,13 +285,13 @@ TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
       SKIP("CUDA not available");
     }
 
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 2048,
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // First write succeeds
     std::vector<char> data(1024);
@@ -308,7 +308,7 @@ TEST_CASE("GPUMemorySink error handling", "[gpu_memory_sink]") {
   }
 }
 
-TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
+TEST_CASE("GpuMemorySink validation", "[gpu_memory_sink]") {
   GPUMemoryFixture fixture(10 * 1024 * 1024);
 
   if (!fixture.is_cuda_available()) {
@@ -316,13 +316,13 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   }
 
   SECTION("Verify total bytes written on close") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 5 * 1024 * 1024, // matches expected_total below
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write specific amount
     size_t expected_total = 5 * 1024 * 1024; // 5MB
@@ -345,13 +345,13 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   }
 
   SECTION("Close without writes") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 0, // no writes expected
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Close without any writes
     auto status = sink.close();
@@ -359,13 +359,13 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   }
 
   SECTION("Stream synchronization on close") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 2 * 1024 * 1024, // matches write_size below
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write data
     size_t write_size = 2 * 1024 * 1024; // 2MB
@@ -383,7 +383,7 @@ TEST_CASE("GPUMemorySink validation", "[gpu_memory_sink]") {
   }
 }
 
-TEST_CASE("GPUMemorySink proposed fix validation", "[gpu_memory_sink]") {
+TEST_CASE("GpuMemorySink proposed fix validation", "[gpu_memory_sink]") {
   GPUMemoryFixture fixture(10 * 1024 * 1024);
 
   if (!fixture.is_cuda_available()) {
@@ -394,13 +394,13 @@ TEST_CASE("GPUMemorySink proposed fix validation", "[gpu_memory_sink]") {
     // This test validates the proposed fix:
     // close() should check that current_offset_ == options_.total_size
 
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024 * 1024, // 1MB expected
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write only partial data
     size_t partial_write = 512 * 1024; // 512KB (half of expected)
@@ -422,13 +422,13 @@ TEST_CASE("GPUMemorySink proposed fix validation", "[gpu_memory_sink]") {
   }
 
   SECTION("Validate exact amount written") {
-    GPUMemorySink::Options options{
+    GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
         .total_size = 1024 * 1024, // 1MB expected
         .chunk_size = 128 * 1024 * 1024,
         .device_id = 0,
     };
-    GPUMemorySink sink(options);
+    GpuMemorySink sink(options);
 
     // Write exact amount
     fixture.fill_host_buffer('H');

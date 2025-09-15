@@ -53,10 +53,10 @@ struct StoreEngineOptions {
   // instance (lease). Defaults to 1 (fully serialized).
   int streaming_buffer_max_concurrent_sessions{1};
 
-  // Chunk size for Distributed Virtual Memory Pool (DVMP) allocations.
+  // CPU Virtual Address Space (VS) chunk size for CPU-side allocations.
   // This controls the granularity of memory allocations for replica chunks.
   // Default: 256 MiB for optimal GPU transfer performance.
-  size_t dvmp_chunk_size{256ULL << 20}; // 256 MiB
+  size_t cpu_chunk_size{256ULL << 20}; // 256 MiB
 
   // RFC-0007: Enable strong verification (FULL_DIGEST) by default on load.
   // When true, the loader will compute the data_multihash from the loaded

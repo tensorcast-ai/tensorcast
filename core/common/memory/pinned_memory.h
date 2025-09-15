@@ -22,7 +22,7 @@
 #include <memory>
 #include <vector>
 
-#include "pinned_memory_pool.h"
+#include "pinned_buffer_pool.h"
 
 namespace tensorcast::common::memory {
 
@@ -39,19 +39,21 @@ class PinnedMemory {
 
   int allocate(
       size_t size,
-      std::shared_ptr<PinnedMemoryPool> mempool,
+      std::shared_ptr<PinnedBufferPool> mempool,
       const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero());
   std::vector<char*>& get();
+
   size_t num_chunks() const {
     return buffers_.size();
   }
+
   size_t chunk_size() const {
     return mempool_->chunk_size();
   }
 
  private:
   std::vector<char*> buffers_;
-  std::shared_ptr<PinnedMemoryPool> mempool_;
+  std::shared_ptr<PinnedBufferPool> mempool_;
 };
 
 } // namespace tensorcast::common::memory

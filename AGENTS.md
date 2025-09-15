@@ -121,7 +121,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 ## Architecture Overview
 
 ### Core Components
-- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides DVMP/UMA memory model, replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
@@ -144,7 +144,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
     ┌───────────▼───────────┐                       ┌───────────▼───────────┐
     │   Store Daemon #1     │  RDMA/TCP (P2P data)  │    Store Daemon #N    │
     │  (C++ over StoreEngine)│<-------------------->│  (C++ over StoreEngine)│
-    │ - DVMP/UMA memory     │                       │ - DVMP/UMA memory     │
+    │ - VS/UMA memory       │                       │ - VS/UMA memory       │
     │ - Disk & P2P loaders  │                       │ - Disk & P2P loaders  │
     │ - CUDA IPC export     │                       │ - CUDA IPC export     │
     └───────────┬───────────┘                       └───────────┬───────────┘
@@ -158,7 +158,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 
 ## Documentation Structure and Project Hierarchy
 
-This repository’s documentation has been reorganized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
+This repository’s documentation has been organized so that each module owns a focused `README.md`, with cross-cutting guides under `docs/`. Use the map below to navigate, and when you update any module, also update its corresponding documentation.
 Note: When writing documentation, you may use Mermaid diagrams to illustrate flows, state machines, hierarchies, and architecture where appropriate.
 
 ### Repository-level docs
@@ -173,28 +173,21 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - ./docs/internals/save_dict_flow.md — End-to-end save_dict data path and artifacts produced.
 - ./docs/internals/adding-metrics.md — How to add and expose new metrics.
 
-### Modules (C++ core and services)
+### Modules (C++ core and services, tests)
 
 - ./core/store/README.md — Internals of the C++ Store Engine (API surface, data paths, memory model, P2P orchestration).
   - ./core/store/docs/architecture.md — Detailed engine architecture and component responsibilities.
-  - ./core/store/docs/state-management.md — UMA/DVMP state model and lifecycle.
+  - ./core/store/docs/state-management.md — UMA/VS state model and lifecycle.
   - ./core/store/docs/device-manager.md — Device discovery, UUID/ordinal mapping, and per-device state.
   - ./core/store/docs/device-registry.md — Replica/device registry structures and indexing.
-
 - ./core/checkpoint/README.md — Overview and streaming save/restore.
   - ./core/checkpoint/docs/architecture.md — Detailed design and relationships.
   - ./core/checkpoint/docs/data-format.md — Binary file format and index schema.
   - ./core/checkpoint/docs/verification-integration.md — Integrity verification and integration paths.
-
 - ./core/communicator/README.md — TCP/MTCP/RDMA data-movement engine internals.
-
 - ./daemon/README.md — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
-
 - ./tensorcast/global_store/README.md — Control plane internals (layered architecture, data model, services, flows).
   - ./tensorcast/global_store/webui_frontend/README.md — Web UI features, development, and integration.
-
-### Tests and examples
-
 - tests/python/README.md — Python test layout and commands for running suites.
 
 ### Doc sync rule (required for agents)
@@ -229,6 +222,13 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 #### Includes vs. Forward Declarations
 - Avoid forward declarations; include the correct headers for any types used in headers and translation units.
 - Follow include-what-you-use: include the minimal header that directly provides the symbols you reference.
+
+#### UMA V3 canonical headers (required)
+- Use canonical headers after UMA V3 final cutover. Legacy and alias headers are forbidden in new/modified code:
+  - `core/common/memory/virtual_address_space.h` (canonical; DVMP removed)
+  - `core/store/replica/unified_memory_authority.h` (canonical; alias under `core/store/uma/*` removed)
+  - `core/store/replica/memory_export_registry.h` (canonical; replaces `chunk_export_service.h`)
+- The helper script `tools/lint/check_uma_aliases.sh` enforces this policy (error-level) and fails on legacy includes.
 
 #### C++ Naming Conventions
 - **Variables/Functions**: `snake_case`
@@ -345,6 +345,11 @@ if (fd < 0) {
 - Use explicit, named imports for utilities
 - Use `dataclasses` or Pydantic models for complex data structures
 - Use absolute imports for in-repo modules: `from tensorcast.xxx.yyy import Z`; avoid relative imports like `from .xxx import Z`
+
+
+### Commenting & Self-Documentation
+- Use comments to capture what and why, not how. Focus on intent, invariants, and decision rationale; the code should express the implementation.
+- Make code self-explanatory.
 
 
 ## Development Principles

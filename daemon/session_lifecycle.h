@@ -910,8 +910,6 @@ class SessionLifecycleManager {
     // Note: LIP leases are handled by LipManager; we rely on RefTracker cover for now.
   }
 
-  // sweep_sessions_ttl and sweep_reg_join_ttl removed (legacy code path replaced by lifecycle guards)
-
   void sweep_pid_liveness() {
     auto keys = refs_.keys();
     for (const auto& key : keys) {

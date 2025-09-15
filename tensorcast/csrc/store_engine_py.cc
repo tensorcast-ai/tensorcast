@@ -28,8 +28,8 @@ namespace py = pybind11;
 using tensorcast::DeviceType;
 using tensorcast::common::ensure_logging_initialized;
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::store::CommRegistrationInfo;
 using tensorcast::store::DeviceKey;
+using tensorcast::store::ExportRegistration;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
@@ -57,7 +57,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::enum_<MemoryLocation>(m, "MemoryLocation")
       .value("NONE", MemoryLocation::NONE)
       .value("DISK", MemoryLocation::DISK)
-      .value("CPU", MemoryLocation::PAGEABLE_CPU)
+      .value("CPU", MemoryLocation::CPU)
       .value("GPU", MemoryLocation::GPU)
       .value("REMOTE", MemoryLocation::REMOTE)
       .export_values();
@@ -72,17 +72,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("FAILED", MemoryState::FAILED)
       .export_values();
 
-  // Bind CommRegistrationInfo struct
+  // Bind ExportRegistration struct
   // Note: void* pointers are cast to uintptr_t for Python representation
-  py::class_<CommRegistrationInfo>(m, "CommRegistrationInfo")
+  py::class_<ExportRegistration>(m, "ExportRegistration")
       .def(py::init<>())
-      .def_readwrite("artifact_size", &CommRegistrationInfo::artifact_size)
-      .def_readwrite("location", &CommRegistrationInfo::location)
-      .def_readwrite("device_id", &CommRegistrationInfo::device_id)
-      .def_readwrite("comm_dev_type", &CommRegistrationInfo::comm_dev_type)
+      .def_readwrite("artifact_size", &ExportRegistration::artifact_size)
+      .def_readwrite("location", &ExportRegistration::location)
+      .def_readwrite("device_id", &ExportRegistration::device_id)
+      .def_readwrite("comm_dev_type", &ExportRegistration::comm_dev_type)
       .def_property_readonly(
           "buffer_addresses",
-          [](const CommRegistrationInfo& cri) {
+          [](const ExportRegistration& cri) {
             std::vector<uintptr_t> addresses;
             addresses.reserve(cri.buffer_addresses.size());
             for (const auto& addr : cri.buffer_addresses) {
@@ -90,10 +90,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             }
             return addresses;
           })
-      .def_readwrite("buffer_sizes", &CommRegistrationInfo::buffer_sizes)
-      .def_readwrite("remote_memory_keys", &CommRegistrationInfo::remote_memory_keys)
-      .def("__repr__", [](const CommRegistrationInfo& cri) {
-        std::string repr = "<CommRegistrationInfo artifact_size=" + std::to_string(cri.artifact_size) +
+      .def_readwrite("buffer_sizes", &ExportRegistration::buffer_sizes)
+      .def_readwrite("remote_memory_keys", &ExportRegistration::remote_memory_keys)
+      .def("__repr__", [](const ExportRegistration& cri) {
+        std::string repr = "<ExportRegistration artifact_size=" + std::to_string(cri.artifact_size) +
             ", location=" + std::to_string(static_cast<int>(cri.location)) +
             ", device_id=" + std::to_string(cri.device_id) + ", buffer_addresses=[";
         bool first = true;
@@ -332,7 +332,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(
           "enable_remote_replica_access",
           [](StoreEngine& cs, const ReplicaKey& key, MemoryLocation loc) {
-            absl::StatusOr<CommRegistrationInfo> info_or;
+            absl::StatusOr<ExportRegistration> info_or;
             {
               py::gil_scoped_release release;
               info_or = cs.enable_remote_replica_access(key, loc);
@@ -361,39 +361,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("replica_key"),
           py::arg("location"),
           "Disable remote memory access for the given instance.")
-      .def(
-          "lock_chunks",
-          [](StoreEngine& cs, const ReplicaKey& key, const std::vector<uint32_t>& chunk_indices) {
-            absl::Status st;
-            {
-              py::gil_scoped_release release;
-              st = cs.lock_chunks(key, absl::MakeSpan(chunk_indices));
-            }
-            if (!st.ok()) {
-              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
-            }
-            return 0; // Return 0 on success
-          },
-          py::arg("replica_key"),
-          py::arg("chunk_indices"),
-          "Lock chunks for H2D or P2P transfer to prevent concurrent eviction.")
-      .def(
-          "unlock_chunks",
-          [](StoreEngine& cs, const ReplicaKey& key, const std::vector<uint32_t>& chunk_indices, bool copied_gpu) {
-            absl::Status st;
-            {
-              py::gil_scoped_release release;
-              st = cs.unlock_chunks(key, absl::MakeSpan(chunk_indices), copied_gpu);
-            }
-            if (!st.ok()) {
-              PY_THROW_WITH_LOG(PyExc_RuntimeError, st.ToString());
-            }
-            return 0; // Return 0 on success
-          },
-          py::arg("replica_key"),
-          py::arg("chunk_indices"),
-          py::arg("copied_gpu"),
-          "Unlock chunks after H2D or P2P transfer completion.")
       .def("__repr__", [](const StoreEngine& /*cs*/) { return "<StoreEngine>"; })
       .def(
           "get_all_replicas_info",

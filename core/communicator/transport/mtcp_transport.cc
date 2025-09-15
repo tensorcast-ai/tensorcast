@@ -279,7 +279,7 @@ void MTcpTransport::set_conn_count(int conn_count) {
   conn_count_ = conn_count;
 }
 
-void MTcpTransport::set_memory_pool(std::shared_ptr<common::memory::PinnedMemoryPool> pool) {
+void MTcpTransport::set_memory_pool(std::shared_ptr<common::memory::PinnedBufferPool> pool) {
   memory_pool_ = std::move(pool);
 }
 
@@ -540,7 +540,7 @@ void MTcpTransport::send_loop() {
         } else {
           // CPU tensor path (MemoryStager required)
           if (memory_stager_) {
-            // Stage CPU data into pinned buffers to avoid direct DVMP window exposure
+            // Stage CPU data into pinned buffers to avoid direct VS window exposure
             VLOG(1) << "Staging CPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks";
 
             const int available_buffers = static_cast<int>(memory_stager_->get_num_buffers());

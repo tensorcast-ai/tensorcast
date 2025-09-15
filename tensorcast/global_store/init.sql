@@ -133,7 +133,7 @@ CREATE INDEX idx_artifact_transports_completed_at ON artifact_transports(complet
 --     WHERE worker_id = OLD.worker_id;
 -- END;
 
--- ========== Chunk Directory for Distributed Memory Pool (DVMP) ==========
+-- ========== Chunk Directory for Virtual Address Space (VS) ==========
 -- Tracks global chunk distribution for distributed virtual memory pool
 
 CREATE TABLE IF NOT EXISTS chunk_directory (

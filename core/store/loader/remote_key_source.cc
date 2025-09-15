@@ -188,16 +188,16 @@ bool RemoteKeySource::supports_direct_write() const {
 absl::StatusOr<size_t> RemoteKeySource::read_into(
     uint64_t dest_va_offset,
     size_t bytes,
-    const DirectWriteToken& token) {
+    const DirectWriteGrant& grant) {
   if (dest_va_offset >= options_.total_size) {
     return 0; // Beyond EOF
   }
 
-  // Helper: find token segment for a given VA offset
-  auto find_segment = [&](uint64_t va_off) -> const DirectWriteToken::Segment* {
-    for (const auto& seg : token.segments) {
-      if (va_off >= seg.va_offset && va_off < seg.va_offset + seg.length) {
-        return &seg;
+  // Helper: find grant window for a given VA offset
+  auto find_window = [&](uint64_t va_off) -> const DirectWriteGrant::Window* {
+    for (const auto& win : grant.windows) {
+      if (va_off >= win.va_offset && va_off < win.va_offset + win.length) {
+        return &win;
       }
     }
     return nullptr;
@@ -209,13 +209,13 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
 
   while (bytes_done < to_read_total) {
     const uint64_t cur_va = dest_va_offset + bytes_done;
-    const auto* seg = find_segment(cur_va);
-    if (seg == nullptr) {
-      return absl::InvalidArgumentError("DirectWriteToken lacks segment for requested VA range");
+    const auto* win = find_window(cur_va);
+    if (win == nullptr) {
+      return absl::InvalidArgumentError("DirectWriteGrant lacks window for requested VA range");
     }
-    const uint64_t seg_off_in_bytes = cur_va - seg->va_offset;
-    const uint64_t local_addr = seg->local_addr + seg_off_in_bytes;
-    const uint64_t seg_bytes_left = seg->length - seg_off_in_bytes;
+    const uint64_t seg_off_in_bytes = cur_va - win->va_offset;
+    const uint64_t local_addr = win->local_addr + seg_off_in_bytes;
+    const uint64_t seg_bytes_left = win->length - seg_off_in_bytes;
 
     // Determine starting key and offset for src_global_offset
     size_t key_index = 0;

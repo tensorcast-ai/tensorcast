@@ -134,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_artifact_transports_status ON artifact_transports
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_created_at ON artifact_transports(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_transports_completed_at ON artifact_transports(completed_at);
 
--- Distributed Virtual Memory Pool (DVMP) chunk directory
+-- Virtual Address Space (VS) chunk directory
 CREATE TABLE IF NOT EXISTS chunk_directory (
     artifact_id TEXT NOT NULL,
     chunk_idx INTEGER NOT NULL,
@@ -171,4 +171,3 @@ CREATE TABLE IF NOT EXISTS key_mappings (
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
 
 -- ===================== End Global Store =====================
-

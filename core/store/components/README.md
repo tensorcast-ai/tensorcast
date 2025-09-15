@@ -12,7 +12,7 @@ StoreEngine (Main API)
     ├── ReplicaRegistry       - Thread-safe replica storage and lifecycle
     ├── MetricsCollector    - Centralized metrics collection
     ├── CommunicationManager - P2P/RDMA communication handling
-    └── PinnedMemoryPool    - Memory allocation (existing component)
+    └── PinnedBufferPool    - Memory allocation (canonical)
 ```
 
 ## Components
@@ -39,4 +39,3 @@ StoreEngine (Main API)
 - Wraps the communication engine for P2P transfers
 - Handles memory registration for RDMA
 - Manages remote transfer setup
-

@@ -7,8 +7,8 @@
 #include <string>
 
 #include "core/common/device_types.h"
-#include "core/common/memory/distributed_virtual_memory_pool.h"
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "gsl/pointers"
 
@@ -38,9 +38,9 @@ struct ReplicaConfig {
   int local_device_id = -1; // -1 means unspecified; runtime will decide
 
   // Memory pools for allocation (can be shared across replicas).
-  gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pinned_memory_pool;
+  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_buffer_pool;
   // Shared Distributed Virtual Memory Pool for managing virtual address spaces
-  gsl::not_null<std::shared_ptr<common::memory::DistributedVirtualMemoryPool>> dvmp;
+  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space;
 
   // Optional: Explicitly provide artifact size if known.
   std::optional<uint64_t> expected_artifact_size;
@@ -55,7 +55,7 @@ struct ReplicaConfig {
   // Whether to enable P2P communication for this replica
   bool p2p_comm_enabled = false;
 
-  // (dvmp lock strictness is internal policy now)
+  // (virtual_addr_space lock strictness is internal policy now)
 
   // Future runtime configurations can be added here:
   // - Tensor compression strategies

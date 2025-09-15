@@ -12,12 +12,12 @@ namespace tensorcast::common::memory {
 StreamingPinnedBuffer::StreamingPinnedBuffer(
     size_t num_chunks,
     size_t chunk_size,
-    std::shared_ptr<PinnedMemoryPool> pool)
+    std::shared_ptr<PinnedBufferPool> pool)
     : num_chunks_(num_chunks), chunk_size_(chunk_size), pool_(std::move(pool)) {
   chunk_buffers_.reserve(num_chunks_);
 
   // Verify that chunk_size from pool is aligned for DIRECT_IO
-  if (pool_ && pool_->chunk_size() % PinnedMemoryPool::kDirectIOAlignment != 0) {
+  if (pool_ && pool_->chunk_size() % PinnedBufferPool::kDirectIOAlignment != 0) {
     LOG(WARNING) << "StreamingPinnedBuffer: Pool chunk size " << pool_->chunk_size() << " is not aligned for DIRECT_IO";
   }
 }

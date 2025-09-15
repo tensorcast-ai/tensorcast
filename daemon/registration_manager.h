@@ -20,7 +20,7 @@ namespace tensorcast::daemon {
 
 class RegistrationManager {
  public:
-  enum class RegPlan : uint8_t { COALESCED = 0, DVMP = 1, LEASE = 2 };
+  enum class RegPlan : uint8_t { COALESCED = 0, CPU = 1, LEASE = 2 };
 
   struct RegMeta {
     RegPlan plan{RegPlan::COALESCED};

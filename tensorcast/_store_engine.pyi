@@ -39,7 +39,7 @@ class DeviceType(Enum):
 # =======================
 
 
-class CommRegistrationInfo:
+class ExportRegistration:
     artifact: int
     location: MemoryLocation
     device_id: int
@@ -136,25 +136,13 @@ class StoreEngine:
 
     def get_replica_size(self, replica_key: ReplicaKey) -> int: ...
 
-    # ---- Distributed Memory Pool helpers ----
-    def lock_chunks(
-        self,
-        replica_key: ReplicaKey,
-        chunk_indices: List[int],
-    ) -> int: ...
-
-    def unlock_chunks(
-        self,
-        replica_key: ReplicaKey,
-        chunk_indices: List[int],
-        copied_gpu: bool,
-    ) -> int: ...
+    # ---- Distributed Memory Pool helpers (removed in UMA V3) ----
 
     def enable_remote_replica_access(
         self,
         replica_key: ReplicaKey,
         location: MemoryLocation,
-    ) -> CommRegistrationInfo: ...
+    ) -> ExportRegistration: ...
 
     def disable_remote_replica_access(
         self,

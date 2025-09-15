@@ -6,7 +6,7 @@
 #include <cstdint>
 
 #include "absl/status/statusor.h"
-#include "core/store/direct_write.h"
+#include "core/store/replica/types/direct_write_grant.h"
 
 namespace tensorcast::store::loader {
 
@@ -30,7 +30,7 @@ class SeekableSource : public Source {
   virtual absl::StatusOr<size_t> read_into(
       [[maybe_unused]] uint64_t dest_va_offset,
       [[maybe_unused]] size_t bytes,
-      const DirectWriteToken& /*token*/) {
+      const DirectWriteGrant& /*grant*/) {
     return absl::UnimplementedError("direct write not supported");
   }
 };

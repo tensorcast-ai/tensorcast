@@ -65,7 +65,7 @@ struct Location {
       key.type = DeviceType::GPU;
       key.ordinal = device_id;
       key.uuid = device_uuid;
-    } else if (type == common::memory::MemoryLocation::PAGEABLE_CPU || type == common::memory::MemoryLocation::DISK) {
+    } else if (type == common::memory::MemoryLocation::CPU || type == common::memory::MemoryLocation::DISK) {
       key.type = DeviceType::CPU;
       key.ordinal = -1;
     }

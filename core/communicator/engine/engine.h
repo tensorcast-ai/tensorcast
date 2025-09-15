@@ -16,7 +16,7 @@
 #include "core/communicator/transport/request.h"
 #include "core/communicator/transport/tcp_context.h"
 
-#include "core/common/memory/pinned_memory_pool.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/engine/dram_stager.h"
 #include "core/communicator/engine/memory_stager.h"
@@ -174,10 +174,10 @@ class Communicator {
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
 
   // Shared pinned memory pool for GPU operations
-  std::shared_ptr<common::memory::PinnedMemoryPool> gpu_memory_pool_;
+  std::shared_ptr<common::memory::PinnedBufferPool> gpu_memory_pool_;
   // Dedicated pinned memory pool for CPU staging when configured with a
   // different chunk size than GPU. Falls back to gpu_memory_pool_ when null.
-  std::shared_ptr<common::memory::PinnedMemoryPool> cpu_memory_pool_;
+  std::shared_ptr<common::memory::PinnedBufferPool> cpu_memory_pool_;
 
   // Unified memory stager (CPU staging in TCP path)
   std::shared_ptr<engine::MemoryStager> memory_stager_;
@@ -208,7 +208,7 @@ class Communicator {
   // Mapping from GPU id -> MemoryStager (GpuNetStager adapter per NUMA node)
   std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_mem_stagers_;
   // Keep pools alive and accessible for MR preregistration
-  std::vector<std::shared_ptr<common::memory::PinnedMemoryPool>> numa_pools_;
+  std::vector<std::shared_ptr<common::memory::PinnedBufferPool>> numa_pools_;
 
   // Helpers to select NUMA-aware stagers
   std::shared_ptr<engine::MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;

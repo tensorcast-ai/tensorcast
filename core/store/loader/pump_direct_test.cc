@@ -10,11 +10,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "core/store/direct_write.h"
 #include "core/store/loader/buffer_pool.h"
 #include "core/store/loader/pump.h"
 #include "core/store/loader/sink.h"
 #include "core/store/loader/source.h"
+#include "core/store/replica/types/direct_write_grant.h"
 
 using namespace tensorcast::store;
 using namespace tensorcast::store::loader;
@@ -27,24 +27,33 @@ class DummyPool : public BufferPool {
   explicit DummyPool(size_t chunk_size, int capacity) : chunk_size_(chunk_size), capacity_(capacity) {
     (void)capacity_;
   }
+
   size_t chunk_size() const override {
     return chunk_size_;
   }
+
   int capacity() const override {
     return capacity_;
   }
+
   absl::StatusOr<int> get_free_chunk() override {
     return absl::InternalError("unused in direct path");
   }
+
   void return_chunk(int) override {}
+
   absl::Status mark_chunk_ready(int, uint64_t, size_t) override {
     return absl::OkStatus();
   }
+
   absl::StatusOr<ReadyChunk> get_ready_chunk() override {
     return absl::UnavailableError("no chunks");
   }
+
   void signal_production_complete() override {}
+
   void shutdown() override {}
+
   void* get_chunk_data_ptr(int) override {
     return nullptr;
   }
@@ -55,7 +64,7 @@ class DummyPool : public BufferPool {
 };
 
 // Direct-capable sink that exposes a buffer and plans token segments.
-class DirectCapableSink : public PositionedSink, public DirectWritableSink {
+class DirectCapableSink : public PositionedSink, public DirectWriteCapable {
  public:
   explicit DirectCapableSink(size_t size) : buffer_(size, 0) {}
 
@@ -66,29 +75,31 @@ class DirectCapableSink : public PositionedSink, public DirectWritableSink {
     std::memcpy(buffer_.data() + offset, src, bytes);
     return absl::OkStatus();
   }
+
   absl::Status close() override {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<DirectWriteToken> plan_direct_write(absl::Span<const VaRange> ranges) override {
-    DirectWriteToken token;
-    token.segments.reserve(ranges.size());
+  absl::StatusOr<DirectWriteGrant> plan_direct_write(absl::Span<const VaRange> ranges) override {
+    DirectWriteGrant grant;
+    grant.windows.reserve(ranges.size());
     for (const auto& r : ranges) {
       if (r.offset + r.length > buffer_.size())
         return absl::OutOfRangeError("range beyond buffer");
-      token.segments.push_back(
-          DirectWriteToken::Segment{
+      grant.windows.push_back(
+          DirectWriteGrant::Window{
               .va_offset = r.offset,
               .local_addr = reinterpret_cast<uint64_t>(buffer_.data() + r.offset),
               .length = r.length});
     }
-    token.keepalive = nullptr; // Not needed in test
-    return token;
+    grant.keepalive = nullptr; // Not needed in test
+    return grant;
   }
 
   const std::vector<uint8_t>& buffer() const {
     return buffer_;
   }
+
   size_t write_calls() const {
     return write_calls_;
   }
@@ -109,6 +120,7 @@ class DirectSource : public SeekableSource {
     std::memcpy(dst, data_.data(), to_read);
     return to_read;
   }
+
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
     if (offset >= data_.size())
       return size_t{0};
@@ -116,29 +128,31 @@ class DirectSource : public SeekableSource {
     std::memcpy(dst, data_.data() + offset, to_read);
     return to_read;
   }
+
   bool supports_direct_write() const override {
     return true;
   }
-  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteToken& token) override {
+
+  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
     size_t total = 0;
     uint64_t pos = dest_va_offset;
     while (total < bytes) {
-      const DirectWriteToken::Segment* seg = nullptr;
-      for (const auto& s : token.segments) {
-        if (pos >= s.va_offset && pos < s.va_offset + s.length) {
-          seg = &s;
+      const DirectWriteGrant::Window* win = nullptr;
+      for (const auto& w : grant.windows) {
+        if (pos >= w.va_offset && pos < w.va_offset + w.length) {
+          win = &w;
           break;
         }
       }
-      if (!seg)
+      if (!win)
         return absl::InvalidArgumentError("no segment for offset");
-      uint64_t seg_off = pos - seg->va_offset;
-      uint64_t seg_left = seg->length - seg_off;
+      uint64_t seg_off = pos - win->va_offset;
+      uint64_t seg_left = win->length - seg_off;
       size_t step = static_cast<size_t>(std::min<uint64_t>(seg_left, bytes - total));
       if (pos >= data_.size())
         return absl::OutOfRangeError("source eof");
       size_t can_copy = std::min(step, data_.size() - static_cast<size_t>(pos));
-      std::memcpy(reinterpret_cast<void*>(seg->local_addr + seg_off), data_.data() + pos, can_copy);
+      std::memcpy(reinterpret_cast<void*>(win->local_addr + seg_off), data_.data() + pos, can_copy);
       total += can_copy;
       pos += can_copy;
     }

@@ -28,10 +28,10 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 
 ## What It Does Not Do
 
-- Reimplement engine invariants: memory lifecycle, DVMP/UMA model, verification semantics, or DVMP chunk-locking rules.
+- Reimplement engine invariants: memory lifecycle, UMA ledger model, verification semantics. Transfer chunk-locking is removed (handled by UMA plan/commit and VS pin leases).
 - Own long-lived cache policy is out of scope for the daemon. Eviction policies live below or behind explicit feature flags.
 - Bypass the StoreEngine for data movement or memory management.
-- Break wire compatibility. Protocol changes are additive and guarded.
+- Protocol changes are additive and guarded; no backward‑compat bridging layers are maintained.
 
 ## Layering and Boundaries
 
@@ -54,7 +54,7 @@ flowchart TB
 - Managers/Registries:
   - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
   - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
-- Engine: single source of truth for materialization orchestration, memory lifecycle, DVMP locking semantics, verification futures.
+- Engine: single source of truth for materialization orchestration, memory lifecycle, UMA ledger semantics, verification futures.
 
 ## Interfaces (Public Surface)
 

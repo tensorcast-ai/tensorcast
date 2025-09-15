@@ -121,9 +121,11 @@ sc_cc_library(
 
 # Memory management - Pinned memory pool (must come before pinned_memory)
 sc_cc_library(
-    name = "pinned_memory_pool_lib",
-    srcs = ["memory/pinned_memory_pool.cc"],
-    hdrs = ["memory/pinned_memory_pool.h"],
+    name = "pinned_buffer_pool_lib",
+    srcs = ["memory/pinned_buffer_pool.cc"],
+    hdrs = [
+        "memory/pinned_buffer_pool.h",
+    ],
     includes = ["memory"],
     visibility = ["//visibility:public"],
     deps = [
@@ -145,7 +147,7 @@ sc_cc_library(
     deps = [
         ":cuda_api_lib",
         ":error_handling_lib",
-        ":pinned_memory_pool_lib",
+        ":pinned_buffer_pool_lib",
     ],
 )
 
@@ -157,14 +159,22 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
-# Alias: Virtual Address Space (DVMP → VS)
-sc_header_only_library(
+# Virtual Address Space (VS)
+sc_cc_library(
     name = "virtual_address_space_lib",
+    srcs = ["memory/virtual_address_space.cc"],
     hdrs = ["memory/virtual_address_space.h"],
     includes = ["memory"],
     visibility = ["//visibility:public"],
     deps = [
-        ":distributed_virtual_memory_pool_lib",
+        ":cuda_api_lib",
+        ":error_handling_lib",
+        ":system_capabilities_lib",
+        "//core/store/replica:chunk_meta",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -177,28 +187,12 @@ sc_cc_library(
     deps = [
         ":cuda_api_lib",
         ":error_handling_lib",
-        ":pinned_memory_pool_lib",
+        ":pinned_buffer_pool_lib",
     ],
 )
 
 # Memory management - Distributed virtual memory pool
-sc_cc_library(
-    name = "distributed_virtual_memory_pool_lib",
-    srcs = ["memory/distributed_virtual_memory_pool.cc"],
-    hdrs = ["memory/distributed_virtual_memory_pool.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
-        # removed metric_objects_lib
-        ":system_capabilities_lib",
-        "//core/store/replica:chunk_meta",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
-        "@gsl",
-        "@opentelemetry-cpp//api:api",
-    ],
-)
+## distributed_virtual_memory_pool_lib removed in UMA V3 cutover
 
 ## Metrics - OpenTelemetry wrappers (header-only)
 ## metric_objects_lib removed; use OpenTelemetry API directly
@@ -338,15 +332,15 @@ sc_cc_library(
 
 # Tests for memory components
 cc_test(
-    name = "distributed_virtual_memory_pool_test",
-    srcs = ["memory/distributed_virtual_memory_pool_test.cc"],
+    name = "virtual_address_space_test",
+    srcs = ["memory/virtual_address_space_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
     tags = ["requires_cuda"],
     deps = [
-        ":distributed_virtual_memory_pool_lib",
+        ":virtual_address_space_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -354,15 +348,15 @@ cc_test(
 )
 
 cc_test(
-    name = "dvmp_region_handle_test",
-    srcs = ["memory/dvmp_region_handle_test.cc"],
+    name = "cpu_va_region_handle_test",
+    srcs = ["memory/cpu_va_region_handle_test.cc"],
     linkopts = select({
         ":use_fake_cuda": [],
         "//conditions:default": ["-lcuda"],
     }),
     tags = ["requires_cuda"],
     deps = [
-        ":distributed_virtual_memory_pool_lib",
+        ":virtual_address_space_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
@@ -401,11 +395,10 @@ sc_cc_library(
         ":cuda_memory_lib",
         ":device_guard_lib",
         ":device_types_lib",
-        ":distributed_virtual_memory_pool_lib",
         ":error_handling_lib",
         ":logging_init_lib",
+        ":pinned_buffer_pool_lib",
         ":pinned_memory_lib",
-        ":pinned_memory_pool_lib",
         ":streaming_pinned_buffer_lib",
         ":system_capabilities_lib",
         ":trace_ctx_lib",
@@ -413,6 +406,7 @@ sc_cc_library(
         ":trace_macros_lib",
         ":trace_manager_lib",
         ":trace_scope_lib",
+        ":virtual_address_space_lib",
         "@gsl",
     ],
     alwayslink = True,

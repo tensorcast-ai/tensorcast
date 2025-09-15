@@ -26,18 +26,18 @@
 
 namespace tensorcast::common::memory {
 
-CudaMemory::~CudaMemory() {
+GpuDeviceMemory::~GpuDeviceMemory() {
   release_resources();
 }
 
-absl::Status CudaMemory::allocate(size_t size, int device_id) {
+absl::Status GpuDeviceMemory::allocate(size_t size, int device_id) {
   if (allocation_type_ != AllocationType::UNINITIALIZED) {
-    LOG(ERROR) << "CudaMemory::allocate called on an already initialized object (state="
+    LOG(ERROR) << "GpuDeviceMemory::allocate called on an already initialized object (state="
                << static_cast<int>(allocation_type_) << ").";
-    return absl::FailedPreconditionError("CudaMemory already initialized");
+    return absl::FailedPreconditionError("GpuDeviceMemory already initialized");
   }
   if (size == 0) {
-    LOG(ERROR) << "CudaMemory::allocate called with size 0.";
+    LOG(ERROR) << "GpuDeviceMemory::allocate called with size 0.";
     return absl::InvalidArgumentError("Size must be > 0");
   }
 
@@ -54,25 +54,26 @@ absl::Status CudaMemory::allocate(size_t size, int device_id) {
   // Get native IPC mem handle if possible; continue without if unsupported
   status = cuda::get_ipc_mem_handle(&handle_, data_);
   if (!status.ok()) {
-    LOG(WARNING) << "CudaMemory::allocate - get_ipc_mem_handle failed (continuing without IPC handle): " << status;
+    LOG(WARNING) << "GpuDeviceMemory::allocate - get_ipc_mem_handle failed (continuing without IPC handle): " << status;
   }
 
   size_ = size;
   device_id_ = device_id;
   allocation_type_ = AllocationType::DIRECT;
 
-  VLOG(1) << "CudaMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address " << data_;
+  VLOG(1) << "GpuDeviceMemory: Directly allocated " << size_ << " bytes on device " << device_id_ << " at address "
+          << data_;
   return absl::OkStatus();
 }
 
-absl::Status CudaMemory::adopt_ipc_handle(const cudaIpcMemHandle_t& ipc_handle, size_t size, int device_id) {
+absl::Status GpuDeviceMemory::adopt_ipc_handle(const cudaIpcMemHandle_t& ipc_handle, size_t size, int device_id) {
   if (allocation_type_ != AllocationType::UNINITIALIZED) {
-    LOG(ERROR) << "CudaMemory::adopt_ipc_handle called on an already initialized object.";
-    return absl::FailedPreconditionError("CudaMemory already initialized");
+    LOG(ERROR) << "GpuDeviceMemory::adopt_ipc_handle called on an already initialized object.";
+    return absl::FailedPreconditionError("GpuDeviceMemory already initialized");
   }
 
   if (size == 0) {
-    LOG(ERROR) << "CudaMemory::adopt_ipc_handle called with size 0.";
+    LOG(ERROR) << "GpuDeviceMemory::adopt_ipc_handle called with size 0.";
     return absl::InvalidArgumentError("Size must be > 0");
   }
 
@@ -104,12 +105,12 @@ absl::Status CudaMemory::adopt_ipc_handle(const cudaIpcMemHandle_t& ipc_handle, 
   handle_ = ipc_handle;
   allocation_type_ = AllocationType::IPC_EXTERNAL;
 
-  LOG(INFO) << "CudaMemory: Adopted CUDA IPC memory handle on device " << device_id_ << " ptr=" << data_ << " size "
-            << size_;
+  LOG(INFO) << "GpuDeviceMemory: Adopted CUDA IPC memory handle on device " << device_id_ << " ptr=" << data_
+            << " size " << size_;
   return absl::OkStatus();
 }
 
-void CudaMemory::release_resources() {
+void GpuDeviceMemory::release_resources() {
   if (data_ == nullptr && allocation_type_ == AllocationType::UNINITIALIZED) {
     return; // Nothing to do
   }
@@ -117,32 +118,32 @@ void CudaMemory::release_resources() {
   switch (allocation_type_) {
     case AllocationType::DIRECT:
       if (data_) {
-        VLOG(2) << "CudaMemory: Freeing directly allocated memory (" << size_ << " bytes) on device " << device_id_
+        VLOG(2) << "GpuDeviceMemory: Freeing directly allocated memory (" << size_ << " bytes) on device " << device_id_
                 << " at address " << data_;
         // Best effort to set the correct device before freeing
         auto status = cuda::set_device(device_id_);
         if (!status.ok()) {
-          LOG(ERROR) << "CudaMemory::release_resources - set_device(" << device_id_
+          LOG(ERROR) << "GpuDeviceMemory::release_resources - set_device(" << device_id_
                      << ") failed before free: " << status;
         }
         status = cuda::free(data_);
         if (!status.ok()) {
-          LOG(ERROR) << "CudaMemory::release_resources - free failed for address " << data_ << ": " << status;
+          LOG(ERROR) << "GpuDeviceMemory::release_resources - free failed for address " << data_ << ": " << status;
         }
         // Even if free fails, reset members to avoid double free attempts
       }
       break;
     case AllocationType::IPC_EXTERNAL:
       if (data_) {
-        LOG(INFO) << "CudaMemory: Closing CUDA IPC memory handle for ptr " << data_ << " (" << size_ << " bytes)";
+        LOG(INFO) << "GpuDeviceMemory: Closing CUDA IPC memory handle for ptr " << data_ << " (" << size_ << " bytes)";
         auto status = cuda::set_device(device_id_);
         if (!status.ok()) {
-          LOG(ERROR) << "CudaMemory::release_resources - set_device(" << device_id_
+          LOG(ERROR) << "GpuDeviceMemory::release_resources - set_device(" << device_id_
                      << ") failed before ipc close: " << status;
         }
         status = cuda::close_ipc_handle(data_);
         if (!status.ok()) {
-          LOG(ERROR) << "CudaMemory::release_resources - close_ipc_handle failed for address " << data_ << ": "
+          LOG(ERROR) << "GpuDeviceMemory::release_resources - close_ipc_handle failed for address " << data_ << ": "
                      << status;
         }
       }

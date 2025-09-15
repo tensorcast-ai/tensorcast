@@ -11,6 +11,7 @@ namespace tensorcast::communicator::engine {
 
 namespace {
 class NoOpLeaseHandle : public DRAMStager::LeaseHandle {};
+
 class NoOpLeaseProvider : public DRAMStager::LeaseProvider {
  public:
   std::unique_ptr<DRAMStager::LeaseHandle> acquire(
@@ -27,7 +28,7 @@ std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider(
   return provider;
 }
 
-DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedMemoryPool>> pool, size_t num_buffers_hint)
+DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool, size_t num_buffers_hint)
     : pool_(std::move(pool)), chunk_size_(pool_->chunk_size()), num_buffers_hint_(num_buffers_hint) {}
 
 absl::StatusOr<void*> DRAMStager::stage(
@@ -43,7 +44,7 @@ absl::StatusOr<void*> DRAMStager::stage(
   // Immediate allocation attempt; the send loop can back off if needed
   int ret = pool_->allocate(chunk_size_, bufs);
   if (ret != 0 || bufs.empty()) {
-    return absl::ResourceExhaustedError("PinnedMemoryPool out of buffers for staging");
+    return absl::ResourceExhaustedError("PinnedBufferPool out of buffers for staging");
   }
 
   void* host_ptr = bufs[0];

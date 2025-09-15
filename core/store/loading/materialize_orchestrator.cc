@@ -58,7 +58,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     // Build target description
     ReplicaTarget target;
     target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                                   : common::memory::MemoryLocation::PAGEABLE_CPU;
+                                                                   : common::memory::MemoryLocation::CPU;
     target.location.device_id = target_device.ordinal;
 
     auto load_or = store_->ingest_from_p2p_internal(std::string(artifact_id), p2p_src, target, hints);
@@ -104,7 +104,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   ReplicaTarget target;
   target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                                 : common::memory::MemoryLocation::PAGEABLE_CPU;
+                                                                 : common::memory::MemoryLocation::CPU;
   target.location.device_id = target_device.ordinal;
 
   auto disk_or = store_->ingest_from_disk_internal(hints.disk_path, disk_src, target, hints);

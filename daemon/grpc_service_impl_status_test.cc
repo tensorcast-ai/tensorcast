@@ -42,7 +42,7 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
     REQUIRE(st.ok());
     REQUIRE(resp.is_registered());
     REQUIRE(resp.worker_id() == "worker-1");
-    // With no replicas and default compat, comm enabled is false
+    // With no replicas and default settings, comm enabled is false
     REQUIRE_FALSE(resp.communication_info().enabled());
   }
 }
