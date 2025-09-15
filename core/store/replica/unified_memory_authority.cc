@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <map>
-#include <set>
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
@@ -18,7 +17,6 @@
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
-#include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store::replica {
@@ -433,7 +431,7 @@ bool UnifiedMemoryAuthority::is_gpu_loading_complete(const loading::ReplicaKey& 
 
 void UnifiedMemoryAuthority::record_gpu_touch(
     const loading::ReplicaKey& key,
-    int device_id,
+    int /*device_id*/,
     absl::Span<const uint32_t> chunks) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -480,8 +478,8 @@ absl::StatusOr<UnifiedMemoryAuthority::ArtifactLayout> UnifiedMemoryAuthority::g
   if (const char* env = std::getenv("TCAST_TX_SLICE_BYTES")) {
     // Simple decimal parse; ignore invalid
     char* endp = nullptr;
-    unsigned long long v = std::strtoull(env, &endp, 10);
-    if (endp != env && v > 0) {
+    uint64_t v = std::strtoull(env, &endp, 10);
+    if (endp != env && v > 0ULL) {
       slice = static_cast<size_t>(v);
     }
   }
@@ -556,7 +554,8 @@ absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::pla
 
   // Create session record
   const uint64_t sid = next_session_id_++;
-  sessions_[sid] = SessionRecord{.key = key, .target = target, .device_id = device_id, .chunks = chunks};
+  sessions_[sid] =
+      SessionRecord{.key = key, .target = target, .device_id = device_id, .chunks = chunks, .cpu_leases = {}};
   // Final: do not acquire plan-time CPU pin leases.
   // Sliding-window direct-write leases are obtained per-window by the pump when needed.
 

@@ -87,6 +87,10 @@ graph TB
 - Final cutover (V3): alias headers removed; UnifiedMemoryAuthority/VirtualAddressSpace are the canonical names. Incremental rollout flags are removed; transactional Plan→Execute→Commit path and UMA-ledger authority are always enabled.
 - Canonical Bazel targets: `//core/store/replica:unified_memory_authority`, `//core/common:virtual_address_space_lib`, and `//core/store/replica:memory_export_registry`.
 
+### Release & Eviction (GPU)
+
+- GPU unload path now explicitly informs UMA to drop per-device residency and optional allocation via `UnifiedMemoryAuthority::release_gpu_device(ReplicaKey, device_id, drop_allocation=true)`. This keeps the UMA ledger authoritative and ensures VRAM is actually reclaimed. Subsequent `plan_load(GPU)` will correctly compute missing chunks instead of returning an empty set.
+
 ## Public API Surface (StoreEngine)
 
 - Construction: `StoreEngine::StoreEngine(const StoreEngineOptions& opts)`
