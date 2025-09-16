@@ -162,9 +162,20 @@ class DaemonCtl:
         # after channel refresh. Prefer the grpc MultiCallable "_method" path,
         # fall back to Python __name__.
         method_path = getattr(method, "_method", None)
-        resolved_name = (
-            method_path.rsplit("/", 1)[-1] if isinstance(method_path, str) else None
-        ) or getattr(method, "__name__", None)
+        # gRPC MultiCallable._method may be bytes (e.g., b"/pkg.Service/Method").
+        # Decode to str and extract the final segment for getattr(self.stub, name).
+        resolved_name = None
+        if isinstance(method_path, (bytes, bytearray)):
+            try:
+                method_path_str = method_path.decode("ascii", errors="ignore")
+            except Exception:
+                method_path_str = ""
+            if method_path_str:
+                resolved_name = method_path_str.rsplit("/", 1)[-1]
+        elif isinstance(method_path, str):
+            resolved_name = method_path.rsplit("/", 1)[-1]
+        if not resolved_name:
+            resolved_name = getattr(method, "__name__", None)
 
         cur_method = method
         last_err: Exception | None = None
@@ -690,7 +701,7 @@ class DaemonCtl:
                     req,
                     timeout=timeout_s,
                     span=span,
-                    retries=1,
+                    retries=0,
                 )
             except grpc.RpcError as e:
                 span.record_exception(e)

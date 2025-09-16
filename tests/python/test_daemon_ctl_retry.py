@@ -24,7 +24,8 @@ class BadStub:
 
 class GoodStub:
     def GetServerConfig(self, request, timeout=None):  # noqa: N802
-        return SimpleNamespace(chunk_size=123, mem_pool_size=456)
+        # Mimic real GetServerConfigResponse field names
+        return SimpleNamespace(tx_slice_bytes=123, mem_pool_size=456)
 
 
 def test_unary_call_rebinds_stub_after_refresh(monkeypatch):

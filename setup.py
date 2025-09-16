@@ -282,9 +282,7 @@ def build_store_engine_and_daemon(
     targets.append("//daemon:tensorcast_daemon")
     cmd.extend(targets)
 
-    if develop:
-        cmd.append("--compilation_mode=dbg")
-    else:
+    if RELEASE:
         cmd.append("--compilation_mode=opt")
 
     if use_dist_dir:
