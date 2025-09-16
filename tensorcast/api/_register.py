@@ -475,12 +475,18 @@ def make_plan_model(
             release_on_tensor_commit=options.release_on_tensor_commit,
         )
     if plan_type is PlanType.VRAM_LEASED:
+        # Current release only supports Lease-In-Place (LIP)
+        in_place = options.lease_in_place
+        if not in_place:
+            raise InvalidPlan(
+                "vram_leased (in_place=false) is not implemented; set lease_in_place=True"
+            )
         return LeasePlan(
             kind="lease",
             min_tensor_bytes=options.min_tensor_bytes,
             max_tensor_count=options.max_tensor_count,
             lease_bytes_limit=options.lease_bytes_limit,
-            in_place=bool(getattr(options, "lease_in_place", False)),
+            in_place=in_place,
         )
     raise InvalidPlan(f"Unknown plan: {plan_type}")
 

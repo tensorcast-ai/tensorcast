@@ -24,6 +24,14 @@ Core elements:
 - One RPC family for Begin/Feed/KeepAlive/Commit/Abort/Revoke across all plans.
 - Clear plan behaviors: Coalesced VRAM, Lease (materialize‑on‑Commit), and Lease‑In‑Place (LIP, ephemeral, TTL‑bound).
 
+## Implementation status (current release)
+
+- Supported:
+  - vram_coalesced
+  - vram_leased with in_place=true (LIP)
+- Not yet implemented:
+  - vram_leased with in_place=false ("materialize on Commit" to daemon VRAM). The current daemon implementation always treats Lease as in-place at Commit.
+
 # Goals / Non‑Goals
 
 Goals
@@ -73,7 +81,7 @@ Behavioral notes
 - Computes AVBS SegmentPlan; zero‑fills PAD for hashing and materialization.
 - Runs Begin → Feed (for Lease) → optional KeepAlive → Commit.
 - vram_coalesced: Daemon allocates coalesced VRAM; client writes via IPC; Commit registers COALESCED_VRAM.
-- vram_leased: If `lease_in_place` is False, Commit materializes to COALESCED_VRAM; if True, registers LIP (ephemeral, TTL/KeepAlive).
+- vram_leased: Currently only `lease_in_place=True` (LIP) is implemented and registered at Commit (ephemeral, TTL/KeepAlive). The `lease_in_place=False` (materialize to COALESCED_VRAM at Commit) variant is not implemented in this release.
 
 ## Control Plane RPCs (Unified)
 
@@ -99,7 +107,7 @@ Principles
 
 Plan behaviors
 - vram_coalesced: Client writes into daemon allocation via IPC; Commit registers COALESCED_VRAM.
-- vram_leased (in_place=false): Commit materializes Lease→VRAM; P2P remains staged‑only.
+- vram_leased (in_place=false): Not implemented in current release (planned); would materialize Lease→VRAM; P2P remains staged‑only.
 - vram_leased (in_place=true, LIP): Commit registers VRAM_LEASE_IN_PLACE with TTL/KeepAlive; same‑device consumption is rejected; cross‑device local materialization copies device‑to‑device into new COALESCED_VRAM; P2P staged‑only with optional receiver‑side verification.
 
 ### Registration Flow (Mermaid)
@@ -121,7 +129,7 @@ sequenceDiagram
     CL->>DM: FeedRegisterArtifactStream{lease_segments}
     CL-->>DM: KeepAlive (optional)
     CL->>DM: CommitRegisteredArtifact
-    DM->>DM: "Copy Lease→VRAM + zero PAD, register COALESCED_VRAM"
+    DM->>DM: "Copy Lease→VRAM + zero PAD, register COALESCED_VRAM" (not implemented in current release)
   else vram_leased (in_place=true, LIP)
     CL->>DM: FeedRegisterArtifactStream{lease_segments}
     CL-->>DM: KeepAlive (optional)
@@ -130,6 +138,8 @@ sequenceDiagram
     DM->>DM: Register VRAM_LEASE_IN_PLACE{ttl,owner_pid}
   end
 ```
+
+Note: The `vram_leased (in_place=false)` branch is not implemented in the current release; the daemon executes the LIP branch for Lease.
 
 ### Same‑Machine Materialization (Mermaid)
 

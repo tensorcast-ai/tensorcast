@@ -34,6 +34,17 @@ absl::Mutex g_ipc_map_mu;
 absl::flat_hash_map<std::string, ExportedIpcInfo> g_exported_ipc_map ABSL_GUARDED_BY(g_ipc_map_mu);
 absl::flat_hash_set<void*> g_exported_ptrs ABSL_GUARDED_BY(g_ipc_map_mu);
 std::atomic<bool> g_enable_same_process_ipc_fallback{false};
+
+// Convert native cudaIpcMemHandle_t to lower-hex string (2 chars per byte),
+// matching the representation used by get_ipc_handle().
+std::string to_hex_string(const cudaIpcMemHandle_t& h) {
+  std::stringstream ss;
+  for (int i = 0; i < static_cast<int>(sizeof(cudaIpcMemHandle_t)); ++i) {
+    ss << std::hex << std::setw(2) << std::setfill('0')
+       << static_cast<int>(reinterpret_cast<const unsigned char*>(&h)[i]);
+  }
+  return ss.str();
+}
 } // namespace
 
 void configure_same_process_ipc_fallback(bool enabled) {
@@ -353,10 +364,37 @@ bool is_available() {
 // IPC handle operations (native CUDA handle type)
 absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
   SC_RETURN_IF_CUDA_ERROR(cudaIpcGetMemHandle(handle, dev_ptr));
+  // Record mapping unconditionally to enable precise same-process open
+  // detection (and optional fallback) for native IPC handles.
+  {
+    absl::MutexLock lock(&g_ipc_map_mu);
+    int current_device = -1;
+    ABSL_CHECK_OK(get_device(&current_device));
+    const std::string key = to_hex_string(*handle);
+    g_exported_ipc_map[key] = ExportedIpcInfo{.ptr = dev_ptr, .device_id = current_device, .pid = getpid()};
+    g_exported_ptrs.insert(dev_ptr);
+  }
   return absl::OkStatus();
 }
 
 absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsigned int flags) {
+  LOG(INFO) << "open_ipc_mem_handle: " << dev_ptr << " " << flags;
+  // Detect the invalid same-process usage early and return a clear error.
+  // Opening a CUDA IPC memory handle in the same process that exported it is
+  // not a valid CUDA usage (IPC is cross-process only). Avoid surfacing
+  // misleading device/context errors from the runtime.
+  {
+    absl::MutexLock lock(&g_ipc_map_mu);
+    const std::string key = to_hex_string(handle);
+    auto it = g_exported_ipc_map.find(key);
+    if (it != g_exported_ipc_map.end() && it->second.pid == getpid()) {
+      LOG(ERROR) << "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
+                 << "Use the original device pointer within the exporting process, or a non-IPC path.";
+      return absl::FailedPreconditionError(
+          "cudaIpcOpenMemHandle called on a handle exported in the same process; this is invalid. "
+          "Use the original device pointer within the exporting process, or a non-IPC path.");
+    }
+  }
   SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(dev_ptr, handle, flags));
   return absl::OkStatus();
 }

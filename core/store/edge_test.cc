@@ -323,9 +323,13 @@ TEST_CASE("E7: Rapid materialize_replica/unload cycling", "[store_engine][edge][
       continue;
     }
 
-    auto handle = std::move(handle_or).value();
+    // Limit handle lifetime so it is released before unloading
+    {
+      auto handle = std::move(handle_or).value();
+      // Intentionally do not wait; exit scope to release handle
+    }
 
-    // Don't wait for completion - immediately unload
+    // Don't wait for completion - immediately attempt unload after releasing handle
     auto replica_key = make_replica_key(artifact_id, 0);
     int unload_result = store->unload_replica(replica_key);
 

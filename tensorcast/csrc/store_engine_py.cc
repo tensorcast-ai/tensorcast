@@ -501,9 +501,6 @@ transport layer.)pbdoc")
 
             if (cfg.contains("stager") && !cfg["stager"].is_none()) {
               auto st = cfg["stager"].cast<py::dict>();
-              auto gb = [&st](const char* k, bool fb) {
-                return (st.contains(k) && !st[k].is_none()) ? st[k].cast<bool>() : fb;
-              };
               auto gi = [&st](const char* k, int fb) {
                 return (st.contains(k) && !st[k].is_none()) ? st[k].cast<int>() : fb;
               };
@@ -534,9 +531,6 @@ transport layer.)pbdoc")
             }
             if (cfg.contains("pool") && !cfg["pool"].is_none()) {
               auto pl = cfg["pool"].cast<py::dict>();
-              auto gb = [&pl](const char* k, bool fb) {
-                return (pl.contains(k) && !pl[k].is_none()) ? pl[k].cast<bool>() : fb;
-              };
               auto gu64 = [&pl](const char* k, uint64_t fb) {
                 return (pl.contains(k) && !pl[k].is_none()) ? pl[k].cast<uint64_t>() : fb;
               };
@@ -558,18 +552,12 @@ transport layer.)pbdoc")
             }
             if (cfg.contains("affinity") && !cfg["affinity"].is_none()) {
               auto af = cfg["affinity"].cast<py::dict>();
-              auto gb = [&af](const char* k, bool fb) {
-                return (af.contains(k) && !af[k].is_none()) ? af[k].cast<bool>() : fb;
-              };
               auto* af_mut = ccfg.mutable_affinity();
               if (af.contains("enable") && !af["enable"].is_none())
                 af_mut->set_enable(af["enable"].cast<bool>());
             }
             if (cfg.contains("simple_numa") && !cfg["simple_numa"].is_none()) {
               auto sn = cfg["simple_numa"].cast<py::dict>();
-              auto gb = [&sn](const char* k, bool fb) {
-                return (sn.contains(k) && !sn[k].is_none()) ? sn[k].cast<bool>() : fb;
-              };
               auto* sn_mut = ccfg.mutable_simple_numa();
               if (sn.contains("enable") && !sn["enable"].is_none())
                 sn_mut->set_enable(sn["enable"].cast<bool>());
@@ -641,10 +629,10 @@ This overload calls the typed-config initialization path in C++.)pbdoc")
           "is_enabled",
           &CommunicationManager::is_enabled,
           "Return True if the communication engine is initialized and enabled.");
+  // Expose canonical granularity constants for Python callers
+  m.attr("artifact_chunk_default_bytes") = py::int_(tensorcast::common::consts::kArtifactChunkDefault);
+  m.attr("tx_slice_default_bytes") = py::int_(tensorcast::common::consts::kTxSliceDefault);
+  m.attr("hash_leaf_bytes") = py::int_(tensorcast::common::consts::kHashLeafBytes);
 }
 
 // NOLINTEND(google-build-using-namespace,fuchsia-statically-constructed-objects,misc-const-correctness,misc-use-anonymous-namespace,)
-// Expose canonical granularity constants for Python callers
-m.attr("artifact_chunk_default_bytes") = py::int_(tensorcast::common::consts::kArtifactChunkDefault);
-m.attr("tx_slice_default_bytes") = py::int_(tensorcast::common::consts::kTxSliceDefault);
-m.attr("hash_leaf_bytes") = py::int_(tensorcast::common::consts::kHashLeafBytes);

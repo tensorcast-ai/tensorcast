@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -168,5 +169,21 @@ class RegistrationManager {
   absl::flat_hash_map<std::string, RegMeta> reg_meta_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(mu_);
 };
+
+// Stream operator for RegPlan to enable readable logging
+inline std::ostream& operator<<(std::ostream& os, RegistrationManager::RegPlan plan) {
+  switch (plan) {
+    case RegistrationManager::RegPlan::COALESCED:
+      os << "coalesced";
+      break;
+    case RegistrationManager::RegPlan::LEASE:
+      os << "lease";
+      break;
+    default:
+      os << "unknown(" << static_cast<int>(plan) << ")";
+      break;
+  }
+  return os;
+}
 
 } // namespace tensorcast::daemon

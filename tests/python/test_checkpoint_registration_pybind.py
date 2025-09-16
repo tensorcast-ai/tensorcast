@@ -13,6 +13,7 @@ from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
 from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
 from tensorcast.types import CoalescedPlan, CoalescedHandshake
+from tests.python.utils.daemon import start_daemon_binary
 
 
 def _skip_if_no_cuda() -> None:
@@ -25,55 +26,13 @@ def _skip_if_no_cuda() -> None:
 
 
 def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Popen:
-    """Start the daemon using unified --config_text (no legacy flags).
-
-    The minimal config sets server.listen, storage_path, engine.mem_pool_size_bytes,
-    engine.tx_slice_bytes and engine.artifact_chunk_bytes. P2P listen is optional.
-    """
-    bin_path = Path(__file__).resolve().parents[2] / "tensorcast" / "bin" / "tensorcast_daemon"
-    assert bin_path.exists() and os.access(bin_path, os.X_OK)
-    host, port_str = listen_addr.split(":")
-    port = int(port_str)
-    # Use 8MiB tx_slice_bytes and 256MiB artifact chunk for tests
-    config_text = (
-        "{"
-        f"\"server\": {{\"listen\": {{\"host\": \"{host}\", \"port\": {port}}}, "
-        f"\"storage_path\": \"{str(storage_path)}\", \"num_threads\": 2}}, "
-        "\"engine\": {\"mem_pool_size_bytes\": 268435456, \"tx_slice_bytes\": 8388608, \"artifact_chunk_bytes\": 268435456}"
-        "}"
-    )
-    args = [
-        str(bin_path),
-        f"--config_text={config_text}",
-    ]
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    # Wait for readiness
-    deadline = time.time() + 10
-    ok = False
-    while time.time() < deadline:
-        try:
-            chan = grpc.insecure_channel(listen_addr)
-            stub = _pb2_grpc.StoreDaemonServiceStub(chan)
-            stub.GetServerConfig(_pb2.GetServerConfigRequest(), timeout=1.0)
-            chan.close()
-            ok = True
-            break
-        except Exception:
-            time.sleep(0.2)
-    if not ok:
-        try:
-            out, err = proc.communicate(timeout=1)
-        except Exception:
-            out = b""; err = b""
-        raise RuntimeError(f"daemon failed to start: out={out.decode()} err={err.decode()}")
-    return proc
+    return start_daemon_binary(listen_addr, storage_path, config_mode="inline_json", enable_same_process_ipc_fallback=True)
 
 
 @pytest.mark.timeout(60)
 def test_sdk_begin_commit_and_ipc_map(tmp_path: Path):
     _skip_if_no_cuda()
-    # Same-process IPC fallback for tests
-    os.environ.setdefault("TENSORCAST_ENABLE_IPC_SAME_PROCESS_FALLBACK", "1")
+    # Same-process IPC fallback is enabled via daemon config
     listen = "127.0.0.1:50740"
     try:
         proc = _start_daemon_binary(listen, tmp_path / "models")
@@ -102,9 +61,9 @@ def test_sdk_begin_commit_and_ipc_map(tmp_path: Path):
         assert isinstance(ptr, int) and ptr != 0
         assert _C.close_cuda_memory_handle(0, ptr) is True
 
-        desc = ctl.commit_registered_artifact(begin.registration_id)
-        assert desc.artifact_id.startswith("mi2:")
-        assert desc.total_size == size
+        res = ctl.commit_registered_artifact(begin.registration_id)
+        assert res.descriptor.artifact_id.startswith("mi2:")
+        assert res.descriptor.total_size == size
     finally:
         try:
             proc.terminate(); proc.wait(timeout=3)
