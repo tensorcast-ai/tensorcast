@@ -41,9 +41,7 @@ grpc::Status RegistrationController::begin(
     return {StatusCode::INVALID_ARGUMENT, "owner_pid is required (>0)"};
   }
   RegistrationManager::RegPlan plan = RegistrationManager::RegPlan::COALESCED;
-  if (req.has_cpu())
-    plan = RegistrationManager::RegPlan::CPU;
-  else if (req.has_lease())
+  if (req.has_lease())
     plan = RegistrationManager::RegPlan::LEASE;
   RegistrationManager::RegMeta meta;
   meta.plan = plan;
@@ -90,41 +88,7 @@ grpc::Status RegistrationController::begin(
     rctx.mark_success();
     return Status::OK;
   }
-  if (plan == RegistrationManager::RegPlan::CPU) {
-    store::StoreEngine::ArtifactRegistration a;
-    a.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
-    if (req.has_tensor_index_key())
-      a.tensor_index_key = req.tensor_index_key();
-    if (req.has_tensor_index_data()) {
-      a.tensor_index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
-      a.schema_version = req.tensor_index_data().schema_version();
-      a.encoding = req.tensor_index_data().encoding();
-    }
-    a.device_id = req.device_id();
-    a.total_size_bytes = req.total_size();
-    a.enable_p2p = true;
-    if (req.has_ttl_ms())
-      a.ttl_ms = req.ttl_ms();
-    auto begin_or = d_.engine.begin_register_artifact_cpu(a);
-    if (!begin_or.ok())
-      return to_grpc_status(begin_or.status());
-    const auto& out = begin_or.value();
-    resp.set_registration_id(out.registration_id);
-    auto* hs = resp.mutable_cpu()->mutable_stream();
-    hs->set_token(out.registration_id);
-    resp.set_device_id(out.device_id);
-    resp.set_total_size(out.size_bytes);
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_begin_cpu_total");
-      counter->Add(1.0);
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_begin_va_space_total unavailable";
-    }
-    d_.reg.set_meta(out.registration_id, meta);
-    rctx.mark_success();
-    return Status::OK;
-  }
+  // CPU plan removed
   if (plan == RegistrationManager::RegPlan::LEASE) {
     std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
     resp.set_registration_id(reg_id);
@@ -186,12 +150,7 @@ grpc::Status RegistrationController::feed_stream(
         }
       }
     }
-    if (req.has_cpu_chunk()) {
-      const auto& ck = req.cpu_chunk();
-      auto st = d_.engine.feed_register_cpu_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
-      if (!st.ok())
-        return to_grpc_status(st);
-    } else if (req.has_lease_segments()) {
+    if (req.has_lease_segments()) {
       std::vector<LeaseSegMeta> to_add;
       to_add.reserve(req.lease_segments().segments_size());
       for (const auto& s : req.lease_segments().segments()) {
@@ -250,12 +209,7 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         }
       }
     }
-    if (req.has_cpu_chunk()) {
-      const auto& ck = req.cpu_chunk();
-      auto st = d_.engine.feed_register_cpu_chunk(reg_id, ck.offset(), ck.data().data(), ck.data().size());
-      if (!st.ok())
-        return to_grpc_status(st);
-    } else if (req.has_lease_segments()) {
+    if (req.has_lease_segments()) {
       std::vector<LeaseSegMeta> to_add;
       to_add.reserve(req.lease_segments().segments_size());
       for (const auto& s : req.lease_segments().segments()) {
@@ -313,55 +267,7 @@ grpc::Status RegistrationController::commit(
   RegistrationManager::RegMeta meta;
   if (meta_opt.has_value())
     meta = *meta_opt;
-  if (meta.plan == RegistrationManager::RegPlan::CPU) {
-    if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
-      d_.reg.erase_meta(req.registration_id());
-      try {
-        static auto meter =
-            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-        static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
-        counter->Add(1.0);
-      } catch (...) {
-        VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
-      }
-      return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
-    }
-    auto commit_or = d_.engine.commit_registered_artifact(req.registration_id());
-    if (!commit_or.ok())
-      return to_grpc_status(commit_or.status());
-    const auto& out = commit_or.value();
-    auto* desc = resp.mutable_artifact_descriptor();
-    desc->set_artifact_id(out.artifact_id);
-    desc->set_index_multihash(out.index_multihash);
-    desc->set_data_multihash(out.data_multihash);
-    desc->set_schema_version(out.schema_version);
-    desc->set_encoding(out.encoding);
-    desc->set_total_size(out.size_bytes);
-    resp.set_existed(out.existed);
-    if (out.existed) {
-      // Join a lightweight reference to the existing replica (CPU VS path)
-      store::loading::ReplicaKey key{
-          .artifact_id = out.artifact_id,
-          .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-          .replica = 0};
-      d_.refs.add_ref(key, meta.owner_pid);
-      // Preserve meta for optional TTL keepalive and mark joined
-      meta.joined_existing = true;
-      meta.artifact_id_mi2 = out.artifact_id;
-      d_.reg.set_meta(req.registration_id(), meta);
-    } else {
-      d_.reg.erase_meta(req.registration_id());
-    }
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_commit_cpu_total");
-      counter->Add(1.0);
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_commit_cpu_total unavailable";
-    }
-    rctx.mark_success();
-    return Status::OK;
-  }
+  // CPU plan removed
   if (meta.plan == RegistrationManager::RegPlan::LEASE) {
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
       d_.reg.erase_all_for(req.registration_id());

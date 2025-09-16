@@ -116,18 +116,7 @@ class StoreEngine {
    */
   absl::StatusOr<RegistrationBeginResult> begin_register_artifact(const ArtifactRegistration& reg);
 
-  // CPU (VS) registration begin. Allocates VS-backed CPU region and prepares a
-  // pending registration tracked by registration_id. No GPU memory is allocated
-  // in this path.
-  absl::StatusOr<RegistrationBeginResult> begin_register_artifact_cpu(const ArtifactRegistration& reg);
-
-  // Writes a CPU data chunk into the pending registration's VS region at the
-  // specified virtual address offset. Updates CPU chunk metadata accordingly.
-  absl::Status feed_register_cpu_chunk(
-      std::string_view registration_id,
-      uint64_t offset,
-      const void* data,
-      size_t bytes);
+  // CPU registration path removed
 
   /**
    * @brief Commit a previously begun registration.  Finalizes the replica by

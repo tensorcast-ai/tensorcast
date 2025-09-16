@@ -51,7 +51,6 @@ from tensorcast.types import (
     ArtifactDescriptor,
     CoalescedHandshake,
     CoalescedPlan,
-    CpuPlan,
     Handshake,
     LeasePlan,
     LeaseSegment,
@@ -234,7 +233,7 @@ def begin_register_artifact_sdk(
     total_size_bytes: int,
     ttl_ms: int | None,
     tensor_index_data: bytes,
-    plan: CoalescedPlan | CpuPlan | LeasePlan,
+    plan: CoalescedPlan | LeasePlan,
     daemon_address: str,
 ) -> tuple[RegisteredArtifact, Handshake]:
     ctl = get_daemon_client(daemon_address)
@@ -467,19 +466,13 @@ def _prepare_build(
 
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
-) -> CoalescedPlan | CpuPlan | LeasePlan:
+) -> CoalescedPlan | LeasePlan:
     plan_type = cast(PlanType, options.plan)
     if plan_type is PlanType.VRAM_COALESCED:
         return CoalescedPlan(
             kind="coalesced",
             max_inflight_bytes=options.max_inflight_bytes,
             release_on_tensor_commit=options.release_on_tensor_commit,
-        )
-    if plan_type is PlanType.CPU:
-        return CpuPlan(
-            kind="cpu",
-            preferred_channel=int(options.cpu_preferred_channel),  # pyright: ignore[reportArgumentType]
-            ring_bytes=int(options.cpu_ring_bytes),
         )
     if plan_type is PlanType.VRAM_LEASED:
         return LeasePlan(
@@ -534,50 +527,6 @@ class _CoalescedUploader:
         return dest_state_dict
 
 
-class _CpuUploader:
-    def upload(
-        self,
-        *,
-        artifact: dict[str, torch.Tensor],
-        ctx: BuildContext,
-        layout: CoalescedLayout,
-        handle: RegisteredArtifact,
-        handshake: Handshake,
-        daemon_address: str,
-    ) -> dict[str, torch.Tensor]:
-        frames: list[tuple[int, bytes]] = []
-        for name in sorted(ctx.tensor_meta_index.keys()):
-            dst_off = int(layout.offsets[ctx.device_id][name])
-            _ptr, storage_size = ctx.tensor_source_index[name]
-            src = artifact[name]
-            b = src.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
-            if len(b) != int(storage_size):
-                raise TensorCastError(
-                    f"Tensor '{name}' raw byte size mismatch: {len(b)} vs {storage_size}"
-                )
-            frames.append((int(dst_off), b))
-
-        ctl = handle.client
-        # Final model: single-frame by default; allow explicit frame_bytes override
-        frame_bytes = None
-
-        ok_all = True
-        for off, data_bytes in frames:
-            ok = ctl.feed_register_artifact_cpu_stream_data(
-                handle.registration_id,
-                data_bytes,
-                offset=int(off),
-                frame_bytes=frame_bytes,
-                timeout_s=60.0,
-            )
-            if not ok:
-                ok_all = False
-                break
-        if not ok_all:
-            raise FeedFailed("CPU feed failed")
-        return artifact
-
-
 class _LeaseUploader:
     def upload(
         self,
@@ -615,7 +564,6 @@ class _LeaseUploader:
 
 PLAN_REGISTRY: dict[PlanType, object] = {
     PlanType.VRAM_COALESCED: _CoalescedUploader(),
-    PlanType.CPU: _CpuUploader(),
     PlanType.VRAM_LEASED: _LeaseUploader(),
 }
 
@@ -663,10 +611,6 @@ def _register_artifact_core(
         plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints
-    if plan_type is PlanType.CPU and ctx.input_mode != "cpu":
-        raise DeviceMismatch(
-            "cpu plan requires CPU tensors (specify device_id to enforce CPU input)"
-        )
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"
@@ -674,7 +618,6 @@ def _register_artifact_core(
 
     span_names = {
         PlanType.VRAM_COALESCED: "Client/RegisterArtifact.Coalesced",
-        PlanType.CPU: "Client/RegisterArtifact.CPU",
         PlanType.VRAM_LEASED: "Client/RegisterArtifact.Lease",
     }
 
@@ -692,24 +635,6 @@ def _register_artifact_core(
         with handle:
             # Upload per plan
             if isinstance(registrar, _CoalescedUploader):
-                state_dict = registrar.upload(
-                    artifact=artifact,
-                    ctx=ctx,
-                    layout=layout,
-                    handle=handle,
-                    handshake=hs,
-                    daemon_address=addr,
-                )
-                commit_res = handle.commit(timeout_s=60.0)
-                desc = commit_res.descriptor
-                _persist_publish_if_needed(
-                    desc=desc, options=options, state_dict_to_save=state_dict
-                )
-                return RegistrationResult(
-                    state_dict=state_dict, descriptor=desc, lease=None
-                )
-
-            if isinstance(registrar, _CpuUploader):
                 state_dict = registrar.upload(
                     artifact=artifact,
                     ctx=ctx,

@@ -39,7 +39,6 @@ def get_global_store_address() -> str:
 
 class PlanType(Enum):
     VRAM_COALESCED = "vram_coalesced"
-    CPU = "cpu"
     VRAM_LEASED = "vram_leased"
 
     @staticmethod
@@ -51,8 +50,6 @@ class PlanType(Enum):
             return PlanType.VRAM_COALESCED
         if s in ("vram_leased", "lease"):
             return PlanType.VRAM_LEASED
-        if s in ("cpu", "uma"):
-            return PlanType.CPU
         raise InvalidPlan(f"Unknown plan: {value}")
 
 
@@ -67,8 +64,7 @@ class RegisterArtifactOptions:
     lease_bytes_limit: int = 0
     # Lease/LIP specific: opt-in in-place mode per RFC-0014
     lease_in_place: bool = False
-    cpu_preferred_channel: int = 2
-    cpu_ring_bytes: int = 0
+    # CPU path removed
     key: str | None = None
     disk_path: str | None = None
 

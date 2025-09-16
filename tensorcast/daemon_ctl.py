@@ -28,9 +28,6 @@ from tensorcast.types import (
     BeginRegisterArtifactResult,
     CoalescedHandshake,
     CommitResult,
-    CpuEmptyHandshake,
-    CpuRingHandshake,
-    CpuStreamHandshake,
     LeaseHandshake,
     LeaseSegment,
     Plan,
@@ -656,21 +653,11 @@ class DaemonCtl:
                 handshake = CoalescedHandshake(
                     daemon_ipc_handle=bytes(resp.coalesced.daemon_ipc_handle)
                 )
-            elif resp.HasField("cpu"):
-                if resp.cpu.HasField("ring"):
-                    handshake = CpuRingHandshake(
-                        name=resp.cpu.ring.name,
-                        ring_bytes=int(resp.cpu.ring.ring_bytes),
-                    )
-                elif resp.cpu.HasField("stream"):
-                    handshake = CpuStreamHandshake(stream_token=resp.cpu.stream.token)
-                else:
-                    handshake = CpuEmptyHandshake()
             elif resp.HasField("lease"):
                 handshake = LeaseHandshake()
             else:
-                # Should not happen given daemon oneof
-                handshake = CpuEmptyHandshake()
+                # Should not happen
+                raise RuntimeError("BeginRegisterArtifact: missing handshake")
 
             return BeginRegisterArtifactResult(
                 registration_id=resp.registration_id,
@@ -775,79 +762,8 @@ class DaemonCtl:
             return True
 
     # ------------------------------------------------------------------
-    # Registration feed/keepalive helpers (Lease/CPU)
+    # Registration feed/keepalive helpers (Lease only)
     # ------------------------------------------------------------------
-
-    def feed_register_artifact_cpu_chunk(
-        self, registration_id: str, offset: int, data: bytes, last: bool = True
-    ) -> bool:
-        # Unified stream-only implementation: build single-frame stream
-        stream_req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
-            registration_id=registration_id
-        )
-        stream_req.cpu_chunk.offset = int(offset)
-        stream_req.cpu_chunk.data = data
-        stream_req.cpu_chunk.last = bool(last)
-        try:
-            # Do not retry streaming feeds; on TTL expiry the server returns
-            # DEADLINE_EXCEEDED and we should fail fast without reusing the
-            # request iterator across channels.
-            self._unary_call(
-                self.stub.FeedRegisterArtifactStream,
-                iter([stream_req]),
-                timeout=30.0,
-                retries=0,
-            )
-            return True
-        except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifactStream(cpu) failed: {e}")
-            return False
-
-    def feed_register_artifact_cpu_stream_data(
-        self,
-        registration_id: str,
-        data: bytes,
-        *,
-        offset: int = 0,
-        frame_bytes: int | None = None,
-        timeout_s: float = 60.0,
-    ) -> bool:
-        """Stream CPU bytes using FeedRegisterArtifactStream.
-
-        Default is a single-frame send. Specify frame_bytes to segment the
-        payload client-side when needed (e.g., very large payloads).
-        """
-        if frame_bytes is None:
-            # Default: single frame
-            frame_bytes = len(data)
-
-        def _iter():
-            nonlocal offset
-            n = len(data)
-            pos = 0
-            while pos < n:
-                take = min(frame_bytes, n - pos)
-                req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
-                    registration_id=registration_id
-                )
-                req.cpu_chunk.offset = int(offset + pos)
-                req.cpu_chunk.data = data[pos : pos + take]
-                pos += take
-                req.cpu_chunk.last = pos >= n
-                yield req
-
-        try:
-            # Do not retry streaming feeds; iterator cannot be reused safely.
-            self._unary_call(
-                self.stub.FeedRegisterArtifactStream,
-                _iter(),
-                timeout=timeout_s,
-                retries=0,
-            )
-            return True
-        except grpc.RpcError as e:  # noqa: BLE001
-            logger.error(f"FeedRegisterArtifactStream(cpu,data) failed: {e}")
-            return False
 
     def feed_register_artifact_lease_segments(
         self, registration_id: str, segments: list[LeaseSegment]

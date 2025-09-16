@@ -355,7 +355,6 @@ message BeginRegisterArtifactRequest {
   // Realization plan options
   oneof plan {
     CoalescedOptions coalesced = 10;
-    CpuOptions cpu = 11;
     LeaseOptions lease = 12;
   }
 }
@@ -372,16 +371,6 @@ message CoalescedOptions {
   bool release_on_tensor_commit = 2;
 }
 
-message CpuOptions {
-  enum Channel {
-    CHANNEL_UNSPECIFIED = 0;
-    CHANNEL_SHM_RING = 1;
-    CHANNEL_GRPC_STREAM = 2;
-  }
-  Channel preferred_channel = 1;
-  uint32 ring_bytes = 2; // For SHM_RING
-}
-
 message LeaseOptions {
   uint64 min_tensor_bytes = 1;
   uint32 max_tensor_count = 2;
@@ -396,7 +385,6 @@ message BeginRegisterArtifactResponse {
   uint64 total_size = 3; // Confirmed total size
   oneof handshake {
     CoalescedHandshake coalesced = 10;
-    CpuHandshake cpu = 11;
     LeaseHandshake lease = 12;
   }
 }
@@ -405,36 +393,17 @@ message CoalescedHandshake {
   bytes daemon_ipc_handle = 1;
 }
 
-message CpuHandshake {
-  oneof channel {
-    CpuShmRing ring = 1;
-    CpuGrpcStream stream = 2;
-  }
-}
-message CpuShmRing {
-  string name = 1;
-  uint32 ring_bytes = 2;
-}
-message CpuGrpcStream {
-  string token = 1;
-}
 message LeaseHandshake {}
 
 // Stream variants must not reuse unary messages per lint
 message FeedRegisterArtifactStreamRequest {
   string registration_id = 1;
   oneof feed {
-    CpuChunk cpu_chunk = 10;
     LeaseSegments lease_segments = 11;
   }
 }
 message FeedRegisterArtifactStreamResponse {}
 
-message CpuChunk {
-  uint64 offset = 1;
-  bytes data = 2;
-  bool last = 3;
-}
 message LeaseSegments {
   repeated LeasedSegment segments = 1;
 }
