@@ -232,6 +232,8 @@ classDiagram
 - UMA (Unified Memory): `core/store/replica/unified_memory_authority.{h,cc}`
 - Transfers: `core/store/replica/transfer_service.{h,cc}`, `core/store/replica/transfer_helpers.{h,cc}`
 - States: `core/store/replica/memory_state.h`, Locations: `core/common/memory/memory_location.h`
+- GPU unloads are strictly state-protected: if the target is in `LOADING`, `release_memory()` immediately returns `FailedPrecondition`. Callers must wait for completion (typically via `wait_for_state(..., LOADED)`). This prevents concurrent unloads from tearing down VRAM before the replica has finished loading.
+- When accessing a GPU buffer, use `ReplicaLoadController::get_gpu_allocation_view()` to obtain both the base address and the UMA-owned `std::shared_ptr<GpuDeviceMemory>` in one call, ensuring the GPU allocation is not released prematurely during subsequent validation or hashing.
 
 ```mermaid
 stateDiagram-v2

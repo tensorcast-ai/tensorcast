@@ -95,7 +95,7 @@ absl::Status try_evict_gpu_memory_impl(
     }
 
     // Attempt to release GPU memory (safe mode to avoid mid-transfer memory).
-    auto st = replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    auto st = replica->release_memory(MemoryLocation::GPU);
     if (!st.ok()) {
       continue; // Couldn't free – maybe busy.
     }
@@ -421,7 +421,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     if (evict_st.ok()) {
       // Reset replica GPU memory state then retry loading.
       {
-        absl::Status _st = replica->release_memory(common::memory::MemoryLocation::GPU, /*safe_release=*/true);
+        absl::Status _st = replica->release_memory(common::memory::MemoryLocation::GPU);
         if (!_st.ok()) {
           LOG(WARNING) << "release_memory(GPU) failed during retry after eviction: " << _st;
         }
@@ -494,11 +494,12 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
       verify_size = *sz_or;
     }
-    if (target_location == MemoryLocation::GPU) {
-      const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-      if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && verify_size > 0) {
+    if (target_location == MemoryLocation::GPU && verify_size > 0) {
+      auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+      if (view_or.ok()) {
+        [[maybe_unused]] auto keep_gpu_allocation = view_or->allocation;
         auto data_mh_or = loader::compute_data_multihash_from_gpu_memory(
-            gsl::not_null<void*>{gpu_ptrs[0]}, verify_size, target_device_id);
+            gsl::not_null<void*>{view_or->base_ptr}, verify_size, target_device_id);
         if (data_mh_or.ok()) {
           computed_data_mh = *data_mh_or;
         } else {
@@ -634,12 +635,14 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
                 sz_for_verify = *sz_or;
               }
             }
-            if (target_location == MemoryLocation::GPU) {
-              const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-              if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && sz_for_verify > 0) {
-                ptrs.push_back(gpu_ptrs[0]);
+            [[maybe_unused]] std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
+            if (target_location == MemoryLocation::GPU && sz_for_verify > 0) {
+              auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+              if (view_or.ok()) {
+                ptrs.push_back(view_or->base_ptr);
                 sizes.push_back(static_cast<size_t>(sz_for_verify));
                 dev_id = target_device_id;
+                gpu_allocation_guard = view_or->allocation;
               }
             } else {
               const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
@@ -670,12 +673,14 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
             sz_for_verify = *sz_or;
           }
         }
-        if (target_location == MemoryLocation::GPU) {
-          const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-          if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr && sz_for_verify > 0) {
-            ptrs.push_back(gpu_ptrs[0]);
+        [[maybe_unused]] std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
+        if (target_location == MemoryLocation::GPU && sz_for_verify > 0) {
+          auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+          if (view_or.ok()) {
+            ptrs.push_back(view_or->base_ptr);
             sizes.push_back(static_cast<size_t>(sz_for_verify));
             dev_id = target_device_id;
+            gpu_allocation_guard = view_or->allocation;
           }
         } else {
           const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
@@ -718,10 +723,11 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       }
       if (total > 0) {
         if (target_location == MemoryLocation::GPU) {
-          const auto gpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-          if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+          auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+          if (view_or.ok()) {
+            [[maybe_unused]] auto keep_gpu_allocation = view_or->allocation;
             auto mh_or = loader::compute_data_multihash_from_gpu_memory(
-                gsl::not_null<void*>{gpu_ptrs[0]}, total, target_device_id);
+                gsl::not_null<void*>{view_or->base_ptr}, total, target_device_id);
             if (mh_or.ok()) {
               computed_data_mh = *mh_or;
             }
@@ -1060,7 +1066,7 @@ absl::Status StoreEngine::try_evict_memory_for_replica(size_t required_size) {
 
     // Only attempt to free CPU memory for now – GPU eviction will be handled
     // in a future iteration.
-    auto free_status = replica->release_memory(common::memory::MemoryLocation::CPU, /*safe_release=*/true);
+    auto free_status = replica->release_memory(common::memory::MemoryLocation::CPU);
     if (free_status.ok()) {
       metrics_collector_->record_memory_eviction();
       LOG(INFO) << "Evicted replica " << inst_key.artifact_id
@@ -1762,7 +1768,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Release memory outside the critical section if TTL expired
   if (expired_replica) {
     {
-      absl::Status _st = expired_replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+      absl::Status _st = expired_replica->release_memory(MemoryLocation::GPU);
       if (!_st.ok()) {
         VLOG(1) << "release_memory(GPU) failed during TTL cleanup: " << _st;
       }
@@ -1847,13 +1853,13 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       }
       if (entry.plan == PendingRegistrationEntry::Plan::CPU) {
         // VS path allocated CPU memory
-        absl::Status _st = entry.replica->release_memory(MemoryLocation::CPU, /*safe_release=*/true);
+        absl::Status _st = entry.replica->release_memory(MemoryLocation::CPU);
         if (!_st.ok()) {
           VLOG(1) << "release_memory(CPU) failed during idempotent success cleanup: " << _st;
         }
       } else {
         // Coalesced/Lease-materialized path allocated GPU memory
-        absl::Status _st = entry.replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+        absl::Status _st = entry.replica->release_memory(MemoryLocation::GPU);
         if (!_st.ok()) {
           VLOG(1) << "release_memory(GPU) failed during idempotent success cleanup: " << _st;
         }
@@ -1991,7 +1997,7 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
   }
   if (replica) {
     // Release GPU memory; best-effort cleanup but log failures.
-    absl::Status _st = replica->release_memory(MemoryLocation::GPU, /*safe_release=*/true);
+    absl::Status _st = replica->release_memory(MemoryLocation::GPU);
     if (!_st.ok()) {
       VLOG(1) << "abort_registered_artifact: release_memory(GPU) failed: " << _st;
     }

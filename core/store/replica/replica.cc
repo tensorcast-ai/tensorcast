@@ -223,7 +223,7 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
   MemoryState initial_state = memory_manager_->get_state(target_location);
   if (initial_state == MemoryState::FAILED) {
     // Release any partially-allocated resources.
-    absl::Status rel_status = memory_manager_->release_memory(target_location, /*safe_release=*/false);
+    absl::Status rel_status = memory_manager_->release_memory(target_location);
     if (!rel_status.ok()) {
       return make_ready_future(rel_status);
     }
@@ -453,13 +453,12 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
   return absl::InvalidArgumentError("Invalid target location.");
 }
 
-absl::Status Replica::release_memory(MemoryLocation location, bool safe_release) {
+absl::Status Replica::release_memory(MemoryLocation location) {
   absl::MutexLock lock(&mutex_);
 
-  VLOG(2) << "Replica(" << key_.artifact_id << "): Releasing memory for " << location_to_string(location)
-          << ", safe=" << safe_release;
+  VLOG(2) << "Replica(" << key_.artifact_id << "): Releasing memory for " << location_to_string(location);
 
-  absl::Status status = memory_manager_->release_memory(location, safe_release);
+  absl::Status status = memory_manager_->release_memory(location);
 
   // If release was successful and state is now unallocated, invalidate the future
   if (status.ok() && memory_manager_->get_state(location) <= MemoryState::UNALLOCATED) {
@@ -596,32 +595,41 @@ absl::Status Replica::verify_artifact_data(
 absl::Status Replica::verify_key_points(
     common::memory::MemoryLocation location,
     const tensorcast::common::ArtifactVerificationInfo& expected_info) const {
-  absl::MutexLock lock(&mutex_);
-  // Check if data is loaded at the specified location
-  MemoryState state = memory_manager_->get_state(location);
-  if (state != MemoryState::LOADED) {
-    return absl::FailedPreconditionError(
-        absl::StrCat(
-            "Replica data must be loaded at ",
-            location_to_string(location),
-            " before verification. Current state: ",
-            state_to_string(state)));
-  }
-
-  // Get data pointers and sizes
-  std::vector<void*> data_ptrs = memory_manager_->get_pointer(location);
-  if (data_ptrs.empty()) {
-    return absl::InternalError("No data pointers available for loaded replica.");
-  }
-
+  std::vector<void*> data_ptrs;
   std::vector<size_t> data_sizes;
-  uint64_t artifact_size = memory_manager_->get_artifact_size();
+  int device_id = -1;
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
 
-  // Single contiguous buffer for both GPU and CPU under VS
-  data_sizes.push_back(artifact_size);
+  {
+    absl::MutexLock lock(&mutex_);
+    // Check if data is loaded at the specified location
+    MemoryState state = memory_manager_->get_state(location);
+    if (state != MemoryState::LOADED) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "Replica data must be loaded at ",
+              location_to_string(location),
+              " before verification. Current state: ",
+              state_to_string(state)));
+    }
 
-  // Determine device ID for verification
-  int device_id = (location == common::memory::MemoryLocation::GPU) ? memory_manager_->get_local_device_id() : -1;
+    // Get data pointers and sizes
+    data_ptrs = memory_manager_->get_pointer(location);
+    if (data_ptrs.empty()) {
+      return absl::InternalError("No data pointers available for loaded replica.");
+    }
+
+    uint64_t artifact_size = memory_manager_->get_artifact_size();
+    data_sizes.push_back(artifact_size);
+
+    if (location == common::memory::MemoryLocation::GPU) {
+      device_id = memory_manager_->get_local_device_id();
+      gpu_allocation_guard = memory_manager_->get_gpu_allocation_shared();
+      if (!gpu_allocation_guard) {
+        return absl::FailedPreconditionError("GPU allocation not available for verification");
+      }
+    }
+  }
 
   LOG(INFO) << "Replica(" << key_.artifact_id << "): Fast key-point verification for " << location_to_string(location);
 

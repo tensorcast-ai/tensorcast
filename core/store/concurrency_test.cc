@@ -29,6 +29,36 @@ struct LoggingInitializer {
 const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
 } // namespace
 
+// A0: Single-thread smoke test for materialize + unload flow
+TEST_CASE("A0: Smoke materialize/unload flow", "[store_engine][concurrency][a0]") {
+  skip_if_no_cuda("A0");
+
+  const std::string artifact_id = "concurrent_model_a0";
+  const size_t artifact_size = 8 * 1024 * 1024; // 8MB
+
+  TempArtifactFixture fixture("concurrency_a0");
+  fixture.create_model(artifact_id, artifact_size);
+
+  auto store = make_test_store(fixture.root());
+
+  MaterializeHints hints;
+  hints.disk_path = artifact_id;
+  auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  REQUIRE(handle_or.ok());
+
+  auto handle = std::move(handle_or).value();
+  REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());
+
+  auto loaded_devices = store->get_resident_devices(artifact_id);
+  REQUIRE(loaded_devices.size() == 1);
+  REQUIRE(loaded_devices[0].type == tensorcast::DeviceType::GPU);
+  REQUIRE(loaded_devices[0].ordinal == 0);
+
+  auto replica_key = make_replica_key(artifact_id, 0);
+  REQUIRE(store->unload_replica(replica_key) == 0);
+  REQUIRE(store->get_resident_devices(artifact_id).empty());
+}
+
 // A1: 32 threads calling materialize_replica() on the same replica
 TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][concurrency][a1]") {
   skip_if_no_cuda("A1");

@@ -105,13 +105,12 @@ class ReplicaLoadController {
   /**
    * @brief Releases memory at the specified location.
    * If the memory was allocated by this manager, it's returned to the pool or freed.
-   * Transitions state to UNALLOCATED or UNINITIALIZED.
+   * Transitions state to UNALLOCATED except when the current state is FAILED (kept for observability).
+   * Refuses to release if the state is LOADING.
    * @param location CPU or GPU.
-   * @param safe_release If true, refuses to release if state is LOADING.
-   * @return absl::Status OkStatus or error (e.g., if safe_release is true and state is LOADING).
+   * @return absl::Status OkStatus or FailedPrecondition if LOADING (GPU always fails while transfers are in-flight).
    */
-  [[nodiscard]] absl::Status release_memory(common::memory::MemoryLocation location, bool safe_release = false)
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  [[nodiscard]] absl::Status release_memory(common::memory::MemoryLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets the current memory state for the specified location.
@@ -128,6 +127,18 @@ class ReplicaLoadController {
    */
   [[nodiscard]] std::vector<void*> get_pointer(common::memory::MemoryLocation location) const
       ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Exposes the shared GPU allocation handle; primarily for ensuring the
+  // lifetime of UMA-managed allocations during async transfers.
+  [[nodiscard]] std::shared_ptr<common::memory::GpuDeviceMemory> get_gpu_allocation_shared() const
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  struct GpuAllocationView {
+    void* base_ptr = nullptr;
+    std::shared_ptr<common::memory::GpuDeviceMemory> allocation;
+  };
+
+  [[nodiscard]] absl::StatusOr<GpuAllocationView> get_gpu_allocation_view() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Retrieves the CUDA IPC memory handle associated with the managed GPU

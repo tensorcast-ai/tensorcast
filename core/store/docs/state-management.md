@@ -42,7 +42,6 @@ stateDiagram-v2
 
     LOADING --> LOADED: Loading successful
     LOADING --> FAILED: Loading failed
-    LOADING --> UNALLOCATED: Force release
 
     LOADED --> UNALLOCATED: release_memory()
     LOADED --> LOADING: Data transfer
@@ -61,7 +60,7 @@ stateDiagram-v2
 | UNINITIALIZED | ❌ | ❌ | Initialize |
 | UNALLOCATED | ❌ | ❌ | Allocate memory |
 | ALLOCATED | ✅ | ❌ | Start loading, release memory |
-| LOADING | ✅ | ⚠️ | Wait for completion, force release |
+| LOADING | ✅ | ⚠️ | Wait for completion; release is blocked until load finishes |
 | LOADED | ✅ | ✅ | Access data, transfer data, release memory |
 | FAILED | ⚠️ | ❌ | Cleanup resources |
 
@@ -202,14 +201,8 @@ sequenceDiagram
     Client->>MM: release_memory(safe=true)
     MM->>MM: check current state
 
-    alt state == LOADING && safe_release
-        MM-->>Client: error (unsafe)
-    else state == LOADING && !safe_release
-        MM->>MM: wait briefly
-        MM->>MM: force transition to FAILED
-        MM->>Pool: return buffers
-        MM->>MM: set_state(UNALLOCATED)
-        MM-->>Client: success with warning
+    alt state == LOADING
+        MM-->>Client: error (load in progress)
     else state >= ALLOCATED
         MM->>Pool: return buffers
         MM->>MM: set_state(UNALLOCATED)

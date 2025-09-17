@@ -224,7 +224,7 @@ absl::Status ReplicaLoadController::allocate_gpu_memory() {
   return set_state_locked(MemoryLocation::GPU, MemoryState::ALLOCATED);
 }
 
-absl::Status ReplicaLoadController::release_memory(MemoryLocation location, bool safe_release) {
+absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
   absl::MutexLock lock(&mutex_);
 
   std::string loc_str = location_to_string(location);
@@ -235,23 +235,20 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location, bool
             "ReplicaLoadController($0): Invalid location for release: $1", replica_key_.artifact_id, loc_str));
   }
   MemoryState* state_ptr = sc_or->state;
-  absl::CondVar* cond_ptr = sc_or->cond;
 
   // CPU has special handling (does not free VS region)
   if (location == MemoryLocation::CPU) {
-    VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id
-            << "): release_memory called for CPU (safe_release=" << safe_release << ")";
+    VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): release_memory called for CPU";
 
     MemoryState current_state = *state_ptr;
-    if (current_state == MemoryState::LOADING && safe_release) {
+    if (current_state == MemoryState::LOADING) {
       return absl::FailedPreconditionError(
           absl::Substitute(
-              "ReplicaLoadController($0): Cannot safely release CPU while LOADING.", replica_key_.artifact_id));
+              "ReplicaLoadController($0): Cannot release CPU memory while a load is in progress.",
+              replica_key_.artifact_id));
     }
 
-    if (current_state == MemoryState::LOADING && !safe_release) {
-      ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
-    } else if (current_state != MemoryState::UNALLOCATED) {
+    if (current_state != MemoryState::UNALLOCATED) {
       ABSL_CHECK_OK(set_state_locked(location, MemoryState::UNALLOCATED));
     }
 
@@ -260,7 +257,7 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location, bool
 
   MemoryState current_state = *state_ptr;
   VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Requesting release for " << loc_str
-          << " (current state: " << state_to_string(current_state) << ", safe_release: " << safe_release << ")";
+          << " (current state: " << state_to_string(current_state) << ")";
 
   if (current_state <= MemoryState::UNALLOCATED) {
     VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Memory for " << loc_str
@@ -269,33 +266,15 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location, bool
   }
 
   if (current_state == MemoryState::LOADING) {
-    if (safe_release) {
-      LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Safe release requested for "
-                   << loc_str << " while LOADING. Release denied.";
-      return absl::FailedPreconditionError(
-          absl::Substitute(
-              "ReplicaLoadController($0): Cannot safely release $1 memory while in LOADING state.",
-              replica_key_.artifact_id,
-              loc_str));
-    }
-
-    VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Unsafe release requested for " << loc_str
-            << " while LOADING. Attempting to wait briefly...";
-    if (cond_ptr->WaitWithTimeout(&mutex_, absl::Milliseconds(500))) {
-      LOG(ERROR) << "ReplicaLoadController(" << replica_key_.artifact_id
-                 << "): Timeout expired while waiting for LOADING state on " << loc_str
-                 << " to resolve during unsafe release.";
-    }
-
-    current_state = *state_ptr;
-    if (current_state == MemoryState::LOADING) {
-      LOG(ERROR) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Force releasing " << loc_str
-                 << " memory while still LOADING after wait. Setting state to FAILED. Potential resource issues.";
-      ABSL_CHECK_OK(set_state_locked(location, MemoryState::FAILED));
-    } else {
-      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): State for " << loc_str << " changed to "
-              << state_to_string(current_state) << " during wait. Proceeding with release.";
-    }
+    // When a concurrent load is in-flight we refuse to tear down resources.
+    // Callers should retry once the load completes.
+    VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Release requested for " << loc_str
+            << " while LOADING. Returning FailedPrecondition without releasing.";
+    return absl::FailedPreconditionError(
+        absl::Substitute(
+            "ReplicaLoadController($0): Cannot release $1 memory while a load is in progress.",
+            replica_key_.artifact_id,
+            loc_str));
   }
 
   // Proceed with GPU resource release
@@ -375,6 +354,26 @@ std::vector<void*> ReplicaLoadController::get_pointer(MemoryLocation location) c
     return {};
   }
   return std::vector<void*>({base});
+}
+
+std::shared_ptr<common::memory::GpuDeviceMemory> ReplicaLoadController::get_gpu_allocation_shared() const {
+  absl::MutexLock lock(&mutex_);
+  return gpu_.cuda_mem;
+}
+
+absl::StatusOr<ReplicaLoadController::GpuAllocationView> ReplicaLoadController::get_gpu_allocation_view() const {
+  absl::MutexLock lock(&mutex_);
+  if (!gpu_.cuda_mem) {
+    return absl::FailedPreconditionError("GPU allocation not available");
+  }
+  void* base = get_base_ptr_locked(MemoryLocation::GPU);
+  if (base == nullptr) {
+    return absl::FailedPreconditionError("GPU base pointer not available");
+  }
+  GpuAllocationView view;
+  view.base_ptr = base;
+  view.allocation = gpu_.cuda_mem;
+  return view;
 }
 
 void* ReplicaLoadController::get_base_ptr_locked(MemoryLocation location) const {
@@ -1204,6 +1203,7 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
         LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id
                   << "): async load start; target=" << static_cast<int>(target_location) << ", conc=" << concurrency;
         void* gpu_ptr = nullptr;
+        std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
         int device_id = get_local_device_id();
         if (target_location == MemoryLocation::GPU) {
           auto vec = this->get_pointer(MemoryLocation::GPU);
@@ -1212,6 +1212,11 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
             return absl::FailedPreconditionError("GPU memory not allocated");
           }
           gpu_ptr = vec[0];
+          gpu_allocation = this->get_gpu_allocation_shared();
+          if (!gpu_allocation) {
+            this->record_failure_and_fail_(MemoryLocation::GPU, "GPU allocation handle missing");
+            return absl::FailedPreconditionError("GPU allocation handle missing");
+          }
         }
 
         // Plan → Execute → Commit path (final)
@@ -1224,7 +1229,7 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
         LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): UMA plan_load ok; launching execute";
         auto plan = std::move(*plan_or);
         absl::Status exec_status =
-            transfer_service_->execute(plan, target_location, *source, concurrency, gpu_ptr, device_id);
+            transfer_service_->execute(plan, target_location, *source, concurrency, gpu_ptr, gpu_allocation, device_id);
         if (!exec_status.ok()) {
           // Abort session on failure (idempotent)
           auto _ = memory_coordinator_->abort(plan.session_id);

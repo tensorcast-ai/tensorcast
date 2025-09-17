@@ -188,6 +188,7 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
 std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
     MemoryLocation target_location,
     void* gpu_ptr,
+    std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
     int device_id) {
   if (target_location == MemoryLocation::GPU) {
     auto sink = std::make_unique<loader::GpuMemorySink>(loader::GpuMemorySink::Options{
@@ -200,7 +201,8 @@ std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
             return l->artifact_chunk_bytes;
           return get_pool_chunk_size();
         }(),
-        .device_id = device_id});
+        .device_id = device_id,
+        .allocation = std::move(gpu_allocation)});
     return sink;
   }
   // CPU sink writes into VS region via PositionedSink
@@ -272,6 +274,7 @@ absl::Status TransferService::load_from_source(
     int concurrency,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     void* gpu_ptr_or_null,
+    std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
     int device_id) {
   LOG(INFO) << "TransferService::load_from_source begin: artifact_id=" << replica_key_.artifact_id
             << " target=" << static_cast<int>(target_location) << " concurrency=" << concurrency;
@@ -339,7 +342,7 @@ absl::Status TransferService::load_from_source(
   }
 
   loader::StreamingBufferAdapter adapter(session_spb);
-  auto sink = build_sink_(target_location, gpu_ptr_or_null, device_id);
+  auto sink = build_sink_(target_location, gpu_ptr_or_null, std::move(gpu_allocation), device_id);
   if (!sink) {
     return absl::FailedPreconditionError("Failed to construct sink for target location");
   }
@@ -390,6 +393,7 @@ absl::Status TransferService::execute(
     loader::SeekableSource& source,
     int concurrency,
     void* gpu_ptr_or_null,
+    std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
     int device_id) {
   if (concurrency <= 0) {
     return absl::InvalidArgumentError("Concurrency must be positive");
@@ -427,7 +431,7 @@ absl::Status TransferService::execute(
     return init_status;
   }
   loader::StreamingBufferAdapter adapter(session_spb);
-  auto sink = build_sink_(target_location, gpu_ptr_or_null, device_id);
+  auto sink = build_sink_(target_location, gpu_ptr_or_null, std::move(gpu_allocation), device_id);
   if (!sink) {
     return absl::FailedPreconditionError("Failed to construct sink for target location");
   }

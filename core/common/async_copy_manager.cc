@@ -162,6 +162,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       });
 
   if (!status.ok()) {
+    LOG(ERROR) << "AsyncCopyManager::submit_h2d failed: device=" << dst.device_id << " dst_ptr=" << dst_ptr
+               << " src_ptr=" << src_ptr << " bytes=" << bytes << " status=" << status;
     absl::MutexLock lock(&p->mu);
     p->status = status;
     p->done = true;

@@ -13,6 +13,7 @@
 #include "absl/types/span.h"
 #include "gsl/pointers"
 
+#include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
@@ -60,6 +61,7 @@ class TransferService {
       int concurrency,
       std::optional<absl::Span<const uint32_t>> chunk_indices,
       void* gpu_ptr_or_null,
+      std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
       int device_id);
 
   // Execute a pre-built UMA plan: data-plane only, no state changes
@@ -69,12 +71,14 @@ class TransferService {
       loader::SeekableSource& source,
       int concurrency,
       void* gpu_ptr_or_null,
+      std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
       int device_id);
 
  private:
   std::unique_ptr<loader::PositionedSink> build_sink_(
       common::memory::MemoryLocation target_location,
       void* gpu_ptr,
+      std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
       int device_id);
 
   static std::vector<std::pair<uint64_t, size_t>> build_ranges_(
