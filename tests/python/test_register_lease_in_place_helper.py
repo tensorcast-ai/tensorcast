@@ -35,7 +35,7 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
         b = torch.full((64,), 0x77, dtype=torch.uint8, device=dev)
         state = {"a": a, "b": b}
         opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
-        res = register_artifact(state, options=opts, ttl_ms=2000, daemon_address=listen, create_post_commit_lease=True)
+        res = register_artifact(state, options=opts, ttl_ms=2000, daemon_address=listen)
         desc, lease = res.descriptor, res.lease
         assert desc.artifact_id.startswith("mi2:")
         # Keepalive thread should be running; sleep to allow a keepalive tick

@@ -476,7 +476,7 @@ def make_plan_model(
         )
     if plan_type is PlanType.VRAM_LEASED:
         # Current release only supports Lease-In-Place (LIP)
-        in_place = options.lease_in_place
+        in_place = bool(getattr(options, "lease_in_place", False))
         if not in_place:
             raise InvalidPlan(
                 "vram_leased (in_place=false) is not implemented; set lease_in_place=True"
@@ -486,7 +486,7 @@ def make_plan_model(
             min_tensor_bytes=options.min_tensor_bytes,
             max_tensor_count=options.max_tensor_count,
             lease_bytes_limit=options.lease_bytes_limit,
-            in_place=in_place,
+            in_place=True,
         )
     raise InvalidPlan(f"Unknown plan: {plan_type}")
 
@@ -583,7 +583,6 @@ def _register_artifact_core(
     daemon_address: str | None,
     force_lease_in_place: bool = False,
     prevalidate_disk: bool = True,
-    create_post_commit_lease: bool = False,
 ) -> RegistrationResult:
     if not artifact:
         raise TensorCastError("artifact must not be empty")
@@ -672,15 +671,13 @@ def _register_artifact_core(
                 _persist_publish_if_needed(
                     desc=desc, options=options, state_dict_to_save=None
                 )
-                lease_obj: RegisteredLease | None = None
-                if create_post_commit_lease:
-                    ctl = get_daemon_client(addr)
-                    lease_obj = RegisteredLease(
-                        registration_id=handle.registration_id,
-                        daemon_address=addr,
-                        ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
-                        owner_pid=ctl._get_effective_pid(),
-                    )
+                ctl = get_daemon_client(addr)
+                lease_obj: RegisteredLease = RegisteredLease(
+                    registration_id=handle.registration_id,
+                    daemon_address=addr,
+                    ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
+                    owner_pid=ctl._get_effective_pid(),
+                )
                 # For lease plans, return original artifact as the state_dict
                 return RegistrationResult(
                     state_dict=artifact, descriptor=desc, lease=lease_obj
@@ -696,13 +693,11 @@ def register_artifact(
     device_id: int | torch.device | None = None,
     ttl_ms: int | None = None,
     daemon_address: str | None = None,
-    create_post_commit_lease: bool = False,
 ) -> RegistrationResult:
     """Unified high-level API returning a structured result.
 
     - For Coalesced/UMA/VS: returns destination state dict and descriptor.
     - For Lease (in_place according to options): returns original artifact as state_dict and descriptor.
-    - If create_post_commit_lease is True and plan is lease in-place, also returns a RegisteredLease.
     """
     return _register_artifact_core(
         artifact=artifact,
@@ -712,5 +707,4 @@ def register_artifact(
         daemon_address=daemon_address,
         force_lease_in_place=False,
         prevalidate_disk=True,
-        create_post_commit_lease=create_post_commit_lease,
     )

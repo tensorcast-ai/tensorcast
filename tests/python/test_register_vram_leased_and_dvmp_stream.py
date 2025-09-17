@@ -44,7 +44,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
         t2 = torch.zeros((8, 8), dtype=torch.float32, device=device)
         state = {"t1": t1, "t2": t2}
 
-        opts = RegisterArtifactOptions(plan="vram_leased")
+        opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
         # For lease: do not pass device_id so SDK infers and uses CUDA path
         res = register_artifact(state, options=opts, daemon_address=listen)
         desc = res.descriptor
@@ -121,7 +121,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
             total_size_bytes=total_size,
             ttl_ms=500,
             tensor_index_data=index_bytes,
-            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=16, lease_bytes_limit=0),
+            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=16, lease_bytes_limit=0, in_place=True),
             daemon_address=listen,
         )
 
@@ -180,7 +180,7 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
             total_size_bytes=sz,
             ttl_ms=50,
             tensor_index_data=index_bytes,
-            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=8, lease_bytes_limit=0),
+            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=8, lease_bytes_limit=0, in_place=True),
             daemon_address=listen,
         )
         time.sleep(0.08)
