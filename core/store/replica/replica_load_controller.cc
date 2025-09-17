@@ -408,9 +408,9 @@ absl::Status ReplicaLoadController::set_state(MemoryLocation location, MemorySta
 absl::StatusOr<ReplicaLoadController::StateCond> ReplicaLoadController::get_state_cond_locked(MemoryLocation location) {
   switch (location) {
     case MemoryLocation::CPU:
-      return StateCond{.state = &cpu_.state, .cond = &cpu_.cond};
+      return StateCond{.state = &cpu_.state, .cond = &cpu_.cond, .load_epoch = &cpu_.load_epoch};
     case MemoryLocation::GPU:
-      return StateCond{.state = &gpu_.state, .cond = &gpu_.cond};
+      return StateCond{.state = &gpu_.state, .cond = &gpu_.cond, .load_epoch = &gpu_.load_epoch};
     default:
       return absl::InvalidArgumentError("Invalid location");
   }
@@ -427,6 +427,7 @@ absl::Status ReplicaLoadController::set_state_locked(MemoryLocation location, Me
 
   MemoryState* state_ptr = sc_or->state;
   absl::CondVar* cond_ptr = sc_or->cond;
+  uint64_t* load_epoch_ptr = sc_or->load_epoch;
 
   MemoryState old_state = *state_ptr;
   if (old_state == new_state) {
@@ -446,6 +447,9 @@ absl::Status ReplicaLoadController::set_state_locked(MemoryLocation location, Me
 
   log_state_change(location, old_state, new_state);
   *state_ptr = new_state;
+  if (new_state == MemoryState::LOADED && load_epoch_ptr != nullptr) {
+    ++(*load_epoch_ptr);
+  }
   cond_ptr->SignalAll();
   return absl::OkStatus();
 }
@@ -541,6 +545,19 @@ absl::Status ReplicaLoadController::wait_for_state(
   }
   MemoryState* state_ptr = state_cond_or->state;
   absl::CondVar* cond_ptr = state_cond_or->cond;
+  uint64_t* load_epoch_ptr = state_cond_or->load_epoch;
+  const uint64_t initial_epoch =
+      (target_state == MemoryState::LOADED && load_epoch_ptr != nullptr) ? *load_epoch_ptr : 0;
+
+  auto observed_target = [&]() -> bool {
+    if (*state_ptr == target_state) {
+      return true;
+    }
+    if (target_state == MemoryState::LOADED && load_epoch_ptr != nullptr && *load_epoch_ptr > initial_epoch) {
+      return true;
+    }
+    return false;
+  };
 
   VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Waiting for " << loc_str << " to reach state "
           << state_to_string(target_state) << " (current: " << state_to_string(*state_ptr) << ", timeout: " << timeout
@@ -548,9 +565,23 @@ absl::Status ReplicaLoadController::wait_for_state(
 
   absl::Time deadline = (timeout == absl::InfiniteDuration()) ? absl::InfiniteFuture() : absl::Now() + timeout;
 
-  while (*state_ptr != target_state && *state_ptr != MemoryState::FAILED) {
+  if (observed_target()) {
+    const bool epoch_advanced =
+        target_state == MemoryState::LOADED && load_epoch_ptr != nullptr && *load_epoch_ptr > initial_epoch;
+    if (epoch_advanced && *state_ptr != target_state) {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id
+              << "): Target state satisfied by a completed load epoch even though current state is "
+              << state_to_string(*state_ptr);
+    } else {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful. " << loc_str
+              << " already in target state " << state_to_string(target_state);
+    }
+    return absl::OkStatus();
+  }
+
+  while (!observed_target() && *state_ptr != MemoryState::FAILED) {
     if (absl::Now() >= deadline) {
-      if (*state_ptr != target_state && *state_ptr != MemoryState::FAILED) {
+      if (!observed_target() && *state_ptr != MemoryState::FAILED) {
         LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Timeout waiting for " << loc_str
                      << " to reach state " << state_to_string(target_state)
                      << ". Current state: " << state_to_string(*state_ptr);
@@ -562,9 +593,17 @@ absl::Status ReplicaLoadController::wait_for_state(
     cond_ptr->WaitWithDeadline(&mutex_, deadline);
   }
 
-  if (*state_ptr == target_state) {
-    VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful. " << loc_str
-            << " reached target state " << state_to_string(target_state);
+  if (observed_target()) {
+    const bool epoch_advanced =
+        target_state == MemoryState::LOADED && load_epoch_ptr != nullptr && *load_epoch_ptr > initial_epoch;
+    if (epoch_advanced && *state_ptr != target_state) {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful via load epoch advance. "
+              << loc_str << " experienced a LOADED epoch after wait started; current state is "
+              << state_to_string(*state_ptr);
+    } else {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful. " << loc_str
+              << " reached target state " << state_to_string(target_state);
+    }
     return absl::OkStatus();
   }
   if (*state_ptr == MemoryState::FAILED) {

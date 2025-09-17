@@ -190,6 +190,12 @@ sequenceDiagram
     MM-->>Client: Return success
 ```
 
+ReplicaLoadController tracks a monotonic **load epoch** for CPU and GPU pods. Any successful transition to
+`LOADED` increments the epoch before notifiers run. Waiters that call `wait_for_state(..., LOADED)` remember the
+epoch observed at the time they start waiting and treat an increment as success, even if a concurrent
+`release_memory()` reverts the visible state back to `UNALLOCATED` before the waiter wakes up. This prevents
+spurious deadline timeouts when load and unload races occur in tight loops.
+
 #### 3. Memory Release
 
 ```mermaid

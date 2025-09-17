@@ -5,7 +5,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
+#include <mutex>
 #include <thread>
 
 #include "absl/status/status.h"
@@ -451,5 +454,70 @@ TEST_CASE("E10: MaterializeMode edge cases", "[store_engine][edge][e10]") {
       LOG(ERROR) << "Failed to reload replica: " << reload_handle.status().message();
     }
     REQUIRE(reload_handle.ok()); // Should return existing instance
+  }
+}
+
+// E11: wait_for_state tolerates immediate release
+TEST_CASE("E11: wait_for_state tolerates immediate release", "[store_engine][edge][e11]") {
+  skip_if_no_cuda("E11");
+
+  const std::string artifact_id = "edge_model_e11";
+  const size_t artifact_size = 20 * 1024 * 1024; // 20MB
+
+  TempArtifactFixture fixture("edge_e11");
+  fixture.create_model(artifact_id, artifact_size);
+
+  auto store = make_test_store(fixture.root());
+
+  const int num_iterations = 5;
+  const auto replica_key = make_replica_key(artifact_id, 0);
+
+  for (int i = 0; i < num_iterations; ++i) {
+    std::atomic<bool> loader_finished{false};
+    std::atomic<bool> materialize_ok{false};
+    std::atomic<bool> wait_ready_ok{false};
+    std::mutex message_mutex;
+    std::string failure_message;
+
+    auto record_failure = [&](std::string msg) {
+      std::lock_guard<std::mutex> lock(message_mutex);
+      failure_message = std::move(msg);
+    };
+
+    std::thread loader([&]() {
+      MaterializeHints hints{.disk_path = artifact_id};
+      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      if (!handle_or.ok()) {
+        record_failure(handle_or.status().ToString());
+        loader_finished.store(true, std::memory_order_release);
+        return;
+      }
+      materialize_ok.store(true, std::memory_order_release);
+
+      auto ready_status = handle_or.value().wait_ready(std::chrono::milliseconds(30000));
+      if (!ready_status.ok()) {
+        record_failure(ready_status.ToString());
+      } else {
+        wait_ready_ok.store(true, std::memory_order_release);
+      }
+      loader_finished.store(true, std::memory_order_release);
+    });
+
+    std::thread unloader([&]() {
+      while (!loader_finished.load(std::memory_order_acquire)) {
+        (void)store->unload_replica(replica_key);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+
+    loader.join();
+    loader_finished.store(true, std::memory_order_release);
+    unloader.join();
+
+    INFO(failure_message);
+    REQUIRE(materialize_ok.load(std::memory_order_acquire));
+    REQUIRE(wait_ready_ok.load(std::memory_order_acquire));
+
+    (void)store->unload_replica(replica_key);
   }
 }

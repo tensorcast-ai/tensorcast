@@ -336,6 +336,7 @@ class ReplicaLoadController {
   struct StateCond {
     MemoryState* state;
     absl::CondVar* cond;
+    uint64_t* load_epoch;
   };
 
   // New helper returning StatusOr for cleaner call-sites
@@ -392,6 +393,7 @@ class ReplicaLoadController {
     // VS base pointer is managed by UMA; no local cache here
     // Last failure reason for observability
     std::string last_error;
+    uint64_t load_epoch = 0;
   };
 
   struct GpuPod {
@@ -406,6 +408,7 @@ class ReplicaLoadController {
     ExportRegistration comm_registration_info;
     // Last failure reason for observability
     std::string last_error;
+    uint64_t load_epoch = 0;
   };
 
   mutable absl::Mutex mutex_; // Protects all member variables below
