@@ -195,6 +195,7 @@ sc_cc_library(
         ":sink",
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
+        "//core/common:cuda_memory_lib",
         "//core/common:device_guard_lib",
         "@gsl",
         "@opentelemetry-cpp//api:api",

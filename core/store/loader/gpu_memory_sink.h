@@ -3,9 +3,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include "gsl/pointers"
 
 #include "absl/status/status.h"
+#include "core/common/memory/cuda_memory.h"
 #include "core/store/loader/sink.h"
 
 namespace tensorcast::store::loader {
@@ -17,6 +19,7 @@ class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositioned
     uint64_t total_size = 0;
     size_t chunk_size = 128 * 1024 * 1024; // 128MB default
     int device_id = 0;
+    std::shared_ptr<common::memory::GpuDeviceMemory> allocation;
   };
 
   explicit GpuMemorySink(Options options);

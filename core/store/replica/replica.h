@@ -101,12 +101,11 @@ class Replica {
 
   /**
    * @brief Releases the memory associated with the specified location.
+   *        Refuses to release if the memory is currently LOADING.
    * @param location The location to release (MemoryLocation::CPU or MemoryLocation::GPU).
-   * @param safe_release If true, fails if the memory is currently being loaded into.
-   * @return absl::Status OkStatus on success, error otherwise.
+   * @return absl::Status OkStatus on success, FailedPrecondition if LOADING, error otherwise.
    */
-  absl::Status release_memory(common::memory::MemoryLocation location, bool safe_release = false)
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status release_memory(common::memory::MemoryLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Gets the current state of the memory for the specified location.
