@@ -145,6 +145,11 @@ with init(address="local", daemon_config_path=".../store_daemon_config.yaml") as
     ...
 ```
 
+All APIs under `tensorcast.api` require this initialization. Call `tensorcast.init(...)` once per
+process before using helpers such as `register_artifact`, `load_dict_sync`, or `load_dict_async`.
+They automatically reuse the daemon session and gRPC client established during `init()`, and will
+raise a `RuntimeError` if invoked prior to initialization.
+
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.
 - To opt-in to SDK-installed signal handling (e.g., in standalone scripts), pass `install_signal_handlers=True`:

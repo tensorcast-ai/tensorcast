@@ -23,13 +23,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from tensorcast.cli_utils.service_manager import discover_default_config_path
+from tensorcast.api._config import clear_daemon_address, set_daemon_address
+from tensorcast.cli_utils.resolve import ping_daemon, resolve_address_mode
+from tensorcast.cli_utils.service_manager import (
+    discover_default_config_path,
+    start_service,
+)
+from tensorcast.client_config_loader import load_client_config
+from tensorcast.client_runtime import daemon_target_default, set_client_config
+from tensorcast.daemon_ctl import (
+    DaemonCtl,
+    get_daemon_client,
+    release_daemon_client,
+)
+from tensorcast.daemon_runtime_config import load_daemon_config
+from tensorcast.logger import init_logger, setup_logging
 
 _current_ctx: Context | None = None
 _atexit_registered = False
-_ctx_lock: "threading.Lock | None" = (
-    None  # initialized lazily to avoid import-time threading
-)
+_ctx_lock: "threading.Lock" = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -47,18 +59,25 @@ class Context:
     is_owner: bool
     session_id: str | None
     session_dir: str | None
+    client: DaemonCtl
     _closed: bool = False
     _handlers_installed: bool = False
+    _client_released: bool = False
 
     def close(self) -> None:
         if self._closed:
             return
+        if not self._client_released:
+            with contextlib.suppress(Exception):
+                release_daemon_client(self.address)
+            self._client_released = True
         if self.is_owner and self.session_id:
             # Stop daemon session we launched
             from tensorcast.cli_utils.service_manager import stop_service
 
             stop_service(session_id=self.session_id)
         self._closed = True
+        clear_daemon_address()
 
     def __enter__(self) -> "Context":
         return self
@@ -134,18 +153,6 @@ def init(
     requires `daemon_config_path` (or a discoverable default).
     """
     global _current_ctx, _atexit_registered, _ctx_lock
-    # Initialize lock lazily
-    if _ctx_lock is None:
-        import threading as _threading
-
-        _ctx_lock = _threading.Lock()
-
-    # Import here to avoid circular dependencies and heavy imports at module import time
-    from tensorcast.api import set_daemon_address
-    from tensorcast.cli_utils.resolve import ping_daemon, resolve_address_mode
-    from tensorcast.cli_utils.service_manager import start_service
-    from tensorcast.daemon_runtime_config import load_daemon_config
-    from tensorcast.logger import init_logger
 
     logger = init_logger(__name__)
 
@@ -167,12 +174,14 @@ def init(
             if not ping_daemon(resolved_addr):
                 raise RuntimeError(f"No daemon found at {resolved_addr}")
             set_daemon_address(resolved_addr)
+            client = get_daemon_client(resolved_addr)
             logger.info("✅ Connected to daemon at %s", resolved_addr)
             ctx = Context(
                 address=resolved_addr,
                 is_owner=False,
                 session_id=None,
                 session_dir=None,
+                client=client,
             )
             _current_ctx = ctx
             if install_signal_handlers:
@@ -217,6 +226,7 @@ def init(
             port = int(cfg.server.listen.port or 0)
             daemon_address = f"{host}:{port}"
         set_daemon_address(daemon_address)
+        client = get_daemon_client(daemon_address)
         logger.info(
             "✅ tensorcast initialized; daemon at %s (session=%s)",
             daemon_address,
@@ -228,6 +238,7 @@ def init(
             is_owner=True,
             session_id=inst.id,
             session_dir=str(inst.session),
+            client=client,
         )
         _current_ctx = ctx
         if install_signal_handlers:
@@ -243,6 +254,19 @@ def init(
 def is_initialized() -> bool:
     """Return True if a runtime Context has been established and not closed."""
     return _current_ctx is not None and not _current_ctx._closed  # noqa: SLF001
+
+
+def require_initialized() -> Context:
+    ctx = _current_ctx
+    if ctx is None or ctx._closed:
+        raise RuntimeError(
+            "TensorCast runtime is not initialized. Call tensorcast.startup.init() first."
+        )
+    return ctx
+
+
+def current_client() -> DaemonCtl:
+    return require_initialized().client
 
 
 def shutdown() -> None:
@@ -261,10 +285,6 @@ def init_from_client_config(config_path: str) -> None:
     Sets default storage root, daemon target, and client load defaults.
     Also applies logging level from config if provided.
     """
-    from tensorcast.api import set_daemon_address
-    from tensorcast.client_config_loader import load_client_config
-    from tensorcast.client_runtime import daemon_target_default, set_client_config
-    from tensorcast.logger import setup_logging
 
     cfg = load_client_config(config_path)
     set_client_config(cfg)
@@ -287,5 +307,7 @@ __all__ = [
     "init",
     "shutdown",
     "is_initialized",
+    "require_initialized",
+    "current_client",
     "init_from_client_config",
 ]

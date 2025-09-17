@@ -8,8 +8,6 @@ from ._config import (
     GetArtifactOptions,
     PlanType,
     RegisterArtifactOptions,
-    get_daemon_address,
-    set_daemon_address,
 )
 from ._indices import build_indices_from_safetensors, calculate_tensor_device_offsets
 from ._io_disk import load_dict_from_disk, save_dict
@@ -38,8 +36,6 @@ __all__ = [
     "begin_register_artifact_sdk",
     "RegisteredArtifact",
     "RegisteredLease",
-    "set_daemon_address",
-    "get_daemon_address",
     # Config/Options
     "PlanType",
     "RegisterArtifactOptions",

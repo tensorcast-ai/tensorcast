@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -15,17 +16,35 @@ DEFAULT_PINNED_TIMEOUT_MS: int = 30000
 
 
 # Global daemon address configuration
-_global_daemon_address = "127.0.0.1:8073"
+_daemon_address_lock = threading.RLock()
+_global_daemon_address: str | None = None
 _global_store_address = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
 
 
 def set_daemon_address(address: str) -> None:
-    global _global_daemon_address
-    _global_daemon_address = address
+    with _daemon_address_lock:
+        global _global_daemon_address
+        _global_daemon_address = address
 
 
 def get_daemon_address() -> str:
-    return _global_daemon_address
+    with _daemon_address_lock:
+        if _global_daemon_address is None:
+            raise RuntimeError(
+                "TensorCast runtime is not initialized. Call tensorcast.startup.init() first."
+            )
+        return _global_daemon_address
+
+
+def clear_daemon_address() -> None:
+    with _daemon_address_lock:
+        global _global_daemon_address
+        _global_daemon_address = None
+
+
+def has_daemon_address() -> bool:
+    with _daemon_address_lock:
+        return _global_daemon_address is not None
 
 
 def set_global_store_address(address: str) -> None:

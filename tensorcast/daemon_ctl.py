@@ -977,36 +977,61 @@ class DaemonCtl:
 # -----------------------------------------------------------------------------
 # Shared client cache
 # -----------------------------------------------------------------------------
-_CLIENT_CACHE_LOCK: RLock = RLock()
-_CLIENT_CACHE: dict[tuple[str, int], DaemonCtl] = {}
+_CLIENT_LOCK: RLock = RLock()
+_CLIENT_INSTANCE: DaemonCtl | None = None
+_CLIENT_ADDRESS: str | None = None
 
 
 def get_daemon_client(server_address: str = "127.0.0.1:8073") -> DaemonCtl:
-    """Get or create a shared DaemonCtl for the current PID and address.
+    """Get or create the singleton DaemonCtl for the current process.
 
-    Reuses a single gRPC channel per (address, PID) to avoid the overhead of
-    creating new channels on every functional API call. Safe for multi-threaded
-    use; gRPC channels/stubs are thread-safe.
-
-    Note: We key by PID to remain fork-safe. In a forked child process, calls
-    will create a new channel entry rather than reusing parent's channel.
+    All TensorCast API calls share a single client bound to the daemon address
+    established during `tensorcast.startup.init()`. Requesting a different
+    address after initialization is a programmer error and will raise.
     """
-    pid = os.getpid()
-    key = (server_address, pid)
-    with _CLIENT_CACHE_LOCK:
-        client = _CLIENT_CACHE.get(key)
-        if client is None:
-            client = DaemonCtl(server_address)
-            _CLIENT_CACHE[key] = client
-        return client
+    global _CLIENT_INSTANCE, _CLIENT_ADDRESS
+    with _CLIENT_LOCK:
+        if _CLIENT_INSTANCE is None:
+            _CLIENT_INSTANCE = DaemonCtl(server_address)
+            _CLIENT_ADDRESS = server_address
+            return _CLIENT_INSTANCE
+        assert _CLIENT_ADDRESS is not None
+        if server_address != _CLIENT_ADDRESS:
+            raise RuntimeError(
+                "TensorCast client already initialized for address "
+                f"{_CLIENT_ADDRESS}; refusing to create a second client for {server_address}."
+            )
+        return _CLIENT_INSTANCE
 
 
 def _shutdown_daemon_clients() -> None:
-    with _CLIENT_CACHE_LOCK:
-        for c in list(_CLIENT_CACHE.values()):
-            with suppress(Exception):
-                c.close()
-        _CLIENT_CACHE.clear()
+    global _CLIENT_INSTANCE, _CLIENT_ADDRESS
+    with _CLIENT_LOCK:
+        client = _CLIENT_INSTANCE
+        _CLIENT_INSTANCE = None
+        _CLIENT_ADDRESS = None
+    if client is not None:
+        with suppress(Exception):
+            client.close()
+
+
+def release_daemon_client(server_address: str) -> None:
+    """Close and drop the singleton DaemonCtl if it matches `server_address`."""
+
+    global _CLIENT_INSTANCE, _CLIENT_ADDRESS
+    with _CLIENT_LOCK:
+        if _CLIENT_INSTANCE is None:
+            return
+        if _CLIENT_ADDRESS != server_address:
+            raise RuntimeError(
+                "Attempted to release TensorCast client bound to "
+                f"{_CLIENT_ADDRESS}; expected {server_address}."
+            )
+        client = _CLIENT_INSTANCE
+        _CLIENT_INSTANCE = None
+        _CLIENT_ADDRESS = None
+    with suppress(Exception):
+        client.close()
 
 
 atexit.register(_shutdown_daemon_clients)

@@ -24,6 +24,15 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 
 - **RemoteStoreDaemon**: Same as LocalStoreDaemon
 
+## Runtime Initialization
+
+All client processes must call `tensorcast.startup.init(...)` before invoking helpers under
+`tensorcast.api`. Initialization establishes a single process-wide session and gRPC client bound to
+the target Store Daemon. APIs such as `register_artifact` and `load_dict_sync` retrieve that client
+via `tensorcast.startup.require_initialized()` and `tensorcast.startup.current_client()`, and will
+raise a `RuntimeError` when used without a prior `init()`. Shut down the context with
+`tensorcast.startup.shutdown()` when the process no longer needs the daemon connection.
+
 ## Artifact Loading Sequence
 
 ```mermaid
@@ -111,7 +120,7 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 
 ### SDK Helpers
 
-- High-level one-shot helper: `tensorcast.api.register_artifact(state_dict, options=..., ttl_ms=..., daemon_address=...)` handles Begin → (Copy/Feed) → Commit and returns the destination tensors (coalesced when applicable) and the RFC‑0007 descriptor.
+- High-level one-shot helper: `tensorcast.api.register_artifact(state_dict, options=..., ttl_ms=...)` handles Begin → (Copy/Feed) → Commit and returns the destination tensors (coalesced when applicable) and the RFC‑0007 descriptor. The function reuses the daemon connection created during `tensorcast.startup.init()`.
 - Lifecycle handle: `tensorcast.api.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
   - Auto-sends keepalive when `ttl_ms` is provided
   - Exposes `commit()`, `abort()`, `revoke()` and context manager semantics
@@ -156,6 +165,8 @@ Public entry points are exported from `tensorcast/api/__init__.py` and should be
 
 ### Client Reuse & Resiliency
 
-- The Python SDK reuses a shared gRPC client per `(address, PID)` via `tensorcast.daemon_ctl.get_daemon_client(...)` to avoid reconnect overhead during functional calls.
+- The Python SDK establishes a single gRPC client per process during `tensorcast.startup.init()` and
+  subsequent API calls access it through `tensorcast.startup.current_client()`. This guarantees that
+  all helpers interact with the same daemon session and prevents accidental cross-daemon usage.
 - The underlying client enables gRPC keepalive and performs a light retry with channel refresh on transient errors (`UNAVAILABLE`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`).
 - In registration flows, `RegisteredArtifact` holds a cached client for its lifetime (keepalive thread, commit/abort/revoke, and feed helpers reuse the same channel).

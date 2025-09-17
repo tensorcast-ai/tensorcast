@@ -7,4 +7,8 @@ cc_library(
     srcs = [
         "nvidia/cuda_nvrtc/lib/libnvrtc.so.12",
     ],
+    hdrs = glob([
+        "nvidia/cuda_nvrtc/include/**/*.h",
+    ]),
+    includes = ["nvidia/cuda_nvrtc/include"],
 )

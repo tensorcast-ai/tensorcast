@@ -245,7 +245,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
-- **Build System**: Bazel with Clang18
+- **Build System**: Bazel with Clang18 (Dependencies are on MODULE.bazel)
 - **Common Deps**: absl, catch2, nlohmann_json
 
 #### Code Style

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
+import logging
 import threading
 import weakref
 from dataclasses import dataclass
@@ -14,19 +16,18 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
+from tensorcast import startup
 from tensorcast._C import (
     get_cuda_memory_handle,
     get_cuda_memory_ptr,
     restore_tensors,
 )
-from tensorcast.daemon_ctl import get_daemon_client
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.api._config import (
     PlanType,
     RegisterArtifactOptions,
-    get_daemon_address,
     get_global_store_address,
 )
 from tensorcast.api._device import resolve_device
@@ -75,6 +76,9 @@ class RegistrationResult:
     lease: RegisteredLease | None
 
 
+logger = logging.getLogger(__name__)
+
+
 class RegisteredArtifact:
     def __init__(
         self,
@@ -92,8 +96,13 @@ class RegisteredArtifact:
         self._ka_thread: threading.Thread | None = None
         self._ka_stop = threading.Event()
         self._epoch: int = 0
+        if client is None:
+            raise RuntimeError(
+                "RegisteredArtifact requires an active TensorCast session. "
+                "Call tensorcast.startup.init() before using registration APIs."
+            )
         # Cache client for this handle's lifetime
-        self._ctl = client or get_daemon_client(self._addr)
+        self._ctl = client
 
     @property
     def client(self) -> DaemonCtl:
@@ -156,7 +165,13 @@ class RegisteredLease:
     _atexit_installed = False
 
     def __init__(
-        self, registration_id: str, daemon_address: str, ttl_ms: int, owner_pid: int
+        self,
+        registration_id: str,
+        daemon_address: str,
+        ttl_ms: int,
+        owner_pid: int,
+        *,
+        client: DaemonCtl,
     ) -> None:
         if RegisteredLease._live is None:
             RegisteredLease._live = weakref.WeakSet()
@@ -168,6 +183,7 @@ class RegisteredLease:
         self._owner_pid: int = int(owner_pid)
         self._ka_thread: threading.Thread | None = None
         self._ka_stop = threading.Event()
+        self._client = client
 
         RegisteredLease._live.add(self)
         if not RegisteredLease._atexit_installed:
@@ -184,7 +200,7 @@ class RegisteredLease:
             def _keepalive() -> None:
                 import random
 
-                ctl = get_daemon_client(self._addr)
+                ctl = self._client
                 while not self._ka_stop.wait(interval * (0.9 + 0.2 * random.random())):
                     try:
                         ctl.keep_alive_registered_artifact(
@@ -210,9 +226,14 @@ class RegisteredLease:
 
     def _best_effort_revoke(self) -> None:
         try:
-            ctl = get_daemon_client(self._addr)
-            ctl.revoke_registered_artifact(self.registration_id)
+            self._client.revoke_registered_artifact(self.registration_id)
         except Exception:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                logger.debug(
+                    "Failed to revoke registered artifact %s",
+                    self.registration_id,
+                    exc_info=True,
+                )
             # rely on TTL + pid_watcher
             pass
 
@@ -234,9 +255,10 @@ def begin_register_artifact_sdk(
     ttl_ms: int | None,
     tensor_index_data: bytes,
     plan: CoalescedPlan | LeasePlan,
-    daemon_address: str,
 ) -> tuple[RegisteredArtifact, Handshake]:
-    ctl = get_daemon_client(daemon_address)
+    runtime_ctx = startup.require_initialized()
+    ctl = runtime_ctx.client
+    daemon_addr = runtime_ctx.address
     out = ctl.begin_register_artifact(
         device_id=device_id,
         total_size_bytes=total_size_bytes,
@@ -248,7 +270,7 @@ def begin_register_artifact_sdk(
         timeout_s=60.0,
     )
     handle = RegisteredArtifact(
-        out.registration_id, daemon_address, ttl_ms=ttl_ms or 0, client=ctl
+        out.registration_id, daemon_addr, ttl_ms=ttl_ms or 0, client=ctl
     )
     return handle, out.handshake
 
@@ -265,13 +287,13 @@ def _upsert_key_mapping_if_needed(
     artifact_id: str,
     disk_path: str | None,
     descriptor: ArtifactDescriptor | None = None,
+    client: DaemonCtl | None,
 ) -> None:
     if not key:
         return
     try:
-        if descriptor is not None:
-            ctl = get_daemon_client(get_daemon_address())
-            ok = ctl.publish_replica_key(
+        if descriptor is not None and client is not None:
+            ok = client.publish_replica_key(
                 key=key, descriptor=descriptor, disk_path=disk_path or ""
             )
             if ok:
@@ -293,6 +315,7 @@ def _persist_publish_if_needed(
     desc: ArtifactDescriptor,
     options: RegisterArtifactOptions,
     state_dict_to_save: dict[str, torch.Tensor] | None,
+    client: DaemonCtl,
 ) -> None:
     if options.disk_path is not None and options.disk_path.strip() == "":
         try:
@@ -311,6 +334,7 @@ def _persist_publish_if_needed(
                 artifact_id=desc.artifact_id,
                 disk_path=str(out_dir),
                 descriptor=desc,
+                client=client,
             )
         except Exception:
             pass
@@ -320,6 +344,7 @@ def _persist_publish_if_needed(
             artifact_id=desc.artifact_id,
             disk_path=options.disk_path,
             descriptor=desc,
+            client=client,
         )
 
 
@@ -500,7 +525,6 @@ class _CoalescedUploader:
         layout: CoalescedLayout,
         handle: RegisteredArtifact,
         handshake: Handshake,
-        daemon_address: str,
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, CoalescedHandshake):
             raise TensorCastError("Unexpected handshake type for coalesced plan")
@@ -542,7 +566,6 @@ class _LeaseUploader:
         layout: CoalescedLayout,
         handle: RegisteredArtifact,
         handshake: Handshake,
-        daemon_address: str,
     ) -> dict[str, torch.Tensor]:
         def _export_cuda_ipc_handle(ptr: int) -> bytes:
             return get_cuda_memory_handle(ctx.device_id, int(ptr))
@@ -580,10 +603,12 @@ def _register_artifact_core(
     options: RegisterArtifactOptions,
     device_id: int | torch.device | None,
     ttl_ms: int | None,
-    daemon_address: str | None,
     force_lease_in_place: bool = False,
     prevalidate_disk: bool = True,
 ) -> RegistrationResult:
+    runtime_ctx = startup.require_initialized()
+    addr = runtime_ctx.address
+
     if not artifact:
         raise TensorCastError("artifact must not be empty")
 
@@ -600,7 +625,6 @@ def _register_artifact_core(
 
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    addr = daemon_address or get_daemon_address()
 
     if force_lease_in_place:
         plan_type = PlanType.VRAM_LEASED
@@ -633,7 +657,6 @@ def _register_artifact_core(
             ttl_ms=ttl_ms,
             tensor_index_data=index_bytes,
             plan=plan_model,
-            daemon_address=addr,
         )
 
         registrar = PLAN_REGISTRY[plan_type]
@@ -646,12 +669,14 @@ def _register_artifact_core(
                     layout=layout,
                     handle=handle,
                     handshake=hs,
-                    daemon_address=addr,
                 )
                 commit_res = handle.commit(timeout_s=60.0)
                 desc = commit_res.descriptor
                 _persist_publish_if_needed(
-                    desc=desc, options=options, state_dict_to_save=state_dict
+                    desc=desc,
+                    options=options,
+                    state_dict_to_save=state_dict,
+                    client=runtime_ctx.client,
                 )
                 return RegistrationResult(
                     state_dict=state_dict, descriptor=desc, lease=None
@@ -664,19 +689,22 @@ def _register_artifact_core(
                     layout=layout,
                     handle=handle,
                     handshake=hs,
-                    daemon_address=addr,
                 )
                 commit_res = handle.commit(timeout_s=60.0)
                 desc = commit_res.descriptor
                 _persist_publish_if_needed(
-                    desc=desc, options=options, state_dict_to_save=None
+                    desc=desc,
+                    options=options,
+                    state_dict_to_save=None,
+                    client=runtime_ctx.client,
                 )
-                ctl = get_daemon_client(addr)
+                ctl = runtime_ctx.client
                 lease_obj: RegisteredLease = RegisteredLease(
                     registration_id=handle.registration_id,
                     daemon_address=addr,
                     ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
                     owner_pid=ctl._get_effective_pid(),
+                    client=ctl,
                 )
                 # For lease plans, return original artifact as the state_dict
                 return RegistrationResult(
@@ -692,7 +720,6 @@ def register_artifact(
     options: RegisterArtifactOptions,
     device_id: int | torch.device | None = None,
     ttl_ms: int | None = None,
-    daemon_address: str | None = None,
 ) -> RegistrationResult:
     """Unified high-level API returning a structured result.
 
@@ -704,7 +731,6 @@ def register_artifact(
         options=options,
         device_id=device_id,
         ttl_ms=ttl_ms,
-        daemon_address=daemon_address,
         force_lease_in_place=False,
         prevalidate_disk=True,
     )

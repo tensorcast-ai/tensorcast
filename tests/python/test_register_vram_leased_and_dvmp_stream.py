@@ -7,6 +7,7 @@ import pytest
 
 import torch
 
+from tensorcast import startup
 from tensorcast.api._config import RegisterArtifactOptions
 from tensorcast.api import register_artifact
 from tensorcast.daemon_ctl import DaemonCtl
@@ -37,19 +38,23 @@ def test_register_vram_leased_commit(tmp_path: Path):
     except RuntimeError as e:
         pytest.fail(str(e))
     try:
-        device = torch.device("cuda", 0)
-        # Two tensors that share no storage (unique blocks)
-        # Ensure shapes and element counts are consistent
-        t1 = torch.arange(0, 64, dtype=torch.float32, device=device).reshape(8, 8)
-        t2 = torch.zeros((8, 8), dtype=torch.float32, device=device)
-        state = {"t1": t1, "t2": t2}
+        startup.init(address=listen)
+        try:
+            device = torch.device("cuda", 0)
+            # Two tensors that share no storage (unique blocks)
+            # Ensure shapes and element counts are consistent
+            t1 = torch.arange(0, 64, dtype=torch.float32, device=device).reshape(8, 8)
+            t2 = torch.zeros((8, 8), dtype=torch.float32, device=device)
+            state = {"t1": t1, "t2": t2}
 
-        opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
-        # For lease: do not pass device_id so SDK infers and uses CUDA path
-        res = register_artifact(state, options=opts, daemon_address=listen)
-        desc = res.descriptor
-        assert desc.artifact_id.startswith("mi2:")
-        assert desc.total_size > 0
+            opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
+            # For lease: do not pass device_id so SDK infers and uses CUDA path
+            res = register_artifact(state, options=opts)
+            desc = res.descriptor
+            assert desc.artifact_id.startswith("mi2:")
+            assert desc.total_size > 0
+        finally:
+            startup.shutdown()
     finally:
         try:
             proc.terminate()
@@ -69,6 +74,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
         pytest.fail(str(e))
 
     try:
+        startup.init(address=listen)
         import json, random
         device = torch.device("cuda", 0)
         # Three tensors with disjoint storages
@@ -122,7 +128,6 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
             ttl_ms=500,
             tensor_index_data=index_bytes,
             plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=16, lease_bytes_limit=0, in_place=True),
-            daemon_address=listen,
         )
 
         # Export CUDA IPC handles for each unique storage and build segments, then shuffle
@@ -148,6 +153,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
         commit = handle.commit()
         assert commit and commit.descriptor.artifact_id.startswith("mi2:")
     finally:
+        startup.shutdown()
         try:
             proc.terminate()
             proc.wait(timeout=3)
@@ -167,6 +173,7 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
         pytest.fail(str(e))
 
     try:
+        startup.init(address=listen)
         # Lease path only
         import json
         device = torch.device("cuda", 0)
@@ -181,7 +188,6 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
             ttl_ms=50,
             tensor_index_data=index_bytes,
             plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=8, lease_bytes_limit=0, in_place=True),
-            daemon_address=listen,
         )
         time.sleep(0.08)
         ctl = DaemonCtl(listen)
@@ -192,6 +198,7 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
         ok = ctl.feed_register_artifact_lease_segments(handle2.registration_id, [seg])
         assert not ok, "Lease feed should fail after TTL expiry"
     finally:
+        startup.shutdown()
         try:
             proc.terminate()
             proc.wait(timeout=3)

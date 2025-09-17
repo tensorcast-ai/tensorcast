@@ -6,7 +6,10 @@ from typing import Sequence, cast
 
 import torch
 
+from tensorcast import startup
 from tensorcast.api import save_dict, load_dict_sync
+from tests.python.utils.daemon import start_daemon_binary
+from tests.python.utils.ports import get_free_port
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -47,9 +50,25 @@ def test_shared_storage_roundtrip(tmp_path):
     # Save using the unified writer
     save_dict(state_dict, str(save_path))
 
-    loaded_state_dict = load_dict_sync(
-        disk_path=str(save_path), device_id=0, storage_path="", enable_verification=False,
-    )
+    listen = f"127.0.0.1:{get_free_port()}"
+    daemon_proc = start_daemon_binary(listen, tmp_path / "daemon-storage")
+    try:
+        startup.init(address=listen)
+        try:
+            loaded_state_dict = load_dict_sync(
+                disk_path=str(save_path),
+                device_id=0,
+                storage_path="",
+                enable_verification=False,
+            )
+        finally:
+            startup.shutdown()
+    finally:
+        try:
+            daemon_proc.terminate()
+            daemon_proc.wait(timeout=3)
+        except Exception:
+            pass
 
     # For value comparisons, normalize to CPU to avoid device mismatch errors
     loaded_for_compare: dict[str, torch.Tensor] = {

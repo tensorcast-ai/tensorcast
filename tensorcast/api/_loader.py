@@ -12,12 +12,12 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
+from tensorcast import startup
 from tensorcast._C import (
     get_cuda_memory_ptr,
     restore_tensors,
 )
 from tensorcast.client_runtime import client_defaults, daemon_target_default
-from tensorcast.daemon_ctl import get_daemon_client
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
@@ -28,8 +28,6 @@ from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from ._config import (
     DEFAULT_PINNED_TIMEOUT_MS,
     GetArtifactOptions,
-    get_daemon_address,
-    set_daemon_address,
 )
 from ._device import device_uuid_for, resolve_device
 from ._errors import DaemonUnavailable, IndexParseError
@@ -253,11 +251,16 @@ def _apply_client_defaults_if_present(
     pinned_allocation_timeout_ms: int,
     enable_verification: bool,
     wait_for_completion: bool,
+    *,
+    runtime_address: str,
 ) -> tuple[int, bool, bool]:
     cfg_timeout_ms, cfg_enable_ver, cfg_wait = client_defaults()
     cfg_target = daemon_target_default()
-    if cfg_target:
-        set_daemon_address(cfg_target)
+    if cfg_target and cfg_target != runtime_address:
+        raise RuntimeError(
+            "ClientConfig daemon target does not match initialized daemon address. "
+            "Call tensorcast.startup.init() with the desired daemon first."
+        )
 
     if (
         pinned_allocation_timeout_ms == DEFAULT_PINNED_TIMEOUT_MS
@@ -286,7 +289,8 @@ def load_dict_sync(
     """
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = get_daemon_client(get_daemon_address())
+    runtime_ctx = startup.require_initialized()
+    client = runtime_ctx.client
 
     if storage_path is None:
         try:
@@ -326,7 +330,10 @@ def load_dict_sync(
         enable_verification,
         _wait_for_completion,
     ) = _apply_client_defaults_if_present(
-        pinned_allocation_timeout_ms, enable_verification, True
+        pinned_allocation_timeout_ms,
+        enable_verification,
+        True,
+        runtime_address=runtime_ctx.address,
     )
     try:
         loader = DaemonLoader(
@@ -368,7 +375,8 @@ def get_artifact_sync(
     opts = options or GetArtifactOptions()
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = get_daemon_client(get_daemon_address())
+    runtime_ctx = startup.require_initialized()
+    client = runtime_ctx.client
 
     dev_id = resolve_device(device_id)
     replica_uuid = os.urandom(8).hex()
@@ -387,7 +395,6 @@ def get_artifact_sync(
             pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
         )
 
-    client = get_daemon_client(get_daemon_address())
     (
         pinned_ms,
         enable_ver,
@@ -396,6 +403,7 @@ def get_artifact_sync(
         opts.pinned_allocation_timeout_ms,
         opts.enable_verification,
         opts.wait_for_completion,
+        runtime_address=runtime_ctx.address,
     )
     if pinned_ms is not None:
         opts.pinned_allocation_timeout_ms = pinned_ms
@@ -476,7 +484,8 @@ def load_dict_async(
 ) -> LoadHandle:
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
-    client = get_daemon_client(get_daemon_address())
+    runtime_ctx = startup.require_initialized()
+    client = runtime_ctx.client
 
     if storage_path is None:
         try:
@@ -518,7 +527,10 @@ def load_dict_async(
         enable_verification,
         _,
     ) = _apply_client_defaults_if_present(
-        pinned_allocation_timeout_ms, enable_verification, False
+        pinned_allocation_timeout_ms,
+        enable_verification,
+        False,
+        runtime_address=runtime_ctx.address,
     )
 
     loader = DaemonLoader(
@@ -550,7 +562,8 @@ def get_artifact_async(
     opts = options or GetArtifactOptions()
     dev_id = resolve_device(device_id)
     replica_uuid = new_uuid()
-    client = get_daemon_client(get_daemon_address())
+    runtime_ctx = startup.require_initialized()
+    client = runtime_ctx.client
     tracer = trace.get_tracer(__name__)
     with tracer.start_as_current_span(
         "Client/GetArtifactByKey.P2P", kind=SpanKind.INTERNAL

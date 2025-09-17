@@ -69,7 +69,6 @@ def register_artifact(
     *,
     plan: Literal["vram_coalesced", "vram_leased"] = "vram_coalesced",
     enable_p2p: bool = True,
-    daemon_address: str | None = None,
     lease_in_place: bool = False,
     ttl_ms: int | None = None,
 ) -> "RegisteredArtifact":
@@ -82,6 +81,7 @@ Behavioral notes
 - Runs Begin → Feed (for Lease) → optional KeepAlive → Commit.
 - vram_coalesced: Daemon allocates coalesced VRAM; client writes via IPC; Commit registers COALESCED_VRAM.
 - vram_leased: Currently only `lease_in_place=True` (LIP) is implemented and registered at Commit (ephemeral, TTL/KeepAlive). The `lease_in_place=False` (materialize to COALESCED_VRAM at Commit) variant is not implemented in this release.
+- API users must call `tensorcast.startup.init()` before invoking `register_artifact`; the helper reuses the singleton daemon client established during initialization.
 
 ## Control Plane RPCs (Unified)
 

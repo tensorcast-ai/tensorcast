@@ -8,6 +8,7 @@ import grpc
 import pytest
 import torch
 
+from tensorcast import startup
 from tensorcast.api import RegisterArtifactOptions, register_artifact
 from tests.python.utils.daemon import start_daemon_binary
 
@@ -30,21 +31,25 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
     except RuntimeError as e:
         pytest.fail(str(e))
     try:
-        dev = torch.device("cuda", 0)
-        a = torch.arange(0, 32, dtype=torch.uint8, device=dev)
-        b = torch.full((64,), 0x77, dtype=torch.uint8, device=dev)
-        state = {"a": a, "b": b}
-        opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
-        res = register_artifact(state, options=opts, ttl_ms=2000, daemon_address=listen)
-        desc, lease = res.descriptor, res.lease
-        assert desc.artifact_id.startswith("mi2:")
-        # Keepalive thread should be running; sleep to allow a keepalive tick
-        time.sleep(0.5)
+        startup.init(address=listen)
+        try:
+            dev = torch.device("cuda", 0)
+            a = torch.arange(0, 32, dtype=torch.uint8, device=dev)
+            b = torch.full((64,), 0x77, dtype=torch.uint8, device=dev)
+            state = {"a": a, "b": b}
+            opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
+            res = register_artifact(state, options=opts, ttl_ms=2000)
+            desc, lease = res.descriptor, res.lease
+            assert desc.artifact_id.startswith("mi2:")
+            # Keepalive thread should be running; sleep to allow a keepalive tick
+            time.sleep(0.5)
 
-        assert lease is not None
-        # Context revoke
-        with lease:
-            pass
+            assert lease is not None
+            # Context revoke
+            with lease:
+                pass
+        finally:
+            startup.shutdown()
     finally:
         try:
             proc.terminate()
