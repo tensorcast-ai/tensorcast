@@ -8,7 +8,6 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
-#include "core/common/cuda_api.h"
 
 namespace tensorcast::store::loader {
 
@@ -42,40 +41,6 @@ class CpuMemorySourceLocal : public SeekableSource {
  private:
   const uint8_t* base_ptr_;
   uint64_t total_size_;
-  uint64_t current_offset_ = 0;
-};
-
-class GpuMemorySourceLocal : public SeekableSource {
- public:
-  GpuMemorySourceLocal(void* device_ptr, uint64_t total_size, int device_id)
-      : device_ptr_(static_cast<uint8_t*>(device_ptr)), total_size_(total_size), device_id_(device_id) {}
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto st = read_at(current_offset_, dst, max_bytes);
-    if (!st.ok())
-      return st;
-    current_offset_ += *st;
-    return st;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_)
-      return static_cast<size_t>(0);
-    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    if (auto st = tensorcast::cuda::set_device(device_id_); !st.ok())
-      return st;
-    auto st = tensorcast::cuda::memcpy(dst, device_ptr_ + offset, to_copy, cudaMemcpyDeviceToHost);
-    if (!st.ok())
-      return st;
-    if (auto sync = tensorcast::cuda::device_synchronize(); !sync.ok())
-      return sync;
-    return to_copy;
-  }
-
- private:
-  uint8_t* device_ptr_;
-  uint64_t total_size_;
-  int device_id_;
   uint64_t current_offset_ = 0;
 };
 
@@ -128,8 +93,7 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(
     uint64_t total_size,
     int device_id,
     size_t leaf_chunk_bytes) {
-  GpuMemorySourceLocal src(device_ptr.get(), total_size, device_id);
-  return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
+  return common::compute_data_multihash_from_gpu(device_ptr.get(), total_size, device_id, leaf_chunk_bytes);
 }
 
 } // namespace tensorcast::store::loader

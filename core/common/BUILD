@@ -1,5 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
-load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
+load("//core:BUILD.bzl", "cuda_conditional_deps", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
 config_setting(
@@ -96,15 +96,30 @@ sc_cc_library(
 # Content-addressed hashing utilities (RFC-0007)
 sc_cc_library(
     name = "artifact_hash_lib",
-    srcs = ["artifact_hash.cc"],
-    hdrs = ["artifact_hash.h"],
+    srcs = [
+        "artifact_hash_cpu.cc",
+        "artifact_hash_gpu.cc",
+    ],
+    hdrs = [
+        "artifact_hash.h",
+        "artifact_hash_internal.h",
+    ],
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-lcuda"],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@boringssl//:crypto",
-    ],
+    ] + cuda_conditional_deps(
+        fake_cuda_deps = [],
+        real_cuda_deps = ["@nvrtc//:nvrtc"],
+    ),
 )
 
 # Memory management - CUDA memory utilities
