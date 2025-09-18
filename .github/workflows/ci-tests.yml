@@ -60,9 +60,9 @@ jobs:
         run: |
           ln -s $(bazel info output_base)/external external
 
-      - name: Build libstore_engine.so
+      - name: Build libcheckpoint_ext.so
         run: |
-          bazel build //core:libstore_engine.so \
+          bazel build //core:libcheckpoint_ext.so \
             --define use_fake_cuda=true \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
@@ -74,11 +74,11 @@ jobs:
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
-      - name: Upload libstore_engine.so artifact
+      - name: Upload libcheckpoint_ext.so artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libstore_engine-so
-          path: bazel-bin/core/libstore_engine.so
+          name: libcheckpoint_ext-so
+          path: bazel-bin/core/libcheckpoint_ext.so
           if-no-files-found: error
 
       - name: Upload tensorcast_daemon artifact
@@ -205,16 +205,16 @@ jobs:
           uv run ruff check .
           uv run ruff format . --check
 
-      - name: Download libstore_engine.so artifact
+      - name: Download libcheckpoint_ext.so artifact
         uses: actions/download-artifact@v4
         with:
-          name: libstore_engine-so
+          name: libcheckpoint_ext-so
           path: .
 
-      - name: Stage libstore_engine.so for setup.py
+      - name: Stage libcheckpoint_ext.so for setup.py
         run: |
           mkdir -p bazel-bin/core
-          cp -f libstore_engine.so bazel-bin/core/libstore_engine.so
+          cp -f libcheckpoint_ext.so bazel-bin/core/libcheckpoint_ext.so
 
       - name: Download tensorcast_daemon artifact
         uses: actions/download-artifact@v4

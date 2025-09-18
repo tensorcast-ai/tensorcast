@@ -255,13 +255,13 @@ def ensure_external_symlink() -> None:
         print("  ln -s $(bazel info output_base)/external external")
 
 
-def build_store_engine_and_daemon(
+def build_checkpoint_runtime_and_daemon(
     develop: bool = True,
     use_fake_cuda: bool = False,
     use_remote: bool = False,
     use_dist_dir: bool = False,
 ):
-    """Build both core store engine and daemon together in one Bazel invocation.
+    """Build the checkpoint runtime surface and daemon together in one Bazel invocation.
 
     - Honors the same flags as individual builders
     - If BUILD_CORE is false, only the daemon is built
@@ -276,9 +276,9 @@ def build_store_engine_and_daemon(
 
     cmd = [BAZEL_EXE, "build"]
 
-    # Targets: build store_engine only when BUILD_CORE is enabled; daemon always
+    # Targets: build checkpoint surface (for tensorcast._C) and daemon
     targets: list[str] = []
-    targets.append("//core:libstore_engine.so")
+    targets.append("//core:libcheckpoint_ext.so")
     targets.append("//daemon:tensorcast_daemon")
     cmd.extend(targets)
 
@@ -306,7 +306,7 @@ def build_store_engine_and_daemon(
         for i, arg in enumerate(display_cmd):
             if isinstance(arg, str) and arg.startswith("--remote_header=x-buildbuddy-api-key="):
                 display_cmd[i] = "--remote_header=x-buildbuddy-api-key=***REDACTED***"
-    print(f"building store_engine and daemon cmd={display_cmd}")
+    print(f"building checkpoint runtime and daemon cmd={display_cmd}")
 
     status_code = subprocess.run(cmd).returncode
     if status_code != 0:
@@ -366,19 +366,18 @@ def _place_artifact(src: Path, dst: Path, *, prefer_copy: bool, name: str, make_
         os.symlink(str(src.resolve()), str(dst))
 
 
-def copy_libstore_engine(debug: bool):
-    """Place libstore_engine into tensorcast/lib.
+def copy_checkpoint_extension_lib() -> None:
+    """Place libcheckpoint_ext.so into tensorcast/lib.
 
-    - In RELEASE mode: copy the file
+    - In RELEASE mode: copy the file for wheel distribution
     - In default mode: create a symlink to Bazel output to avoid repeated copies
     """
-    # Determine placement mode based on RELEASE flag
     prefer_copy = RELEASE
 
-    src = Path(dir_path) / "bazel-bin" / "core" / "libstore_engine.so"
-    dst = Path(dir_path) / "tensorcast" / "lib" / "libstore_engine.so"
+    src = Path(dir_path) / "bazel-bin" / "core" / "libcheckpoint_ext.so"
+    dst = Path(dir_path) / "tensorcast" / "lib" / "libcheckpoint_ext.so"
 
-    _place_artifact(src, dst, prefer_copy=prefer_copy, name="libstore_engine.so", make_executable=False)
+    _place_artifact(src, dst, prefer_copy=prefer_copy, name="libcheckpoint_ext.so", make_executable=False)
 
 
 def copy_schema_sql() -> None:
@@ -450,12 +449,12 @@ class DevelopCommand(develop):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_store_engine_and_daemon(
+        build_checkpoint_runtime_and_daemon(
             develop=True,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libstore_engine(debug=True)
+        copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
 
@@ -470,12 +469,12 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_store_engine_and_daemon(
+        build_checkpoint_runtime_and_daemon(
             develop=True,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libstore_engine(debug=True)
+        copy_checkpoint_extension_lib()
         BuildExtension.run(self)
         copy_extensions()
         copy_daemon_binary()
@@ -493,12 +492,12 @@ class InstallCommand(install):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_store_engine_and_daemon(
+        build_checkpoint_runtime_and_daemon(
             develop=False,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libstore_engine(debug=False)
+        copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
 
@@ -517,12 +516,12 @@ class BdistCommand(bdist_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_store_engine_and_daemon(
+        build_checkpoint_runtime_and_daemon(
             develop=False,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
-        copy_libstore_engine(debug=False)
+        copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
 
@@ -541,13 +540,13 @@ class EditableWheelCommand(editable_wheel):
 
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
-        build_store_engine_and_daemon(
+        build_checkpoint_runtime_and_daemon(
             develop=True,
             use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         gen_version_file()
-        copy_libstore_engine(debug=True)
+        copy_checkpoint_extension_lib()
         copy_daemon_binary()
         copy_schema_sql()
         editable_wheel.run(self)
@@ -692,7 +691,7 @@ if BUILD_EXTENSION:
                 f"tensorcast.{name}",
                 sources,
                 library_dirs=_library_dirs,
-                libraries=["store_engine"],
+                libraries=["checkpoint_ext"],
                 include_dirs=_include_dirs,
                 extra_compile_args=(
                     [
@@ -718,7 +717,6 @@ if BUILD_EXTENSION:
                         "-Wno-deprecated",
                         "-Wno-deprecated-declarations",
                         "-Wl,--no-as-needed",
-                        "-lstore_engine",
                         "-Wl,-rpath,$ORIGIN/lib",
                         "-lpthread",
                         "-ldl",

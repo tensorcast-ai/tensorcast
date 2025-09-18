@@ -17,7 +17,7 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
 - **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)
-- **Python Bindings**: First-class PyTorch integration via `tensorcast.csrc.checkpoint_py` (zero-copy where possible)
+- **Python Bindings**: First-class PyTorch integration via `tensorcast.csrc.checkpoint_py` (zero-copy where possible), packaged through the Bazel target `//core:libcheckpoint_ext.so`
 - **Memory Optimization**: Handles shared tensor storages to avoid duplication
 
 ## Module Structure

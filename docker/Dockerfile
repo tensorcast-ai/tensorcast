@@ -105,7 +105,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps -e .
 
-ADD tensorcast/lib/libstore_engine.so /app/tensorcast/lib/libstore_engine.so
+ADD tensorcast/lib/libcheckpoint_ext.so /app/tensorcast/lib/libcheckpoint_ext.so
 
 # Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"

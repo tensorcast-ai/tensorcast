@@ -9,8 +9,8 @@
 #include "absl/log/log.h"
 #include "core/common/config/daemon_config_io.h"
 #include "core/common/cuda_api.h"
+#include "core/common/logging_init.h"
 #include "core/common/otel/init.h"
-#include "core/common/otel/logging_sink.h"
 #include "core/common/trace/trace_manager.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/store_engine.h"
@@ -33,7 +33,7 @@ using namespace tensorcast;
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
-
+  common::ensure_logging_initialized();
   // Avoid global using-directives per project guidelines
   // Note: config loading happens below; defer OTel/log-sink init until then.
   // Load unified config from either --config (file) or --config_text (inline)
@@ -98,13 +98,11 @@ int main(int argc, char** argv) {
   }
   opts.global_store_address = gs_addr;
 
-  // Apply logging level/VLOG, install optional sinks, then initialize OTel
-  common::otel::apply_absl_log_level_from_config(cfg.observability().logging());
-  common::otel::install_plain_log_sink_from_config(cfg.observability().logging());
+  // Configure logging level/VLOG and optional sinks, then initialize OTel
+  common::initialize_logging_from_config(cfg.observability().logging());
   if (!common::otel::init_from_config(cfg.observability(), "store-daemon")) {
     LOG(WARNING) << "OpenTelemetry initialization failed; continuing without telemetry";
   }
-  common::otel::install_otel_log_sink_from_config(cfg.observability().logging());
   // Configure Chrome trace directory (optional)
   if (!cfg.observability().tracing().chrome_trace_dir().empty()) {
     common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
