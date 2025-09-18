@@ -277,9 +277,8 @@ jobs:
 
       - name: Generate protos via Buf
         # if: steps.restore-buf-proto-gen.outputs.cache-hit != 'true'
-        run: |
-          cd proto
-          buf generate
+        run: bash ./tools/build_proto_python.sh raw
+        shell: bash
 
       - name: Build C++ extensions with fake CUDA
         run: |
