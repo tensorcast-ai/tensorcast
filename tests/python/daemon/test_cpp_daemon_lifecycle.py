@@ -15,8 +15,10 @@ The test is skipped if the C++ daemon binary is not available.
 from __future__ import annotations
 
 import contextlib
+import os
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 import tempfile
@@ -24,14 +26,20 @@ import yaml
 import os
 import grpc
 import pytest
+import yaml
 
+from tensorcast.cli_utils.proc import (
+    build_daemon_process_env,
+    ensure_cpp_daemon_binary,
+)
 from tensorcast.cli_utils.service_manager import ServiceError
-from tensorcast.cli_utils.proc import ensure_cpp_daemon_binary
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.global_store.config.settings import (
     GlobalStoreConfig,
+)
+from tensorcast.global_store.config.settings import (
     set_config as set_gs_config,
 )
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
     global_store_pb2_grpc,
@@ -111,58 +119,70 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         "communicator": {"enable_rdma": False},
         "observability": {
             "otel": {"enabled": False},
-            "logging": {"level": "INFO", "otel_context_enabled": False, "file": str(log_path)},
+            "logging": {
+                "level": "INFO",
+                "otel_context_enabled": False,
+                "file": str(log_path),
+            },
             "tracing": {"chrome_trace_dir": ""},
         },
         "debug": {"cuda": {"enable_same_process_ipc_fallback": False}},
     }
 
-    with tempfile.NamedTemporaryFile(prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        prefix="tc_daemon_cfg_", suffix=".yaml", mode="w", delete=False
+    ) as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
         cfg_path = Path(f.name)
 
     # Launch daemon with config-only init, capture output for debugging
     proc_log = storage_dir / "daemon_proc.log"
-    log_fd = open(proc_log, "a")
-    proc = subprocess.Popen([str(bin_path), f"--config={cfg_path}"], stdout=log_fd, stderr=log_fd)
-    try:
-        # Poll ListActiveWorkers until daemon registers
-        channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+    with open(proc_log, "a") as log_fd:
+        env = build_daemon_process_env()
+        proc = subprocess.Popen(
+            [str(bin_path), f"--config={cfg_path}"],
+            stdout=log_fd,
+            stderr=log_fd,
+            env=env,
+        )
+        try:
+            # Poll ListActiveWorkers until daemon registers
+            channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+            stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
 
-        deadline = time.time() + 15.0
-        found = None
-        while time.time() < deadline and not found:
-            resp = stub.ListActiveWorkers(global_store_pb2.ListActiveWorkersRequest(include_unavailable=True))
-            for w in resp.workers:
-                if w.grpc_port == listen_port:
-                    found = w
-                    break
-            if not found:
-                time.sleep(0.25)
-        if found is None:
-            try:
+            deadline = time.time() + 15.0
+            found = None
+            while time.time() < deadline and not found:
+                resp = stub.ListActiveWorkers(
+                    global_store_pb2.ListActiveWorkersRequest(include_unavailable=True)
+                )
+                for w in resp.workers:
+                    if w.grpc_port == listen_port:
+                        found = w
+                        break
+                if not found:
+                    time.sleep(0.25)
+            if found is None:
                 tail = ""
                 if log_path.exists():
                     tail = log_path.read_text()[-2000:]
                 proc_tail = ""
-                try:
+                with contextlib.suppress(Exception):
                     proc_tail = proc_log.read_text()[-2000:]
-                except Exception:
-                    pass
                 pytest.fail(
                     "daemon did not register in time;\n"
-                    + "daemon log tail:\n" + tail + "\n"
-                    + "proc output tail:\n" + proc_tail
+                    + "daemon log tail:\n"
+                    + tail
+                    + "\n"
+                    + "proc output tail:\n"
+                    + proc_tail
                 )
-            finally:
-                pass
-        assert found is not None
-        assert found.mem_pool_total_size == 64 * 1024 * 1024
-        assert found.accepting_new_requests is True
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            assert found is not None
+            assert found.mem_pool_total_size == 64 * 1024 * 1024
+            assert found.accepting_new_requests is True
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()

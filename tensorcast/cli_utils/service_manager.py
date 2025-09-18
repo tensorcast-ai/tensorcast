@@ -36,6 +36,7 @@ from .paths import (
     set_current_session_id,
 )
 from .proc import (
+    build_daemon_process_env,
     ensure_cpp_daemon_binary,
     is_matching_daemon_process,
     kill_force,
@@ -143,7 +144,7 @@ def start_service(
     so = open_log_binary(so_path)
     se = open_log_binary(se_path)
 
-    env = {**os.environ, "TENSORCAST_INSTANCE": inst.id}
+    env = build_daemon_process_env({**os.environ, "TENSORCAST_INSTANCE": inst.id})
 
     try:
         proc = subprocess.Popen(

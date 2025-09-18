@@ -28,7 +28,10 @@ uv run -q python -m tensorcast.cli start --no-block --config=examples/config/sto
 If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
 ```
 
-The CLI locates the binary from the wheel or development path automatically.
+The CLI locates the binary from the wheel or development path automatically
+and extends ``LD_LIBRARY_PATH`` with the PyTorch and NVIDIA runtime directories
+bundled in the virtual environment so the daemon resolves ``libtorch`` and
+CUDA libraries without extra shell setup.
 
 When launching in non-blocking mode (`tensorcast start --no-block`), the CLI now
 mirrors daemon stdout and stderr into the invoking terminal in addition to

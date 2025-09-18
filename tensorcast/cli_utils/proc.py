@@ -13,11 +13,88 @@ import os
 import platform
 import signal
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import psutil
 
 from .errors import ServiceError
+
+
+def _discover_daemon_library_paths() -> list[Path]:
+    """Return library search paths required by the daemon runtime.
+
+    The C++ daemon depends on libtorch and NVIDIA CUDA libraries that ship with
+    the Python packages.  Bazel does not embed an rpath for these shared
+    objects, so we construct an explicit list of directories that should be
+    appended to ``LD_LIBRARY_PATH`` before launching the daemon binary.
+    """
+
+    paths: list[Path] = []
+
+    try:
+        import torch
+    except Exception:
+        return paths
+
+    try:
+        torch_root = Path(torch.__file__).resolve().parent
+    except Exception:
+        return paths
+
+    torch_lib = torch_root / "lib"
+    if torch_lib.is_dir():
+        paths.append(torch_lib)
+
+    site_packages = torch_root.parent
+    nvidia_root = site_packages / "nvidia"
+    if nvidia_root.is_dir():
+        paths.extend(
+            candidate
+            for candidate in sorted(nvidia_root.rglob("lib"))
+            if candidate.is_dir()
+        )
+        paths.extend(
+            candidate
+            for candidate in sorted(nvidia_root.rglob("lib64"))
+            if candidate.is_dir()
+        )
+
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for p in paths:
+        try:
+            resolved = p.resolve()
+        except Exception:
+            resolved = p
+        if not resolved.exists():
+            continue
+        if resolved in seen:
+            continue
+        deduped.append(resolved)
+        seen.add(resolved)
+
+    return deduped
+
+
+def build_daemon_process_env(
+    base_env: Mapping[str, str] | None = None,
+    extra_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Prepare an environment mapping for launching the C++ daemon."""
+
+    env = dict(base_env or os.environ)
+    if extra_env:
+        env.update(extra_env)
+
+    ld_paths = _discover_daemon_library_paths()
+    if ld_paths:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        ld_entries = [str(p) for p in ld_paths if str(p)]
+        if existing:
+            ld_entries.append(existing)
+        env["LD_LIBRARY_PATH"] = ":".join(ld_entries)
+
+    return env
 
 
 def _require_linux() -> None:
