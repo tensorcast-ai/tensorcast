@@ -106,7 +106,7 @@ sc_cc_library(
     ],
     linkopts = select({
         ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
+        "//conditions:default": ["-ldl"],
     }),
     visibility = ["//visibility:public"],
     deps = [
@@ -356,10 +356,6 @@ sc_cc_library(
 cc_test(
     name = "virtual_address_space_test",
     srcs = ["memory/virtual_address_space_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":virtual_address_space_lib",
@@ -372,10 +368,6 @@ cc_test(
 cc_test(
     name = "cpu_va_region_handle_test",
     srcs = ["memory/cpu_va_region_handle_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":virtual_address_space_lib",
@@ -389,10 +381,6 @@ cc_test(
 cc_test(
     name = "cuda_api_test",
     srcs = ["cuda_api_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":cuda_api_lib",

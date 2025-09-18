@@ -293,10 +293,6 @@ sc_header_only_library(
 cc_test(
     name = "disk_mmap_test",
     srcs = ["disk_mmap_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common:pinned_buffer_pool_lib",
@@ -311,10 +307,6 @@ cc_test(
 cc_test(
     name = "disk_cpu_load_test",
     srcs = ["disk_cpu_load_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common:pinned_buffer_pool_lib",
@@ -331,10 +323,6 @@ cc_test(
 cc_test(
     name = "disk_cpu_gpu_transfer_test",
     srcs = ["disk_cpu_gpu_transfer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":file_partition_source",
@@ -355,10 +343,6 @@ cc_test(
 cc_test(
     name = "disk_loader_streaming_buffer_test",
     srcs = ["disk_loader_streaming_buffer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":disk_loader",
@@ -377,10 +361,6 @@ cc_test(
 cc_test(
     name = "disk_error_test",
     srcs = ["disk_error_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common:pinned_buffer_pool_lib",
@@ -438,10 +418,6 @@ cc_test(
 cc_test(
     name = "artifact_gpu_auto_release_test",
     srcs = ["artifact_gpu_auto_release_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":file_partition_source",
@@ -461,10 +437,6 @@ cc_test(
 cc_test(
     name = "gpu_memory_sink_test",
     srcs = ["gpu_memory_sink_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":file_partition_source",
@@ -480,10 +452,6 @@ cc_test(
 cc_test(
     name = "artifact_verification_test",
     srcs = ["artifact_verification_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common:artifact_verification_lib",
@@ -512,10 +480,6 @@ cc_test(
 cc_test(
     name = "disk_multi_gpu_test",
     srcs = ["disk_multi_gpu_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":file_partition_source",
@@ -584,10 +548,6 @@ cc_test(
 cc_test(
     name = "artifact_streaming_buffer_test",
     srcs = ["artifact_streaming_buffer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":streaming_buffer_adapter",
@@ -607,10 +567,6 @@ cc_test(
 cc_test(
     name = "p2p_loader_tcp_test",
     srcs = ["p2p_loader_tcp_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":p2p_loader",

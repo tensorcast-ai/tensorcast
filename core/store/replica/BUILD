@@ -256,10 +256,6 @@ cc_test(
 cc_test(
     name = "replica_p2p_transfer_test",
     srcs = ["replica_p2p_transfer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common",
@@ -275,10 +271,6 @@ cc_test(
 cc_test(
     name = "unified_memory_authority_test",
     srcs = ["unified_memory_authority_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     deps = [
         ":unified_memory_authority",
         "//core/common:pinned_buffer_pool_lib",

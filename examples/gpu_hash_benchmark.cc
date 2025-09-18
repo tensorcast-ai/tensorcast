@@ -1,5 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -10,13 +11,13 @@
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
 #include "core/store/loader/source_hash.h"
-#include "gsl/gsl"
 
 namespace tc = tensorcast;
 
@@ -127,8 +128,26 @@ int main() {
       48ULL << 30,
   };
 
-  LOG(INFO)
-      << "size_bytes,display_size,chunk_bytes,leaf_count,gpu_elapsed_ms,gpu_status,cpu_elapsed_ms,cpu_status,hash_match,gpu_gib_per_s,cpu_gib_per_s";
+  const std::vector<std::string> headers = {
+      "size_bytes",
+      "display_size",
+      "chunk_bytes",
+      "leaf_count",
+      "gpu_elapsed_ms",
+      "gpu_status",
+      "cpu_elapsed_ms",
+      "cpu_status",
+      "hash_match",
+      "gpu_gib_per_s",
+      "cpu_gib_per_s",
+  };
+
+  std::vector<std::vector<std::string>> table_rows;
+  table_rows.reserve(sizes_bytes.size());
+
+  auto format_double = [](double value, int precision) { return absl::StrFormat("%.*f", precision, value); };
+
+  auto is_left_aligned = [](size_t index) { return index == 1 || index == 5 || index == 7 || index == 8; };
 
   for (uint64_t size : sizes_bytes) {
     size_t free_bytes = 0;
@@ -152,9 +171,19 @@ int main() {
       const double cpu_gib_per_s = (cpu_status_msg == "ok" && cpu_elapsed_ms > 0.0)
           ? (static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0)) / (cpu_elapsed_ms / 1000.0)
           : 0.0;
-      LOG(INFO) << size << ',' << format_bytes(size) << ',' << chunk_bytes << ',' << leaf_count << ',' << gpu_elapsed_ms
-                << ',' << gpu_status_msg << ',' << cpu_elapsed_ms << ',' << cpu_status_msg << ','
-                << (hash_match ? 1 : 0) << ',' << gpu_gib_per_s << ',' << cpu_gib_per_s;
+      table_rows.push_back({
+          absl::StrCat(size),
+          format_bytes(size),
+          absl::StrCat(chunk_bytes),
+          absl::StrCat(leaf_count),
+          format_double(gpu_elapsed_ms, 3),
+          gpu_status_msg,
+          format_double(cpu_elapsed_ms, 3),
+          cpu_status_msg,
+          hash_match ? "yes" : "no",
+          format_double(gpu_gib_per_s, 3),
+          format_double(cpu_gib_per_s, 3),
+      });
     };
 
     if (auto status = tc::cuda::get_memory_info(&free_bytes, &total_bytes, /*device_id=*/0); !status.ok()) {
@@ -244,6 +273,56 @@ int main() {
 
     emit();
   }
+
+  auto render_separator = [&](const std::vector<size_t>& widths) {
+    std::string separator = "+";
+    for (size_t width : widths) {
+      separator.append(width + 2, '-');
+      separator.push_back('+');
+    }
+    return separator;
+  };
+
+  auto render_row = [&](const std::vector<std::string>& row, const std::vector<size_t>& widths) {
+    std::string line;
+    line.reserve(row.size() * 8);
+    line.push_back('|');
+    for (size_t i = 0; i < row.size(); ++i) {
+      const std::string& cell = row[i];
+      const size_t width = widths[i];
+      const size_t padding = width > cell.size() ? width - cell.size() : 0;
+      line.push_back(' ');
+      if (is_left_aligned(i)) {
+        line.append(cell);
+        line.append(padding, ' ');
+      } else {
+        line.append(padding, ' ');
+        line.append(cell);
+      }
+      line.push_back(' ');
+      line.push_back('|');
+    }
+    return line;
+  };
+
+  std::vector<size_t> column_widths(headers.size(), 0);
+  for (size_t i = 0; i < headers.size(); ++i) {
+    column_widths[i] = headers[i].size();
+  }
+  for (const auto& row : table_rows) {
+    for (size_t i = 0; i < row.size(); ++i) {
+      column_widths[i] = std::max(column_widths[i], row[i].size());
+    }
+  }
+
+  const std::string separator = render_separator(column_widths);
+  LOG(INFO) << separator;
+  LOG(INFO) << render_row(headers, column_widths);
+  LOG(INFO) << separator;
+  for (const auto& row : table_rows) {
+    LOG(INFO) << render_row(row, column_widths);
+  }
+  LOG(INFO) << separator;
 
   return EXIT_SUCCESS;
 }
