@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import time
+from typing import Any
 
 import grpc
 
@@ -37,11 +39,21 @@ def tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def wait_daemon_ready(host: str, port: int, timeout: float = 20.0) -> bool:
+def wait_daemon_ready(
+    host: str,
+    port: int,
+    timeout: float = 20.0,
+    *,
+    proc: subprocess.Popen[Any] | None = None,
+) -> bool:
     deadline = time.time() + timeout
     addr = f"{host}:{port}"
     last_err: Exception | None = None
+    if proc is not None and proc.poll() is not None:
+        return False
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             channel = grpc.insecure_channel(addr)
             stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
@@ -49,6 +61,8 @@ def wait_daemon_ready(host: str, port: int, timeout: float = 20.0) -> bool:
             return True
         except Exception as e:  # noqa: BLE001
             last_err = e
+            if proc is not None and proc.poll() is not None:
+                return False
             if tcp_port_open(host, port, timeout=0.4):
                 return True
             time.sleep(0.2)

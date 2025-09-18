@@ -1,21 +1,27 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#ifndef CORE_COMMON_LOGGING_INIT_H_
-#define CORE_COMMON_LOGGING_INIT_H_
+#pragma once
+
+namespace tensorcast::config::v1 {
+class Observability_Logging;
+} // namespace tensorcast::config::v1
 
 namespace tensorcast::common {
 
 /**
  * Ensure absl logging is initialized exactly once across all modules.
  *
- * Defaults to INFO level. For configuration-driven severity/VLOG and file
- * sinks, entry points should call:
- *  - tensorcast::common::otel::apply_absl_log_level_from_config
- *  - tensorcast::common::otel::install_plain_log_sink_from_config
- *  - tensorcast::common::otel::install_otel_log_sink_from_config
+ * Defaults to INFO level. Entry points that need configuration-driven setup
+ * should call initialize_logging_from_config() after parsing runtime config.
  */
 void ensure_logging_initialized();
 
-} // namespace tensorcast::common
+/**
+ * Initialize and configure logging based on the observability.logging proto.
+ * Safe to call multiple times; updates severity thresholds, VLOG level, and
+ * optional file/OTel sinks atomically. Subsequent calls with different config
+ * replace previously installed sinks.
+ */
+void initialize_logging_from_config(const tensorcast::config::v1::Observability_Logging& log_cfg);
 
-#endif // CORE_COMMON_LOGGING_INIT_H_
+} // namespace tensorcast::common

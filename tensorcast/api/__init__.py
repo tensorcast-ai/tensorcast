@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
-from tensorcast.types import ArtifactDescriptor, CommitResult
-
-from ._config import (
+from tensorcast.api._config import (
     GetArtifactOptions,
     PlanType,
     RegisterArtifactOptions,
 )
-from ._indices import build_indices_from_safetensors, calculate_tensor_device_offsets
-from ._io_disk import load_dict_from_disk, save_dict
-from ._loader import (
+from tensorcast.api._indices import (
+    build_indices_from_safetensors,
+    calculate_tensor_device_offsets,
+)
+from tensorcast.api._io_disk import load_dict_from_disk, save_dict
+from tensorcast.api._loader import (
     get_artifact_async,
     get_artifact_sync,
     load_dict_async,
     load_dict_sync,
 )
-from ._register import (
+from tensorcast.api._register import (
     RegisteredArtifact,
     RegisteredLease,
     begin_register_artifact_sdk,
     register_artifact,
 )
+from tensorcast.types import ArtifactDescriptor, CommitResult
 
 __all__ = [
     # Stable public API

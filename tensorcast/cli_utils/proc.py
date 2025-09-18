@@ -8,6 +8,7 @@ Linux-only features are guarded to avoid crashing on import in other OSes.
 from __future__ import annotations
 
 import contextlib
+import importlib.resources as ir
 import os
 import platform
 import signal
@@ -117,28 +118,14 @@ def is_matching_daemon_process(pid: int, expected_cmd0: Optional[str]) -> bool:
 
 
 def ensure_cpp_daemon_binary() -> Path:
-    env_path = os.environ.get("TENSORCAST_DAEMON_BIN")
-    if env_path:
-        p = Path(env_path)
-        if p.exists() and os.access(p, os.X_OK):
-            return p
-        raise ServiceError(f"TENSORCAST_DAEMON_BIN set but not executable: {p}")
-
-    try:
-        import importlib.resources as ir  # py3.9+
-
-        pkg = ir.files("tensorcast").joinpath("bin").joinpath("tensorcast_daemon")
-        p = Path(str(pkg))
-        if p.exists() and os.access(p, os.X_OK):
-            return p
-    except Exception:
-        pass
-
     repo_root = Path(__file__).resolve().parents[2]
     candidate = repo_root / "bazel-bin" / "daemon" / "tensorcast_daemon"
     if candidate.exists() and os.access(candidate, os.X_OK):
         return candidate
 
-    raise ServiceError(
-        "tensorcast_daemon binary not found. Set TENSORCAST_DAEMON_BIN, install a package containing tensorcast/bin/tensorcast_daemon, or build it via Bazel (bazel build //daemon:tensorcast_daemon)."
-    )
+    pkg = ir.files("tensorcast").joinpath("bin").joinpath("tensorcast_daemon")
+    p = Path(str(pkg))
+    if p.exists() and os.access(p, os.X_OK):
+        return p
+
+    raise ServiceError("tensorcast_daemon binary not found.")

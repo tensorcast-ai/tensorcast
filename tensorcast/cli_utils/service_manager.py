@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +145,7 @@ def start_service(
 
     env = {**os.environ, "TENSORCAST_INSTANCE": inst.id}
 
-    if blocking:
+    try:
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -155,53 +156,13 @@ def start_service(
             preexec_fn=lambda: preexec_fate_sharing(),
             close_fds=True,
         )
-        _register_process(inst, role="daemon", proc=proc, so=so_path, se=se_path)
-        connect_host = resolve_connect_host(host)
-        if publish_meta:
-            _write_meta(
-                inst,
-                address=f"{connect_host}:{port}",
-                config_path=meta_cfg_path,
-                p2p_address=f"{resolve_connect_host(p2p_host)}:{p2p_port}",
-                daemon_bin=str(bin_path),
-            )
-        if register_current:
-            set_current_session_id(inst.id)
-        object.__setattr__(inst, "address", f"{connect_host}:{port}")
-        object.__setattr__(
-            inst, "p2p_address", f"{resolve_connect_host(p2p_host)}:{p2p_port}"
-        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            so.close()
+        with contextlib.suppress(Exception):
+            se.close()
+        raise
 
-        sinks_out: list[Any] = [so]
-        sinks_err: list[Any] = [se]
-        if to_console:
-            sinks_out.append(sys.stdout)
-            sinks_err.append(sys.stderr)
-        t1 = threading.Thread(target=pump, args=(proc.stdout, sinks_out), daemon=True)
-        t2 = threading.Thread(target=pump, args=(proc.stderr, sinks_err), daemon=True)
-        t1.start()
-        t2.start()
-        try:
-            ret = proc.wait()
-            click.echo(f"daemon exited with code {ret}")
-            return inst
-        finally:
-            with contextlib.suppress(Exception):
-                so.close()
-            with contextlib.suppress(Exception):
-                se.close()
-
-    # Non-blocking
-    proc = subprocess.Popen(
-        args,
-        stdin=subprocess.DEVNULL,
-        stdout=so,
-        stderr=se,
-        cwd=inst.session,
-        env=env,
-        preexec_fn=lambda: preexec_fate_sharing(),
-        close_fds=True,
-    )
     _register_process(inst, role="daemon", proc=proc, so=so_path, se=se_path)
     connect_host = resolve_connect_host(host)
     if publish_meta:
@@ -219,25 +180,35 @@ def start_service(
         inst, "p2p_address", f"{resolve_connect_host(p2p_host)}:{p2p_port}"
     )
 
-    if wait:
-        ready = wait_daemon_ready(connect_host, port, timeout=timeout)
-        if not ready:
-            try:
-                pgid = os.getpgid(proc.pid)
-                if not kill_gracefully(pgid, grace=2.0):
-                    kill_force(pgid)
-            except ProcessLookupError:
-                pass
-            with contextlib.suppress(Exception):
-                import shutil
+    sinks_out: list[Any] = [so]
+    sinks_err: list[Any] = [se]
+    if to_console:
+        sinks_out.append(sys.stdout)
+        sinks_err.append(sys.stderr)
+    log_threads = _start_daemon_log_threads(proc, sinks_out, sinks_err)
 
-                shutil.rmtree(inst.root, ignore_errors=True)
-            with contextlib.suppress(Exception):
-                clear_current_session_if_matches(inst.id)
-            with contextlib.suppress(Exception):
-                so.close()
-            with contextlib.suppress(Exception):
-                se.close()
+    if blocking:
+        ret = proc.wait()
+        _join_threads(log_threads)
+        click.echo(f"daemon exited with code {ret}")
+        return inst
+
+    if wait:
+        try:
+            _ensure_process_started(proc, so_path, startup_grace=min(timeout, 1.0))
+        except ServiceError:
+            _cleanup_failed_start(proc, log_threads, inst, so, se)
+            raise
+
+        ready = wait_daemon_ready(connect_host, port, timeout=timeout, proc=proc)
+        if not ready:
+            retcode = proc.poll()
+            _cleanup_failed_start(proc, log_threads, inst, so, se)
+            if retcode is not None:
+                raise ServiceError(
+                    f"Daemon exited with code {retcode} during startup (address={connect_host}:{port}). "
+                    f"Check logs at {so_path}"
+                )
             raise ServiceError(
                 f"Daemon failed to become ready within {timeout:.0f}s (address={connect_host}:{port}). "
                 f"Check logs at {so_path}"
@@ -246,10 +217,6 @@ def start_service(
     click.echo(
         f"StoreDaemon started (daemon session={inst.id}) at {connect_host}:{port}. Logs: {so_path}"
     )
-    with contextlib.suppress(Exception):
-        so.close()
-    with contextlib.suppress(Exception):
-        se.close()
     return inst
 
 
@@ -304,6 +271,94 @@ def logs_tail(
     *, session_id: str | None = None, stderr: bool = False, follow: bool = False
 ) -> None:
     _logs_tail(session_id=session_id, stderr=stderr, follow=follow)
+
+
+def _start_daemon_log_threads(
+    proc: subprocess.Popen[Any], stdout_sinks: list[Any], stderr_sinks: list[Any]
+) -> list[threading.Thread]:
+    threads: list[threading.Thread] = []
+    if proc.stdout is not None:
+        threads.append(_spawn_log_thread(proc.stdout, stdout_sinks))
+    if proc.stderr is not None:
+        threads.append(_spawn_log_thread(proc.stderr, stderr_sinks))
+    return threads
+
+
+def _spawn_log_thread(src, sinks: list[Any]) -> threading.Thread:
+    def _worker() -> None:
+        try:
+            pump(src, sinks)
+        finally:
+            with contextlib.suppress(Exception):
+                src.close()
+            for sink in sinks:
+                if sink in (sys.stdout, sys.stderr):
+                    continue
+                with contextlib.suppress(Exception):
+                    sink.flush()
+                    sink.close()
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    return thread
+
+
+def _join_threads(threads: list[threading.Thread], timeout: float = 1.0) -> None:
+    if not threads:
+        return
+    deadline = time.monotonic() + max(timeout, 0.0)
+    for thread in threads:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0.0:
+            break
+        thread.join(remaining)
+
+
+def _ensure_process_started(
+    proc: subprocess.Popen[Any], log_path: Path, startup_grace: float
+) -> None:
+    grace = max(startup_grace, 0.1)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        retcode = proc.poll()
+        if retcode is not None:
+            raise ServiceError(
+                f"Daemon exited with code {retcode} during startup. Check logs at {log_path}"
+            )
+        time.sleep(0.05)
+    retcode = proc.poll()
+    if retcode is not None:
+        raise ServiceError(
+            f"Daemon exited with code {retcode} during startup. Check logs at {log_path}"
+        )
+
+
+def _cleanup_failed_start(
+    proc: subprocess.Popen[Any],
+    log_threads: list[threading.Thread],
+    inst: DaemonSession,
+    so,
+    se,
+) -> None:
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        pgid = None
+    if (
+        pgid is not None
+        and proc.poll() is None
+        and not kill_gracefully(pgid, grace=2.0)
+    ):
+        kill_force(pgid)
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=2.0)
+    _join_threads(log_threads, timeout=1.0)
+    for stream in (so, se):
+        with contextlib.suppress(Exception):
+            stream.flush()
+            stream.close()
+    with contextlib.suppress(Exception):
+        clear_current_session_if_matches(inst.id)
 
 
 def _register_process(

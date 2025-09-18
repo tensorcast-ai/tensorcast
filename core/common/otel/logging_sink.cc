@@ -2,19 +2,18 @@
 
 #include "core/common/otel/logging_sink.h"
 
-#include <atomic>
 #include <cctype>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 
-#include "absl/log/globals.h"
-#include "absl/log/initialize.h"
 #include "absl/log/log.h"
 #include "absl/log/log_sink.h"
 #include "absl/log/log_sink_registry.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/time.h"
 
 #include "opentelemetry/context/runtime_context.h"
 #include "opentelemetry/trace/context.h"
@@ -117,40 +116,54 @@ class OtelLogSink : public absl::LogSink {
   std::ofstream file_;
 };
 
-std::atomic<bool> g_installed{false};
+std::mutex g_otel_sink_mu;
 std::unique_ptr<OtelLogSink> g_sink;
+std::string g_sink_path;
 
 } // namespace
 
 // Env-driven sink installer removed in final scheme
 
 void remove_otel_log_sink() {
-  if (!g_installed.load(std::memory_order_acquire)) {
+  std::lock_guard<std::mutex> lk(g_otel_sink_mu);
+  if (!g_sink) {
     return;
   }
-  if (g_sink) {
-    absl::RemoveLogSink(g_sink.get());
-    g_sink.reset();
-  }
-  g_installed.store(false, std::memory_order_release);
+  absl::RemoveLogSink(g_sink.get());
+  g_sink.reset();
+  g_sink_path.clear();
 }
 
 void install_otel_log_sink_from_config(const Observability_Logging& log_cfg) {
-  if (g_installed.load(std::memory_order_acquire)) {
-    return;
-  }
-  const bool enabled = log_cfg.otel_context_enabled();
-  if (!enabled) {
-    return;
-  }
   const std::string& path = log_cfg.sink_file();
-  if (path.empty()) {
-    return; // no file target
+  const bool enable_sink = log_cfg.otel_context_enabled() && !path.empty();
+
+  std::lock_guard<std::mutex> lk(g_otel_sink_mu);
+
+  if (!enable_sink) {
+    if (g_sink) {
+      absl::RemoveLogSink(g_sink.get());
+      g_sink.reset();
+      g_sink_path.clear();
+      LOG(INFO) << "Removed OTel log sink";
+    }
+    return;
   }
+
+  if (g_sink && g_sink_path == path) {
+    return;
+  }
+
+  if (g_sink) {
+    absl::RemoveLogSink(g_sink.get());
+    g_sink.reset();
+    g_sink_path.clear();
+  }
+
   auto sink = std::make_unique<OtelLogSink>(path);
   absl::AddLogSink(sink.get());
+  g_sink_path = path;
   g_sink = std::move(sink);
-  g_installed.store(true, std::memory_order_release);
   LOG(INFO) << "Installed OTel log sink (file): " << path;
 }
 
@@ -163,12 +176,14 @@ class PlainFileLogSink : public absl::LogSink {
       LOG(WARNING) << "PlainFileLogSink failed to open file: " << path_;
     }
   }
+
   ~PlainFileLogSink() override {
     std::lock_guard<std::mutex> lk(mu_);
     if (file_.is_open())
       file_.flush();
     file_.close();
   }
+
   void Send(const absl::LogEntry& entry) override {
     const auto ts = absl::FormatTime(entry.timestamp());
     const char sev = [s = entry.log_severity()]() {
@@ -210,46 +225,39 @@ class PlainFileLogSink : public absl::LogSink {
   std::ofstream file_;
 };
 
-std::atomic<bool> g_plain_installed{false};
+std::mutex g_plain_sink_mu;
 std::unique_ptr<PlainFileLogSink> g_plain_sink;
+std::string g_plain_path;
 } // namespace
 
-void apply_absl_log_level_from_config(const Observability_Logging& log_cfg) {
-  absl::InitializeLog();
-  absl::LogSeverityAtLeast min_level = absl::LogSeverityAtLeast::kInfo;
-  switch (log_cfg.level()) {
-    case tensorcast::config::v1::Observability::LOG_LEVEL_DEBUG: // DEBUG via VLOG
-    case tensorcast::config::v1::Observability::LOG_LEVEL_INFO:
-      min_level = absl::LogSeverityAtLeast::kInfo;
-      break;
-    case tensorcast::config::v1::Observability::LOG_LEVEL_WARN:
-      min_level = absl::LogSeverityAtLeast::kWarning;
-      break;
-    case tensorcast::config::v1::Observability::LOG_LEVEL_ERROR:
-      min_level = absl::LogSeverityAtLeast::kError;
-      break;
-    case tensorcast::config::v1::Observability::LOG_LEVEL_UNSPECIFIED:
-    default:
-      min_level = absl::LogSeverityAtLeast::kInfo;
-      break;
-  }
-  absl::SetStderrThreshold(min_level);
-  absl::SetMinLogLevel(min_level);
-  if (log_cfg.vlog_level() > 0) {
-    absl::SetVLogLevel("*", log_cfg.vlog_level());
-  }
-}
-
 void install_plain_log_sink_from_config(const Observability_Logging& log_cfg) {
-  if (g_plain_installed.load(std::memory_order_acquire))
-    return;
   const std::string& path = log_cfg.file();
-  if (path.empty())
+  std::lock_guard<std::mutex> lk(g_plain_sink_mu);
+
+  if (path.empty()) {
+    if (g_plain_sink) {
+      absl::RemoveLogSink(g_plain_sink.get());
+      g_plain_sink.reset();
+      g_plain_path.clear();
+      LOG(INFO) << "Removed plain logfile sink";
+    }
     return;
+  }
+
+  if (g_plain_sink && g_plain_path == path) {
+    return;
+  }
+
+  if (g_plain_sink) {
+    absl::RemoveLogSink(g_plain_sink.get());
+    g_plain_sink.reset();
+    g_plain_path.clear();
+  }
+
   auto sink = std::make_unique<PlainFileLogSink>(path);
   absl::AddLogSink(sink.get());
+  g_plain_path = path;
   g_plain_sink = std::move(sink);
-  g_plain_installed.store(true, std::memory_order_release);
   LOG(INFO) << "Installed plain logfile sink: " << path;
 }
 

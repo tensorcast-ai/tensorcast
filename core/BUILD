@@ -14,13 +14,20 @@ cc_library(
     alwayslink = True,
 )
 
-# Main shared library target
+# Shared library with the minimal surface needed by tensorcast._C.
 cc_binary(
-    name = "libstore_engine.so",
+    name = "libcheckpoint_ext.so",
     linkshared = True,
     linkstatic = True,
     visibility = ["//visibility:public"],
     deps = [
-        ":core",
+        "//core/checkpoint",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_verification_lib",
+        "//core/common:logging_init_lib",
+        "//core/store/loader:canonical_index",
+        "//core/store/loader:file_partition_source",
+        "//core/store/loader:safetensors_util",
+        "//core/store/loader:source_hash",
     ],
 )

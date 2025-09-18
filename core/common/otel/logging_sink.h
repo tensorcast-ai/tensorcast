@@ -13,15 +13,12 @@ namespace tensorcast::common::otel {
 // shutdown paths. Safe to call even if not installed.
 void remove_otel_log_sink();
 
-// Install OTel-enriched log sink based on Observability.Logging config
+// Install or update OTel-enriched log sink based on Observability.Logging.
+// When otel_context_enabled is false or sink_file empty, the sink is removed.
 void install_otel_log_sink_from_config(const tensorcast::config::v1::Observability_Logging& log_cfg);
 
-// Apply absl logging severity and VLOG level from Observability.Logging
-// - Maps LogLevel DEBUG/INFO/WARN/ERROR to absl min log level
-// - Applies global VLOG level when vlog_level > 0
-void apply_absl_log_level_from_config(const tensorcast::config::v1::Observability_Logging& log_cfg);
-
 // Optionally install a plain file sink (no OTel enrichment) if `logging.file`
-// is set. Safe to call multiple times; only installs once.
+// is set. Safe to call multiple times; later calls replace the sink if the
+// target path changes or remove it when empty.
 void install_plain_log_sink_from_config(const tensorcast::config::v1::Observability_Logging& log_cfg);
 } // namespace tensorcast::common::otel

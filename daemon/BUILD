@@ -120,6 +120,7 @@ cc_binary(
         ":grpc_service_impl",
         ":worker_lifecycle",
         "//core/common:daemon_config_io_lib",
+        "//core/common:logging_init_lib",
         "//core/common:otel_init_lib",
         "//core/common:otel_log_sink_lib",
         "//core/common:trace_manager_lib",

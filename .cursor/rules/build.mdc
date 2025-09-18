@@ -40,12 +40,12 @@ python -m pytest tests/python/test_name
 
 ### Core Library (`BUILD_CORE=1`)
 - **Location**: `/core/` directory
-- **Output**: `libstore_engine.so`
+- **Output**: `libcheckpoint_ext.so`
 - **Includes**: checkpoint, store, communicator modules
 
 ### Python Extension (`BUILD_EXTENSION=1`)
 - **Location**: `/tensorcast/csrc/` directory
-- **Output**: `tensorcast._store_engine`, `tensorcast._C`
+- **Output**: `tensorcast._C`
 - **Purpose**: Python bindings for C++ core
 
 ### Fake CUDA Backend (`USE_FAKE_CUDA=1`)

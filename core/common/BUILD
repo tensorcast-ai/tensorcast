@@ -75,7 +75,11 @@ sc_cc_library(
     hdrs = ["logging_init.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":otel_log_sink_lib",
+        "//proto/tensorcast/config/v1:config_cc",
+        "@abseil-cpp//absl/log:globals",
         "@abseil-cpp//absl/log:initialize",
+        "@abseil-cpp//absl/log:vlog_is_on",
     ],
 )
 
@@ -276,10 +280,9 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/config/v1:config_cc",
-        "@abseil-cpp//absl/log:globals",
-        "@abseil-cpp//absl/log:initialize",
         "@abseil-cpp//absl/log:vlog_is_on",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
         "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
     ],

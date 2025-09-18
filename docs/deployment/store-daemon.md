@@ -30,6 +30,16 @@ If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/sto
 
 The CLI locates the binary from the wheel or development path automatically.
 
+When launching in non-blocking mode (`tensorcast start --no-block`), the CLI now
+mirrors daemon stdout and stderr into the invoking terminal in addition to
+persisting them under `~/.tensorcast/sessions/<id>/logs`. Library callers can
+disable console mirroring by invoking `start_service(..., to_console=False)` if
+needed. The CLI also validates that the daemon process stays alive before
+waiting for the gRPC ready probe, failing fast with the daemon's exit code when
+configuration issues prevent startup. Failed launches leave the session log
+directory intact so the captured `daemon.out` / `daemon.err` streams remain
+available for troubleshooting.
+
 ## Manage Daemon Sessions
 
 Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
@@ -51,6 +61,13 @@ uv run -q python -m tensorcast.cli stop
 ## Observability
 
 Metrics are exposed via the unified system; the daemon no longer provides an HTTP metrics endpoint.
+
+### Logging
+
+- `observability.logging.level` drives the daemon's stderr threshold and minimum log level (DEBUG is routed through VLOG).
+- `observability.logging.vlog_level` sets the global `VLOG` verbosity; values <= 0 disable verbose logging.
+- `observability.logging.file` writes plain-text logs to disk in addition to stderr; the sink is hot-swappable at runtime via config reloads.
+- When `observability.logging.otel_context_enabled` and `observability.logging.sink_file` are set, the daemon writes a second log file enriched with OpenTelemetry `trace_id`/`span_id` for correlation.
 
 ## Configuration
 

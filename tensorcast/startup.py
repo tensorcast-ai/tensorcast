@@ -141,6 +141,7 @@ def init(
     timeout: float = 20.0,
     install_signal_handlers: bool = False,
     fate_share_sigterm: bool = False,
+    show_daemon_logs: bool = True,
 ) -> Context:
     """Launch or connect to a Store Daemon and set global address.
 
@@ -151,6 +152,17 @@ def init(
     When launching, a daemon config file is required. If `address` is None and
     there is a current session, connects to it; otherwise `address="local"`
     requires `daemon_config_path` (or a discoverable default).
+
+    Args:
+        address: Target daemon address or resolution mode.
+        daemon_config_path: Config file when launching a local daemon.
+        wait: Wait for startup readiness when launching.
+        timeout: Startup readiness timeout in seconds.
+        install_signal_handlers: Install SIGTERM/SIGINT handlers on success.
+        fate_share_sigterm: Force hard exit on signals when handlers installed.
+        show_daemon_logs: Mirror daemon stdout/stderr to the current console when
+            launching locally. The SDK previously suppressed logs; defaulting to
+            True now preserves full visibility during development.
     """
     global _current_ctx, _atexit_registered, _ctx_lock
 
@@ -210,7 +222,7 @@ def init(
             config_path=cfg_path,
             session_id=None,
             blocking=False,
-            to_console=False,
+            to_console=show_daemon_logs,
             wait=wait,
             timeout=timeout,
             register_current=False,
