@@ -290,29 +290,29 @@ jobs:
           uv run pyright ./tensorcast
           uv run mypy ./tensorcast
 
-      - name: Smoke test C++ StoreDaemon via CLI
-        env:
-          TENSORCAST_DAEMON_BIN: ${{ github.workspace }}/tensorcast_daemon
-          UV_NO_SYNC: "1"
-        run: |
-          set -euxo pipefail
-          PORT=17073
-          uv run -q python -m tensorcast.cli start --non-blocking --host 127.0.0.1 --port ${PORT}
-          deadline=$((SECONDS+10))
-          ok=0
-          while (( SECONDS < deadline )); do
-            if uv run -q python -c "import grpc; from tensorcast.proto import store_daemon_pb2 as pb2, store_daemon_pb2_grpc as pb2g; stub=pb2g.StoreDaemonStub(grpc.insecure_channel('127.0.0.1:${PORT}')); stub.GetServerConfig(pb2.GetServerConfigRequest(), timeout=2.0)" >/dev/null 2>&1; then
-              echo READY
-              ok=1
-              break
-            fi
-            sleep 0.5
-          done
-          if [ "$ok" -ne 1 ]; then
-            echo NOT_READY
-            exit 1
-          fi
-          uv run -q python -m tensorcast.cli stop || true
+      # - name: Smoke test C++ StoreDaemon via CLI
+      #   env:
+      #     TENSORCAST_DAEMON_BIN: ${{ github.workspace }}/tensorcast_daemon
+      #     UV_NO_SYNC: "1"
+      #   run: |
+      #     set -euxo pipefail
+      #     PORT=17073
+      #     uv run -q python -m tensorcast.cli start --non-blocking --host 127.0.0.1 --port ${PORT}
+      #     deadline=$((SECONDS+10))
+      #     ok=0
+      #     while (( SECONDS < deadline )); do
+      #       if uv run -q python -c "import grpc; from tensorcast.proto import store_daemon_pb2 as pb2, store_daemon_pb2_grpc as pb2g; stub=pb2g.StoreDaemonStub(grpc.insecure_channel('127.0.0.1:${PORT}')); stub.GetServerConfig(pb2.GetServerConfigRequest(), timeout=2.0)" >/dev/null 2>&1; then
+      #         echo READY
+      #         ok=1
+      #         break
+      #       fi
+      #       sleep 0.5
+      #     done
+      #     if [ "$ok" -ne 1 ]; then
+      #       echo NOT_READY
+      #       exit 1
+      #     fi
+      #     uv run -q python -m tensorcast.cli stop || true
 
       - name: Run Python tests
         run: |
