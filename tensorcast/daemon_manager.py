@@ -95,7 +95,7 @@ class DaemonManager:
             "-m",
             "tensorcast.cli",
             "start",
-            "--no-block",
+            "--non-blocking",
         ]
         cmd.extend(["--config", str(self._config_path or "")])
         return cmd

@@ -44,7 +44,7 @@ def cli():
     ),
 )
 @click.option(
-    "--block/--no-block",
+    "--blocking/--non-blocking",
     is_flag=True,
     default=False,
     help="Run in blocking mode (foreground). Default is non-blocking",
@@ -62,7 +62,7 @@ def cli():
     show_default=True,
     help="Readiness wait timeout in seconds (with --wait)",
 )
-def start(config: Path | None, block: bool, wait: bool, timeout: float):
+def start(config: Path | None, blocking: bool, wait: bool, timeout: float):
     """Start the StoreDaemon service.
 
     Refuses to start if a current daemon session is already healthy. Use
@@ -87,7 +87,7 @@ def start(config: Path | None, block: bool, wait: bool, timeout: float):
             )
         start_service(
             config_path=cfg,
-            blocking=block,
+            blocking=blocking,
             to_console=True,
             wait=wait,
             timeout=timeout,
@@ -157,7 +157,7 @@ def status(host: str | None, port: int | None):
     ),
 )
 @click.option(
-    "--block/--no-block",
+    "--blocking/--non-blocking",
     is_flag=True,
     default=False,
     help="Run in blocking mode (foreground). Default is non-blocking",
@@ -180,14 +180,14 @@ def restart(
     ctx: click.Context,
     force: bool,
     config: Path | None,
-    block: bool,
+    blocking: bool,
     wait: bool,
     timeout: float,
 ):
     """Restart the StoreDaemon service (UX aligned with start)."""
     ctx.invoke(stop, force=force)
     click.echo("Starting service...")
-    ctx.invoke(start, config=config, block=block, wait=wait, timeout=timeout)
+    ctx.invoke(start, config=config, blocking=blocking, wait=wait, timeout=timeout)
 
 
 @cli.command(name="logs")

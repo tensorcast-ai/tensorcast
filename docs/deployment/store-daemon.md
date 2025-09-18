@@ -23,7 +23,7 @@ bazel build //daemon:tensorcast_daemon
 Use the unified YAML config and start via CLI:
 
 ```
-uv run -q python -m tensorcast.cli start --no-block --config=examples/config/store_daemon_config.yaml
+uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml
 
 If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
 ```
@@ -36,7 +36,7 @@ namespace) that live inside the active Python environment. This allows the
 daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
 
-When launching in non-blocking mode (`tensorcast start --no-block`), the CLI now
+When launching in non-blocking mode (`tensorcast start --non-blocking`), the CLI now
 mirrors daemon stdout and stderr into the invoking terminal in addition to
 persisting them under `~/.tensorcast/sessions/<id>/logs`. Library callers can
 disable console mirroring by invoking `start_service(..., to_console=False)` if

@@ -72,7 +72,7 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
 
 - Development (from source):
   - Build once with Bazel: `bazel build //daemon:tensorcast_daemon`
-  - Start background: `uv run -q python -m tensorcast.cli start --no-block --config=examples/config/store_daemon_config.yaml`
+  - Start background: `uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml`
     - By default non-blocking start waits until the daemon is ready (timeout 20s). Use `--no-wait` to return immediately.
     - Customize readiness timeout: `--timeout 30`
   - Status: `uv run -q python -m tensorcast.cli status`

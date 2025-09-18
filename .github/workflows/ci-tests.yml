@@ -290,13 +290,6 @@ jobs:
           uv run pyright ./tensorcast
           uv run mypy ./tensorcast
 
-      - name: Run Python tests
-        run: |
-          uv run pytest tests/python/ -v --tb=short
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
-        shell: bash
-
       - name: Smoke test C++ StoreDaemon via CLI
         env:
           TENSORCAST_DAEMON_BIN: ${{ github.workspace }}/tensorcast_daemon
@@ -320,3 +313,10 @@ jobs:
             exit 1
           fi
           uv run -q python -m tensorcast.cli stop || true
+
+      - name: Run Python tests
+        run: |
+          uv run pytest tests/python/ -v --tb=short
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
+        shell: bash
