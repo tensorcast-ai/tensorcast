@@ -198,8 +198,6 @@ worker_policy:
   heartbeat_timeout: "30s"
   cleanup_interval: "60s"
   default_heartbeat_interval: "5s"
-web_ui:
-  enabled: false
 observability:
   logging:
     level: LOG_LEVEL_INFO

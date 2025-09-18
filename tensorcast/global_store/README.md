@@ -6,7 +6,7 @@ This document explains the internal implementation of the Global Store (central 
 
 - Purpose: Central registry and control plane for artifacts and workers.
 - Storage: DuckDB (in-memory by default; optional persistent file).
-- Interface: gRPC (unary-unary RPCs), Prometheus metrics, optional Web UI process.
+- Interface: gRPC (unary-unary RPCs) with Prometheus metrics export.
 - Runtime: Background maintenance thread (cleanup + VACUUM), batched heartbeats.
 
 ## Configuration
@@ -21,7 +21,7 @@ This document explains the internal implementation of the Global Store (central 
 
 ```
 tensorcast/global_store/
-├── __main__.py                 # CLI entry: bootstraps server + metrics + Web UI
+├── __main__.py                 # CLI entry: bootstraps server and metrics
 ├── grpc_service.py             # gRPC facade + wiring + maintenance thread
 ├── db_utils.py                 # Schema bootstrap (prefers repo-root schema.sql) + maintenance (VACUUM)
 ├── metrics.py                  # Prometheus metrics + gRPC interceptor
@@ -44,7 +44,6 @@ tensorcast/global_store/
 │   ├── worker_service.py       # Register/Heartbeat/List/Cleanup workers
 │   ├── recovery_service.py     # Startup recovery + state sync
 │   └── chunk_service.py        # Chunk directory (distributed memory pool)
-└── webui_backend/, webui_frontend/ (optional UI)
 ```
 
 ## Architecture

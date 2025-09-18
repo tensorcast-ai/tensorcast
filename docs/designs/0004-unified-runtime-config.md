@@ -53,7 +53,7 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `debug.cuda`: guardrails for same‑process IPC fallback.
 
 - `GlobalStoreConfig` (Python Global Store)
-  - `database`, `server` (`listen`, worker pool, `grpc`), `worker_policy`, optional `web_ui`, `observability`.
+  - `database`, `server` (`listen`, worker pool, `grpc`), `worker_policy`, `observability`.
 
 - `ClientConfig` (Python client/CLI)
   - `daemon.target` (`SocketAddress`), `bin_path`, `python_interpreter`, `storage.default_root`, client defaults and observability.

@@ -24,18 +24,12 @@ message WorkerPolicy {
   google.protobuf.Duration default_heartbeat_interval = 3;
 }
 
-message WebUi {
-  bool enabled = 1;
-  string host = 2;
-  uint32 port = 3;
-  repeated string cors_allowed_origins = 4;
-}
-
 message GlobalStoreConfig {
+  reserved 4;
+  reserved "web_ui";
   Database database = 1;
   GlobalServer server = 2;
   WorkerPolicy worker_policy = 3;
-  WebUi web_ui = 4;
   tensorcast.config.v1.Observability observability = 5;
   tensorcast.config.v1.ConfigMeta meta = 100; // Optional metadata
 }

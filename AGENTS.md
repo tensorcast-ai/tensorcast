@@ -35,7 +35,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 ### Core Components
 - **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
-- **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; gRPC API, Prometheus metrics, optional Web UI.
+- **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; exposes gRPC APIs and Prometheus metrics.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
 - **User Process Worker**: Client process consuming artifacts via `tensorcast.api` (e.g., `load_dict_sync()`), mapping CUDA IPC handles for zero‑copy GPU access.
 
@@ -75,7 +75,6 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - ./core/communicator/README.md — TCP/MTCP/RDMA data-movement engine internals.
 - ./daemon/README.md — C++ Store Daemon architecture, gRPC surface, lifecycles, and flows.
 - ./tensorcast/global_store/README.md — Control plane internals (layered architecture, data model, services, flows).
-  - ./tensorcast/global_store/webui_frontend/README.md — Web UI features, development, and integration.
 - tests/python/README.md — Python test layout and commands for running suites.
 
 ### Doc sync rule (required for agents)

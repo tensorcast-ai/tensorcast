@@ -47,17 +47,6 @@ class GlobalStoreConfig(BaseModel):
     # Metrics settings
     metrics_port: int = 8000
 
-    # Web UI settings
-    ui_port: int = 9000
-    ui_host: str = "0.0.0.0"
-    ui_static_dir: Optional[str] = None
-    ui_enabled: bool = True
-    ui_cors_origins: Optional[str] = (
-        None  # Comma-separated list of allowed CORS origins for the Web UI
-    )
-    # Path for Web UI process log file
-    ui_log_file: Path = Path("/tmp/global-store-webui.log")
-
     class Config:
         # Match previous @dataclass(frozen=True) behaviour (immutability)
         frozen = True
@@ -124,17 +113,6 @@ class GlobalStoreConfig(BaseModel):
         cleanup_interval_ms = max(0, cleanup_interval_ms)
         default_hb_ms = max(0, default_hb_ms)
 
-        # Web UI
-        ui_enabled = pb.web_ui.enabled
-        ui_host = pb.web_ui.host or "0.0.0.0"
-        ui_port = int(pb.web_ui.port) if pb.web_ui.port > 0 else 9000
-        # Convert CORS list to comma-separated for existing code
-        ui_cors_origins = (
-            ",".join(pb.web_ui.cors_allowed_origins)
-            if pb.web_ui.cors_allowed_origins
-            else None
-        )
-
         return cls(
             db_file=db_file,
             heartbeat_timeout_ms=heartbeat_timeout_ms,
@@ -146,12 +124,6 @@ class GlobalStoreConfig(BaseModel):
             optimize_interval_ms=3_600_000,
             # Metrics port: keep default unless overridden elsewhere
             metrics_port=8000,
-            ui_port=ui_port,
-            ui_host=ui_host,
-            ui_static_dir=None,
-            ui_enabled=ui_enabled,
-            ui_cors_origins=ui_cors_origins,
-            ui_log_file=Path("/tmp/global-store-webui.log"),
         )
 
     @staticmethod

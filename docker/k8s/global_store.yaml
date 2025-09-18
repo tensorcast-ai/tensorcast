@@ -18,10 +18,6 @@ spec:
       port: 8001
       targetPort: 8001
       protocol: TCP
-    - name: webui
-      port: 9000
-      targetPort: 9000
-      protocol: TCP
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -88,14 +84,6 @@ spec:
         # Monitoring configuration
         - name: GLOBAL_STORE_METRICS_PORT
           value: "8001"
-        - name: GLOBAL_STORE_UI_PORT
-          value: "9000"
-        - name: GLOBAL_STORE_UI_HOST
-          value: "0.0.0.0"
-        - name: GLOBAL_STORE_UI_ENABLED
-          value: "true"
-        - name: GLOBAL_STORE_UI_LOG_FILE
-          value: "/data/logs/webui.log"
         # Logging configuration
         - name: LOG_LEVEL
           value: "INFO"
@@ -105,9 +93,6 @@ spec:
           protocol: TCP
         - name: metrics
           containerPort: 8001
-          protocol: TCP
-        - name: webui
-          containerPort: 9000
           protocol: TCP
         volumeMounts:
         - name: data
