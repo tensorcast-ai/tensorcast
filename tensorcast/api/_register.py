@@ -21,6 +21,7 @@ from tensorcast._C import (
     get_cuda_memory_ptr,
     restore_tensors,
 )
+from tensorcast.api._indices import calculate_tensor_device_offsets
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
@@ -426,7 +427,6 @@ class CoalescedLayout:
         align: int = DEFAULT_ALIGN,
     ) -> "CoalescedLayout":
         # Note: current implementation ignores `align` to match existing API.
-        from ._indices import calculate_tensor_device_offsets
 
         tensor_device_offsets, unique_chunks_all = calculate_tensor_device_offsets(
             tensor_source_index, int(device_id)
@@ -486,7 +486,7 @@ def make_plan_model(
         )
     if plan_type is PlanType.VRAM_LEASED:
         # Current release only supports Lease-In-Place (LIP)
-        in_place = bool(getattr(options, "lease_in_place", False))
+        in_place = options.lease_in_place
         if not in_place:
             raise InvalidPlan(
                 "vram_leased (in_place=false) is not implemented; set lease_in_place=True"

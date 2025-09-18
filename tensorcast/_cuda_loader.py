@@ -52,7 +52,7 @@ def ensure_nvrtc_builtins_preloaded() -> None:
     if not module:
         return
 
-    lib_dir = Path(module.__file__).resolve().parent / "lib"
+    lib_dir = Path(module.__file__).resolve().parent / "lib"  # pyright: ignore[reportArgumentType]
     if not lib_dir.is_dir():
         _logger.debug(
             "cuda_nvrtc package present but lib/ directory missing at %s", lib_dir
