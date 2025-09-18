@@ -418,10 +418,6 @@ cc_test(
 cc_test(
     name = "gpu_tensor_registration_test",
     srcs = ["engine/gpu_tensor_registration_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":engine_lib",
@@ -435,10 +431,6 @@ cc_test(
 cc_test(
     name = "tcp_transfer_test",
     srcs = ["engine/tcp_transfer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":engine_lib",
@@ -452,10 +444,6 @@ cc_test(
 cc_test(
     name = "tcp_concurrent_test",
     srcs = ["engine/tcp_concurrent_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = [
         "requires_cuda",
         "stress",
@@ -472,10 +460,6 @@ cc_test(
 cc_test(
     name = "tcp_error_handling_test",
     srcs = ["engine/tcp_error_handling_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":engine_lib",

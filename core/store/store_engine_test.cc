@@ -25,7 +25,7 @@ using tensorcast::store::loading::ReplicaKey;
 // Helper utilities
 // ─────────────────────────────────────────────────────────────────────────────
 static DeviceKey make_gpu_key(int ordinal) {
-  return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
+  return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
 }
 
 static StoreEngine make_store(

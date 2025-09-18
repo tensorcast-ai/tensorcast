@@ -19,6 +19,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash_internal.h"
@@ -26,6 +27,7 @@
 
 #ifndef USE_FAKE_CUDA
 #include <cuda.h>
+#include <dlfcn.h>
 #include <nvrtc.h>
 #endif // USE_FAKE_CUDA
 
@@ -39,6 +41,179 @@ using internal::determine_leaf_chunk_size;
 using internal::kMaxChunkSize;
 using internal::sha256_bytes;
 using internal::to_multibase_multihash_sha256;
+
+#ifndef USE_FAKE_CUDA
+constexpr std::array<const char*, 2> kCudaDriverLibraryNames{"libcuda.so.1", "libcuda.so"};
+
+std::string format_cuda_driver_version(int version) {
+  if (version <= 0) {
+    return "unknown";
+  }
+  const int major = version / 1000;
+  const int minor = (version % 1000) / 10;
+  const int patch = version % 10;
+  if (patch == 0) {
+    return absl::StrCat(major, ".", minor);
+  }
+  return absl::StrCat(major, ".", minor, ".", patch);
+}
+
+void log_driver_nvrtc_mismatch_hint_if_needed(const absl::Status& status) {
+  if (!absl::StrContains(status.message(), "CUDA_ERROR_UNSUPPORTED_PTX_VERSION")) {
+    return;
+  }
+
+  int nvrtc_major = 0;
+  int nvrtc_minor = 0;
+  const nvrtcResult nvrtc_version_result = nvrtcVersion(&nvrtc_major, &nvrtc_minor);
+  const bool has_nvrtc_version = nvrtc_version_result == NVRTC_SUCCESS;
+
+  int driver_version = 0;
+  const cudaError_t driver_version_result = cudaDriverGetVersion(&driver_version);
+  const bool has_driver_version = driver_version_result == cudaSuccess;
+
+  std::string hint =
+      "NVRTC generated PTX that the loaded NVIDIA driver rejected (unsupported PTX version). "
+      "This usually means the NVRTC toolkit is newer than the installed driver.";
+
+  if (has_nvrtc_version) {
+    absl::StrAppend(&hint, " NVRTC version ", nvrtc_major, ".", nvrtc_minor, ".");
+  }
+
+  if (has_driver_version) {
+    absl::StrAppend(&hint, " Driver reports version ", format_cuda_driver_version(driver_version), ".");
+  }
+
+  if (has_nvrtc_version && has_driver_version) {
+    absl::StrAppend(
+        &hint,
+        " Update the driver to a release that supports CUDA ",
+        nvrtc_major,
+        ".",
+        nvrtc_minor,
+        " or align NVRTC with the installed driver.");
+  }
+
+  LOG(ERROR) << hint;
+}
+
+// NOLINTBEGIN(readability-identifier-naming)
+struct CudaDriverSymbols {
+  decltype(&::cuInit) cuInit = nullptr;
+  decltype(&::cuModuleLoadData) cuModuleLoadData = nullptr;
+  decltype(&::cuModuleGetFunction) cuModuleGetFunction = nullptr;
+  decltype(&::cuModuleUnload) cuModuleUnload = nullptr;
+  decltype(&::cuLaunchKernel) cuLaunchKernel = nullptr;
+  decltype(&::cuGetErrorName) cuGetErrorName = nullptr;
+  decltype(&::cuGetErrorString) cuGetErrorString = nullptr;
+};
+
+// NOLINTEND(readability-identifier-naming)
+
+CudaDriverSymbols& cuda_driver_symbols() {
+  static auto* symbols = new CudaDriverSymbols();
+  return *symbols;
+}
+
+void*& cuda_driver_handle() {
+  static void* handle = nullptr;
+  return handle;
+}
+
+template <typename Fn>
+absl::Status load_cuda_symbol(void* handle, const char* symbol_name, Fn& out) {
+  dlerror();
+  void* symbol = dlsym(handle, symbol_name);
+  const char* error = dlerror();
+  if (symbol == nullptr || error != nullptr) {
+    return absl::UnavailableError(
+        absl::StrCat(
+            "Failed to load CUDA driver symbol ", symbol_name, ": ", error != nullptr ? error : "symbol not found"));
+  }
+  out = reinterpret_cast<Fn>(symbol);
+  return absl::OkStatus();
+}
+
+absl::Status load_cuda_driver() {
+  auto& handle = cuda_driver_handle();
+  if (handle != nullptr) {
+    return absl::OkStatus();
+  }
+
+  std::string load_errors;
+  for (const char* library_name : kCudaDriverLibraryNames) {
+    dlerror();
+    handle = dlopen(library_name, RTLD_NOW | RTLD_LOCAL);
+    if (handle != nullptr) {
+      break;
+    }
+    const char* error = dlerror();
+    if (error != nullptr) {
+      if (!load_errors.empty()) {
+        absl::StrAppend(&load_errors, "; ");
+      }
+      absl::StrAppend(&load_errors, "dlopen(", library_name, "): ", error);
+    }
+  }
+
+  if (handle == nullptr) {
+    return absl::UnavailableError(
+        absl::StrCat(
+            "Failed to load CUDA driver library (libcuda.so): ",
+            load_errors.empty() ? "(no error details)" : load_errors));
+  }
+
+  CudaDriverSymbols& symbols = cuda_driver_symbols();
+  absl::Cleanup cleanup = absl::MakeCleanup([&]() {
+    symbols = CudaDriverSymbols{};
+    if (handle != nullptr) {
+      dlclose(handle);
+      handle = nullptr;
+    }
+  });
+
+  auto load_or = [&](auto& fn, const char* name) -> absl::Status {
+    absl::Status status = load_cuda_symbol(handle, name, fn);
+    if (!status.ok()) {
+      return status;
+    }
+    return absl::OkStatus();
+  };
+
+  if (auto status = load_or(symbols.cuInit, "cuInit"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuModuleLoadData, "cuModuleLoadData"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuModuleGetFunction, "cuModuleGetFunction"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuModuleUnload, "cuModuleUnload"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuLaunchKernel, "cuLaunchKernel"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuGetErrorName, "cuGetErrorName"); !status.ok()) {
+    return status;
+  }
+  if (auto status = load_or(symbols.cuGetErrorString, "cuGetErrorString"); !status.ok()) {
+    return status;
+  }
+
+  std::move(cleanup).Cancel();
+  return absl::OkStatus();
+}
+
+absl::Status ensure_cuda_driver_loaded() {
+  static std::once_flag once;
+  static absl::Status load_status = absl::OkStatus();
+  std::call_once(once, [&]() { load_status = load_cuda_driver(); });
+  return load_status;
+}
+
+#endif // USE_FAKE_CUDA
 
 void release_device_buffer(void** ptr) {
   if (ptr == nullptr || *ptr == nullptr) {
@@ -325,8 +500,18 @@ absl::Status cu_result_to_status(CUresult result, std::string_view context) {
   }
   const char* name = nullptr;
   const char* description = nullptr;
-  cuGetErrorName(result, &name);
-  cuGetErrorString(result, &description);
+  absl::Status driver_status = ensure_cuda_driver_loaded();
+  if (driver_status.ok()) {
+    const CudaDriverSymbols& symbols = cuda_driver_symbols();
+    if (symbols.cuGetErrorName != nullptr) {
+      symbols.cuGetErrorName(result, &name);
+    }
+    if (symbols.cuGetErrorString != nullptr) {
+      symbols.cuGetErrorString(result, &description);
+    }
+  } else {
+    return absl::InternalError(absl::StrCat(context, " - CUDA driver unavailable: ", driver_status.message()));
+  }
   return absl::InternalError(
       absl::StrCat(
           context,
@@ -339,7 +524,19 @@ absl::Status cu_result_to_status(CUresult result, std::string_view context) {
 absl::Status ensure_cuda_driver_initialized() {
   static std::once_flag once;
   static absl::Status init_status = absl::OkStatus();
-  std::call_once(once, [&]() { init_status = cu_result_to_status(cuInit(0), "cuInit"); });
+  std::call_once(once, [&]() {
+    absl::Status driver_status = ensure_cuda_driver_loaded();
+    if (!driver_status.ok()) {
+      init_status = driver_status;
+      return;
+    }
+    const CudaDriverSymbols& symbols = cuda_driver_symbols();
+    if (symbols.cuInit == nullptr) {
+      init_status = absl::UnavailableError("cuInit symbol unavailable in CUDA driver");
+      return;
+    }
+    init_status = cu_result_to_status(symbols.cuInit(0), "cuInit");
+  });
   return init_status;
 }
 
@@ -349,7 +546,10 @@ struct NvrtcSha256Kernel {
 
   ~NvrtcSha256Kernel() {
     if (module != nullptr) {
-      cuModuleUnload(module);
+      const CudaDriverSymbols& symbols = cuda_driver_symbols();
+      if (symbols.cuModuleUnload != nullptr) {
+        symbols.cuModuleUnload(module);
+      }
     }
   }
 };
@@ -389,17 +589,26 @@ absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(i
     return init_status;
   }
 
+  const CudaDriverSymbols& symbols = cuda_driver_symbols();
+  if (symbols.cuModuleLoadData == nullptr || symbols.cuModuleGetFunction == nullptr) {
+    return absl::UnavailableError("CUDA driver missing module symbol support for NVRTC hashing");
+  }
+
   CUmodule module = nullptr;
   CUfunction function = nullptr;
-  auto module_status = cu_result_to_status(cuModuleLoadData(&module, ptx.c_str()), "cuModuleLoadData");
+  auto module_status = cu_result_to_status(symbols.cuModuleLoadData(&module, ptx.c_str()), "cuModuleLoadData");
   if (!module_status.ok()) {
+    log_driver_nvrtc_mismatch_hint_if_needed(module_status);
     return module_status;
   }
 
   auto function_status =
-      cu_result_to_status(cuModuleGetFunction(&function, module, kSha256KernelName), "cuModuleGetFunction");
+      cu_result_to_status(symbols.cuModuleGetFunction(&function, module, kSha256KernelName), "cuModuleGetFunction");
   if (!function_status.ok()) {
-    cuModuleUnload(module);
+    if (symbols.cuModuleUnload != nullptr) {
+      symbols.cuModuleUnload(module);
+    }
+    log_driver_nvrtc_mismatch_hint_if_needed(function_status);
     return function_status;
   }
 
@@ -473,6 +682,12 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
   const auto& kernel = kernel_or.value();
   const auto sm_count = static_cast<unsigned int>(props.multiProcessorCount);
 
+  auto ensure_driver_status = ensure_cuda_driver_initialized();
+  if (!ensure_driver_status.ok()) {
+    return ensure_driver_status;
+  }
+  const CudaDriverSymbols& symbols = cuda_driver_symbols();
+
   const uint64_t leaf_count64 =
       (total_size + static_cast<uint64_t>(chunk_size_bytes) - 1ULL) / static_cast<uint64_t>(chunk_size_bytes);
   if (leaf_count64 == 0) {
@@ -524,8 +739,13 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
 
   CUstream launch_stream = stream_created ? reinterpret_cast<CUstream>(stream) : nullptr;
 
+  if (symbols.cuLaunchKernel == nullptr) {
+    return absl::UnavailableError("CUDA driver missing cuLaunchKernel symbol required for NVRTC hashing");
+  }
+
   auto launch_status = cu_result_to_status(
-      cuLaunchKernel(kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr),
+      symbols.cuLaunchKernel(
+          kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr),
       "cuLaunchKernel(tensorcast_sha256_leaf_kernel)");
   if (!launch_status.ok()) {
     return launch_status;
@@ -603,8 +823,8 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(
 #ifndef USE_FAKE_CUDA
   root_or = compute_root_via_nvrtc(device_base, total_size, chunk_size, device_id);
   if (!root_or.ok()) {
-    LOG(WARNING) << "NVRTC hashing unavailable, falling back to host copy path: " << root_or.status();
-    root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);
+    LOG(ERROR) << "NVRTC hashing unavailable: " << root_or.status();
+    return root_or.status();
   }
 #else
   root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);

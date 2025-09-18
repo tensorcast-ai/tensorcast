@@ -159,6 +159,7 @@ bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=f
 
 #### C++ Code Formatting
 ```bash
+# It's not necessary to add other arguments to the command, just run it directly
 uv run clang-tidy ./core/xxx.cc
 ```
 

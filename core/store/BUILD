@@ -259,10 +259,6 @@ sc_cc_library(
 cc_test(
     name = "store_engine_test",
     srcs = ["store_engine_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
@@ -276,10 +272,6 @@ cc_test(
 cc_test(
     name = "store_engine_p2p_loader_test",
     srcs = ["store_engine_p2p_loader_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
@@ -295,10 +287,6 @@ cc_test(
 cc_test(
     name = "store_engine_p2p_verification_fail_test",
     srcs = ["store_engine_p2p_verification_fail_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
@@ -314,10 +302,6 @@ cc_test(
 cc_test(
     name = "registration_memory_replica_test",
     srcs = ["registration_memory_replica_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
@@ -375,10 +359,6 @@ cc_test(
 cc_test(
     name = "multi_gpu_test",
     srcs = ["multi_gpu_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = [
         "multi_gpu",
         "requires_cuda",
@@ -396,10 +376,6 @@ cc_test(
 cc_test(
     name = "store_engine_verification_default_test",
     srcs = ["store_engine_verification_default_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["store_engine"],
     deps = [
         ":store_engine",
@@ -413,10 +389,6 @@ cc_test(
 cc_test(
     name = "store_engine_safetensors_backfill_test",
     srcs = ["store_engine_safetensors_backfill_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["store_engine"],
     deps = [
         ":store_engine",

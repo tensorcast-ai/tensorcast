@@ -115,10 +115,6 @@ sc_cc_library(
 cc_test(
     name = "duplicate_buffer_test",
     srcs = ["duplicate_buffer_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-lcuda"],
-    }),
     tags = ["requires_cuda"],
     deps = [
         ":checkpoint",
