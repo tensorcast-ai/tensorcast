@@ -214,17 +214,18 @@ jobs:
       - name: Stage libcheckpoint_ext.so for setup.py
         run: |
           mkdir -p bazel-bin/core
+          mkdir -p bazel-bin/daemon
           cp -f libcheckpoint_ext.so bazel-bin/core/libcheckpoint_ext.so
 
       - name: Download tensorcast_daemon artifact
         uses: actions/download-artifact@v4
         with:
           name: tensorcast-daemon-bin
-          path: .
+          path: bazel-bin/daemon
 
       - name: Make tensorcast_daemon executable
         run: |
-          chmod +x ./tensorcast_daemon
+          chmod +x bazel-bin/daemon/tensorcast_daemon
 
       - name: Restore Bazel external headers cache
         id: cache-externals
