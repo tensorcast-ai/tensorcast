@@ -23,23 +23,28 @@ from .errors import ServiceError
 def _discover_daemon_library_paths() -> list[Path]:
     """Return library search paths required by the daemon runtime.
 
-    The C++ daemon depends on libtorch and NVIDIA CUDA libraries that ship with
-    the Python packages.  Bazel does not embed an rpath for these shared
-    objects, so we construct an explicit list of directories that should be
-    appended to ``LD_LIBRARY_PATH`` before launching the daemon binary.
+    The packaged daemon depends on TensorCast shared objects as well as the
+    libtorch and NVIDIA CUDA runtime distributed with the Python wheels. Bazel
+    does not set an rpath for these, so we explicitly surface the relevant
+    directories for ``LD_LIBRARY_PATH`` augmentation.
     """
 
     paths: list[Path] = []
 
+    package_root = Path(__file__).resolve().parents[1]
+    package_lib = package_root / "lib"
+    if package_lib.is_dir():
+        paths.append(package_lib)
+
     try:
         import torch
     except Exception:
-        return paths
+        return _dedupe_library_paths(paths)
 
     try:
         torch_root = Path(torch.__file__).resolve().parent
     except Exception:
-        return paths
+        return _dedupe_library_paths(paths)
 
     torch_lib = torch_root / "lib"
     if torch_lib.is_dir():
@@ -59,9 +64,13 @@ def _discover_daemon_library_paths() -> list[Path]:
             if candidate.is_dir()
         )
 
+    return _dedupe_library_paths(paths)
+
+
+def _dedupe_library_paths(candidates: Iterable[Path]) -> list[Path]:
     deduped: list[Path] = []
     seen: set[Path] = set()
-    for p in paths:
+    for p in candidates:
         try:
             resolved = p.resolve()
         except Exception:
@@ -72,7 +81,6 @@ def _discover_daemon_library_paths() -> list[Path]:
             continue
         deduped.append(resolved)
         seen.add(resolved)
-
     return deduped
 
 

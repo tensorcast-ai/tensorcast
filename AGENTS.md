@@ -99,8 +99,9 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 #### C++ Core (Bazel) and Python Extension
 ```bash
-# Build all. BUILD_CORE means cxx files in core/ and ./daemon
-#  BUILD_EXTENSION means cxx files in tensorcast/csrc
+# Build all.
+#  BUILD_CORE means cxx files in core/ and ./daemon
+#  BUILD_EXTENSION means cxx files in tensorcast/csrc and the output is tensorcast._C
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext

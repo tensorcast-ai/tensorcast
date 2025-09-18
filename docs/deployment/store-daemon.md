@@ -29,9 +29,10 @@ If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/sto
 ```
 
 The CLI locates the binary from the wheel or development path automatically
-and extends ``LD_LIBRARY_PATH`` with the PyTorch and NVIDIA runtime directories
-bundled in the virtual environment so the daemon resolves ``libtorch`` and
-CUDA libraries without extra shell setup.
+and extends ``LD_LIBRARY_PATH`` with the TensorCast shared library bundle as
+well as the PyTorch and NVIDIA runtime directories that live inside the active
+Python environment. This allows the daemon to resolve ``libstore_engine``,
+``libtorch`` and CUDA components even when only the binary is present on disk.
 
 When launching in non-blocking mode (`tensorcast start --no-block`), the CLI now
 mirrors daemon stdout and stderr into the invoking terminal in addition to
