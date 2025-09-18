@@ -23,7 +23,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --extra global --extra local --extra ui --frozen --no-install-project --no-dev
+    uv sync --extra global --extra local --frozen --no-install-project --no-dev
 
 ADD .python-version /app/.python-version
 ADD setup.py /app/setup.py
@@ -45,22 +45,6 @@ ADD .git /app/.git
 # Remove the uv pip install from builder stage
 # RUN --mount=type=cache,target=/root/.cache/uv \
 #     uv pip install --no-deps -e .
-
-FROM hub.i.basemind.com/tensorcast/debian:bookworm-slim as ui_builder
-
-RUN apt-get update && apt-get install -y nodejs npm curl build-essential zip unzip openjdk-17-jdk-headless
-
-ADD tensorcast/global_store /app/tensorcast/global_store
-
-# -----------------------------------------------------------------------------
-# Build the Global-Store Web-UI (static assets served by FastAPI backend)
-# -----------------------------------------------------------------------------
-RUN npm install -g pnpm && \
-    cd /app/tensorcast/global_store/webui_frontend && \
-    pnpm install --frozen-lockfile --force && \
-    pnpm tsc --noEmit && \
-    pnpm build
-
 
 FROM hub.i.basemind.com/tensorcast/python:uv-bookworm-slim
 
@@ -114,8 +98,6 @@ ADD docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 ADD tensorcast/*.so /app/tensorcast/
-
-COPY --from=ui_builder --chown=python:python /app/tensorcast/global_store /app/tensorcast/global_store
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 

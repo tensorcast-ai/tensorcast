@@ -15,7 +15,6 @@ The Global Store provides:
 - **Worker Management**: Handles worker registration, heartbeats, and health monitoring
 - **State Synchronization**: Ensures consistency across distributed workers
 - **High Availability**: Supports persistent storage and recovery mechanisms
-- **Web UI**: Built-in monitoring and management interface
 - **Metrics**: Prometheus-compatible metrics endpoint
 
 ## Configuration
@@ -49,7 +48,6 @@ docker run -d \
   --name global-store \
   -p 50051:50051 \
   -p 8001:8001 \
-  -p 9000:9000 \
   -v /var/lib/global_store:/data \
   -v $(pwd)/examples/config/global_store_config.yaml:/etc/tensorcast/global_store.yaml:ro \
   hub.i.basemind.com/tensorcast/global-store:latest \
@@ -130,13 +128,6 @@ grpc_health_probe -addr=localhost:50051
 curl http://localhost:8001/health
 ```
 
-#### Web UI Monitoring
-Access at `http://<host>:<ui_port>`:
-- Real-time worker status
-- Artifact distribution visualization
-- System metrics dashboard
-- Configuration viewer
-
 ## Kubernetes High Availability
 
 ### StatefulSet Configuration
@@ -202,8 +193,6 @@ spec:
     port: 50051
   - name: metrics
     port: 8001
-  - name: ui
-    port: 9000
   selector:
     app: global-store
 ```
@@ -231,7 +220,6 @@ export GLOBAL_STORE_OPTIMIZE_INTERVAL_MS=1800000  # 30 minutes
 - Run as non-root user
 - Use TLS for gRPC connections in production
 - Restrict network access to trusted sources
-- Enable authentication for Web UI access
 
 ### 4. Scaling Strategy
 
