@@ -19,7 +19,9 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-
+import tempfile
+import yaml
+import os
 import grpc
 import pytest
 
@@ -34,7 +36,7 @@ from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
     global_store_pb2_grpc,
 )
-
+from concurrent.futures import ThreadPoolExecutor
 
 def _get_free_port() -> int:
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
@@ -44,8 +46,6 @@ def _get_free_port() -> int:
 
 @pytest.fixture
 def gs_server():
-    from concurrent.futures import ThreadPoolExecutor
-
     # Initialize Global Store config (file-less, in-memory DB, defaults)
     set_gs_config(GlobalStoreConfig())
     servicer = GlobalStoreServicer()
@@ -77,17 +77,10 @@ def _wait_http_ok(host: str, port: int, path: str, timeout_s: float = 15.0) -> b
 
 @pytest.mark.integration
 def test_cpp_daemon_registers_with_global_store(gs_server):
-    import os
-    if os.environ.get("TENSORCAST_RUN_CPP_DAEMON_IT") != "1":
+    if os.environ.get("TENSORCAST_RUN_CPP_DAEMON_IT", "1") != "1":
         pytest.skip("Set TENSORCAST_RUN_CPP_DAEMON_IT=1 to run daemon integration test")
-    # Locate daemon binary or skip
-    try:
-        bin_path: Path = ensure_cpp_daemon_binary()
-    except ServiceError:
-        pytest.skip("C++ daemon binary not available; skipping integration test")
 
-    import tempfile
-    import yaml
+    bin_path: Path = ensure_cpp_daemon_binary()
 
     _, gs_port = gs_server
 
@@ -107,7 +100,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         },
         "engine": {
             "mem_pool_size_bytes": 64 * 1024 * 1024,
-            "chunk_bytes": 1 * 1024 * 1024,
+            "tx_slice_bytes": 1 * 1024 * 1024,
             "artifact_chunk_bytes": 1 * 1024 * 1024,
             "streaming_buffer_max_concurrent_sessions": 1,
         },
