@@ -316,7 +316,7 @@ IO helpers (`write_at`, `map_file_segments`).
 
 During disk ingestion or commit of in-memory registration:
 - `index_multihash` is derived from canonical index bytes (safetensors or tensor_index.json). When absent, it is computed.
-- `data_multihash` is computed by linearizing the canonical SegmentPlan (PAD=0) over the loaded buffer. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing.
+- `data_multihash` is computed by linearizing the canonical SegmentPlan (PAD=0) over the loaded buffer. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing using the runtime-compiled NVRTC SHA256 kernel (with the old CPU streaming path as automatic fallback). The GPU lane now ingests 64-byte message blocks directly, auto-tunes leaf chunking down to 512 KiB to keep ≥4K leaves resident for large tensors, and returns digests via pinned host memory with async copies to overlap compute and transfer.
 - For disk ingestion, missing descriptors are materialized under the artifact directory:
   - `artifact_descriptor.json` (index/data multihash, sizes)
   - `tensor_index.json` (canonical, when needed)

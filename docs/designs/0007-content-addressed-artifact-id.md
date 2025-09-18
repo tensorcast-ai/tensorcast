@@ -70,6 +70,7 @@ Stable grouping and layout
 - `index_multihash = MULTIHASH(canonical_index_bytes)`.
 - `data_multihash = MULTIHASH(TREE_HASH(stream_bytes(0..total_size)))`.
 - Tree hash: 1–16 MiB chunking, leaves/root with `sha2-256`; prefer GPU parallelization; CPU fallback available.
+- GPU hashing: StoreEngine now compiles a dedicated SHA256 leaf kernel at runtime via NVRTC and executes it on the source device. When NVRTC or real CUDA is unavailable (e.g., FakeCuda), hashing transparently falls back to the previous host streaming implementation so results remain identical. The kernel walks payloads in 64-byte strides (matching SHA256 block size), dynamically shrinks leaf chunking to a 512 KiB floor until at least 4K leaves are scheduled for high-SM parts, and stages digests into pinned host memory with async D2H copies to hide transfer latency. These changes materially increase SM occupancy and reduce wall-clock time for multi-gigabyte tensors while preserving digest parity with the CPU fallback.
 - Runtime verification: fast KEY_POINTS/SEGMENT checks during load/P2P; FULL verification optional or gated by hints.
 
 ## System integration
@@ -136,4 +137,3 @@ Acceptance criteria
 - Architecture: [Architecture Overview](../architecture/architecture-overview.md), [P2P Transfer Strategies](../architecture/p2p-transfer-strategies.md), [Artifact Loading Workflow](../internals/model-loading.md).
 - Related implementations: `core/store/loader/*`, `core/store/replica/*`, `daemon/*`, `tensorcast/global_store/*`, `tensorcast/api/*`.
  
-

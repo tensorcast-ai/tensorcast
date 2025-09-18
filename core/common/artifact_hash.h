@@ -12,6 +12,8 @@
 
 namespace tensorcast::common {
 
+inline constexpr size_t kGpuHashDefaultLeafChunkBytes = 4ULL * 1024 * 1024;
+
 // Compute index multihash (multibase base32 over multihash sha2-256) from either
 // canonical index bytes (preferred) or a precomputed sha256 hex key.
 absl::StatusOr<std::string> compute_index_multihash(
@@ -21,7 +23,11 @@ absl::StatusOr<std::string> compute_index_multihash(
 // Compute data multihash (multibase base32 over tree-hash sha2-256 root) for a
 // contiguous GPU buffer [gpu_ptr, size). The implementation streams device→host
 // in 4MiB leaves and reduces them as a Merkle tree.
-absl::StatusOr<std::string> compute_data_multihash_from_gpu(void* gpu_ptr, uint64_t total_size, int device_id);
+absl::StatusOr<std::string> compute_data_multihash_from_gpu(
+    void* gpu_ptr,
+    uint64_t total_size,
+    int device_id,
+    size_t leaf_chunk_bytes = kGpuHashDefaultLeafChunkBytes);
 
 // Lightweight public wrappers to reuse hashing primitives across modules
 // without duplicating implementations. These mirror the internal helpers

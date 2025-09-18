@@ -33,6 +33,7 @@
 -I/usr/include/python3.10
 
 -Iexternal/+_repo_rules+cuda/include
+-Iexternal/+_repo_rules+nvrtc/nvidia/cuda_nvrtc/include
 
 -D__cplusplus=202002L
 
