@@ -124,6 +124,7 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 - Lifecycle handle: `tensorcast.api.begin_register_artifact_sdk(...) -> (RegisteredArtifact, handshake)` returns a `RegisteredArtifact` that:
   - Auto-sends keepalive when `ttl_ms` is provided
   - Exposes `commit()`, `abort()`, `revoke()` and context manager semantics
+  - Publishes key mappings through the Store Daemon; the SDK no longer reaches Global Store directly, so all key→artifact coordination stays on the daemon control plane.
 
 ### Python SDK Updates
 

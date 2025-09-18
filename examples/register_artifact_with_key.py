@@ -1,18 +1,17 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import os
 from pathlib import Path
 
 import torch
 
+from tensorcast import startup
 from tensorcast.api import register_artifact
-from tensorcast.api._config import RegisterArtifactOptions, set_global_store_address
+from tensorcast.api._config import RegisterArtifactOptions
 
 
 def main() -> None:
-    # Optionally point SDK to Global Store
-    gs_addr = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
-    set_global_store_address(gs_addr)
+    # Connect to the Store Daemon (assumes tensorcast.startup.init() env/config)
+    startup.init()
 
     # Create a tiny dummy state_dict
     state_dict: dict[str, torch.Tensor] = {

@@ -48,7 +48,6 @@ if not already_patched:
 # Public package interface remains unchanged below.
 # -----------------------------------------------------------------------------
 
-import tensorcast._store_engine as _store_engine  # noqa: E402
 from tensorcast._version import __version__  # noqa: E402
 
 # Import functions from the canonical startup module
@@ -63,5 +62,4 @@ __all__ = [
     "init",
     "is_initialized",
     "shutdown",
-    "_store_engine",
 ]

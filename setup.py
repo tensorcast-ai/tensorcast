@@ -659,7 +659,6 @@ if BUILD_EXTENSION:
 
     EXTENSIONS = {
         "_C": ["tensorcast/csrc/checkpoint_py.cc"],
-        "_store_engine": ["tensorcast/csrc/store_engine_py.cc"],
     }
 
     for name, sources in EXTENSIONS.items():

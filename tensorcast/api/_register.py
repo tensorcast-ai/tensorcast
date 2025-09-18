@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import grpc
 import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
@@ -25,11 +24,7 @@ from tensorcast._C import (
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.api._config import (
-    PlanType,
-    RegisterArtifactOptions,
-    get_global_store_address,
-)
+from tensorcast.api._config import PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import (
     DeviceMismatch,
@@ -46,8 +41,6 @@ from tensorcast.api._indices import (
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.observability.otel import ensure_client_otel
-from tensorcast.proto.global_store.v1 import global_store_pb2 as gs_pb2
-from tensorcast.proto.global_store.v1 import global_store_pb2_grpc as gs_pb2_grpc
 from tensorcast.types import (
     ArtifactDescriptor,
     CoalescedHandshake,
@@ -275,12 +268,6 @@ def begin_register_artifact_sdk(
     return handle, out.handshake
 
 
-def _gs_stub(addr: str | None = None) -> gs_pb2_grpc.GlobalStoreServiceStub:
-    target = addr or get_global_store_address()
-    channel = grpc.insecure_channel(target)
-    return gs_pb2_grpc.GlobalStoreServiceStub(channel)
-
-
 def _upsert_key_mapping_if_needed(
     *,
     key: str | None,
@@ -291,23 +278,21 @@ def _upsert_key_mapping_if_needed(
 ) -> None:
     if not key:
         return
+    if client is None:
+        raise RuntimeError("publish_replica_key requires an active daemon client")
+    if descriptor is None:
+        logger.warning("Skipping key publish for %s: missing artifact descriptor", key)
+        return
     try:
-        if descriptor is not None and client is not None:
-            ok = client.publish_replica_key(
-                key=key, descriptor=descriptor, disk_path=disk_path or ""
-            )
-            if ok:
-                return
-        stub = _gs_stub()
-        _ = stub.UpsertKeyMapping(
-            gs_pb2.UpsertKeyMappingRequest(
-                key=key, artifact_id=artifact_id, disk_path=disk_path or ""
-            ),
-            timeout=5.0,
+        ok = client.publish_replica_key(
+            key=key, descriptor=descriptor, disk_path=disk_path or ""
         )
-    except Exception:
-        # log-less helper (API layer will log)
-        pass
+        if not ok:
+            logger.warning(
+                "Daemon refused to publish key %s for artifact %s", key, artifact_id
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to publish key %s via daemon", key)
 
 
 def _persist_publish_if_needed(

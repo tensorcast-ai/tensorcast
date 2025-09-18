@@ -1,14 +1,12 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import os
-
-from tensorcast.api._config import GetArtifactOptions, set_global_store_address
+from tensorcast import startup
+from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._loader import get_artifact_sync
 
 
 def main() -> None:
-    gs_addr = os.environ.get("TENSORCAST_GLOBAL_STORE", "127.0.0.1:8085")
-    set_global_store_address(gs_addr)
+    startup.init()
 
     # Prefer daemon MaterializeByKey path (no client-side fallback)
     opts = GetArtifactOptions(prefer="p2p")
