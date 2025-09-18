@@ -36,33 +36,82 @@ def _discover_daemon_library_paths() -> list[Path]:
     if package_lib.is_dir():
         paths.append(package_lib)
 
+    site_packages: Path | None = None
+
     try:
         import torch
     except Exception:
-        return _dedupe_library_paths(paths)
+        torch = None
 
-    try:
-        torch_root = Path(torch.__file__).resolve().parent
-    except Exception:
-        return _dedupe_library_paths(paths)
+    if torch is not None:
+        try:
+            torch_root = Path(torch.__file__).resolve().parent
+        except Exception:
+            torch_root = None
+        if torch_root is not None:
+            torch_lib = torch_root / "lib"
+            if torch_lib.is_dir():
+                paths.append(torch_lib)
+            site_packages = torch_root.parent
 
-    torch_lib = torch_root / "lib"
-    if torch_lib.is_dir():
-        paths.append(torch_lib)
+    if site_packages is None:
+        import site as _site
 
-    site_packages = torch_root.parent
-    nvidia_root = site_packages / "nvidia"
-    if nvidia_root.is_dir():
-        paths.extend(
-            candidate
-            for candidate in sorted(nvidia_root.rglob("lib"))
-            if candidate.is_dir()
+        for candidate in map(Path, _site.getsitepackages()):
+            if candidate.exists():
+                site_packages = candidate
+                break
+
+    if site_packages is not None:
+        nvidia_root = site_packages / "nvidia"
+        if nvidia_root.is_dir():
+            paths.extend(
+                candidate
+                for candidate in sorted(nvidia_root.rglob("lib"))
+                if candidate.is_dir()
+            )
+            paths.extend(
+                candidate
+                for candidate in sorted(nvidia_root.rglob("lib64"))
+                if candidate.is_dir()
+            )
+
+        cuda_components = (
+            "cublas",
+            "cublaslt",
+            "cudnn",
+            "cufft",
+            "curand",
+            "cusolver",
+            "cusparse",
+            "cusparselt",
+            "cuda_cupti",
+            "cuda_nvrtc",
+            "cuda_runtime",
+            "nccl",
+            "nvjitlink",
+            "nvrtc",
+            "nvtx",
         )
-        paths.extend(
-            candidate
-            for candidate in sorted(nvidia_root.rglob("lib64"))
-            if candidate.is_dir()
-        )
+
+        for component in cuda_components:
+            lowered = component.lower()
+            for subdir_name in ("lib", "lib64"):
+                direct = site_packages / component / subdir_name
+                if direct.is_dir():
+                    paths.append(direct)
+
+                direct_lower = site_packages / lowered / subdir_name
+                if direct_lower.is_dir():
+                    paths.append(direct_lower)
+
+                nested = site_packages / "nvidia" / component / subdir_name
+                if nested.is_dir():
+                    paths.append(nested)
+
+                nested_lower = site_packages / "nvidia" / lowered / subdir_name
+                if nested_lower.is_dir():
+                    paths.append(nested_lower)
 
     return _dedupe_library_paths(paths)
 
