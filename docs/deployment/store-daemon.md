@@ -26,6 +26,7 @@ Use the unified YAML config and start via CLI:
 uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml
 
 If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
+Use `--host` / `--port` to override the gRPC listen address for CI or sandboxed runs.
 ```
 
 The CLI locates the binary from the wheel or development path automatically

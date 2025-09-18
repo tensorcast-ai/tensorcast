@@ -85,6 +85,8 @@ def start_service(
     register_current: bool = True,
     publish_meta: bool = True,
     restrict_to_localhost: bool = False,
+    listen_host: str | None = None,
+    listen_port: int | None = None,
 ) -> DaemonSession:
     """Start the C++ StoreDaemon.
 
@@ -92,19 +94,30 @@ def start_service(
     - In non-blocking mode, when wait=True, wait up to `timeout` seconds for readiness before returning.
     """
     cfg = load_daemon_config(config_path)
+    cfg_modified = False
+
+    if listen_host is not None:
+        cfg.server.listen.host = listen_host
+        cfg_modified = True
+    if listen_port is not None:
+        if listen_port <= 0 or listen_port > 65535:
+            raise ServiceError("listen_port must be between 1 and 65535")
+        cfg.server.listen.port = listen_port
+        cfg_modified = True
 
     # Restrict to loopback if requested (SDK private launch)
     if restrict_to_localhost:
         with contextlib.suppress(Exception):
             if cfg.server.listen.host != "127.0.0.1":
                 cfg.server.listen.host = "127.0.0.1"
+                cfg_modified = True
             if cfg.server.p2p_listen.host and cfg.server.p2p_listen.host != "127.0.0.1":
                 cfg.server.p2p_listen.host = "127.0.0.1"
+                cfg_modified = True
 
     host = cfg.server.listen.host or "127.0.0.1"
     port = int(cfg.server.listen.port or 0)
 
-    cfg_modified = False
     if port <= 0:
         port = pick_free_tcp_port()
         cfg.server.listen.port = port

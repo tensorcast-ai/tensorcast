@@ -50,6 +50,18 @@ def cli():
     help="Run in blocking mode (foreground). Default is non-blocking",
 )
 @click.option(
+    "--host",
+    type=str,
+    default=None,
+    help="Override daemon listen host from config",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help="Override daemon listen port from config",
+)
+@click.option(
     "--wait/--no-wait",
     default=True,
     show_default=True,
@@ -62,7 +74,14 @@ def cli():
     show_default=True,
     help="Readiness wait timeout in seconds (with --wait)",
 )
-def start(config: Path | None, blocking: bool, wait: bool, timeout: float):
+def start(
+    config: Path | None,
+    blocking: bool,
+    host: str | None,
+    port: int | None,
+    wait: bool,
+    timeout: float,
+):
     """Start the StoreDaemon service.
 
     Refuses to start if a current daemon session is already healthy. Use
@@ -85,12 +104,17 @@ def start(config: Path | None, blocking: bool, wait: bool, timeout: float):
                 "No config provided and no default config found. "
                 "Provide --config or set $TENSORCAST_DAEMON_CONFIG."
             )
+        if port is not None and (port <= 0 or port > 65535):
+            raise ServiceError("Port must be between 1 and 65535")
+
         start_service(
             config_path=cfg,
             blocking=blocking,
             to_console=True,
             wait=wait,
             timeout=timeout,
+            listen_host=host,
+            listen_port=port,
         )
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
@@ -163,6 +187,18 @@ def status(host: str | None, port: int | None):
     help="Run in blocking mode (foreground). Default is non-blocking",
 )
 @click.option(
+    "--host",
+    type=str,
+    default=None,
+    help="Override daemon listen host from config",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help="Override daemon listen port from config",
+)
+@click.option(
     "--wait/--no-wait",
     default=True,
     show_default=True,
@@ -181,13 +217,23 @@ def restart(
     force: bool,
     config: Path | None,
     blocking: bool,
+    host: str | None,
+    port: int | None,
     wait: bool,
     timeout: float,
 ):
     """Restart the StoreDaemon service (UX aligned with start)."""
     ctx.invoke(stop, force=force)
     click.echo("Starting service...")
-    ctx.invoke(start, config=config, blocking=blocking, wait=wait, timeout=timeout)
+    ctx.invoke(
+        start,
+        config=config,
+        blocking=blocking,
+        host=host,
+        port=port,
+        wait=wait,
+        timeout=timeout,
+    )
 
 
 @cli.command(name="logs")
