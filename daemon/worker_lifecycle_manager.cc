@@ -87,6 +87,11 @@ absl::Status WorkerLifecycleManager::start() {
 }
 
 void WorkerLifecycleManager::stop() {
+  // Idempotent stop: return if we've already executed shutdown sequence.
+  bool expected = false;
+  if (!stop_called_.compare_exchange_strong(expected, true)) {
+    return;
+  }
   if (!gs_)
     return;
   stop_.store(true);
@@ -109,9 +114,14 @@ void WorkerLifecycleManager::stop() {
     }
   }
   if (!worker_id_.empty()) {
-    auto st = gs_->unregister_worker(worker_id_, /*is_graceful_shutdown=*/true);
+    auto id = worker_id_;
+    auto st = gs_->unregister_worker(id, /*is_graceful_shutdown=*/true);
     if (!st.ok()) {
       LOG(WARNING) << "GlobalStore unregister_worker failed: " << st;
+    } else {
+      LOG(INFO) << "GlobalStore unregister_worker succeeded for worker_id=" << id;
+      // Clear identity to prevent any subsequent attempts (e.g., destructor) from retrying.
+      worker_id_.clear();
     }
   }
 }

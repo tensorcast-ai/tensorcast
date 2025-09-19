@@ -194,6 +194,7 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
 
 - WorkerService
   - `register_worker()` enforces uniqueness by `(node_address, grpc_port)`; updates or creates with generated `worker_id`.
+  - IP validation: registrations with loopback or unspecified addresses are rejected. Use a routable interface IP; `127.0.0.1` and `0.0.0.0` are not allowed.
   - Heartbeats are batched: `WorkerService.heartbeat()` buffers `(worker_id, mem_pool_available_size, accepting_new_requests)`; a daemon thread flushes via `WorkerRepository.batch_update_heartbeats()` every ~100ms (and flushes immediately if the buffer grows).
   - Cleanup: `cleanup_inactive_workers()` deletes workers whose `last_heartbeat` is older than `GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS` and marks their replicas `is_available = FALSE`.
 

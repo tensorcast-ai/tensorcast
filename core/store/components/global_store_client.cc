@@ -21,6 +21,30 @@ namespace tensorcast::store::components {
 // Backward-compatibility: map unversioned global_store symbols to v1
 namespace global_store = tensorcast::global_store::v1;
 
+namespace {
+// Map Global Store Status enum to readable string
+const char* status_to_cstr(global_store::Status s) {
+  switch (s) {
+    case global_store::STATUS_UNSPECIFIED:
+      return "STATUS_UNSPECIFIED";
+    case global_store::STATUS_NOT_FOUND:
+      return "STATUS_NOT_FOUND";
+    case global_store::STATUS_TIMED_OUT:
+      return "STATUS_TIMED_OUT";
+    case global_store::STATUS_TOO_MANY_REQUESTS:
+      return "STATUS_TOO_MANY_REQUESTS";
+    case global_store::STATUS_STATE_SYNC_REQUIRED:
+      return "STATUS_STATE_SYNC_REQUIRED";
+    case global_store::STATUS_ERROR:
+      return "STATUS_ERROR";
+    case global_store::STATUS_OK:
+      return "STATUS_OK";
+    default:
+      return "<unknown>";
+  }
+}
+} // namespace
+
 using common::memory::MemoryLocation;
 using replica::ChunkState;
 
@@ -107,7 +131,17 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
   }
 
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("RegisterWorker failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "RegisterWorker failed: %s (%d). This usually means the Global Store rejected the registration.\n"
+            "Common causes: duplicate worker on %s:%u from another host (node_id mismatch), or server-side error.\n"
+            "Suggested actions: ensure no other daemon owns %s:%u, verify node_id/host configuration, and check Global Store logs.",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status()),
+            request.node_address().c_str(),
+            request.grpc_port(),
+            request.node_address().c_str(),
+            request.grpc_port()));
   }
 
   {
@@ -141,7 +175,9 @@ absl::Status GlobalStoreClient::send_heartbeat(
   }
 
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("WorkerHeartbeat failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "WorkerHeartbeat failed: %s (%d)", status_to_cstr(response.status()), static_cast<int>(response.status())));
   }
 
   return absl::OkStatus();
@@ -177,7 +213,11 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_STATE_SYNC_REQUIRED) {
-    return absl::InternalError(absl::StrFormat("WorkerHeartbeat(enhanced) failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "WorkerHeartbeat(enhanced) failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
   return response;
 }
@@ -199,11 +239,20 @@ absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bo
     return status;
   }
 
-  if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("UnregisterWorker failed with status: %d", response.status()));
+  if (response.status() == global_store::STATUS_OK) {
+    VLOG(1) << "Unregistered worker with ID: " << worker_id
+            << (is_graceful_shutdown ? " (graceful)" : " (non-graceful)");
+    return absl::OkStatus();
   }
-
-  return absl::OkStatus();
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    // Idempotency: if the worker is already absent (e.g., previous unregister
+    // succeeded or GS restarted), treat as success to avoid noisy shutdown logs.
+    VLOG(1) << "UnregisterWorker returned NOT_FOUND for worker_id=" << worker_id << "; treating as success";
+    return absl::OkStatus();
+  }
+  return absl::InternalError(
+      absl::StrFormat(
+          "UnregisterWorker failed: %s (%d)", status_to_cstr(response.status()), static_cast<int>(response.status())));
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_replica(
@@ -234,7 +283,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   }
 
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("RegisterReplica failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "RegisterReplica failed: %s (%d)", status_to_cstr(response.status()), static_cast<int>(response.status())));
   }
 
   LOG(INFO) << "Registered replica: " << artifact_id << " with ID: " << response.replica_id();
@@ -329,7 +380,11 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   }
 
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("RegisterMemoryReplica failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "RegisterMemoryReplica failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
 
   // Enrich log with plan type and basic context. We infer plan from device type:
@@ -403,7 +458,11 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     if (response.status() == global_store::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("No available replicas for replica: %s", artifact_id));
     }
-    return absl::InternalError(absl::StrFormat("RequestReplicaTransport failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "RequestReplicaTransport failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
 
   TransportSession session;
@@ -459,7 +518,11 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
     if (response.status() == global_store::STATUS_NOT_FOUND) {
       return absl::NotFoundError(absl::StrFormat("Artifact not found: %s", artifact_id));
     }
-    return absl::InternalError(absl::StrFormat("GetArtifactInfoById failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "GetArtifactInfoById failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
 
   std::vector<RemoteReplicaInfo> replicas;
@@ -519,7 +582,9 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
   if (!st.ok())
     return st;
   if (resp.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("BatchUpdateChunkStates failed with status: %d", resp.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "BatchUpdateChunkStates failed: %s (%d)", status_to_cstr(resp.status()), static_cast<int>(resp.status())));
   }
   return absl::OkStatus();
 }
@@ -736,7 +801,11 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("SynchronizeWorkerState failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "SynchronizeWorkerState failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
   out_changes->clear();
   out_changes->reserve(response.state_changes_size());
@@ -763,7 +832,11 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("RequestFullStateSync failed with status: %d", response.status()));
+    return absl::InternalError(
+        absl::StrFormat(
+            "RequestFullStateSync failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
   }
   out_expected_replicas->clear();
   out_expected_replicas->reserve(response.expected_replicas_size());

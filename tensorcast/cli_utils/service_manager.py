@@ -9,8 +9,10 @@ stop_service, check_service_status, logs_tail, and session helpers.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -20,13 +22,19 @@ from typing import Any
 
 import click
 
-from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
-
-from .errors import ServiceError
-from .filesys import open_log_binary, read_json_locked, write_json_locked
-from .logs import logs_tail as _logs_tail
-from .network import pick_free_tcp_port, resolve_connect_host, wait_daemon_ready
-from .paths import (
+from tensorcast.cli_utils.errors import ServiceError
+from tensorcast.cli_utils.filesys import (
+    open_log_binary,
+    read_json_locked,
+    write_json_locked,
+)
+from tensorcast.cli_utils.logs import logs_tail as _logs_tail
+from tensorcast.cli_utils.network import (
+    pick_free_tcp_port,
+    resolve_connect_host,
+    wait_daemon_ready,
+)
+from tensorcast.cli_utils.paths import (
     DaemonSession,
     clear_current_session_if_matches,
     get_current_session_id,
@@ -35,7 +43,7 @@ from .paths import (
     session_paths,
     set_current_session_id,
 )
-from .proc import (
+from tensorcast.cli_utils.proc import (
     build_daemon_process_env,
     ensure_cpp_daemon_binary,
     is_matching_daemon_process,
@@ -44,7 +52,8 @@ from .proc import (
     preexec_fate_sharing,
     pump,
 )
-from .status import check_service_status as _check_service_status
+from tensorcast.cli_utils.status import check_service_status as _check_service_status
+from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
 
 
 def discover_default_config_path() -> Path | None:
@@ -152,10 +161,12 @@ def start_service(
     bin_path = ensure_cpp_daemon_binary()
     args = [str(bin_path), daemon_cfg_arg]
 
+    # Persist logs only when running non-blocking. In blocking mode, mirror to console only.
+    persist_logs = not blocking
     so_path = inst.logs / "daemon.out"
     se_path = inst.logs / "daemon.err"
-    so = open_log_binary(so_path)
-    se = open_log_binary(se_path)
+    so = open_log_binary(so_path) if persist_logs else None
+    se = open_log_binary(se_path) if persist_logs else None
 
     env = build_daemon_process_env({**os.environ, "TENSORCAST_INSTANCE": inst.id})
 
@@ -172,9 +183,11 @@ def start_service(
         )
     except Exception:
         with contextlib.suppress(Exception):
-            so.close()
+            if so is not None:
+                so.close()
         with contextlib.suppress(Exception):
-            se.close()
+            if se is not None:
+                se.close()
         raise
 
     _register_process(inst, role="daemon", proc=proc, so=so_path, se=se_path)
@@ -194,14 +207,38 @@ def start_service(
         inst, "p2p_address", f"{resolve_connect_host(p2p_host)}:{p2p_port}"
     )
 
-    sinks_out: list[Any] = [so]
-    sinks_err: list[Any] = [se]
+    sinks_out: list[Any] = []
+    sinks_err: list[Any] = []
+    if persist_logs and so is not None:
+        sinks_out.append(so)
+    if persist_logs and se is not None:
+        sinks_err.append(se)
     if to_console:
         sinks_out.append(sys.stdout)
         sinks_err.append(sys.stderr)
     log_threads = _start_daemon_log_threads(proc, sinks_out, sinks_err)
 
+    # In blocking mode, ensure graceful shutdown:
+    # - Register atexit to stop the daemon session we started
+    # - Install SIGINT/SIGTERM handlers to call stop_service before exiting
     if blocking:
+
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                stop_service(session_id=inst.id)
+
+        atexit.register(_cleanup)
+
+        def _handle_signal(signum, _frame) -> None:  # noqa: ANN001
+            _cleanup()
+            try:
+                sys.exit(128 + int(signum))
+            except SystemExit:
+                raise
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+
         ret = proc.wait()
         _join_threads(log_threads)
         click.echo(f"daemon exited with code {ret}")
@@ -209,7 +246,11 @@ def start_service(
 
     if wait:
         try:
-            _ensure_process_started(proc, so_path, startup_grace=min(timeout, 1.0))
+            _ensure_process_started(
+                proc,
+                inst.logs if persist_logs else None,
+                startup_grace=min(timeout, 1.0),
+            )
         except ServiceError:
             _cleanup_failed_start(proc, log_threads, inst, so, se)
             raise
@@ -218,18 +259,19 @@ def start_service(
         if not ready:
             retcode = proc.poll()
             _cleanup_failed_start(proc, log_threads, inst, so, se)
+            log_hint = f" See logs under {inst.logs}" if persist_logs else ""
             if retcode is not None:
                 raise ServiceError(
-                    f"Daemon exited with code {retcode} during startup (address={connect_host}:{port}). "
-                    f"Check logs at {so_path}"
+                    f"Daemon exited with code {retcode} during startup (address={connect_host}:{port})."
+                    + log_hint
                 )
             raise ServiceError(
-                f"Daemon failed to become ready within {timeout:.0f}s (address={connect_host}:{port}). "
-                f"Check logs at {so_path}"
+                f"Daemon failed to become ready within {timeout:.0f}s (address={connect_host}:{port})."
+                + log_hint
             )
 
     click.echo(
-        f"StoreDaemon started (daemon session={inst.id}) at {connect_host}:{port}. Logs: {so_path}"
+        f"StoreDaemon started (daemon session={inst.id}) at {connect_host}:{port}. Logs: {inst.logs}"
     )
     return inst
 
@@ -329,22 +371,22 @@ def _join_threads(threads: list[threading.Thread], timeout: float = 1.0) -> None
 
 
 def _ensure_process_started(
-    proc: subprocess.Popen[Any], log_path: Path, startup_grace: float
+    proc: subprocess.Popen[Any], log_path: Path | None, startup_grace: float
 ) -> None:
     grace = max(startup_grace, 0.1)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         retcode = proc.poll()
         if retcode is not None:
+            hint = f" Check logs at {log_path}" if log_path is not None else ""
             raise ServiceError(
-                f"Daemon exited with code {retcode} during startup. Check logs at {log_path}"
+                f"Daemon exited with code {retcode} during startup." + hint
             )
         time.sleep(0.05)
     retcode = proc.poll()
     if retcode is not None:
-        raise ServiceError(
-            f"Daemon exited with code {retcode} during startup. Check logs at {log_path}"
-        )
+        hint = f" Check logs at {log_path}" if log_path is not None else ""
+        raise ServiceError(f"Daemon exited with code {retcode} during startup." + hint)
 
 
 def _cleanup_failed_start(
@@ -368,6 +410,8 @@ def _cleanup_failed_start(
         proc.wait(timeout=2.0)
     _join_threads(log_threads, timeout=1.0)
     for stream in (so, se):
+        if stream is None:
+            continue
         with contextlib.suppress(Exception):
             stream.flush()
             stream.close()

@@ -14,8 +14,6 @@
 
 namespace tensorcast::daemon {
 
-// Aliases for versioned proto namespaces used in lifecycle manager
-namespace global_store = ::tensorcast::global_store::v1;
 namespace commonpb = ::tensorcast::common::v1;
 
 class WorkerLifecycleManager {
@@ -46,6 +44,7 @@ class WorkerLifecycleManager {
     }
     return listen.substr(0, pos);
   }
+
   static uint32_t port_from_listen(const std::string& listen) {
     auto pos = listen.rfind(':');
     if (pos == std::string::npos) {
@@ -76,6 +75,10 @@ class WorkerLifecycleManager {
   int64_t last_sync_success_ts_{0};
 
   std::atomic<bool> stop_{false};
+  // Ensure stop() is idempotent even if invoked from multiple places (e.g.,
+  // explicit shutdown path and destructor). When true, subsequent calls to
+  // stop() are no-ops.
+  std::atomic<bool> stop_called_{false};
   std::thread hb_thread_;
   std::thread sync_thread_;
   std::thread monitor_thread_;
@@ -99,30 +102,39 @@ class WorkerLifecycleManager {
   uint64_t hb_success() const {
     return hb_success_.load();
   }
+
   uint64_t hb_failure() const {
     return hb_failure_.load();
   }
+
   uint64_t sync_success() const {
     return sync_success_.load();
   }
+
   uint64_t sync_failure() const {
     return sync_failure_.load();
   }
+
   int64_t last_hb_ts_s() const {
     return last_hb_ts_s_.load();
   }
+
   int64_t last_sync_ts_s() const {
     return last_sync_ts_s_.load();
   }
+
   uint64_t hb_restarts() const {
     return hb_restarts_.load();
   }
+
   uint64_t sync_restarts() const {
     return sync_restarts_.load();
   }
+
   bool hb_alive() const {
     return hb_alive_.load();
   }
+
   bool sync_alive() const {
     return sync_alive_.load();
   }

@@ -52,6 +52,16 @@ int main(int argc, char** argv) {
   }
   const auto& cfg = *cfg_or;
 
+  // Block SIGINT/SIGTERM in this main thread BEFORE starting any threads so that
+  // all subsequently created threads inherit the blocked mask. We'll handle
+  // these signals via sigwait in a dedicated thread later to perform a
+  // cooperative shutdown (gRPC shutdown + worker unregistration).
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGINT);
+  sigaddset(&set, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &set, nullptr);
+
   // Configure CUDA debug toggles
   cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
 
@@ -230,13 +240,6 @@ int main(int argc, char** argv) {
       LOG(WARNING) << "Worker lifecycle start failed: " << st.message();
     }
   }
-  // Install signal handling using sigwait in a dedicated thread.
-  // Block SIGINT/SIGTERM in this thread (will be inherited by worker threads)
-  sigset_t set;
-  sigemptyset(&set);
-  sigaddset(&set, SIGINT);
-  sigaddset(&set, SIGTERM);
-  pthread_sigmask(SIG_BLOCK, &set, nullptr);
 
   std::thread sig_thread([&server, &service, set]() mutable {
     int sig = 0;

@@ -6,6 +6,7 @@ gRPC service implementation for Global Store.
 This provides the gRPC interface layer, delegating business logic to services.
 """
 
+import ipaddress
 import threading
 import time
 from uuid import UUID
@@ -787,6 +788,17 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 request.previous_worker_id if request.previous_worker_id else None
             )
 
+            # Reject loopback/unspecified IPs up front for both normal and recovery registrations
+            try:
+                addr = ipaddress.ip_address(worker.node_address)
+                if addr.is_loopback or addr.is_unspecified:
+                    raise ValidationError(
+                        f"Invalid node_address '{worker.node_address}'. Use a routable (non-loopback, non-unspecified) IP of the external interface; 127.0.0.1 and 0.0.0.0 are not allowed."
+                    )
+            except ValueError:
+                # Not an IP literal; allow hostnames (may resolve to routable IPs)
+                pass
+
             if is_recovery:
                 # Handle recovery registration through recovery service
                 success, state_sync_required = (
@@ -810,6 +822,26 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
 
+                # Single, enriched registration log (recovery)
+                logger.info(
+                    "Worker registered: worker_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s prev_worker_id=%s state_sync_required=%s expected_state_version=%d",
+                    registered.worker_id,
+                    worker.node_id,
+                    worker.node_address,
+                    int(worker.grpc_port),
+                    int(worker.p2p_port),
+                    int(worker.mem_pool_total_size),
+                    int(worker.mem_pool_available_size),
+                    True,
+                    (previous_worker_id or ""),
+                    bool(state_sync_required),
+                    int(
+                        self.recovery_service.get_worker_state_version(
+                            registered.worker_id
+                        )
+                    ),
+                )
+
                 return global_store_pb2.RegisterWorkerResponse(
                     status=global_store_pb2.Status.STATUS_OK,
                     worker_id=registered.worker_id,
@@ -821,7 +853,38 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 )
             else:
                 # Normal registration
+                # Reject cross-host duplicates on the same address:port; allow same-host restart/update
+                existing = self.worker_service.find_worker_by_address(
+                    worker.node_address, worker.grpc_port
+                )
+                if existing and existing.node_id != worker.node_id:
+                    logger.error(
+                        "Registration conflict: %s:%d already owned by worker_id=%s (node=%s); attempted by node=%s.",
+                        worker.node_address,
+                        worker.grpc_port,
+                        existing.worker_id,
+                        existing.node_id,
+                        worker.node_id,
+                    )
+                    # Map to generic error status (client logs will include details)
+                    return global_store_pb2.RegisterWorkerResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+
                 registered = self.worker_service.register_worker(worker)
+
+                # Single, enriched registration log (normal)
+                logger.info(
+                    "Worker registered: worker_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s",
+                    registered.worker_id,
+                    worker.node_id,
+                    worker.node_address,
+                    int(worker.grpc_port),
+                    int(worker.p2p_port),
+                    int(worker.mem_pool_total_size),
+                    int(worker.mem_pool_available_size),
+                    False,
+                )
 
                 return global_store_pb2.RegisterWorkerResponse(
                     status=global_store_pb2.Status.STATUS_OK,
@@ -853,6 +916,19 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.WorkerHeartbeatResponse:
         """Process enhanced worker heartbeat."""
         try:
+            # Detect possible duplicate worker_id usage across different addresses
+            try:
+                w = self.worker_repository.find_by_id(request.worker_id)
+                if w and request.HasField("state_version"):
+                    # Best-effort detection: if the heartbeat's implied source differs from DB registration
+                    # we log a warning to aid diagnosis of shared storage / misconfigured listen.host.
+                    # Note: request doesn't carry node_address; this check is limited.
+                    pass
+            except Exception:
+                # Non-fatal diagnostics
+                logger.debug(
+                    "worker lookup during heartbeat diagnostics failed", exc_info=True
+                )
             set_span_attributes(
                 {
                     "tc.worker.id": request.worker_id,
@@ -969,6 +1045,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.UnregisterWorkerResponse:
         """Unregister a worker."""
         try:
+            # Pre-fetch worker details for enriched logging
+            worker_before = None
+            try:
+                worker_before = self.worker_repository.find_by_id(request.worker_id)
+            except Exception:
+                # Best-effort; proceed even if lookup fails
+                worker_before = None
+
             success = self.worker_service.unregister_worker(request.worker_id)
 
             status = (
@@ -976,6 +1060,29 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 if success
                 else global_store_pb2.Status.STATUS_NOT_FOUND
             )
+            if success:
+                # Single, enriched deregistration log
+                if worker_before:
+                    logger.info(
+                        "Worker unregistered: worker_id=%s graceful=%s node_id=%s addr=%s:%d p2p=%d",
+                        request.worker_id,
+                        getattr(request, "is_graceful_shutdown", False),
+                        worker_before.node_id,
+                        worker_before.node_address,
+                        int(worker_before.grpc_port),
+                        int(worker_before.p2p_port),
+                    )
+                else:
+                    logger.info(
+                        "Worker unregistered: worker_id=%s graceful=%s",
+                        request.worker_id,
+                        getattr(request, "is_graceful_shutdown", False),
+                    )
+            else:
+                logger.warning(
+                    "UnregisterWorker failed: worker %s not found",
+                    request.worker_id,
+                )
 
             return global_store_pb2.UnregisterWorkerResponse(status=status)
 

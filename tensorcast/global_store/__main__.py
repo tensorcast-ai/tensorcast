@@ -17,8 +17,9 @@ from tensorcast.global_store.metrics import (
     start_metrics_http_server,
 )
 from tensorcast.logger import init_logger
-
-# setup_otel_from_observability is imported lazily to avoid hard dependency here
+from tensorcast.observability.otel import (
+    setup_otel_from_observability as _setup_otel_from_observability,
+)
 from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 
 logger = init_logger(__name__)
@@ -44,10 +45,6 @@ def main():
 
     # Initialize OpenTelemetry from config (no env bridging)
     try:
-        from tensorcast.observability.otel import (
-            setup_otel_from_observability as _setup_otel_from_observability,
-        )
-
         _setup_otel_from_observability(pb_cfg.observability, role="global-store")
     except Exception as _exc:  # noqa: BLE001
         logger.exception("Failed to initialize OpenTelemetry from config: %s", _exc)
