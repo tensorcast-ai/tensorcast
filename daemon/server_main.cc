@@ -225,6 +225,10 @@ int main(int argc, char** argv) {
     daemon::WorkerLifecycleManager::Options lopts;
     lopts.global_store_addr = gs_addr;
     lopts.listen_addr = listen_addr;
+    // Prefer explicit advertise.host if provided
+    if (cfg.server().has_advertise() && !cfg.server().advertise().host().empty()) {
+      lopts.advertise_host = cfg.server().advertise().host();
+    }
     lopts.p2p_port = p2p_port;
     if (cfg.high_availability().has_heartbeat_interval()) {
       const auto& d = cfg.high_availability().heartbeat_interval();

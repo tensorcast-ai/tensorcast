@@ -19,6 +19,12 @@ message DaemonServer {
   reserved 1, 2, 5; // host, port, p2p_port
   reserved "host", "port", "p2p_port";
   tensorcast.config.v1.SocketAddress listen = 10;
+  // Optional externally advertised address. If unset or set to an
+  // unspecified/loopback host, the daemon will automatically select a
+  // routable non-loopback IPv4 address during Global Store registration.
+  // The port field is currently ignored for gRPC registration; the
+  // gRPC port is taken from `listen.port`.
+  tensorcast.config.v1.SocketAddress advertise = 12;
   string storage_path = 3;
   uint32 num_threads = 4;
   // Field 6 was enable_p2p_access; removed to avoid duplication with communicator.enable_rdma

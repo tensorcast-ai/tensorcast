@@ -164,6 +164,7 @@ sc_cc_library(
     hdrs = ["worker_lifecycle_manager.h"],
     deps = [
         ":grpc_service_impl",
+        "//core/communicator:utils_lib",
         "//core/store:store_engine",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@opentelemetry-cpp//api:api",

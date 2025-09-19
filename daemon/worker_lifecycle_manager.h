@@ -21,6 +21,8 @@ class WorkerLifecycleManager {
   struct Options {
     std::string global_store_addr;
     std::string listen_addr; // host:port
+    // Optional externally advertised host for registration (overrides listen host)
+    std::string advertise_host;
     uint16_t p2p_port{0};
     int heartbeat_interval_ms{5000};
     int chunk_sync_interval_ms{10000}; // 0 to disable

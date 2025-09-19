@@ -2,6 +2,9 @@ server:
   listen:
     host: 0.0.0.0
     port: 50052
+  # Optional: explicitly control the address advertised to the Global Store
+  # advertise:
+  #   host: 192.168.1.10
   p2p_listen:
     host: 0.0.0.0
     port: 65090

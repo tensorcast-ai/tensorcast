@@ -11,6 +11,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
 #include "absl/log/log.h"
+#include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -38,7 +39,20 @@ absl::Status WorkerLifecycleManager::start() {
     hostname[sizeof(hostname) - 1] = '\0';
   }
   node_id_ = hostname;
-  const std::string node_addr = host_from_listen(opts_.listen_addr);
+  std::string node_addr = opts_.advertise_host;
+  if (node_addr.empty()) {
+    node_addr = host_from_listen(opts_.listen_addr);
+  }
+  // Auto-select a routable IP if listen/advertise host is loopback/unspecified
+  if (node_addr == "127.0.0.1" || node_addr == "0.0.0.0" || node_addr == "::" || node_addr == "[::]" ||
+      node_addr == "*") {
+    // Prefer communicator's default IP resolver to keep selection consistent
+    node_addr = communicator::misc::get_default_ip();
+    if (node_addr.empty()) {
+      LOG(WARNING) << "Failed to auto-detect non-loopback IP; falling back to 127.0.0.1";
+      node_addr = "127.0.0.1";
+    }
+  }
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
 
   auto reg_or = gs_->register_worker(
@@ -343,7 +357,18 @@ void WorkerLifecycleManager::heartbeat_loop() {
 absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   if (!gs_)
     return absl::FailedPreconditionError("GlobalStore client not initialized");
-  const std::string node_addr = host_from_listen(opts_.listen_addr);
+  std::string node_addr = opts_.advertise_host;
+  if (node_addr.empty()) {
+    node_addr = host_from_listen(opts_.listen_addr);
+  }
+  if (node_addr == "127.0.0.1" || node_addr == "0.0.0.0" || node_addr == "::" || node_addr == "[::]" ||
+      node_addr == "*") {
+    node_addr = communicator::misc::get_default_ip();
+    if (node_addr.empty()) {
+      LOG(WARNING) << "Failed to auto-detect non-loopback IP; falling back to 127.0.0.1";
+      node_addr = "127.0.0.1";
+    }
+  }
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   const bool recovery = preserve_identity && !worker_id_.empty();
   auto reg_or = gs_->register_worker(
