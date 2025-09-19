@@ -5,8 +5,10 @@ Runtime startup and connection utilities for TensorCast.
 
 - Provides a unified `init()` entrypoint that either connects to an existing
   Store Daemon or launches one locally and connects to it.
-- Returns a Context object that can be used as a context manager to ensure
-  cleanup when we launched the daemon.
+- Returns a Context object whose lifecycle is process-scoped. The context is
+  automatically closed at process exit via atexit when we launched the daemon
+  (or connected). Use `shutdown()` to close early if needed. Context manager
+  semantics are not required or supported for this object.
 
 This supersedes the older tensorcast.config module. Use this module directly
 and rely on `tensorcast.config` only for backward compatibility.
@@ -53,6 +55,8 @@ class Context:
     - `address` is the gRPC address for the daemon (host:port).
     - `session_id` and `session_dir` are best-effort identifiers provided by
       the service manager when launching locally.
+    - The object does not implement context manager methods; it is managed for
+      the lifetime of the process and cleaned up on exit.
     """
 
     address: str
@@ -78,12 +82,6 @@ class Context:
             stop_service(session_id=self.session_id)
         self._closed = True
         clear_daemon_address()
-
-    def __enter__(self) -> "Context":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001, D401
-        self.close()
 
     def install_signal_handlers(
         self, mode: Literal["graceful", "hard-exit"] = "graceful"

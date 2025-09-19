@@ -141,9 +141,8 @@ ctx = init(address="local", daemon_config_path="examples/config/store_daemon_con
 # Connect to a specific daemon
 ctx = init(address="127.0.0.1:50052")
 
-# Context manages owned session lifecycle (stops on close/atexit)
-with init(address="local", daemon_config_path=".../store_daemon_config.yaml") as ctx:
-    ...
+# Context is process-scoped and is automatically closed at process exit (atexit).
+# Call tensorcast.startup.shutdown() to close early if needed.
 ```
 
 All APIs under `tensorcast.api` require this initialization. Call `tensorcast.init(...)` once per
