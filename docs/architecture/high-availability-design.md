@@ -71,8 +71,10 @@ def _handle_enhanced_heartbeat(...):
 const auto infos = engine_->get_all_replicas_info();
 std::vector<std::string> registered_ids; for (const auto& i : infos) registered_ids.push_back(i.artifact_id);
 state_checksum_ = compute_state_checksum(infos);
-auto hb_or = gs_->send_heartbeat_enhanced(worker_id_, engine_->get_available_memory(), accepting, state_version_, state_checksum_, registered_ids, last_sync_success_ts_, global_store::CONNECTION_STATUS_CONNECTED);
+auto hb_or = global_store_->send_heartbeat_enhanced(*worker_id_, engine_->get_available_memory(), accepting, state_version_, state_checksum_, registered_ids, last_sync_success_ts_, global_store::CONNECTION_STATUS_CONNECTED);
 ```
+
+The lifecycle manager now constructs its `GlobalStoreClient` (channel + stub) during instantiation; the handle is `gsl::not_null`, node identity is captured once at construction, and the worker id is populated during registration so `start()` only performs the health-check handshake and worker registration.
 
 ## State Synchronization
 

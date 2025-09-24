@@ -15,6 +15,7 @@ from tensorcast.global_store.metrics import (
 )
 from tensorcast.global_store.models import MemoryType, Replica
 from tensorcast.global_store.repositories import ReplicaRepository
+from tensorcast.global_store.services.address_validation import ensure_routable_address
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -48,6 +49,10 @@ class ArtifactService:
             raise ValidationError("memory_size must be positive")
         if replica.max_concurrency <= 0:
             raise ValidationError("max_concurrency must be positive")
+        if not (1 <= replica.node_port <= 65535):
+            raise ValidationError("node_port must be between 1 and 65535")
+
+        ensure_routable_address(replica.node_address, "node_address")
 
         # Additional validation for transport metadata consistency
         if replica.remote_memory_keys:

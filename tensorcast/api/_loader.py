@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, cast
 
@@ -378,6 +379,23 @@ def get_artifact_sync(
     runtime_ctx = startup.require_initialized()
     client = runtime_ctx.client
 
+    (
+        pinned_ms,
+        enable_ver,
+        wait_comp,
+    ) = _apply_client_defaults_if_present(
+        opts.pinned_allocation_timeout_ms,
+        opts.enable_verification,
+        opts.wait_for_completion,
+        runtime_address=runtime_ctx.address,
+    )
+    opts = replace(
+        opts,
+        pinned_allocation_timeout_ms=pinned_ms,
+        enable_verification=enable_ver,
+        wait_for_completion=wait_comp,
+    )
+
     dev_id = resolve_device(device_id)
     replica_uuid = os.urandom(8).hex()
 
@@ -394,23 +412,6 @@ def get_artifact_sync(
             enable_verification=opts.enable_verification,
             pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
         )
-
-    (
-        pinned_ms,
-        enable_ver,
-        wait_comp,
-    ) = _apply_client_defaults_if_present(
-        opts.pinned_allocation_timeout_ms,
-        opts.enable_verification,
-        opts.wait_for_completion,
-        runtime_address=runtime_ctx.address,
-    )
-    if pinned_ms is not None:
-        opts.pinned_allocation_timeout_ms = pinned_ms
-    if enable_ver is not None:
-        opts.enable_verification = enable_ver
-    if wait_comp is not None:
-        opts.wait_for_completion = wait_comp
 
     try:
         with tracer.start_as_current_span(

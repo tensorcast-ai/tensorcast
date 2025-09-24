@@ -282,6 +282,8 @@ IO helpers (`write_at`, `map_file_segments`).
 - StoreEngine
   - Coordinates materialization, memory registration and eviction
   - Owns `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, optional `GlobalStoreClient`, and optional `CommunicationManager`
+  - When Global Store is configured, store registrations now fail if the daemon cannot determine a routable (non-loopback) IP to advertise; operators must set `--advertise_host` or a non-loopback `listen_addr`
+  - The `GlobalStoreClient` channel and stub are constructed once at engine bring-up; `initialize()` performs only the health-check handshake so retry/backoff state stays immutable at runtime
   - Implements helpers for VS chunk locks, remote access registration, and Global Store registration
 
 - Replica

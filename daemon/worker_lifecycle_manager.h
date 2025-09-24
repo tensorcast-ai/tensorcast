@@ -10,6 +10,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
+#include "gsl/pointers"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::daemon {
@@ -28,8 +29,10 @@ class WorkerLifecycleManager {
     int chunk_sync_interval_ms{10000}; // 0 to disable
   };
 
-  WorkerLifecycleManager(std::shared_ptr<store::StoreEngine> engine, StoreDaemonServiceImpl* service, Options opts)
-      : engine_(std::move(engine)), service_(service), opts_(std::move(opts)) {}
+  WorkerLifecycleManager(
+      gsl::not_null<std::shared_ptr<store::StoreEngine>> engine,
+      gsl::not_null<StoreDaemonServiceImpl*> service,
+      Options opts);
 
   ~WorkerLifecycleManager() {
     stop();
@@ -39,6 +42,8 @@ class WorkerLifecycleManager {
   void stop();
 
  private:
+  static absl::StatusOr<std::string> resolve_advertised_address(const WorkerLifecycleManager::Options& opts);
+
   static std::string host_from_listen(const std::string& listen) {
     auto pos = listen.find(':');
     if (pos == std::string::npos) {
@@ -63,13 +68,17 @@ class WorkerLifecycleManager {
   static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
   absl::Status reregister_worker(bool preserve_identity);
 
-  std::shared_ptr<store::StoreEngine> engine_;
-  StoreDaemonServiceImpl* service_;
-  Options opts_;
+  const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
+  const gsl::not_null<StoreDaemonServiceImpl*> service_;
+  const Options opts_;
 
-  std::unique_ptr<store::components::GlobalStoreClient> gs_;
+  static gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> make_global_store_client(
+      const Options& opts);
+  static std::string derive_node_id();
+
+  const gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> global_store_;
+  const std::string node_id_;
   std::string worker_id_;
-  std::string node_id_;
 
   // HA state tracking
   uint64_t state_version_{0};

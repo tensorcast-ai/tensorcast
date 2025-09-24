@@ -356,12 +356,26 @@ class StoreEngine {
   // Worker identity (for Global Store registrations)
   std::string worker_id_;
   std::string node_id_;
+  std::string node_address_;
+  uint32_t grpc_port_{0};
+  uint32_t p2p_port_{0};
 
  public:
   // Inject worker identity after successful registration with Global Store
-  void set_worker_identity(std::string worker_id, std::string node_id) {
+  void set_worker_identity(
+      std::string worker_id,
+      std::string node_id,
+      std::string node_address,
+      uint32_t grpc_port,
+      uint32_t p2p_port) {
     worker_id_ = std::move(worker_id);
     node_id_ = std::move(node_id);
+    node_address_ = std::move(node_address);
+    grpc_port_ = grpc_port;
+    p2p_port_ = p2p_port;
+    if (global_store_client_) {
+      global_store_client_->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
+    }
   }
 };
 

@@ -26,6 +26,7 @@ class TcpContext {
   absl::StatusOr<transport::tcp_transport_t> connect(const std::string& ip, uint16_t port);
 
   std::string get_local_ip() const;
+  uint16_t listening_port() const;
 
   // Typed configuration injection
   void set_connect_timeout(int seconds) {
@@ -56,6 +57,7 @@ class TcpContext {
 
   friend class TcpTransport;
 };
+
 typedef std::shared_ptr<TcpContext> tcp_context_t;
 
 } // namespace tensorcast::communicator::transport

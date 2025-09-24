@@ -31,8 +31,9 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   }
 
   enabled_ = true;
+  listen_port_ = comm_engine_->listening_port();
   // DRAM stager uses default no-op lease provider; UMA export keepalive holds leases.
-  LOG(INFO) << "Communication engine initialized on " << listen_addr << ":" << listen_port;
+  LOG(INFO) << "Communication engine initialized on " << listen_addr << ":" << listen_port_;
   return absl::OkStatus();
 }
 
@@ -50,8 +51,9 @@ absl::Status CommunicationManager::initialize_with_config(
   }
 
   enabled_ = true;
+  listen_port_ = comm_engine_->listening_port();
   // DRAM stager uses default no-op lease provider; UMA export keepalive holds leases.
-  LOG(INFO) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port;
+  LOG(INFO) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port_;
   return absl::OkStatus();
 }
 

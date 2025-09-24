@@ -215,7 +215,15 @@ def init(
         else:
             cfg_path = Path(daemon_config_path)
 
-        # Private launch for SDK: do not publish meta/current_session; restrict to localhost
+        cfg = load_daemon_config(cfg_path)
+        restrict_localhost = True
+        if cfg.server.HasField("p2p_listen"):
+            p2p_host = cfg.server.p2p_listen.host.strip()
+            p2p_port = int(cfg.server.p2p_listen.port)
+            if p2p_host or p2p_port:
+                restrict_localhost = False
+
+        # Private launch for SDK: do not publish meta/current_session; restrict to localhost unless P2P is configured
         inst = start_service(
             config_path=cfg_path,
             session_id=None,
@@ -225,13 +233,12 @@ def init(
             timeout=timeout,
             register_current=False,
             publish_meta=False,
-            restrict_to_localhost=True,
+            restrict_to_localhost=restrict_localhost,
         )
 
         daemon_address = inst.address or _current_session_address()
         if not daemon_address:
             # Fallback: read original config (may be wrong when port was 0)
-            cfg = load_daemon_config(cfg_path)
             host = cfg.server.listen.host or "127.0.0.1"
             port = int(cfg.server.listen.port or 0)
             daemon_address = f"{host}:{port}"

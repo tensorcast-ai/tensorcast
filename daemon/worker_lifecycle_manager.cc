@@ -7,10 +7,15 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <utility>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "opentelemetry/metrics/provider.h"
@@ -22,40 +27,99 @@ namespace commonpb = common::v1;
 
 using namespace std::chrono_literals;
 
-absl::Status WorkerLifecycleManager::start() {
-  if (opts_.global_store_addr.empty()) {
-    return absl::OkStatus();
-  }
-  store::components::GlobalStoreClientConfig cfg;
-  cfg.global_store_address = opts_.global_store_addr;
-  gs_ = std::make_unique<store::components::GlobalStoreClient>(cfg);
-  auto st = gs_->initialize();
-  if (!st.ok())
-    return st;
+namespace {
 
+bool is_loopback_or_unspecified(absl::string_view addr) {
+  if (addr.empty())
+    return true;
+  if (addr == "localhost" || addr == "ip6-localhost" || addr == "*" || addr == "0.0.0.0")
+    return true;
+
+  absl::string_view trimmed = addr;
+  if (trimmed.front() == '[' && trimmed.back() == ']') {
+    trimmed.remove_prefix(1);
+    trimmed.remove_suffix(1);
+  }
+
+  return trimmed == "127.0.0.1" || trimmed == "::" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1";
+}
+} // namespace
+
+WorkerLifecycleManager::WorkerLifecycleManager(
+    gsl::not_null<std::shared_ptr<store::StoreEngine>> engine,
+    gsl::not_null<StoreDaemonServiceImpl*> service,
+    Options opts)
+    : engine_(std::move(engine)),
+      service_(service),
+      opts_(std::move(opts)),
+      global_store_(make_global_store_client(opts_)),
+      node_id_(derive_node_id()) {}
+
+gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
+    const Options& opts) {
+  ABSL_CHECK(!opts.global_store_addr.empty()) << "WorkerLifecycleManager requires a Global Store address";
+
+  store::components::GlobalStoreClientConfig cfg;
+  cfg.global_store_address = opts.global_store_addr;
+  auto client = std::make_shared<store::components::GlobalStoreClient>(std::move(cfg));
+  return gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>>{std::move(client)};
+}
+
+std::string WorkerLifecycleManager::derive_node_id() {
   char hostname[256];
-  if (::gethostname(hostname, sizeof(hostname)) != 0) {
-    std::strncpy(hostname, "unknown", sizeof(hostname));
-    hostname[sizeof(hostname) - 1] = '\0';
+  if (::gethostname(hostname, sizeof(hostname)) == 0) {
+    return hostname;
   }
-  node_id_ = hostname;
-  std::string node_addr = opts_.advertise_host;
-  if (node_addr.empty()) {
-    node_addr = host_from_listen(opts_.listen_addr);
+  return "unknown";
+}
+
+absl::StatusOr<std::string> WorkerLifecycleManager::resolve_advertised_address(
+    const WorkerLifecycleManager::Options& opts) {
+  std::string addr = opts.advertise_host;
+  if (addr.empty()) {
+    addr = WorkerLifecycleManager::host_from_listen(opts.listen_addr);
   }
-  // Auto-select a routable IP if listen/advertise host is loopback/unspecified
-  if (node_addr == "127.0.0.1" || node_addr == "0.0.0.0" || node_addr == "::" || node_addr == "[::]" ||
-      node_addr == "*") {
-    // Prefer communicator's default IP resolver to keep selection consistent
-    node_addr = communicator::misc::get_default_ip();
-    if (node_addr.empty()) {
-      LOG(WARNING) << "Failed to auto-detect non-loopback IP; falling back to 127.0.0.1";
-      node_addr = "127.0.0.1";
+
+  if (is_loopback_or_unspecified(addr)) {
+    const std::string default_ip = communicator::misc::get_default_ip();
+    if (!default_ip.empty()) {
+      addr = default_ip;
     }
   }
+
+  if (is_loopback_or_unspecified(addr)) {
+    return absl::InvalidArgumentError(
+        "Global Store registration requires a routable advertise_host. Provide --advertise_host with a non-loopback "
+        "address or configure listen_addr accordingly.");
+  }
+
+  return addr;
+}
+
+absl::Status WorkerLifecycleManager::start() {
+  auto st = global_store_->initialize();
+  if (!st.ok()) {
+    return st;
+  }
+
+  auto node_addr_or = resolve_advertised_address(opts_);
+  if (!node_addr_or.ok()) {
+    return node_addr_or.status();
+  }
+  const std::string node_addr = *node_addr_or;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
 
-  auto reg_or = gs_->register_worker(
+  if (grpc_port == 0) {
+    return absl::InvalidArgumentError(
+        "WorkerLifecycleManager requires listen_addr to include a non-zero port for gRPC registration.");
+  }
+
+  if (opts_.p2p_port == 0) {
+    return absl::InvalidArgumentError(
+        "WorkerLifecycleManager requires a non-zero p2p_port when Global Store HA is enabled; configure --p2p_listen.");
+  }
+
+  auto reg_or = global_store_->register_worker(
       node_id_,
       node_addr,
       grpc_port,
@@ -70,25 +134,20 @@ absl::Status WorkerLifecycleManager::start() {
   service_->set_worker_registered(worker_id_);
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
-  if (engine_) {
-    engine_->set_worker_identity(worker_id_, node_id_);
-  }
+  engine_->set_worker_identity(worker_id_, node_id_, node_addr, grpc_port, opts_.p2p_port);
 
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
-  if (gs_) {
-    std::vector<commonpb::ReplicaInfo> expected;
-    auto full_or = gs_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
-    if (full_or.ok()) {
-      state_version_ = full_or->first;
-      state_checksum_ = full_or->second;
-      apply_full_state(expected);
-      last_sync_success_ts_ = static_cast<int64_t>(
-          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-              .count());
-    } else {
-      LOG(WARNING) << "Initial RequestFullStateSync failed: " << full_or.status();
-    }
+  std::vector<commonpb::ReplicaInfo> expected;
+  auto full_or = global_store_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
+  if (full_or.ok()) {
+    state_version_ = full_or->first;
+    state_checksum_ = full_or->second;
+    apply_full_state(expected);
+    last_sync_success_ts_ = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+  } else {
+    LOG(WARNING) << "Initial RequestFullStateSync failed: " << full_or.status();
   }
 
   stop_.store(false);
@@ -106,8 +165,6 @@ void WorkerLifecycleManager::stop() {
   if (!stop_called_.compare_exchange_strong(expected, true)) {
     return;
   }
-  if (!gs_)
-    return;
   stop_.store(true);
   if (hb_thread_.joinable())
     hb_thread_.join();
@@ -128,8 +185,8 @@ void WorkerLifecycleManager::stop() {
     }
   }
   if (!worker_id_.empty()) {
-    auto id = worker_id_;
-    auto st = gs_->unregister_worker(id, /*is_graceful_shutdown=*/true);
+    const std::string id = worker_id_;
+    auto st = global_store_->unregister_worker(id, /*is_graceful_shutdown=*/true);
     if (!st.ok()) {
       LOG(WARNING) << "GlobalStore unregister_worker failed: " << st;
     } else {
@@ -155,7 +212,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
       }
       // Compute simple checksum over current snapshot
       state_checksum_ = compute_state_checksum(infos);
-      auto hb_or = gs_->send_heartbeat_enhanced(
+      auto hb_or = global_store_->send_heartbeat_enhanced(
           worker_id_,
           engine_->get_available_memory(),
           accepting,
@@ -169,7 +226,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         hb_failure_.fetch_add(1);
         // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
         // perform recovery-aware re-registration to preserve identity.
-        if (gs_->is_connected()) {
+        if (global_store_->is_connected()) {
           auto st_re = reregister_worker(/*preserve_identity=*/true);
           if (!st_re.ok()) {
             LOG(WARNING) << "Re-registration attempt failed: " << st_re;
@@ -236,7 +293,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           }
 
           std::vector<global_store::StateChange> changes;
-          auto sync_or = gs_->synchronize_worker_state(local_state, /*force_full_sync=*/false, &changes);
+          auto sync_or = global_store_->synchronize_worker_state(local_state, /*force_full_sync=*/false, &changes);
           if (sync_or.ok()) {
             state_version_ = sync_or->first;
             state_checksum_ = sync_or->second;
@@ -330,7 +387,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
             sync_failure_.fetch_add(1);
             // Fallback to full-state sync if server indicates desync or errors persist
             std::vector<commonpb::ReplicaInfo> expected;
-            auto full_or = gs_->request_full_state_sync(worker_id_, state_version_, &expected);
+            auto full_or = global_store_->request_full_state_sync(worker_id_, state_version_, &expected);
             if (full_or.ok()) {
               state_version_ = full_or->first;
               state_checksum_ = full_or->second;
@@ -355,23 +412,14 @@ void WorkerLifecycleManager::heartbeat_loop() {
 }
 
 absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
-  if (!gs_)
-    return absl::FailedPreconditionError("GlobalStore client not initialized");
-  std::string node_addr = opts_.advertise_host;
-  if (node_addr.empty()) {
-    node_addr = host_from_listen(opts_.listen_addr);
+  auto node_addr_or = resolve_advertised_address(opts_);
+  if (!node_addr_or.ok()) {
+    return node_addr_or.status();
   }
-  if (node_addr == "127.0.0.1" || node_addr == "0.0.0.0" || node_addr == "::" || node_addr == "[::]" ||
-      node_addr == "*") {
-    node_addr = communicator::misc::get_default_ip();
-    if (node_addr.empty()) {
-      LOG(WARNING) << "Failed to auto-detect non-loopback IP; falling back to 127.0.0.1";
-      node_addr = "127.0.0.1";
-    }
-  }
+  const std::string node_addr = *node_addr_or;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   const bool recovery = preserve_identity && !worker_id_.empty();
-  auto reg_or = gs_->register_worker(
+  auto reg_or = global_store_->register_worker(
       node_id_,
       node_addr,
       grpc_port,
@@ -388,12 +436,10 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   }
   worker_id_ = new_worker_id;
   service_->set_worker_registered(worker_id_);
-  if (engine_) {
-    engine_->set_worker_identity(worker_id_, node_id_);
-  }
+  engine_->set_worker_identity(worker_id_, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Perform a best-effort full-state sync after re-registration
   std::vector<commonpb::ReplicaInfo> expected;
-  auto full_or = gs_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
+  auto full_or = global_store_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
   if (full_or.ok()) {
     state_version_ = full_or->first;
     state_checksum_ = full_or->second;
@@ -427,7 +473,7 @@ void WorkerLifecycleManager::chunk_sync_loop() {
         }
       }
       if (!updates.empty()) {
-        auto st = gs_->batch_update_chunk_states(worker_id_, node_id_, updates);
+        auto st = global_store_->batch_update_chunk_states(worker_id_, node_id_, updates);
         if (!st.ok()) {
           LOG(WARNING) << "batch_update_chunk_states failed: " << st;
           try {

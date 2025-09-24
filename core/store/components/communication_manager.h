@@ -87,8 +87,13 @@ class CommunicationManager {
       const std::vector<size_t>& buffer_sizes,
       int device_id);
 
+  uint16_t listen_port() const {
+    return listen_port_;
+  }
+
  private:
   bool enabled_ = false;
+  uint16_t listen_port_{0};
   std::shared_ptr<tensorcast::communicator::engine::Communicator> comm_engine_;
 };
 

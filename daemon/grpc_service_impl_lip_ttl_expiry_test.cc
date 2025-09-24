@@ -20,7 +20,7 @@ tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = std::filesystem::temp_directory_path() / "tensorcast_daemon_lip_ttl_test";
   std::filesystem::create_directories(opts.storage_path);
-  opts.p2p_port = 0;
+  opts.p2p_port = 47003;
   opts.memory_pool_size = 64ULL << 20; // 64 MiB
   opts.tx_slice_bytes = 1ULL << 20; // 1 MiB
   opts.num_thread = 2;

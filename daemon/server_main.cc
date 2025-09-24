@@ -19,6 +19,7 @@
 #include "daemon/worker_lifecycle_manager.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
+#include "gsl/pointers"
 
 #include <pthread.h>
 #include <csignal>
@@ -65,6 +66,8 @@ int main(int argc, char** argv) {
   // Configure CUDA debug toggles
   cuda::configure_same_process_ipc_fallback(cfg.debug().cuda().enable_same_process_ipc_fallback());
 
+  LOG(INFO) << "Config: " << cfg.DebugString();
+
   // Map config to StoreEngineOptions
   store::StoreEngineOptions opts;
   opts.storage_path = cfg.server().storage_path();
@@ -95,10 +98,20 @@ int main(int argc, char** argv) {
     if (!st.ok()) {
       LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
     } else {
+      const uint16_t actual_port = comm_mgr->listen_port();
+      if (actual_port != 0) {
+        p2p_port = actual_port;
+      }
       opts.comm_manager = comm_mgr;
     }
   }
   opts.p2p_port = p2p_port;
+
+  if (cfg.high_availability().enabled() && p2p_port == 0) {
+    LOG(ERROR) << "Global Store high availability requires server.p2p_listen.port to be non-zero;"
+               << " configure a valid P2P port before starting the daemon.";
+    return 2;
+  }
 
   // Global Store HA - pick first endpoint if enabled
   std::string gs_addr;
@@ -238,7 +251,10 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().periodic_sync_interval();
       lopts.chunk_sync_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
-    lifecycle = std::make_unique<daemon::WorkerLifecycleManager>(engine, &service, lopts);
+    lifecycle = std::make_unique<daemon::WorkerLifecycleManager>(
+        gsl::not_null<std::shared_ptr<store::StoreEngine>>{engine},
+        gsl::not_null<daemon::StoreDaemonServiceImpl*>{&service},
+        lopts);
     auto st = lifecycle->start();
     if (!st.ok()) {
       LOG(WARNING) << "Worker lifecycle start failed: " << st.message();

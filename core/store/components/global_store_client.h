@@ -16,6 +16,7 @@
 #include "core/store/device_types.h"
 #include "core/store/replica/chunk_meta.h"
 #include "grpcpp/grpcpp.h"
+#include "gsl/pointers"
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/global_store/v1/global_store.grpc.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
@@ -53,7 +54,7 @@ struct TransportSession {
 
 class GlobalStoreClient {
  public:
-  explicit GlobalStoreClient(const GlobalStoreClientConfig& config);
+  explicit GlobalStoreClient(GlobalStoreClientConfig config);
   ~GlobalStoreClient();
 
   // Initialize connection to Global Store
@@ -194,6 +195,9 @@ class GlobalStoreClient {
   // Fetch canonical tensor index bytes by artifact_id.
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id);
 
+  // Update the cached local endpoint for subsequent memory registrations.
+  void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port);
+
  private:
   // Helper for RPC retries
   template <typename Request, typename Response, typename RpcMethod>
@@ -206,17 +210,21 @@ class GlobalStoreClient {
   // Convert between internal types and proto types
   static common::v1::MemoryType convert_to_proto_memory_type(common::memory::MemoryLocation location);
   static common::memory::MemoryLocation convert_from_proto_memory_type(common::v1::MemoryType type);
-  static void fill_memory_info(
+  absl::Status fill_memory_info(
       common::v1::MemoryInfo* info,
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t memory_size);
   static RemoteReplicaInfo convert_from_proto_memory_info(const common::v1::MemoryInfo& info);
 
-  GlobalStoreClientConfig config_;
-  std::shared_ptr<grpc::Channel> channel_;
-  std::unique_ptr<global_store::v1::GlobalStoreService::Stub> stub_;
+  const GlobalStoreClientConfig config_;
+  const gsl::not_null<std::shared_ptr<grpc::Channel>> channel_;
+  const gsl::not_null<std::unique_ptr<global_store::v1::GlobalStoreService::Stub>> stub_;
   std::string worker_id_;
+  std::string node_id_;
+  std::string node_address_;
+  uint32_t grpc_port_{0};
+  uint32_t p2p_port_{0};
   mutable std::mutex mutex_;
 };
 

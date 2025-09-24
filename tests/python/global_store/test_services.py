@@ -56,6 +56,32 @@ class TestServices:
                 Worker(node_id="node1", node_address="192.168.1.1", grpc_port=0)
             )
 
+        # Loopback address should be rejected
+        with pytest.raises(ValidationError, match="Invalid node_address"):
+            worker_service.register_worker(
+                Worker(
+                    node_id="node1",
+                    node_address="127.0.0.1",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+
+        # Loopback hostname should also be rejected
+        with pytest.raises(ValidationError, match="Invalid node_address"):
+            worker_service.register_worker(
+                Worker(
+                    node_id="node1",
+                    node_address="localhost",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
+
     def test_worker_service_heartbeat(self, services):
         """Test worker heartbeat processing."""
         worker_service = services["worker"]
@@ -198,6 +224,35 @@ class TestServices:
         assert updated.replica_id == registered.replica_id
         assert updated.memory_size == 2048
         assert updated.max_concurrency == 20
+
+    def test_artifact_service_rejects_loopback_address(self, services):
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                node_id="node1",
+                node_address="192.168.1.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+
+        with pytest.raises(ValidationError, match="Invalid node_address"):
+            artifact_service.register_replica(
+                Replica(
+                    artifact_id="test_artifact",
+                    node_id="node1",
+                    node_address="127.0.0.1",
+                    node_port=8080,
+                    memory_size=1024,
+                    memory_type=MemoryType.GPU,
+                    device_id=0,
+                    worker_id=worker.worker_id,
+                )
+            )
 
     def test_artifact_service_unregistration(self, services):
         """Test artifact replica unregistration."""

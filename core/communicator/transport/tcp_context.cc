@@ -141,6 +141,13 @@ std::string TcpContext::get_local_ip() const {
   return {inet_ntoa(local_addr_.sin_addr)};
 }
 
+uint16_t TcpContext::listening_port() const {
+  if (local_addr_.sin_family != AF_INET) {
+    return 0;
+  }
+  return ntohs(local_addr_.sin_port);
+}
+
 misc::result_t TcpContext::register_transport(TcpTransport* t) {
   epoll_event ev{};
   bzero(&ev, sizeof(epoll_event));

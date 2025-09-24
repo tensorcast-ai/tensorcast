@@ -27,10 +27,11 @@ uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config
 
 If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
 Use `--host` / `--port` to override the gRPC listen address for CI or sandboxed runs.
-By default, if `server.listen.host` is `0.0.0.0` or `127.0.0.1`, the daemon will
-automatically select a routable non-loopback IPv4 address to advertise to the Global Store.
-To explicitly control the advertised address (e.g., on multi-NIC hosts), set
-`server.advertise.host` in the config. If unset or non-routable, auto-detection applies.
+By default, if `server.listen.host` is `0.0.0.0` or `127.0.0.1`, the daemon attempts to
+auto-detect a routable non-loopback IPv4 address to advertise to the Global Store. If the
+auto-detection fails (e.g., headless hosts without an UP interface), startup aborts with an
+`INVALID_ARGUMENT` prompting you to set `server.advertise.host` explicitly. Loopback or
+unspecified addresses are no longer accepted once Global Store integration is enabled.
 ```
 
 The CLI locates the binary from the wheel or development path automatically

@@ -2,7 +2,6 @@
 
 """Service for worker operations."""
 
-import ipaddress
 import threading
 import time
 import uuid
@@ -11,6 +10,9 @@ from tensorcast.global_store.config import get_config
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Worker
 from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
+from tensorcast.global_store.services.address_validation import (
+    ensure_routable_address,
+)
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,26 +39,6 @@ class WorkerService:
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _is_loopback_address(addr: str) -> bool:
-        try:
-            return ipaddress.ip_address(addr).is_loopback
-        except ValueError:
-            # Hostname or invalid literal; treat as non-loopback here
-            return False
-
-    @staticmethod
-    def _is_unspecified_address(addr: str) -> bool:
-        """Return True when the address is unspecified (e.g., 0.0.0.0, ::).
-
-        Hostnames are treated as specified since they may resolve to routable IPs.
-        """
-        try:
-            return ipaddress.ip_address(addr).is_unspecified
-        except ValueError:
-            s = str(addr).strip().lower()
-            return s in {"0.0.0.0", "::", "[::]", "*"}
-
-    @staticmethod
     def _generate_worker_id(node_id: str) -> str:
         # UUID-based to avoid time-collision and cross-host clashes
         return f"worker_{node_id}_{uuid.uuid4().hex[:8]}"
@@ -81,13 +63,7 @@ class WorkerService:
         if not (1 <= worker.p2p_port <= 65535):
             raise ValidationError("Comm port must be between 1 and 65535")
 
-        # Reject loopback or unspecified addresses that are not reachable from other hosts
-        if self._is_loopback_address(
-            worker.node_address
-        ) or self._is_unspecified_address(worker.node_address):
-            raise ValidationError(
-                f"Invalid node_address '{worker.node_address}'. Use a routable (non-loopback, non-unspecified) IP of the external interface; 127.0.0.1 and 0.0.0.0 are not allowed."
-            )
+        ensure_routable_address(worker.node_address, "node_address")
 
         # Check for existing worker registered at the same advertised address:port
         existing = self.worker_repository.find_by_address_port(

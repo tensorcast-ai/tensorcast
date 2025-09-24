@@ -130,6 +130,7 @@ cc_binary(
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
+        "@gsl",
     ],
 )
 
@@ -167,6 +168,7 @@ sc_cc_library(
         "//core/communicator:utils_lib",
         "//core/store:store_engine",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+        "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -641,5 +643,6 @@ cc_test(
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )

@@ -35,11 +35,15 @@ def chunk_service(repos):
     return ChunkService(repos["chunk"])
 
 
-def _insert_worker(worker_repo: WorkerRepository, node_id: str = "node1") -> Worker:
+def _insert_worker(
+    worker_repo: WorkerRepository,
+    node_id: str = "node1",
+    node_address: str = "192.168.50.10",
+) -> Worker:
     worker = Worker(
         worker_id="worker_node1_1",
         node_id=node_id,
-        node_address="127.0.0.1",
+        node_address=node_address,
         grpc_port=50051,
         p2p_port=50052,
         mem_pool_total_size=1024,
@@ -84,7 +88,7 @@ def test_batch_update_and_query(chunk_service: ChunkService, repos):
     # Verify fields copied from repo row mapping
     by_idx = {loc.chunk_idx: loc for loc in locations}
     assert by_idx[0].node_id == "node1"
-    assert by_idx[0].node_address == "127.0.0.1"
+    assert by_idx[0].node_address == "192.168.50.10"
     assert by_idx[0].p2p_port == 50052
     assert by_idx[0].device_uuid == "gpu-uuid-0"
 
@@ -280,7 +284,7 @@ def test_get_chunk_distribution_across_multiple_nodes(
         Worker(
             worker_id="worker_node1_1",
             node_id="node1",
-            node_address="127.0.0.1",
+            node_address="192.168.50.10",
             grpc_port=50051,
             p2p_port=50052,
             mem_pool_total_size=1024,
@@ -292,7 +296,7 @@ def test_get_chunk_distribution_across_multiple_nodes(
         Worker(
             worker_id="worker_node2_1",
             node_id="node2",
-            node_address="127.0.0.2",
+            node_address="192.168.50.11",
             grpc_port=50061,
             p2p_port=50062,
             mem_pool_total_size=1024,
@@ -343,7 +347,7 @@ def test_query_specific_indices_returns_multiple_nodes(
         Worker(
             worker_id="worker_node1_2",
             node_id="node1",
-            node_address="127.0.0.1",
+            node_address="192.168.50.10",
             grpc_port=50071,
             p2p_port=50072,
             mem_pool_total_size=1024,
@@ -355,7 +359,7 @@ def test_query_specific_indices_returns_multiple_nodes(
         Worker(
             worker_id="worker_node2_2",
             node_id="node2",
-            node_address="127.0.0.2",
+            node_address="192.168.50.11",
             grpc_port=50081,
             p2p_port=50082,
             mem_pool_total_size=1024,
@@ -406,7 +410,7 @@ def test_query_ordering_by_node_load_ratio(chunk_service: ChunkService, repos, d
         Worker(
             worker_id="worker_node1_3",
             node_id="node1",
-            node_address="127.0.0.1",
+            node_address="192.168.50.10",
             grpc_port=50091,
             p2p_port=50092,
             mem_pool_total_size=1024,
@@ -418,7 +422,7 @@ def test_query_ordering_by_node_load_ratio(chunk_service: ChunkService, repos, d
         Worker(
             worker_id="worker_node2_3",
             node_id="node2",
-            node_address="127.0.0.2",
+            node_address="192.168.50.11",
             grpc_port=50101,
             p2p_port=50102,
             mem_pool_total_size=1024,

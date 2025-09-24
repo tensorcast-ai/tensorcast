@@ -127,6 +127,8 @@ class Communicator {
     return enable_rdma_;
   }
 
+  uint16_t listening_port() const;
+
   size_t staged_segments_count_for_test() {
     absl::MutexLock lk(&staged_mu_);
     return staged_segments_.pairs().size();

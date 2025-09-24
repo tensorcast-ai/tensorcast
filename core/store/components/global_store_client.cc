@@ -6,10 +6,15 @@
 #include <chrono>
 #include <random>
 #include <thread>
+#include <utility>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "core/common/otel/grpc_propagation.h"
+#include "core/communicator/misc/utils.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "tensorcast/common/v1/common.pb.h"
@@ -43,27 +48,51 @@ const char* status_to_cstr(global_store::Status s) {
       return "<unknown>";
   }
 }
+
+bool is_loopback_or_unspecified(absl::string_view addr) {
+  if (addr.empty())
+    return true;
+  if (addr == "localhost" || addr == "ip6-localhost" || addr == "*" || addr == "0.0.0.0")
+    return true;
+
+  absl::string_view trimmed = addr;
+  if (trimmed.front() == '[' && trimmed.back() == ']') {
+    trimmed.remove_prefix(1);
+    trimmed.remove_suffix(1);
+  }
+
+  return trimmed == "127.0.0.1" || trimmed == "::" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1";
+}
 } // namespace
 
 using common::memory::MemoryLocation;
 using replica::ChunkState;
 
-GlobalStoreClient::GlobalStoreClient(const GlobalStoreClientConfig& config) : config_(config) {}
+namespace {
 
-GlobalStoreClient::~GlobalStoreClient() = default;
-
-absl::Status GlobalStoreClient::initialize() {
-  std::lock_guard<std::mutex> lock(mutex_);
-
+std::shared_ptr<grpc::Channel> make_channel(const GlobalStoreClientConfig& config) {
   grpc::ChannelArguments args;
   args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 30000);
   args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 20000);
   args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
 
-  channel_ = grpc::CreateCustomChannel(config_.global_store_address, grpc::InsecureChannelCredentials(), args);
+  auto channel = grpc::CreateCustomChannel(config.global_store_address, grpc::InsecureChannelCredentials(), args);
+  ABSL_CHECK(channel != nullptr);
+  return channel;
+}
 
-  stub_ = global_store::GlobalStoreService::NewStub(channel_);
+} // namespace
 
+GlobalStoreClient::GlobalStoreClient(GlobalStoreClientConfig config)
+    : config_(std::move(config)),
+      channel_(gsl::not_null<std::shared_ptr<grpc::Channel>>(make_channel(config_))),
+      stub_(
+          gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>>(
+              global_store::GlobalStoreService::NewStub(channel_.get()))) {}
+
+GlobalStoreClient::~GlobalStoreClient() = default;
+
+absl::Status GlobalStoreClient::initialize() {
   // Test connection with a health check
   global_store::HealthCheckRequest req;
   global_store::HealthCheckResponse resp;
@@ -104,6 +133,24 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
     uint64_t mem_pool_available_size,
     bool is_recovery_registration,
     std::string_view previous_worker_id) {
+  if (is_loopback_or_unspecified(node_address)) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat(
+            "Invalid node_address '%s'. Global Store requires a routable (non-loopback) address; configure --advertise_host "
+            "or listen_addr accordingly.",
+            node_address));
+  }
+
+  if (grpc_port == 0) {
+    return absl::InvalidArgumentError(
+        "register_worker requires a non-zero grpc_port; ensure the daemon listen_addr includes a port component.");
+  }
+
+  if (p2p_port == 0) {
+    return absl::InvalidArgumentError(
+        "register_worker requires a non-zero p2p_port; configure the daemon with --p2p_listen or provide a valid port.");
+  }
+
   global_store::RegisterWorkerRequest request;
   request.set_node_id(std::string(node_id));
   request.set_node_address(std::string(node_address));
@@ -147,6 +194,10 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     worker_id_ = response.worker_id();
+    node_id_ = std::string(node_id);
+    node_address_ = std::string(node_address);
+    grpc_port_ = grpc_port;
+    p2p_port_ = p2p_port;
   }
 
   LOG(INFO) << "Registered worker with ID: " << response.worker_id();
@@ -268,7 +319,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   request.set_max_concurrency(max_concurrency);
 
   auto* mem_info = request.mutable_mem_info();
-  fill_memory_info(mem_info, device, location, memory_size);
+  if (auto fill_st = fill_memory_info(mem_info, device, location, memory_size); !fill_st.ok()) {
+    return fill_st;
+  }
 
   global_store::RegisterReplicaResponse response;
 
@@ -315,7 +368,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   request.set_max_concurrency(max_concurrency);
 
   auto* mem_info = request.mutable_mem_info();
-  fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size);
+  if (auto fill_st = fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size); !fill_st.ok()) {
+    return fill_st;
+  }
   // If server supports memory replica fields, populate them via extension fields in MemoryInfo
   // For current proto, we include memory-replica metadata by overloading fields when available via
   // Global Store server. As a fallback, embed keys in the request's optional fields.
@@ -393,8 +448,8 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   const char* plan_str = (device.type == DeviceType::CPU) ? "virtual_addr_space" : "vram_coalesced";
   const char* dev_kind = (device.type == DeviceType::CPU) ? "cpu" : "gpu";
   LOG(INFO) << "Registered memory replica: " << artifact_id << " plan=" << plan_str << " device=" << dev_kind << ":"
-            << device.ordinal << " size=" << memory_size << "B"
-            << " replica_id=" << response.replica_id();
+            << device.ordinal;
+  LOG(INFO) << "RegisterReplica(memory) request mem_info: \n" << request.mem_info().DebugString();
   return response.replica_id();
 }
 
@@ -440,7 +495,9 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   dur->set_nanos(static_cast<int32_t>((wait_timeout_ms % 1000) * 1000000));
 
   auto* local_mem_info = request.mutable_local_memory_info();
-  fill_memory_info(local_mem_info, target_device, MemoryLocation::GPU, 0);
+  if (auto fill_st = fill_memory_info(local_mem_info, target_device, MemoryLocation::GPU, 0); !fill_st.ok()) {
+    return fill_st;
+  }
 
   global_store::RequestReplicaTransportResponse response;
 
@@ -534,8 +591,7 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
 }
 
 bool GlobalStoreClient::is_connected() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return channel_ && channel_->GetState(false) == GRPC_CHANNEL_READY;
+  return channel_->GetState(false) == GRPC_CHANNEL_READY;
 }
 
 absl::Status GlobalStoreClient::batch_update_chunk_states(
@@ -618,26 +674,59 @@ MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(tensorcast::com
   }
 }
 
-void GlobalStoreClient::fill_memory_info(
+absl::Status GlobalStoreClient::fill_memory_info(
     tensorcast::common::v1::MemoryInfo* info,
     const DeviceKey& device,
     MemoryLocation location,
     uint64_t memory_size) {
-  // Get hostname for node_id
-  char hostname[256];
-  if (gethostname(hostname, sizeof(hostname)) == 0) {
-    info->set_node_id(hostname);
+  std::string node_id;
+  std::string node_address;
+  uint32_t node_port = 0;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    node_id = node_id_;
+    node_address = node_address_;
+    node_port = p2p_port_;
   }
 
-  // TODO: Get actual IP address
-  info->set_node_address("127.0.0.1");
-  info->set_node_port(9090); // Default P2P port
+  if (node_id.empty()) {
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+      node_id = hostname;
+    } else {
+      node_id = "unknown";
+    }
+  }
+
+  if (node_address.empty() || is_loopback_or_unspecified(node_address)) {
+    const std::string default_ip = communicator::misc::get_default_ip();
+    if (!default_ip.empty()) {
+      node_address = default_ip;
+    }
+  }
+
+  if (node_address.empty() || is_loopback_or_unspecified(node_address)) {
+    return absl::FailedPreconditionError(
+        "GlobalStoreClient requires a routable advertised address before exporting memory info.");
+  }
+
+  if (node_port == 0) {
+    return absl::FailedPreconditionError(
+        "GlobalStoreClient requires a non-zero P2P port before exporting memory info; configure --p2p_listen or pass a valid p2p_port to register_worker().");
+  }
+
+  info->set_node_id(node_id);
+  info->set_node_address(node_address);
+  info->set_node_port(node_port);
   info->set_memory_size(memory_size);
   info->set_memory_type(convert_to_proto_memory_type(location));
 
   if (device.type == DeviceType::GPU) {
     info->set_device_id(device.ordinal);
   }
+
+  return absl::OkStatus();
 }
 
 RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensorcast::common::v1::MemoryInfo& info) {
@@ -661,6 +750,26 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   }
 
   return replica;
+}
+
+void GlobalStoreClient::update_local_endpoint(
+    std::string node_id,
+    std::string node_address,
+    uint32_t grpc_port,
+    uint32_t p2p_port) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!node_id.empty()) {
+    node_id_ = std::move(node_id);
+  }
+  if (!node_address.empty()) {
+    node_address_ = std::move(node_address);
+  }
+  if (grpc_port != 0) {
+    grpc_port_ = grpc_port;
+  }
+  if (p2p_port != 0) {
+    p2p_port_ = p2p_port;
+  }
 }
 
 template <typename Request, typename Response, typename RpcMethod>

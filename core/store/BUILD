@@ -95,11 +95,13 @@ sc_cc_library(
         ":device_types",
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
+        "//core/communicator:utils_lib",
         "//core/store/replica:chunk_meta",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
+        "@gsl",
         "@opentelemetry-cpp//api:api",
     ],
 )

@@ -14,16 +14,24 @@
 #include "core/testing/common.h"
 #include "daemon/worker_lifecycle_manager.h"
 #include "grpcpp/grpcpp.h"
+#include "gsl/pointers"
 #include "tensorcast/global_store/v1/global_store.grpc.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace fs = std::filesystem;
 using tensorcast::DeviceType;
+using tensorcast::daemon::StoreDaemonServiceImpl;
 using tensorcast::daemon::WorkerLifecycleManager;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
 namespace global_store = tensorcast::global_store::v1;
+
+namespace {
+
+constexpr uint16_t kTestP2PPort = 45000;
+
+}
 
 static DeviceKey make_gpu_key(int ordinal) {
   return DeviceKey{DeviceType::GPU, ordinal, /*uuid=*/""};
@@ -263,11 +271,14 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 5000; // long enough to avoid race
   wopts.chunk_sync_interval_ms = 0; // disable chunk sync thread
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 
@@ -347,11 +358,14 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 50; // fast heartbeat to apply obsolete list
   wopts.chunk_sync_interval_ms = 0; // disable chunk sync thread
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 
@@ -430,11 +444,14 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 50; // fast heartbeat to drive synchronize call
   wopts.chunk_sync_interval_ms = 0;
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 
@@ -510,11 +527,14 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 50;
   wopts.chunk_sync_interval_ms = 0;
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 
@@ -577,11 +597,14 @@ TEST_CASE("WorkerLifecycleManager sends batch chunk state updates", "[daemon][ha
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 200; // slower heartbeat; chunk sync drives updates
   wopts.chunk_sync_interval_ms = 50; // fast chunk sync loop
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 
@@ -642,11 +665,14 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   WorkerLifecycleManager::Options wopts;
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
-  wopts.p2p_port = 0;
+  wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 50; // drive heartbeat quickly
   wopts.chunk_sync_interval_ms = 0; // disable chunk sync
 
-  WorkerLifecycleManager wlm(engine_ptr, &dummy_service, wopts);
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
 

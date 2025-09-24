@@ -181,6 +181,13 @@ absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_c
   return absl::OkStatus();
 }
 
+uint16_t Communicator::listening_port() const {
+  if (!server_context_) {
+    return 0;
+  }
+  return server_context_->listening_port();
+}
+
 future_read_result_t Communicator::read_tensor(
     const std::string& key,
     uint64_t addr,

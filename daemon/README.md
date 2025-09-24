@@ -19,6 +19,7 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 - Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
 - Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks. The lifecycle manager exposes a schedule hook so the scheduler can be rescheduled immediately when the earliest deadline changes, minimizing expiry drift.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
+- Enforces non-loopback advertisement when registering with Global Store; startup fails if no routable IP can be determined and `--advertise_host` is unset.
 - Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
 - Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
 - Join TTL via leases: duplicate coalesced commits (`existed=true`) create a TTL-bound UseLease for the owner PID. On expiry, the lease finalizer drops the lightweight RefTracker ref and may reclaim memory immediately.
@@ -89,7 +90,7 @@ Contract highlights:
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
 - `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
-- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile).
+- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; `start()` just performs the handshake and initial registration.
 - `server_main.cc`: flags/bootstrap and service registration.
 
 ## Build, Run, Test

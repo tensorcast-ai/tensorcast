@@ -20,8 +20,10 @@ message DaemonServer {
   reserved "host", "port", "p2p_port";
   tensorcast.config.v1.SocketAddress listen = 10;
   // Optional externally advertised address. If unset or set to an
-  // unspecified/loopback host, the daemon will automatically select a
+  // unspecified/loopback host, the daemon attempts to auto-detect a
   // routable non-loopback IPv4 address during Global Store registration.
+  // If auto-detection fails, startup aborts with INVALID_ARGUMENT asking for
+  // a routable advertise.host.
   // The port field is currently ignored for gRPC registration; the
   // gRPC port is taken from `listen.port`.
   tensorcast.config.v1.SocketAddress advertise = 12;
