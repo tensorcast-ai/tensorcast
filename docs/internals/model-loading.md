@@ -83,7 +83,7 @@ sequenceDiagram
 2. **Artifact Request**: Request artifact by human key using CUDA IPC (`MaterializeByKey`)
 3. **Key Resolution**: LocalStoreDaemon resolves key → artifact_id; the daemon orchestrator selects a source, falls back to disk when needed (based on published disk_path hints).
 4. **Replica Location**: Request remote replica location if artifact not available locally
-5. **Artifact Loading**: Load artifact via P2P from remote daemon or from disk (fallback handled by daemon orchestrator, not the client)
+5. **Artifact Loading**: Load artifact via P2P from remote daemon or, when the key supplies a disk hint, from disk (fallback handled by daemon orchestrator, not the client)
 6. **GPU Transfer**: Copy artifact to GPU memory
 7. **Confirmation**: Confirm artifact loading completion (client provides `replica_uuid` in `MaterializeByKeyRequest`)
 8. **Registration**: Register replica with GlobalStore (if using distributed setup)
@@ -139,6 +139,7 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 
 Note: Legacy `load_dict(...)`, `load_dict_handle(...)`, `get_artifact(...)`, and `get_artifact_handle(...)` have been removed. Use the fixed-type helpers above.
 - Unified error model under `TensorCastError` with readable subclasses like `DaemonUnavailable`, `DeviceMismatch`, and `IndexParseError`.
+- Materialize-by-key loads raise a clear runtime error when a key is absent, including the daemon address and guidance for registering artifacts.
 
 ### Registration Semantics
 

@@ -466,12 +466,32 @@ class DaemonCtl:
                 )
             except grpc.RpcError as e:
                 span.record_exception(e)
-                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
                     raise RuntimeError(
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
-                else:
-                    raise RuntimeError(f"Error: {e}") from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    detail = ""
+                    with suppress(Exception):
+                        detail = e.details() or ""
+                    message = (
+                        f"Artifact key '{key}' was not found by StoreDaemon at "
+                        f"{self.server_address}."
+                    )
+                    if detail:
+                        message += f" Daemon response: {detail}."
+                    message += " Verify the key spelling or register the artifact before loading."
+                    raise RuntimeError(message) from e
+                status_name = "UNKNOWN"
+                detail_msg = str(e)
+                with suppress(Exception):
+                    if code is not None:
+                        status_name = code.name
+                    detail_msg = e.details() or detail_msg
+                raise RuntimeError(
+                    f"MaterializeByKey RPC failed with status={status_name}: {detail_msg}"
+                ) from e
 
         load_status = response.status
         if (

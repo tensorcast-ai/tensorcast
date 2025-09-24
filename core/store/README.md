@@ -99,7 +99,7 @@ graph TB
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
-    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store; falls back to disk when `hints.disk_path` is provided. For content-addressed IDs (`mi2:...`), disk fallback requires `hints.disk_path`.
+    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
     - `LOAD_ONLY`: Loads from disk only (rejects content-addressed IDs without `hints.disk_path`).
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle }`.

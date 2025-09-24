@@ -60,7 +60,7 @@ class TestErrorHandling:
 
     def test_transport_request_no_replicas(self, services):
         """Test requesting transport when no replicas exist."""
-        with pytest.raises(TimeoutError) as exc_info:
+        with pytest.raises(NotFoundError) as exc_info:
             services["transport"].request_transport(
                 artifact_id="nonexistent_artifact",
                 source_node_id="node1",
@@ -68,7 +68,7 @@ class TestErrorHandling:
                 source_port=8080,
                 wait_timeout_ms=100
             )
-        assert "No available replica" in str(exc_info.value) and "timeout" in str(exc_info.value)
+        assert "No replicas registered" in str(exc_info.value)
 
     def test_transport_request_all_replicas_at_capacity(self, services, repositories):
         """Test requesting transport when all replicas are at capacity."""

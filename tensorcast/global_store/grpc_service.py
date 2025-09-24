@@ -589,6 +589,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 transport_id=str(transport_id),
             )
 
+        except NotFoundError:
+            logger.info(f"No replicas registered for artifact {request.artifact_id}")
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
         except TimeoutError:
             logger.warning(f"Timeout waiting for artifact {request.artifact_id}")
             return global_store_pb2.RequestReplicaTransportResponse(

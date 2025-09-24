@@ -86,19 +86,21 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     }
     LOG(WARNING) << "P2P load failed: " << load_or.status();
 
+    if (hints.disk_path.empty()) {
+      return load_or.status();
+    }
+
   } else {
     // Not found or GS unavailable → fall back to disk
     LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk";
+    if (hints.disk_path.empty()) {
+      return transport_or.status();
+    }
   }
 
   // ------------------------------------------------------------------
   // 3. Disk fallback
   // ------------------------------------------------------------------
-  // Content-addressed IDs (mi2:...) are not paths. Disk fallback requires an explicit hints.disk_path.
-  if (hints.disk_path.empty()) {
-    return absl::FailedPreconditionError(
-        "Disk fallback requires hints.disk_path; content-addressed artifact_id must route via Global Store");
-  }
   DiskSource disk_src;
   disk_src.path = std::filesystem::path(hints.disk_path);
 

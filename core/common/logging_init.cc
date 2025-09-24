@@ -65,6 +65,8 @@ void initialize_logging_from_config(const tensorcast::config::v1::Observability_
 
   otel::install_plain_log_sink_from_config(log_cfg);
   otel::install_otel_log_sink_from_config(log_cfg);
+
+  LOG(INFO) << "Logging initialized from config: \n" << log_cfg.DebugString();
 }
 
 } // namespace tensorcast::common

@@ -25,6 +25,16 @@ def _to_uuid(value: str | UUID) -> UUID:
 class ReplicaRepository(BaseRepository):
     """Repository for managing artifact replicas in the database."""
 
+    def has_any_replica(self, artifact_id: str) -> bool:
+        """Return True when at least one replica exists for *artifact_id*."""
+
+        cursor = self.get_cursor()
+        row = cursor.execute(
+            "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? LIMIT 1",
+            [artifact_id],
+        ).fetchone()
+        return row is not None
+
     def find_by_id(self, replica_id: UUID, artifact_id: str) -> Replica | None:
         """Find a replica by ID and content-addressed artifact_id."""
         cursor = self.get_cursor()

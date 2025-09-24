@@ -199,7 +199,7 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - Cleanup: `cleanup_inactive_workers()` deletes workers whose `last_heartbeat` is older than `GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS` and marks their replicas `is_available = FALSE`.
 
 - TransportService
-  - `request_transport()` loops until a replica can be claimed (or timeout). On success it creates an `artifact_transports` row and updates metrics (`inc_transport_request`, `observe_transport_wait`, `inc_active_transports`).
+- `request_transport()` first checks whether *any* replicas exist for the artifact. If none are registered it returns `STATUS_NOT_FOUND` immediately (metrics label `status="not_found"`). Otherwise it loops until a replica can be claimed (or the caller's deadline elapses). On success it creates an `artifact_transports` row and updates metrics (`inc_transport_request`, `observe_transport_wait`, `inc_active_transports`).
   - `complete_transport()` decrements the replica’s `current_requests` and marks the transport `completed`.
   - Safety-net: `cleanup_expired_transports()` force-completes stale, in-progress transports and fixes leaked counters.
 
@@ -297,6 +297,7 @@ Use the unified config fields in `examples/config/global_store_config.yaml`.
 - gRPC: `tc_grpc_server_handled_total{method,code}`, `tc_grpc_server_handling_seconds{method}` via `PrometheusInterceptor` (unary-unary exposed methods).
 - Cluster: `tc_active_workers`, `tc_replicas_total`, `tc_replicas_per_artifact{artifact_id}`, `tc_replicas_per_memtype{memory_type}`.
 - Transport: `tc_transport_requests_total{artifact_id,status}`, `tc_transport_wait_seconds{artifact_id}`, `tc_active_transports`.
+  - `status` values: `success`, `timeout`, `error`, `not_found` (no replicas registered).
 - Recovery: `tc_state_sync_total{result}`, `tc_state_sync_seconds`.
 
 ## Operational Threads

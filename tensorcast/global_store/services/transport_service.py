@@ -64,6 +64,11 @@ class TransportService:
         start_time = time.time()
         end_time = start_time + (wait_timeout_ms / 1000 if wait_timeout_ms > 0 else 0)
 
+        if not self.replica_repository.has_any_replica(artifact_id):
+            inc_transport_request(artifact_id, "not_found")
+            observe_transport_wait(artifact_id, time.time() - start_time)
+            raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
+
         while True:
             try:
                 # Try to find and claim an available replica
@@ -105,6 +110,14 @@ class TransportService:
 
             # Check timeout
             if time.time() >= end_time:
+                if not self.replica_repository.has_any_replica(artifact_id):
+                    inc_transport_request(artifact_id, "not_found")
+                    wait_sec = time.time() - start_time
+                    observe_transport_wait(artifact_id, wait_sec)
+                    raise NotFoundError(
+                        f"No replicas registered for artifact {artifact_id}"
+                    )
+
                 inc_transport_request(artifact_id, "timeout")
                 wait_sec = time.time() - start_time
                 observe_transport_wait(artifact_id, wait_sec)

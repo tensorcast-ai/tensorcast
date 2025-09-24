@@ -173,6 +173,26 @@ class TestGRPCService:
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
 
+    def test_request_transport_missing_artifact(
+        self, servicer, test_context, memory_info
+    ):
+        """Requesting transport for a key with no replicas returns NOT_FOUND."""
+
+        transport_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id="missing_artifact",
+            local_memory_info=memory_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=0),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+        )
+
+        transport_response = servicer.RequestReplicaTransport(
+            transport_request, test_context
+        )
+
+        assert transport_response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+
     def test_complete_artifact_replica_transport(
         self, servicer, test_context, memory_info, registered_worker
     ):
