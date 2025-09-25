@@ -3,6 +3,7 @@
 #include "core/common/async_copy_manager.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
+#include "core/common/trace/trace_cuda_async_fn.h"
 
 namespace tensorcast::common {
 
@@ -190,7 +191,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       return set_dev_status;
     }
   }
-  auto status = tensorcast::common::trace::trace_cuda_async(
+  auto status = common::trace::trace_cuda_async(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice, stream_to_use); },
@@ -256,7 +257,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       return set_dev_status;
     }
   }
-  auto status = tensorcast::common::trace::trace_cuda_async(
+  auto status = common::trace::trace_cuda_async(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice, stream_to_use); },
@@ -317,7 +318,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       return set_dev_status;
     }
   }
-  auto status = tensorcast::common::trace::trace_cuda_async(
+  auto status = common::trace::trace_cuda_async(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream_to_use); },
