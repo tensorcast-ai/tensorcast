@@ -215,7 +215,7 @@ classDiagram
 2. Create `FilePartitionSource` implementing `SeekableSource` — `core/store/loader/file_partition_source.{h,cc}`
 3. Return source handle for pump-based streaming — `DiskLoader::open_source()`
 4. Actual loading handled by `ReplicaLoadController::load_async_from_source()` using `TransferService` + `pump_ranges()`
-5. Data flows: FilePartitionSource → Pump → MemorySink (`CpuVaSink` for CPU or `GpuMemorySink` for GPU). For GPU targets, the pump detects sinks that implement `AsyncPositionedSink` and uses `AsyncCopyManager` to submit H2D copies; pinned slots are returned only after GPU DMA completion, enabling I/O–copy overlap without per-chunk synchronizations.
+5. Data flows: FilePartitionSource → Pump → MemorySink (`CpuVaSink` for CPU or `GpuMemorySink` for GPU). For GPU targets, the pump detects sinks that implement `AsyncPositionedSink` and uses `AsyncCopyManager` to submit H2D copies; pinned slots are returned only after GPU DMA completion, and the pump waits on any remaining in-flight copies before exiting, ensuring the GPU buffer is fully materialized prior to verification.
 
 **P2PLoader Workflow**:
 1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/loader/p2p_loader.{h,cc}`

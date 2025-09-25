@@ -4,12 +4,10 @@
 
 #include <algorithm>
 #include <mutex>
-#include <string>
 
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
 #include "absl/log/log.h"
-#include "absl/log/vlog_is_on.h"
 #include "core/common/otel/logging_sink.h"
 #include "tensorcast/config/v1/common.pb.h"
 
@@ -49,7 +47,6 @@ void ensure_logging_initialized() {
     const absl::LogSeverityAtLeast default_level = absl::LogSeverityAtLeast::kInfo;
     absl::SetStderrThreshold(default_level);
     absl::SetMinLogLevel(default_level);
-    absl::SetVLogLevel("*", 0);
   });
 }
 

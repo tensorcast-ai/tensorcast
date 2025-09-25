@@ -4,7 +4,9 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -19,28 +21,44 @@ struct CudaTracePayload {
   std::string artifact_id;
   std::string request_id;
   TraceManager::SpanId span_id;
-  std::function<void()> on_complete;
+  std::function<void(absl::Status)> on_complete;
+  cudaStream_t stream{nullptr};
+  int device_id{-1};
 };
 
 inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* payload) {
+  payload->stream = stream;
   auto status = tensorcast::cuda::launch_host_func(
       stream,
       [](void* user_data) {
         auto* p = static_cast<CudaTracePayload*>(user_data);
         TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
         if (p->on_complete) {
-          p->on_complete();
+          p->on_complete(absl::OkStatus());
         }
         delete p;
       },
       payload);
   if (!status.ok()) {
-    // Fallback: end span immediately to avoid leaks and execute on_complete.
-    TraceManager::instance().end_span(payload->artifact_id, payload->request_id, payload->span_id);
-    if (payload->on_complete) {
-      payload->on_complete();
-    }
-    delete payload;
+    // Fallback: synchronize the stream on a detached thread before completing.
+    std::unique_ptr<CudaTracePayload> holder(payload);
+    std::thread(
+        [](std::unique_ptr<CudaTracePayload> payload_up) {
+          if (!payload_up) {
+            return;
+          }
+          auto* p = payload_up.get();
+          if (p->device_id >= 0) {
+            (void)tensorcast::cuda::set_device(p->device_id);
+          }
+          absl::Status sync_status = tensorcast::cuda::stream_synchronize(p->stream);
+          TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
+          if (p->on_complete) {
+            p->on_complete(sync_status);
+          }
+        },
+        std::move(holder))
+        .detach();
   }
 }
 
@@ -58,9 +76,9 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
 // Usage:
 //   SC_RETURN_IF_ERROR(trace_cuda_async("h2d_copy", stream,
 //       [&]{ return tensorcast::cuda::memcpy_async(dst, src, n, cudaMemcpyHostToDevice, stream); },
-//       [&]{ pool->return_slot(slot); }));
+//       [&](absl::Status st){ pool->return_slot(slot); }));
 // ---------------------------------------------------------------------------
-template <typename Op, typename Done = std::function<void()>>
+template <typename Op, typename Done = std::function<void(absl::Status)>>
 inline absl::Status trace_cuda_async(
     const std::string& stage,
     cudaStream_t stream,
@@ -80,6 +98,10 @@ inline absl::Status trace_cuda_async(
 
   // Schedule host callback to end the span when the stream finishes work.
   auto* payload = new detail::CudaTracePayload{artifact_id, request_id, span_id, std::forward<Done>(on_complete)};
+  int current_device = -1;
+  if (auto dev_status = tensorcast::cuda::get_device(&current_device); dev_status.ok()) {
+    payload->device_id = current_device;
+  }
   detail::sc_schedule_trace_host_cb(stream, payload);
 
   return absl::OkStatus();

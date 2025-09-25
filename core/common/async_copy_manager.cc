@@ -13,32 +13,75 @@ AsyncCopyManager& AsyncCopyManager::instance() {
 
 CopyHandle::~CopyHandle() = default;
 
-absl::Status CopyHandle::wait(absl::Duration timeout) const {
-  absl::MutexLock lock(&p_->mu);
-  if (!p_->done) {
-    if (timeout == absl::InfiniteDuration()) {
-      p_->cv.Wait(&p_->mu);
-    } else {
-      if (!p_->cv.WaitWithTimeout(&p_->mu, timeout)) {
-        return absl::DeadlineExceededError("copy wait timeout");
-      }
-    }
-  }
-  return p_->status;
-}
-
-bool CopyHandle::ok() const {
-  absl::MutexLock lock(&p_->mu);
-  return p_->done && p_->status.ok();
-}
-
 namespace {
 
 inline const char* stage_or(const CopyOptions& opts, const char* def_stage) {
   return opts.tracing_stage ? opts.tracing_stage : def_stage;
 }
-
 } // namespace
+
+absl::Status CopyHandle::wait(absl::Duration timeout) const {
+  p_->mu.Lock();
+  if (!p_->done) {
+    bool wait_result = true;
+    if (timeout == absl::InfiniteDuration()) {
+      p_->cv.Wait(&p_->mu);
+    } else {
+      wait_result = p_->cv.WaitWithTimeout(&p_->mu, timeout);
+    }
+    if (!wait_result) {
+      p_->mu.Unlock();
+      return absl::DeadlineExceededError("copy wait timeout");
+    }
+  }
+  p_->mu.Unlock();
+  return resolve_status_();
+}
+
+bool CopyHandle::ok() const {
+  p_->mu.Lock();
+  const bool done = p_->done;
+  p_->mu.Unlock();
+  if (!done) {
+    return false;
+  }
+  return resolve_status_().ok();
+}
+
+absl::Status CopyHandle::resolve_status_() const {
+  int device_id = -1;
+  bool needs_check = false;
+  absl::Status status;
+  {
+    absl::MutexLock lock(&p_->mu);
+    status = p_->status;
+    if (p_->needs_device_check && status.ok()) {
+      needs_check = true;
+      device_id = p_->device_id;
+      p_->needs_device_check = false;
+    }
+  }
+
+  if (!needs_check) {
+    return status;
+  }
+
+  absl::Status final_status = absl::OkStatus();
+  absl::Status set_dev_status = cuda::set_device(device_id);
+  if (!set_dev_status.ok()) {
+    final_status = set_dev_status;
+  } else {
+    final_status = cuda::get_last_error();
+  }
+
+  if (!final_status.ok()) {
+    absl::MutexLock lock(&p_->mu);
+    p_->status = final_status;
+    return final_status;
+  }
+
+  return status;
+}
 
 AsyncCopyManager::~AsyncCopyManager() {
   shutdown();
@@ -151,12 +194,14 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done]() {
-        if (cb)
+      [p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+        if (cb) {
           cb();
-        absl::Status st = cuda::get_last_error();
+        }
         absl::MutexLock lock(&p->mu);
-        p->status = st;
+        p->status = completion_status;
+        p->device_id = device_id;
+        p->needs_device_check = completion_status.ok() && device_id >= 0;
         p->done = true;
         p->cv.SignalAll();
       });
@@ -167,6 +212,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
     absl::MutexLock lock(&p->mu);
     p->status = status;
     p->done = true;
+    p->device_id = dst.device_id;
+    p->needs_device_check = false;
     p->cv.SignalAll();
     return status;
   }
@@ -213,12 +260,14 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done]() {
-        if (cb)
+      [p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+        if (cb) {
           cb();
-        absl::Status st = cuda::get_last_error();
+        }
         absl::MutexLock lock(&p->mu);
-        p->status = st;
+        p->status = completion_status;
+        p->device_id = device_id;
+        p->needs_device_check = completion_status.ok() && device_id >= 0;
         p->done = true;
         p->cv.SignalAll();
       });
@@ -227,6 +276,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
     absl::MutexLock lock(&p->mu);
     p->status = status;
     p->done = true;
+    p->device_id = dst.device_id;
+    p->needs_device_check = false;
     p->cv.SignalAll();
     return status;
   }
@@ -270,12 +321,14 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done]() {
-        if (cb)
+      [p, cb = opts.callbacks.on_copy_done, device_id = src.device_id](absl::Status completion_status) {
+        if (cb) {
           cb();
-        absl::Status st = cuda::get_last_error();
+        }
         absl::MutexLock lock(&p->mu);
-        p->status = st;
+        p->status = completion_status;
+        p->device_id = device_id;
+        p->needs_device_check = completion_status.ok() && device_id >= 0;
         p->done = true;
         p->cv.SignalAll();
       });
@@ -284,6 +337,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
     absl::MutexLock lock(&p->mu);
     p->status = status;
     p->done = true;
+    p->device_id = src.device_id;
+    p->needs_device_check = false;
     p->cv.SignalAll();
     return status;
   }

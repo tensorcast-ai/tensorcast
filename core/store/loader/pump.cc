@@ -8,13 +8,14 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 // Direct write grant handled via sink capability
 #include <cstdlib>
-#include <string_view>
 // OpenTelemetry counters for copy failure tracking
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/meter.h"
@@ -97,6 +98,28 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
 
   std::vector<InFlight> inflight;
   auto* async = dynamic_cast<AsyncPositionedSink*>(&dst);
+  auto flush_inflight = [&]() {
+    if (inflight.empty()) {
+      return;
+    }
+    for (auto& entry : inflight) {
+      auto st = entry.handle.wait();
+      pool.return_chunk(entry.slot_id);
+      if (!st.ok()) {
+        record_copy_failure_("gpu");
+        {
+          absl::MutexLock lock(&state.status_mutex);
+          if (state.consumer_status.ok()) {
+            state.consumer_status = st;
+          }
+        }
+        state.should_stop.store(true, std::memory_order_release);
+        pool.shutdown();
+      }
+    }
+    inflight.clear();
+  };
+  absl::Cleanup flush_guard = [&]() { flush_inflight(); };
   while (!state.should_stop.load(std::memory_order_acquire) || draining) {
     auto chunk_result = pool.get_ready_chunk();
     if (!chunk_result.ok()) {
@@ -328,6 +351,19 @@ void run_range_producer(
         state.should_stop.store(true, std::memory_order_release);
         pool.shutdown();
         break;
+      }
+
+      // Emit lightweight diagnostics for chunk payload (first/last 8 bytes).
+      if (bytes_read >= sizeof(uint64_t)) {
+        const uint64_t first_sample = *reinterpret_cast<const uint64_t*>(buffer);
+        const uint64_t last_sample =
+            *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(buffer) + bytes_read - sizeof(uint64_t));
+        LOG(INFO) << "pump_producer chunk_id=" << chunk_id << " offset=" << current_offset << " bytes=" << bytes_read
+                  << " first=0x" << absl::Hex(first_sample, absl::kZeroPad16) << " last=0x"
+                  << absl::Hex(last_sample, absl::kZeroPad16);
+      } else {
+        LOG(INFO) << "pump_producer chunk_id=" << chunk_id << " offset=" << current_offset << " bytes=" << bytes_read
+                  << " (<8 bytes payload)";
       }
 
       current_offset += bytes_read;

@@ -6,6 +6,8 @@ gRPC service implementation for Global Store.
 This provides the gRPC interface layer, delegating business logic to services.
 """
 
+import base64
+import binascii
 import ipaddress
 import threading
 import time
@@ -114,6 +116,27 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # Start background cleanup thread
         self._start_cleanup_thread()
         # Cleanup and optimization are now handled by a single maintenance thread
+
+    @staticmethod
+    def _multibase_sha256_to_hex(value: str) -> str | None:
+        """Convert multibase base32 multihash (sha2-256) to lowercase hex digest."""
+        if not value or value[0] != "b":
+            return None
+        payload = value[1:]
+        if not payload:
+            return None
+        padding_needed = (-len(payload)) % 8
+        padded = payload + ("=" * padding_needed)
+        try:
+            decoded = base64.b32decode(padded.upper(), casefold=True)
+        except binascii.Error:
+            return None
+        if len(decoded) != 34 or decoded[0] != 0x12 or decoded[1] != 0x20:
+            return None
+        digest = decoded[2:]
+        if len(digest) != 32:
+            return None
+        return digest.hex()
 
     def _initiate_startup_recovery(self):
         """Initiate recovery process on startup."""
@@ -515,8 +538,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 return global_store_pb2.GetArtifactIndexByIdResponse(
                     status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
-            index_key = row.get("index_multihash")
+            index_multihash = row.get("index_multihash")
+            index_key = self._multibase_sha256_to_hex(str(index_multihash))
             if not index_key:
+                logger.warning(
+                    "Invalid index_multihash stored for %s; cannot derive SHA key",
+                    artifact_id,
+                )
                 return global_store_pb2.GetArtifactIndexByIdResponse(
                     status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
