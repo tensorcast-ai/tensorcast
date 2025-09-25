@@ -3,14 +3,17 @@
 #include "core/store/replica/transfer_service.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <unordered_map>
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
+#include "core/common/cuda_api.h"
 #include "core/store/loader/cpu_va_sink.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/gpu_memory_sink.h"
@@ -452,6 +455,35 @@ absl::Status TransferService::execute(
   uint64_t total_bytes = 0;
   for (const auto& r : plan.ranges)
     total_bytes += r.second;
+  if (target_location == MemoryLocation::GPU && gpu_ptr_or_null != nullptr && device_id >= 0 && total_bytes > 0 &&
+      VLOG_IS_ON(1)) {
+    constexpr size_t kTailSampleBytes = 16;
+    const size_t tail_len = static_cast<size_t>(std::min<uint64_t>(kTailSampleBytes, total_bytes));
+    const size_t tail_offset = static_cast<size_t>(total_bytes - tail_len);
+    std::array<uint8_t, kTailSampleBytes> tail_bytes{};
+    auto set_dev_status = tensorcast::cuda::set_device(device_id);
+    if (!set_dev_status.ok()) {
+      VLOG(1) << "TransferService::execute tail sample set_device failed: " << set_dev_status;
+    } else {
+      const auto* gpu_bytes = static_cast<const uint8_t*>(gpu_ptr_or_null);
+      auto copy_status =
+          tensorcast::cuda::memcpy(tail_bytes.data(), gpu_bytes + tail_offset, tail_len, cudaMemcpyDeviceToHost);
+      if (!copy_status.ok()) {
+        VLOG(1) << "TransferService::execute tail sample memcpy failed: " << copy_status;
+      } else {
+        std::string tail_hex;
+        tail_hex.reserve(tail_len * 3);
+        for (size_t i = 0; i < tail_len; ++i) {
+          if (i != 0) {
+            tail_hex.push_back(' ');
+          }
+          absl::StrAppendFormat(&tail_hex, "%02x", tail_bytes[i]);
+        }
+        VLOG(1) << "TransferService::execute tail bytes gpu_off=" << tail_offset << " len=" << tail_len << " ["
+                << tail_hex << "]";
+      }
+    }
+  }
   // Record duration metric
   try {
     auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");

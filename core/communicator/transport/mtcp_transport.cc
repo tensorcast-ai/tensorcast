@@ -17,6 +17,7 @@
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
 
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
@@ -772,7 +773,8 @@ void MTcpTransport::recv_loop() {
                tensor,
                idx,
                slot_id,
-               recv_buffer]() mutable -> chunk_result_t {
+               recv_buffer,
+               gpu_global_offset]() mutable -> chunk_result_t {
                 LOG(INFO) << "[MTcpTransport::recv_loop] Async task #" << idx
                           << " waiting for sub-chunk recv to complete";
 
@@ -782,6 +784,19 @@ void MTcpTransport::recv_loop() {
                              << " sub-chunk recv failed, returning buffer";
                   CHECK_OK(recv_buffer->return_chunk(slot_id));
                   return result;
+                }
+
+                if (sub_chunk_size >= sizeof(uint64_t)) {
+                  const uint64_t head_sample = *reinterpret_cast<const uint64_t*>(staged_ptr);
+                  const uint64_t tail_sample =
+                      *reinterpret_cast<const uint64_t*>(staged_ptr + sub_chunk_size - sizeof(uint64_t));
+                  LOG(INFO) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
+                            << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " first=0x"
+                            << absl::Hex(head_sample, absl::kZeroPad16) << " last=0x"
+                            << absl::Hex(tail_sample, absl::kZeroPad16);
+                } else {
+                  LOG(INFO) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
+                            << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " (<8 bytes payload)";
                 }
 
                 // Copy from staged buffer to GPU
@@ -819,6 +834,8 @@ void MTcpTransport::recv_loop() {
                   LOG(ERROR) << "H2D copy failed: " << wait_st;
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
+                LOG(INFO) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << slot_id
+                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset;
                 return result;
               });
 

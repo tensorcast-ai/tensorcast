@@ -7,6 +7,7 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
+#include "core/common/artifact_verification.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/virtual_address_space.h"
 
@@ -222,5 +223,131 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     // Release allocated CPU memory and GPU source
     REQUIRE(mem_manager->release_memory(MemoryLocation::CPU).ok());
     REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
+  }
+
+  SECTION("Remote GPU to Local GPU via TCP with sub-chunked MTCP receive") {
+    // This test reproduces the regression where MTCP splits each network chunk
+    // into multiple pinned-buffer sub-chunks and the final GPU bytes become zero
+    // after transfer, triggering the key-point verification failure.
+
+    const int tcp_conn_count = 8;
+    const int load_concurrency = 8;
+    const std::size_t pool_chunk_size = 64 * 1024 * 1024; // 64 MiB slices
+    const std::size_t artifact_size = pool_chunk_size * 9 + 32; // non-aligned tail chunk
+
+    int source_port = find_available_port();
+    REQUIRE(source_port > 0);
+    int target_port = find_available_port(source_port + 1);
+    REQUIRE(target_port > 0);
+
+    CommunicatorConfig src_cfg;
+    src_cfg.set_enable_rdma(false);
+    src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+    src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
+    src_cfg.mutable_stager()->set_buffers_per_flow(4);
+    src_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
+    src_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
+    auto source_engine = std::make_shared<Communicator>(src_cfg);
+    REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
+
+    CommunicatorConfig dst_cfg;
+    dst_cfg.set_enable_rdma(false);
+    dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+    dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
+    dst_cfg.mutable_stager()->set_buffers_per_flow(4);
+    dst_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
+    dst_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
+    auto target_engine = std::make_shared<Communicator>(dst_cfg);
+    REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
+
+    void* source_gpu_ptr = nullptr;
+    auto alloc_status = tensorcast::cuda::malloc(&source_gpu_ptr, artifact_size);
+    if (!alloc_status.ok()) {
+      SKIP("Insufficient GPU memory to allocate test artifact: " << alloc_status.message());
+    }
+
+    auto payload = create_test_pattern(artifact_size, 7);
+    REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, payload.data(), artifact_size, cudaMemcpyHostToDevice).ok());
+
+    Communicator::RegisterTensorOptions reg_opts;
+    reg_opts.register_mr = false;
+    reg_opts.needs_staging = true;
+    reg_opts.async = false;
+
+    const std::size_t remote_chunk_size = 268435456; // 256 MiB (matches UMA chunk)
+    std::vector<std::string> memory_keys;
+    std::vector<uint64_t> buffer_sizes;
+    size_t offset = 0;
+    int chunk_index = 0;
+    while (offset < artifact_size) {
+      const size_t chunk_bytes = std::min(remote_chunk_size, artifact_size - offset);
+      std::string key = "sub_chunk_artifact_key_" + std::to_string(chunk_index++);
+      auto ptr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(source_gpu_ptr) + offset);
+      REQUIRE(source_engine->register_tensor_ex(key, ptr, chunk_bytes, COMMUNICATE_ENGINE_DEV_GPU, 0, reg_opts).ok());
+      memory_keys.push_back(key);
+      buffer_sizes.push_back(chunk_bytes);
+      offset += chunk_bytes;
+    }
+
+    std::vector<void*> data_ptrs{source_gpu_ptr};
+    std::vector<size_t> data_sizes{artifact_size};
+    auto ver_or = tensorcast::common::ArtifactVerifier::generate_verification_info(
+        data_ptrs,
+        data_sizes,
+        /*device_id=*/0,
+        tensorcast::common::VerificationLevel::KEY_POINTS);
+    REQUIRE(ver_or.ok());
+
+    P2PSource source_config;
+    source_config.size_bytes = artifact_size;
+    source_config.ip = "127.0.0.1";
+    source_config.port = source_port;
+    source_config.memory_keys = memory_keys;
+    source_config.buf_sizes = buffer_sizes;
+    source_config.location.type = MemoryLocation::GPU;
+    source_config.location.device_id = 0;
+    source_config.comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{target_engine};
+    source_config.verification_json = ver_or->to_json();
+
+    auto loader = std::make_shared<P2PLoader>(source_config);
+    REQUIRE(loader->initialize().ok());
+
+    const std::size_t pool_buffers = 20; // ensure enough slices for MTCP receive without exhausting host memory
+    const std::size_t pool_size = pool_chunk_size * pool_buffers;
+    auto pinned_pool = std::make_shared<PinnedBufferPool>(pool_size, pool_chunk_size);
+    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
+    auto mem_manager = std::make_shared<ReplicaLoadController>(
+        "sub_chunk_artifact",
+        0,
+        pinned_pool,
+        virtual_addr_space,
+        pool_size,
+        std::chrono::milliseconds::zero(),
+        artifact_size);
+
+    auto src_or = loader->open_source();
+    REQUIRE(src_or.ok());
+
+    auto future = mem_manager->load_async_from_source(
+        std::move(*src_or),
+        MemoryLocation::GPU,
+        /*concurrency=*/load_concurrency);
+
+    auto load_status = future.get();
+    CAPTURE(load_status.message());
+    REQUIRE(load_status.ok());
+
+    auto gpu_ptrs = mem_manager->get_pointer(MemoryLocation::GPU);
+    REQUIRE(gpu_ptrs.size() == 1);
+    REQUIRE(gpu_ptrs[0] != nullptr);
+
+    std::vector<uint8_t> received(artifact_size);
+    REQUIRE(tensorcast::cuda::memcpy(received.data(), gpu_ptrs[0], artifact_size, cudaMemcpyDeviceToHost).ok());
+    REQUIRE(verify_pattern(received.data(), artifact_size, 7));
+
+    REQUIRE(mem_manager->release_memory(MemoryLocation::GPU).ok());
+    if (source_gpu_ptr != nullptr) {
+      REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
+    }
   }
 }

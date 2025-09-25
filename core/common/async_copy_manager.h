@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <memory>
 
@@ -14,7 +14,6 @@
 #include "absl/container/flat_hash_map.h"
 
 #include "core/common/cuda_api.h"
-#include "core/common/trace/trace_cuda_async_fn.h"
 
 namespace tensorcast::common {
 
@@ -50,15 +49,20 @@ class CopyHandle {
   CopyHandle& operator=(const CopyHandle&) = delete;
 
   absl::Status wait(absl::Duration timeout = absl::InfiniteDuration()) const;
-  bool ok() const;
+  [[nodiscard]] bool ok() const;
 
  private:
+  absl::Status resolve_status_() const;
+
   struct Impl {
     mutable absl::Mutex mu;
     bool done ABSL_GUARDED_BY(mu) = false;
     absl::Status status ABSL_GUARDED_BY(mu) = absl::OkStatus();
     absl::CondVar cv;
+    int device_id ABSL_GUARDED_BY(mu) = -1;
+    mutable bool needs_device_check ABSL_GUARDED_BY(mu) = false;
   };
+
   std::shared_ptr<Impl> p_ = std::make_shared<Impl>();
 
   friend class AsyncCopyManager;

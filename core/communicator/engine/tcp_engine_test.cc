@@ -1,13 +1,15 @@
 
 // Copyright (c) 2025, TensorCast Team.
 
-#include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 
+#include <catch2/catch_test_macros.hpp>
+#include "absl/strings/str_cat.h"
 #include "core/communicator/engine/engine.h"
 
 namespace tensorcast::unittests {
 
-#define BUF_SIZE 65536
+#define BUF_SIZE 16384
 #define KEY "TCP_TENSOR_KEY"
 
 struct TcpTestFixture {
@@ -25,6 +27,7 @@ struct TcpTestFixture {
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     communicator::v1::CommunicatorConfig cli_cfg;
     cli_cfg.set_enable_rdma(false);
+    cli_cfg.mutable_transport()->set_tcp_conn_count(2);
     client_ = new communicator::engine::Communicator(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
@@ -160,13 +163,7 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
       auto result = future_result.get();
       REQUIRE(result.status.ok());
 
-      bool verify_ok = true;
-      for (uint32_t i = 0; i < BUF_SIZE - offset; i++) {
-        if (fixture.client_buf_[i] != fixture.server_buf_[i + offset]) {
-          verify_ok = false;
-        }
-      }
-      REQUIRE(verify_ok);
+      REQUIRE(std::equal(fixture.client_buf_, fixture.client_buf_ + (BUF_SIZE - offset), fixture.server_buf_ + offset));
     }
 
     // Test reading entire buffer
@@ -182,13 +179,8 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     auto result = future_result.get();
     REQUIRE(result.status.ok());
 
-    bool verify_ok = true;
-    for (uint32_t i = 0; i < BUF_SIZE; i++) {
-      if (fixture.client_buf_[i] != fixture.server_buf_[i]) {
-        verify_ok = false;
-      }
-    }
-    REQUIRE(verify_ok);
+    REQUIRE(
+        std::equal(std::begin(fixture.client_buf_), std::end(fixture.client_buf_), std::begin(fixture.server_buf_)));
 
     // Test connection close
     auto close_status = fixture.client_->close_connection("127.0.0.1", 60000);
@@ -197,6 +189,68 @@ TEST_CASE("TCP Communication Engine", "[tcp][communicator]") {
     // Double close should fail
     close_status = fixture.client_->close_connection("127.0.0.1", 60000);
     REQUIRE_FALSE(close_status.ok());
+  }
+
+  SECTION("Read CPU tensor in segments uses latest destination") {
+    REQUIRE(fixture.server_init_status_.ok());
+    REQUIRE(fixture.client_init_status_.ok());
+
+    communicator::engine::Communicator::RegisterTensorOptions opts;
+    opts.register_mr = false;
+    opts.needs_staging = false;
+    opts.async = false;
+    auto reg_status = fixture.server_->register_tensor_ex(
+        KEY,
+        reinterpret_cast<uint64_t>(fixture.server_buf_),
+        sizeof(uint32_t) * BUF_SIZE,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+        -1,
+        opts);
+    REQUIRE(reg_status.ok());
+
+    communicator::engine::Communicator::RegisterTensorOptions client_opts;
+    client_opts.register_mr = false;
+    client_opts.needs_staging = false;
+    client_opts.async = false;
+    auto client_reg_status = fixture.client_->register_tensor_ex(
+        KEY,
+        reinterpret_cast<uint64_t>(fixture.client_buf_),
+        sizeof(uint32_t) * BUF_SIZE,
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+        -1,
+        client_opts);
+    REQUIRE(client_reg_status.ok());
+
+    std::ranges::fill(fixture.client_buf_, 0U);
+
+    const uint32_t half = BUF_SIZE / 2;
+
+    auto first_half = fixture.client_->read_tensor(
+        KEY,
+        reinterpret_cast<uint64_t>(fixture.client_buf_),
+        static_cast<uint64_t>(half) * sizeof(uint32_t),
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+        -1,
+        "127.0.0.1",
+        60000,
+        0);
+    auto first_res = first_half.get();
+    REQUIRE(first_res.status.ok());
+
+    auto second_half = fixture.client_->read_tensor(
+        KEY,
+        reinterpret_cast<uint64_t>(fixture.client_buf_ + half),
+        static_cast<uint64_t>(BUF_SIZE - half) * sizeof(uint32_t),
+        communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+        -1,
+        "127.0.0.1",
+        60000,
+        static_cast<uint64_t>(half) * sizeof(uint32_t));
+    auto second_res = second_half.get();
+    REQUIRE(second_res.status.ok());
+
+    REQUIRE(
+        std::equal(std::begin(fixture.client_buf_), std::end(fixture.client_buf_), std::begin(fixture.server_buf_)));
   }
 }
 

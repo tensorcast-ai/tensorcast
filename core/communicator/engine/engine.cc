@@ -217,14 +217,20 @@ future_read_result_t Communicator::read_tensor(
             << ", net_dev=" << (net_dev == nullptr ? "none" : net_dev->get_name());
 
   auto local_tensor = store_.get_tensor(key);
-  if (local_tensor == nullptr) {
+  const bool needs_new_tensor = local_tensor == nullptr || local_tensor->get_uint64_addr() != addr ||
+      local_tensor->get_bytes() != bytes || local_tensor->get_mem_type() != dev_type ||
+      (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id);
+
+  if (needs_new_tensor) {
     local_tensor = std::make_shared<PartitionTensor>(key, addr, bytes, dev_type, net_dev);
     if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
       local_tensor->set_device_id(dev_id);
     }
-    if (enable_rdma_) {
+    if (enable_rdma_ && net_dev != nullptr) {
       net_dev->reg_async(local_tensor);
     }
+    local_tensor->set_read_ready();
+    store_.register_tensor(local_tensor);
   }
 
   auto req = std::make_shared<transport::ReadRequest>(key, dst_ip, dst_port, local_tensor, remote_offset);

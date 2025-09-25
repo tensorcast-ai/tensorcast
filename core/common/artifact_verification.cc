@@ -3,13 +3,16 @@
 #include "core/common/artifact_verification.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <numeric>
+#include <string>
 
 #include <nlohmann/json.hpp>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "core/common/cuda_api.h"
 #include "core/common/error_handling.h"
 
@@ -404,45 +407,81 @@ absl::Status ArtifactVerifier::verify_key_points(
   }
 
   // Check first value - only copy 8 bytes
-  auto first_val = get_value_at_offset(data_ptrs, data_sizes, 0, device_id);
-  if (!first_val.ok()) {
-    return first_val.status();
+  auto first_val_or = get_value_at_offset(data_ptrs, data_sizes, 0, device_id);
+  if (!first_val_or.ok()) {
+    return first_val_or.status();
   }
-  if (*first_val != expected_info.key_values[0]) {
+
+  auto mid_val_or = get_value_at_offset(data_ptrs, data_sizes, total_size / 2, device_id);
+  if (!mid_val_or.ok()) {
+    return mid_val_or.status();
+  }
+
+  const size_t last_offset = total_size >= sizeof(uint64_t) ? static_cast<size_t>(total_size - sizeof(uint64_t)) : 0;
+  auto last_val_or = get_value_at_offset(data_ptrs, data_sizes, last_offset, device_id);
+  if (!last_val_or.ok()) {
+    return last_val_or.status();
+  }
+
+  const uint64_t actual_first = *first_val_or;
+  const uint64_t actual_mid = *mid_val_or;
+  const uint64_t actual_last = *last_val_or;
+
+  const uint64_t expected_first = expected_info.key_values[0];
+  const uint64_t expected_mid = expected_info.key_values[1];
+  const uint64_t expected_last = expected_info.key_values[2];
+
+  auto log_mismatch = [&](std::string_view position, uint64_t actual, uint64_t expected) {
+    LOG(ERROR) << "verify_key_points mismatch (" << position << ") total_size=" << total_size
+               << " device_id=" << device_id << " actual=0x" << absl::Hex(actual, absl::kZeroPad16) << " expected=0x"
+               << absl::Hex(expected, absl::kZeroPad16) << " actual[keys]=[0x"
+               << absl::Hex(actual_first, absl::kZeroPad16) << ", 0x" << absl::Hex(actual_mid, absl::kZeroPad16)
+               << ", 0x" << absl::Hex(actual_last, absl::kZeroPad16) << "] expected[keys]=[0x"
+               << absl::Hex(expected_first, absl::kZeroPad16) << ", 0x" << absl::Hex(expected_mid, absl::kZeroPad16)
+               << ", 0x" << absl::Hex(expected_last, absl::kZeroPad16) << "]";
+
+    const size_t tail_len = static_cast<size_t>(std::min<uint64_t>(16, total_size));
+    const auto tail_offset = static_cast<size_t>(total_size >= tail_len ? total_size - tail_len : 0);
+    std::array<uint8_t, 16> tail_bytes{};
+    absl::Status tail_status =
+        read_data_chunk(tail_bytes.data(), data_ptrs, data_sizes, tail_offset, tail_len, device_id);
+    if (tail_status.ok()) {
+      std::string tail_hex;
+      tail_hex.reserve(tail_len * 3);
+      for (size_t i = 0; i < tail_len; ++i) {
+        if (i != 0) {
+          tail_hex.append(" ");
+        }
+        tail_hex.append(absl::StrFormat("%02x", tail_bytes[i]));
+      }
+      LOG(ERROR) << "verify_key_points tail@" << tail_offset << " len=" << tail_len << " bytes [" << tail_hex << "]";
+    } else {
+      LOG(ERROR) << "verify_key_points unable to capture tail bytes: " << tail_status;
+    }
+  };
+
+  if (actual_first != expected_first) {
+    log_mismatch("start", actual_first, expected_first);
     return absl::DataLossError(
         absl::StrCat(
             "Key point mismatch at start of replica: got 0x",
-            absl::Hex(*first_val),
+            absl::Hex(actual_first),
             ", expected 0x",
-            absl::Hex(expected_info.key_values[0])));
+            absl::Hex(expected_first)));
   }
 
-  // Check middle value - only copy 8 bytes
-  auto mid_val = get_value_at_offset(data_ptrs, data_sizes, total_size / 2, device_id);
-  if (!mid_val.ok()) {
-    return mid_val.status();
-  }
-  if (*mid_val != expected_info.key_values[1]) {
+  if (actual_mid != expected_mid) {
+    log_mismatch("middle", actual_mid, expected_mid);
     return absl::DataLossError(
         absl::StrCat(
-            "Key point mismatch at middle: got 0x",
-            absl::Hex(*mid_val),
-            ", expected 0x",
-            absl::Hex(expected_info.key_values[1])));
+            "Key point mismatch at middle: got 0x", absl::Hex(actual_mid), ", expected 0x", absl::Hex(expected_mid)));
   }
 
-  // Check last value - only copy 8 bytes
-  auto last_val = get_value_at_offset(data_ptrs, data_sizes, total_size >= 8 ? total_size - 8 : 0, device_id);
-  if (!last_val.ok()) {
-    return last_val.status();
-  }
-  if (*last_val != expected_info.key_values[2]) {
+  if (actual_last != expected_last) {
+    log_mismatch("end", actual_last, expected_last);
     return absl::DataLossError(
         absl::StrCat(
-            "Key point mismatch at end: got 0x",
-            absl::Hex(*last_val),
-            ", expected 0x",
-            absl::Hex(expected_info.key_values[2])));
+            "Key point mismatch at end: got 0x", absl::Hex(actual_last), ", expected 0x", absl::Hex(expected_last)));
   }
 
   VLOG(1) << "Key-point verification passed for " << total_size << " bytes" << (device_id >= 0 ? " (GPU)" : " (CPU)")

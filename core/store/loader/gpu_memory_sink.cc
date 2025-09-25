@@ -2,15 +2,17 @@
 
 #include "core/store/loader/gpu_memory_sink.h"
 
+#include <array>
 #include <cstdlib>
-#include <string_view>
+#include <cstring>
+#include <utility>
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
+#include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
-// OpenTelemetry Metrics for inflight bytes gauge
-#include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 #include "opentelemetry/metrics/provider.h"
@@ -191,6 +193,20 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset
   common::CopyOptions copts;
   copts.tracing_stage = "H2D/Copy";
   copts.callbacks.on_copy_done = [dev_id = options_.device_id, bytes]() { sched_release(dev_id, bytes); };
+
+  // Tail sampling guard – only emit when we are within the final 16 bytes of the allocation.
+  constexpr size_t kTailProbeBytes = 16;
+  const size_t allocation_size = options_.allocation ? options_.allocation->size() : options_.total_size;
+  const bool is_last_chunk = allocation_size > 0 && (offset + bytes >= allocation_size);
+  const bool tail_debug = is_last_chunk && VLOG_IS_ON(1);
+  std::array<uint8_t, kTailProbeBytes> host_tail{};
+  size_t host_tail_len = 0;
+  if (tail_debug && bytes > 0) {
+    host_tail_len = std::min(kTailProbeBytes, bytes);
+    const auto* src_bytes = static_cast<const uint8_t*>(src);
+    std::memcpy(host_tail.data(), src_bytes + bytes - host_tail_len, host_tail_len);
+  }
+
   auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, copts);
   if (!hdl_or.ok()) {
     // Release budget on immediate failure path
@@ -199,7 +215,52 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset
     LOG(ERROR) << "Failed to schedule H2D async copy: " << overall_status_;
     return overall_status_;
   }
-  return hdl_or;
+  auto handle = std::move(*hdl_or);
+
+  if (is_last_chunk) {
+    auto wait_status = handle.wait();
+    if (!wait_status.ok()) {
+      LOG(WARNING) << "GpuMemorySink tail wait failed offset=" << offset << " bytes=" << bytes << ": " << wait_status;
+      return wait_status;
+    }
+  }
+
+  if (tail_debug) {
+    std::array<uint8_t, kTailProbeBytes> gpu_tail{};
+    size_t tail_len = host_tail_len;
+    if (tail_len == 0 && bytes > 0) {
+      tail_len = std::min(kTailProbeBytes, bytes);
+    }
+
+    if (tail_len > 0) {
+      const size_t tail_offset_in_chunk = bytes - tail_len;
+      auto copy_status =
+          tensorcast::cuda::memcpy(gpu_tail.data(), gpu_dest + tail_offset_in_chunk, tail_len, cudaMemcpyDeviceToHost);
+      if (!copy_status.ok()) {
+        LOG(WARNING) << "GpuMemorySink tail probe memcpy failed offset=" << offset << " bytes=" << bytes << ": "
+                     << copy_status;
+      } else {
+        std::string host_hex;
+        std::string gpu_hex;
+        host_hex.reserve(tail_len * 3);
+        gpu_hex.reserve(tail_len * 3);
+        for (size_t i = 0; i < tail_len; ++i) {
+          if (i != 0) {
+            host_hex.push_back(' ');
+            gpu_hex.push_back(' ');
+          }
+          absl::StrAppendFormat(&host_hex, "%02x", host_tail[i]);
+          absl::StrAppendFormat(&gpu_hex, "%02x", gpu_tail[i]);
+        }
+        const size_t global_tail_offset = offset + bytes - tail_len;
+        VLOG(1) << "GpuMemorySink tail probe offset=" << offset << " bytes=" << bytes
+                << " global_tail_off=" << global_tail_offset << " host_tail=[" << host_hex << "] gpu_tail=[" << gpu_hex
+                << "]";
+      }
+    }
+  }
+
+  return handle;
 }
 
 absl::Status GpuMemorySink::close() {

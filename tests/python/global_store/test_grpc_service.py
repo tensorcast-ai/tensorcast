@@ -2,6 +2,8 @@
 
 """Tests for Global Store gRPC service interface."""
 
+import base64
+import hashlib
 import uuid
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
@@ -172,6 +174,39 @@ class TestGRPCService:
         assert transport_response.status == global_store_pb2.Status.STATUS_OK
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
+
+    def test_get_artifact_index_by_id_with_multibase(self, servicer, test_context, memory_info, registered_worker):
+        index_bytes = b'{"tensor":[0,4,[1],[1],"float32",0]}'
+
+        def _multibase(d: bytes) -> str:
+            digest = hashlib.sha256(d).digest()
+            mh = b"\x12\x20" + digest
+            encoded = base64.b32encode(mh).decode("ascii").strip("=").lower()
+            return "b" + encoded
+
+        index_mh = _multibase(index_bytes)
+        data_mh = _multibase(b"payload")
+        artifact_id = f"mi2:{index_mh}:{data_mh}"
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+            tensor_index_data=index_bytes,
+            encoding="json",
+            schema_version="v2",
+        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        resp = servicer.GetArtifactIndexById(
+            global_store_pb2.GetArtifactIndexByIdRequest(artifact_id=artifact_id),
+            test_context,
+        )
+
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.tensor_index_data == index_bytes
 
     def test_request_transport_missing_artifact(
         self, servicer, test_context, memory_info

@@ -14,7 +14,7 @@ from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.global_store.config import GlobalStoreConfig
-from tensorcast.global_store.config.settings import set_config
+from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
     ReplicaRepository,
@@ -119,6 +119,10 @@ class MockContext:
 @pytest.fixture
 def servicer():
     """Create an in-memory GlobalStoreServicer for testing"""
+    try:
+        get_config()
+    except RuntimeError:
+        set_config(GlobalStoreConfig())
     return GlobalStoreServicer()
 
 

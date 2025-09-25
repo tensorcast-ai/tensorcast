@@ -570,6 +570,7 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":p2p_loader",
+        "//core/common:artifact_verification_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
