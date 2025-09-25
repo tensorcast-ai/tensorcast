@@ -1,9 +1,49 @@
 
 // Copyright (c) 2025, TensorCast Team.
 
+#include <arpa/inet.h>
 #include <catch2/catch_test_macros.hpp>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <vector>
 
 #include "core/communicator/engine/engine.h"
+
+#include "core/common/cuda_api.h"
+#include "core/communicator/misc/utils.h"
+
+namespace tensorcast::communicator::engine {
+
+class CommunicatorTestPeer {
+ public:
+  static auto& rdma_context(Communicator& communicator) {
+    return communicator.rdma_context_;
+  }
+
+  static auto& pending_requests(Communicator& communicator) {
+    return communicator.pending_requests_;
+  }
+
+  static auto& channels(Communicator& communicator) {
+    return communicator.channels_;
+  }
+
+  static auto on_receive_response(
+      Communicator& communicator,
+      const channel_t& channel,
+      const transport::tcp_transport_t& control,
+      const engine_message_t& message) {
+    return communicator.on_receive_response(channel, control, message);
+  }
+
+  static void stop_workers(Communicator& communicator) {
+    communicator.stop_.store(true);
+    communicator.request_queue_.stop();
+  }
+};
+
+} // namespace tensorcast::communicator::engine
 
 namespace tensorcast::unittests {
 
@@ -18,6 +58,9 @@ struct RdmaTestFixture {
   absl::Status client_init_status_;
   uint32_t server_buf_[BUF_SIZE];
   uint32_t client_buf_[BUF_SIZE];
+  uint32_t* server_gpu_ptr_ = nullptr;
+  uint32_t* client_gpu_ptr_ = nullptr;
+  size_t tensor_bytes_ = sizeof(uint32_t) * BUF_SIZE;
 
   RdmaTestFixture() {
     communicator::v1::CommunicatorConfig srv_cfg;
@@ -33,9 +76,34 @@ struct RdmaTestFixture {
       server_buf_[i] = i;
       client_buf_[i] = 0;
     }
+
+    int device_count = 0;
+    auto device_count_status = tensorcast::cuda::get_device_count(&device_count);
+    REQUIRE(device_count_status.ok());
+    REQUIRE(device_count > 0);
+
+    auto status = tensorcast::cuda::malloc(reinterpret_cast<void**>(&server_gpu_ptr_), tensor_bytes_);
+    REQUIRE(status.ok());
+    status = tensorcast::cuda::malloc(reinterpret_cast<void**>(&client_gpu_ptr_), tensor_bytes_);
+    REQUIRE(status.ok());
+
+    status = tensorcast::cuda::memcpy(server_gpu_ptr_, server_buf_, tensor_bytes_, cudaMemcpyHostToDevice);
+    REQUIRE(status.ok());
+    status = tensorcast::cuda::memset(client_gpu_ptr_, 0, tensor_bytes_);
+    REQUIRE(status.ok());
   }
 
   ~RdmaTestFixture() {
+    if (server_gpu_ptr_ != nullptr) {
+      auto status = tensorcast::cuda::free(server_gpu_ptr_);
+      REQUIRE(status.ok());
+      server_gpu_ptr_ = nullptr;
+    }
+    if (client_gpu_ptr_ != nullptr) {
+      auto status = tensorcast::cuda::free(client_gpu_ptr_);
+      REQUIRE(status.ok());
+      client_gpu_ptr_ = nullptr;
+    }
     delete server_;
     delete client_;
   }
@@ -60,7 +128,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     o1.async = false;
     auto status = fixture.server_->register_tensor_ex(
         GPU_KEY,
-        reinterpret_cast<uint64_t>(fixture.server_buf_),
+        reinterpret_cast<uint64_t>(fixture.server_gpu_ptr_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
@@ -110,7 +178,7 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     o4.async = false;
     status = fixture.server_->register_tensor_ex(
         GPU_KEY,
-        reinterpret_cast<uint64_t>(fixture.server_buf_),
+        reinterpret_cast<uint64_t>(fixture.server_gpu_ptr_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
@@ -140,9 +208,12 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     o5.register_mr = true;
     o5.needs_staging = true;
     o5.async = false;
+    auto refresh_status = tensorcast::cuda::memcpy(
+        fixture.server_gpu_ptr_, fixture.server_buf_, fixture.tensor_bytes_, cudaMemcpyHostToDevice);
+    REQUIRE(refresh_status.ok());
     auto status = fixture.server_->register_tensor_ex(
         GPU_KEY,
-        reinterpret_cast<uint64_t>(fixture.server_buf_),
+        reinterpret_cast<uint64_t>(fixture.server_gpu_ptr_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
@@ -164,9 +235,12 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
 
     // Test reading with various offsets
     for (uint32_t offset = 4096; offset < BUF_SIZE - 1; offset += 4096) {
+      auto reset_status = tensorcast::cuda::memset(fixture.client_gpu_ptr_, 0, fixture.tensor_bytes_);
+      REQUIRE(reset_status.ok());
+
       auto future_result = fixture.client_->read_tensor(
           GPU_KEY,
-          reinterpret_cast<uint64_t>(fixture.client_buf_),
+          reinterpret_cast<uint64_t>(fixture.client_gpu_ptr_),
           (BUF_SIZE - offset) * sizeof(uint32_t),
           communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
           0,
@@ -176,6 +250,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
 
       auto result = future_result.get();
       REQUIRE(result.status.ok());
+
+      auto copy_status = tensorcast::cuda::memcpy(
+          fixture.client_buf_, fixture.client_gpu_ptr_, fixture.tensor_bytes_, cudaMemcpyDeviceToHost);
+      REQUIRE(copy_status.ok());
 
       bool verify_ok = true;
       for (uint32_t i = 0; i < BUF_SIZE - offset; i++) {
@@ -187,9 +265,12 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     }
 
     // Test reading entire buffer
+    auto reset_status = tensorcast::cuda::memset(fixture.client_gpu_ptr_, 0, fixture.tensor_bytes_);
+    REQUIRE(reset_status.ok());
+
     auto future_result = fixture.client_->read_tensor(
         GPU_KEY,
-        reinterpret_cast<uint64_t>(fixture.client_buf_),
+        reinterpret_cast<uint64_t>(fixture.client_gpu_ptr_),
         sizeof(uint32_t) * BUF_SIZE,
         communicator::base::COMMUNICATE_ENGINE_DEV_GPU,
         0,
@@ -198,6 +279,10 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
 
     auto result = future_result.get();
     REQUIRE(result.status.ok());
+
+    auto copy_status = tensorcast::cuda::memcpy(
+        fixture.client_buf_, fixture.client_gpu_ptr_, fixture.tensor_bytes_, cudaMemcpyDeviceToHost);
+    REQUIRE(copy_status.ok());
 
     bool verify_ok = true;
     for (uint32_t i = 0; i < BUF_SIZE; i++) {
@@ -215,6 +300,123 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
     close_status = fixture.client_->close_connection("127.0.0.1", 60000);
     REQUIRE_FALSE(close_status.ok());
   }
+}
+
+TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][handshake]") {
+  using tensorcast::communicator::base::CHANNEL_RDMA;
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
+  using tensorcast::communicator::engine::ENGINE_OP_RDMA_CONNECT_RESPONSE;
+  using tensorcast::communicator::engine::ENGINE_OP_READ_RESPONSE_EX;
+  using tensorcast::communicator::engine::ENGINE_TRANSPORT_RDMA;
+  using tensorcast::communicator::engine::EngineMessage;
+  using tensorcast::communicator::engine::ProtoRdmaConnectResponse;
+  using tensorcast::communicator::engine::ProtoReadResponseExHeader;
+  using tensorcast::communicator::engine::ProtoReadResponseExSeg;
+  using tensorcast::communicator::misc::STRNCPY;
+  using tensorcast::communicator::misc::SUCCESS;
+
+  tensorcast::communicator::v1::CommunicatorConfig cfg;
+  cfg.set_enable_rdma(true);
+  tensorcast::communicator::engine::Communicator client(cfg, /*channel_expire_sec=*/0);
+
+  auto& rdma_ctx = tensorcast::communicator::engine::CommunicatorTestPeer::rdma_context(client);
+  auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
+  REQUIRE(net_dev != nullptr);
+  const std::string local_dev_name = net_dev->get_name();
+  const std::string remote_dev_name = "peer.nic0";
+
+  constexpr size_t local_bytes = 256;
+  uint8_t* local_gpu_buffer = nullptr;
+  auto alloc_status = tensorcast::cuda::malloc(reinterpret_cast<void**>(&local_gpu_buffer), local_bytes);
+  REQUIRE(alloc_status.ok());
+
+  auto local_tensor = std::make_shared<tensorcast::communicator::transport::PartitionTensor>(
+      "rdma_handshake_tensor",
+      reinterpret_cast<uint64_t>(local_gpu_buffer),
+      static_cast<uint64_t>(local_bytes),
+      COMMUNICATE_ENGINE_DEV_GPU,
+      net_dev);
+  local_tensor->set_device_id(0);
+  local_tensor->register_mr();
+  local_tensor->set_read_ready();
+
+  auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
+      "rdma_handshake_tensor", "127.0.0.1", 65000, local_tensor, /*remote_offset=*/0);
+  auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
+      "rdma_handshake_tensor", remote_dev_name, /*addr=*/0xABC0, local_tensor->get_bytes(), /*rkey=*/0x1234);
+  read_request->set_remote_tensor(remote_tensor);
+
+  tensorcast::communicator::engine::CommunicatorTestPeer::pending_requests(client).put(
+      read_request->get_key(), read_request);
+
+  int sv[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  auto control_ctx = std::make_shared<tensorcast::communicator::transport::TcpContext>();
+  struct sockaddr_in remote_addr{};
+  remote_addr.sin_family = AF_INET;
+  remote_addr.sin_port = htons(65000);
+  remote_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  auto control_transport =
+      std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
+
+  auto channel = std::make_shared<tensorcast::communicator::engine::Channel>(control_transport, CHANNEL_RDMA);
+  tensorcast::communicator::engine::CommunicatorTestPeer::channels(client).put(read_request->get_dst_url(), channel);
+
+  const uint32_t payload_size = sizeof(ProtoReadResponseExHeader) + sizeof(ProtoReadResponseExSeg);
+  auto response = std::make_shared<EngineMessage>(ENGINE_OP_READ_RESPONSE_EX, payload_size);
+  auto* hdr = response->get_payload<ProtoReadResponseExHeader>();
+  STRNCPY(hdr->tensor_key, "rdma_handshake_tensor", tensorcast::communicator::engine::kMaxTensorNameLen);
+  hdr->transport_type = ENGINE_TRANSPORT_RDMA;
+  hdr->staged = 1;
+  STRNCPY(hdr->nic_name, remote_dev_name, tensorcast::communicator::engine::kMaxDevName);
+  hdr->num_segments = 1;
+  auto* seg =
+      reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
+  seg->addr = remote_tensor->get_uint64_addr();
+  seg->offset = 0;
+  seg->bytes = static_cast<uint32_t>(local_tensor->get_bytes());
+  seg->rkey = remote_tensor->get_rkey();
+
+  auto status = tensorcast::communicator::engine::CommunicatorTestPeer::on_receive_response(
+      client, channel, control_transport, response);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  auto rdma_transport = channel->get_rdma(local_dev_name, remote_dev_name);
+  REQUIRE(rdma_transport != nullptr);
+
+  CHECK_FALSE(rdma_transport->ready());
+  CHECK_FALSE(read_request->is_result_set());
+  CHECK(channel->pending_rdma_read_count(local_dev_name, remote_dev_name) == 1);
+
+  auto connect_rsp = EngineMessage::make_message<ProtoRdmaConnectResponse>(ENGINE_OP_RDMA_CONNECT_RESPONSE);
+  auto* connect_payload = connect_rsp->get_payload<ProtoRdmaConnectResponse>();
+  STRNCPY(connect_payload->src_dev_name, local_dev_name, tensorcast::communicator::engine::kMaxDevName);
+  STRNCPY(connect_payload->dst_dev_name, remote_dev_name, tensorcast::communicator::engine::kMaxDevName);
+  CHECK(rdma_transport->get_local_info(&connect_payload->qp_info) == SUCCESS);
+
+  status = tensorcast::communicator::engine::CommunicatorTestPeer::on_receive_response(
+      client, channel, control_transport, connect_rsp);
+  REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
+
+  CHECK(channel->pending_rdma_read_count(local_dev_name, remote_dev_name) == 0);
+  if (rdma_transport->ready()) {
+    CHECK_FALSE(read_request->is_result_set());
+  } else {
+    CHECK(read_request->is_result_set());
+    CHECK_FALSE(read_request->status_.status.ok());
+  }
+
+  auto& pending_map = tensorcast::communicator::engine::CommunicatorTestPeer::pending_requests(client);
+  if (pending_map.exist(read_request->get_key())) {
+    pending_map.del(read_request->get_key());
+  }
+  tensorcast::communicator::engine::CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
+
+  ::close(sv[1]);
+  tensorcast::communicator::engine::CommunicatorTestPeer::stop_workers(client);
+
+  auto free_status = tensorcast::cuda::free(local_gpu_buffer);
+  REQUIRE(free_status.ok());
 }
 
 } // namespace tensorcast::unittests

@@ -206,11 +206,17 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     return misc::FAILED;
   }
 
+  LOG(INFO) << "[rdma_transport] read_multi request=" << request->get_key() << " segs=" << segs.size()
+            << " ready=" << ready_.load() << " dev=" << (dev_ ? dev_->get_name() : "<null>");
+
   // Ensure QP is ready
   if (!ready_.load()) {
+    LOG(INFO) << "[rdma_transport] QP not ready, applying peer params: qpn=" << peer_info_.qpn
+              << " psn=" << peer_info_.psn;
     CHECK_WARN(do_modify_qp_rtr(), "failed to modify qp rtr");
     CHECK_WARN(do_modify_qp_rts(), "failed to modify qp rts");
     ready_.store(true);
+    LOG(INFO) << "[rdma_transport] QP transitioned to RTS for request=" << request->get_key();
   }
 
   // Prepare batch of WRs
@@ -248,8 +254,11 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
   auto res = misc::wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
   if (res) {
     request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
+    LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
+                 << " errno=" << errno;
     return misc::FAILED;
   }
+  LOG(INFO) << "[rdma_transport] Posted " << segs.size() << " RDMA READ WRs for request=" << request->get_key();
   return misc::SUCCESS;
 }
 
@@ -265,10 +274,13 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
         req->set_result(absl::OkStatus());
         // Invoke per-request ACK once, after aggregate completion
         req->invoke_ack_action_once();
+        LOG(INFO) << "[rdma_transport] RDMA READ completion success for request=" << req->get_key();
       }
     } else {
       LOG(WARNING) << "process err wc: status=" << wc->status;
       req->set_result(absl::InternalError(absl::StrCat("failed to process work completion: wc_status=", wc->status)));
+      LOG(WARNING) << "[rdma_transport] Work completion error for request=" << req->get_key()
+                   << " status=" << wc->status;
     }
   }
   return misc::SUCCESS;

@@ -28,6 +28,8 @@
 
 namespace tensorcast::communicator::engine {
 
+class CommunicatorTestPeer;
+
 class Communicator {
  public:
   explicit Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec = 0);
@@ -135,6 +137,8 @@ class Communicator {
   }
 
  private:
+  friend class CommunicatorTestPeer;
+
   transport::net_dev_t get_net_dev(int dev_type, int dev_id);
 
   misc::result_t on_receive_request(

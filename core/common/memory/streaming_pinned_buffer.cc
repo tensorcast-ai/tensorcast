@@ -5,6 +5,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 
 namespace tensorcast::common::memory {
@@ -166,8 +167,27 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
   }
 
   // Wait for a free chunk to become available
+  absl::Time wait_start;
+  absl::Time next_log;
+  bool waiting_logged = false;
   while (free_queue_.empty() && !production_complete_) {
-    free_cv_.Wait(&mutex_);
+    const absl::Time now = absl::Now();
+    if (!waiting_logged) {
+      wait_start = now;
+      next_log = now + absl::Seconds(5);
+      LOG(WARNING) << "StreamingPinnedBuffer capacity exhausted (num_chunks=" << num_chunks_
+                   << ", chunk_size=" << chunk_size_ << ") — waiting for consumer to return staging buffers";
+      waiting_logged = true;
+    } else if (now >= next_log) {
+      LOG(WARNING) << "StreamingPinnedBuffer still waiting for free chunk after "
+                   << absl::FormatDuration(now - wait_start) << " (produced=" << chunks_produced_
+                   << ", consumed=" << chunks_consumed_ << ")";
+      next_log = now + absl::Seconds(5);
+    }
+
+    // Wake periodically even if no notifier so we can re-log the wait status
+    const absl::Time deadline = now + absl::Seconds(1);
+    free_cv_.WaitWithDeadline(&mutex_, deadline);
   }
 
   if (free_queue_.empty() && production_complete_) {
@@ -176,6 +196,11 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
 
   int slot_id = free_queue_.front();
   free_queue_.pop();
+
+  if (waiting_logged) {
+    LOG(INFO) << "StreamingPinnedBuffer wait resolved after " << absl::FormatDuration(absl::Now() - wait_start)
+              << ": slot=" << slot_id << " now available";
+  }
 
   return slot_id;
 }
