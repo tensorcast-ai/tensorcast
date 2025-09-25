@@ -4,8 +4,12 @@
 
 import pytest
 
-from tensorcast.global_store.models import Replica, Worker, MemoryType
-from tensorcast.global_store.exceptions import ValidationError, TimeoutError, NotFoundError
+from tensorcast.global_store.exceptions import (
+    NotFoundError,
+    TimeoutError,
+    ValidationError,
+)
+from tensorcast.global_store.models import MemoryType, Replica, Worker
 
 
 class TestServices:
@@ -124,7 +128,7 @@ class TestServices:
         )
 
         # Register a replica for this worker
-        replica = artifact_service.register_replica(
+        artifact_service.register_replica(
             Replica(
                 artifact_id="test_artifact",
                 node_id="node1",
@@ -381,12 +385,12 @@ class TestServices:
         assert current == 0
         assert max_conc == 2
 
-    def test_transport_service_timeout(self, services):
-        """Test transport timeout."""
+    def test_transport_service_no_replicas(self, services):
+        """Test transport when no replicas exist."""
         transport_service = services["transport"]
 
         # No replicas available
-        with pytest.raises(TimeoutError):
+        with pytest.raises(NotFoundError):
             transport_service.request_transport(
                 artifact_id="nonexistent_artifact",
                 source_node_id="source",
@@ -394,6 +398,59 @@ class TestServices:
                 source_port=8080,
                 wait_timeout_ms=100,
             )
+
+    def test_transport_service_timeout(self, services):
+        """Test transport timeout when replicas exist but are all busy."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        # Setup worker and replica with low concurrency
+        worker = worker_service.register_worker(
+            Worker(
+                node_id="node_timeout_test",
+                node_address="192.168.1.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+
+        artifact_service.register_replica(
+            Replica(
+                artifact_id="test_timeout_artifact",
+                node_id="node_timeout_test",
+                node_address="192.168.1.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                worker_id=worker.worker_id,
+                max_concurrency=1,  # Only 1 concurrent request
+            )
+        )
+
+        # Request first transport (should succeed)
+        _, transport_id = transport_service.request_transport(
+            artifact_id="test_timeout_artifact",
+            source_node_id="source_1",
+            source_address="192.168.2.1",
+            source_port=9090,
+        )
+
+        # Request second transport with short timeout (should fail with TimeoutError)
+        with pytest.raises(TimeoutError):
+            transport_service.request_transport(
+                artifact_id="test_timeout_artifact",
+                source_node_id="source_2",
+                source_address="192.168.2.2",
+                source_port=9091,
+                wait_timeout_ms=100,  # Short timeout
+            )
+
+        # Complete the first transport
+        transport_service.complete_transport(transport_id)
 
     def test_transport_service_concurrency_limit(self, services):
         """Test concurrency limiting."""
@@ -413,7 +470,7 @@ class TestServices:
             )
         )
 
-        replica = artifact_service.register_replica(
+        artifact_service.register_replica(
             Replica(
                 artifact_id="test_artifact",
                 node_id="node1",
@@ -513,7 +570,7 @@ class TestServices:
         loads = [5, 2, 8]  # Different current request loads
         memory_types = [MemoryType.GPU, MemoryType.GPU, MemoryType.RAM]
 
-        for i, (load, mem_type) in enumerate(zip(loads, memory_types)):
+        for i, (load, mem_type) in enumerate(zip(loads, memory_types, strict=False)):
             replica = artifact_service.register_replica(
                 Replica(
                     artifact_id="balanced_artifact",
