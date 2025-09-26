@@ -165,7 +165,7 @@ misc::result_t RdmaTransport::do_post_send() {
   }
 
   req->record_rdma_queue_done();
-  req->set_expected_completions(1);
+  req->add_expected_completions(1);
 
   struct ibv_send_wr read_wr{};
   struct ibv_send_wr* read_bad_wr;
@@ -226,7 +226,6 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   auto* mr = request->get_local_tensor()->get_mr();
   request->record_rdma_queue_done();
-  request->set_expected_completions(static_cast<int>(segs.size()));
 
   for (size_t i = 0; i < segs.size(); ++i) {
     auto& wr = wrs[i];
@@ -272,8 +271,6 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     if (wc->status == IBV_WC_SUCCESS) {
       if (req->mark_completion_and_is_done()) {
         req->set_result(absl::OkStatus());
-        // Invoke per-request ACK once, after aggregate completion
-        req->invoke_ack_action_once();
         LOG(INFO) << "[rdma_transport] RDMA READ completion success for request=" << req->get_key();
       }
     } else {

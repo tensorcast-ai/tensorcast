@@ -46,6 +46,7 @@ struct ProtoHeader {
   uint32_t op = ENGINE_OP_INVALID;
   uint32_t size = 0;
 };
+
 #define PROTO_HEADER_SIZE sizeof(ProtoHeader)
 
 struct ProtoRdmaConnectRequest {
@@ -94,6 +95,10 @@ struct ProtoReadResponseExHeader {
   uint8_t staged; // 1 if segments are staged on server
   char nic_name[kMaxDevName];
   uint32_t num_segments;
+  uint32_t window_seq;
+  uint32_t credit_granted;
+  uint8_t more_segments; // 1 when additional windows remain
+  uint8_t reserved[3];
 };
 
 struct ProtoReadResponseExSeg {
@@ -114,7 +119,11 @@ struct ProtoReadFailed {
 struct ProtoRdmaReadDoneExHeader {
   char tensor_key[kMaxTensorNameLen];
   uint32_t num_segments;
+  uint32_t window_seq;
+  uint8_t final_window; // 1 if this ACK covers the last window
+  uint8_t reserved[3];
 };
+
 struct ProtoRdmaReadDoneExSeg {
   uint64_t offset;
 };

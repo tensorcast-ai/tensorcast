@@ -261,6 +261,7 @@ sc_cc_library(
         ":constants_lib",
         ":memory_stager_lib",
         ":partition_tensor_lib",
+        ":staging_flow_controller_lib",
         ":tcp_lib",
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
@@ -277,6 +278,25 @@ sc_header_only_library(
     name = "memory_stager_lib",
     hdrs = ["engine/memory_stager.h"],
     visibility = ["//visibility:public"],
+)
+
+sc_cc_library(
+    name = "staging_flow_controller_lib",
+    srcs = ["engine/staging_flow_controller.cc"],
+    hdrs = ["engine/staging_flow_controller.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ibv_wrap_lib",
+        ":memory_stager_lib",
+        ":partition_tensor_lib",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+        "@gsl",
+    ],
 )
 
 # GPU Net Stager (header-only)
@@ -316,6 +336,7 @@ sc_cc_library(
     deps = [
         ":mtcp_transport_lib",
         ":rdma_lib",
+        ":staging_flow_controller_lib",
     ],
 )
 
@@ -334,6 +355,7 @@ sc_cc_library(
         ":mtcp_transport_lib",
         ":protocol_lib",
         ":rdma_lib",
+        ":staging_flow_controller_lib",
         ":store_lib",
         ":tcp_lib",
         ":utils_lib",
@@ -391,6 +413,18 @@ cc_test(
     deps = [
         ":engine_lib",
         "//core/testing:catch_main",
+    ],
+)
+
+cc_test(
+    name = "staging_flow_controller_test",
+    srcs = ["engine/staging_flow_controller_test.cc"],
+    deps = [
+        ":memory_stager_lib",
+        ":staging_flow_controller_lib",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time:time",
         "@catch2//:catch2_main",
     ],
 )
@@ -444,6 +478,22 @@ cc_test(
 cc_test(
     name = "tcp_concurrent_test",
     srcs = ["engine/tcp_concurrent_test.cc"],
+    tags = [
+        "requires_cuda",
+        "stress",
+    ],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "cross_transport_soak_test",
+    srcs = ["engine/cross_transport_soak_test.cc"],
     tags = [
         "requires_cuda",
         "stress",

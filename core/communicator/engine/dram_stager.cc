@@ -34,10 +34,18 @@ DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedBuffe
 absl::StatusOr<void*> DRAMStager::stage(
     const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
     uint64_t offset,
-    uint64_t bytes) {
+    uint64_t bytes,
+    StageMode mode) {
   // pool_ is guaranteed non-null
   if (bytes == 0 || bytes > chunk_size_) {
     return absl::InvalidArgumentError("bytes must be in [1, chunk_size]");
+  }
+
+  if (mode == StageMode::kTry) {
+    const size_t available = pool_->get_available_size();
+    if (available < chunk_size_) {
+      return absl::UnavailableError("PinnedBufferPool has no free buffers");
+    }
   }
 
   std::vector<char*> bufs;

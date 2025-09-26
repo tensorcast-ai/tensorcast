@@ -3,10 +3,14 @@
 #ifndef CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 #define CORE_COMMUNICATOR_ENGINE_REQUEST_H_
 
+#include <deque>
 #include <functional>
 #include <string>
+#include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
 
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/partition_tensor.h"
@@ -51,25 +55,63 @@ class ReadRequest {
   void record_rdma_queue_done();
   void record_read_done();
 
-  // Multi-segment RDMA coordination
-  void set_expected_completions(int n) {
-    expected_completions_.store(n);
+  void add_expected_completions(int n) {
+    expected_completions_.fetch_add(n);
   }
+
   // Returns true if all segments have completed
   bool mark_completion_and_is_done() {
     int done = completed_.fetch_add(1) + 1;
+
+    std::vector<PendingAckWindow> ready;
+    std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> sender;
+    {
+      absl::MutexLock lk(&ack_mu_);
+      if (!segment_window_queue_.empty()) {
+        uint32_t window_seq = segment_window_queue_.front();
+        segment_window_queue_.pop_front();
+        if (!pending_ack_windows_.empty()) {
+          auto it = pending_ack_windows_.begin();
+          // Windows are enqueued in order; find matching window_seq
+          for (; it != pending_ack_windows_.end(); ++it) {
+            if (it->window_seq == window_seq) {
+              break;
+            }
+          }
+          if (it != pending_ack_windows_.end()) {
+            it->remaining -= 1;
+            if (it->remaining == 0) {
+              ready.emplace_back(std::move(*it));
+              pending_ack_windows_.erase(it);
+            }
+          }
+        }
+      }
+      sender = ack_sender_;
+    }
+    for (auto& window : ready) {
+      if (sender) {
+        sender(window.window_seq, window.offsets, window.final_window);
+      }
+    }
     return done >= expected_completions_.load();
   }
 
-  // Per-request ACK action (invoked once when all completions are done)
-  void set_ack_action(std::function<void()> fn) {
-    ack_action_ = std::move(fn);
+  void set_ack_sender(std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> fn) {
+    absl::MutexLock lk(&ack_mu_);
+    ack_sender_ = std::move(fn);
   }
-  void invoke_ack_action_once() {
-    bool expected = false;
-    if (ack_invoked_.compare_exchange_strong(expected, true)) {
-      if (ack_action_)
-        ack_action_();
+
+  void enqueue_window_ack(uint32_t window_seq, std::vector<uint64_t> offsets, bool final_window) {
+    absl::MutexLock lk(&ack_mu_);
+    PendingAckWindow window;
+    window.window_seq = window_seq;
+    window.final_window = final_window;
+    window.remaining = static_cast<int>(offsets.size());
+    window.offsets = std::move(offsets);
+    pending_ack_windows_.push_back(std::move(window));
+    for (int i = 0; i < pending_ack_windows_.back().remaining; ++i) {
+      segment_window_queue_.push_back(window_seq);
     }
   }
 
@@ -88,11 +130,20 @@ class ReadRequest {
   uint64_t remote_offset_;
 
   // Number of expected RDMA READ completions for this request
-  std::atomic<int> expected_completions_{1};
+  std::atomic<int> expected_completions_{0};
   std::atomic<int> completed_{0};
 
-  std::function<void()> ack_action_;
-  std::atomic_bool ack_invoked_{false};
+  struct PendingAckWindow {
+    uint32_t window_seq = 0;
+    bool final_window = false;
+    std::vector<uint64_t> offsets;
+    int remaining = 0;
+  };
+
+  absl::Mutex ack_mu_;
+  std::deque<PendingAckWindow> pending_ack_windows_ ABSL_GUARDED_BY(ack_mu_);
+  std::deque<uint32_t> segment_window_queue_ ABSL_GUARDED_BY(ack_mu_);
+  std::function<void(uint32_t, const std::vector<uint64_t>&, bool)> ack_sender_ ABSL_GUARDED_BY(ack_mu_);
 };
 
 using read_request_t = std::shared_ptr<ReadRequest>;

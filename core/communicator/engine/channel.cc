@@ -8,8 +8,16 @@
 
 namespace tensorcast::communicator::engine {
 
-Channel::Channel(communicator::transport::tcp_transport_t control, int type)
-    : type_(type), control_(std::move(control)), mtcp_(nullptr), expired_time_(0) {}
+Channel::Channel(
+    communicator::transport::tcp_transport_t control,
+    int type,
+    int buffers_per_flow,
+    uint32_t max_window_segments)
+    : type_(type),
+      control_(std::move(control)),
+      mtcp_(nullptr),
+      expired_time_(0),
+      flow_state_(std::make_shared<FlowState>(buffers_per_flow, max_window_segments)) {}
 
 Channel::~Channel() {
   close();

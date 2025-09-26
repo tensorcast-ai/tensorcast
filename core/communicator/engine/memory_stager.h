@@ -20,13 +20,19 @@ class MemoryStager {
  public:
   virtual ~MemoryStager() = default;
 
+  enum class StageMode {
+    kBlocking,
+    kTry,
+  };
+
   // Stage a view from the given tensor starting at offset for bytes.
   // Returns a host pointer valid until release_staged_buffer() is called.
   // Implementations must ensure bytes <= get_chunk_size().
   virtual absl::StatusOr<void*> stage(
       const std::shared_ptr<transport::PartitionTensor>& tensor,
       uint64_t offset,
-      uint64_t bytes) = 0;
+      uint64_t bytes,
+      StageMode mode = StageMode::kBlocking) = 0;
 
   // Release a previously staged buffer. Must be called once per stage().
   virtual absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) = 0;

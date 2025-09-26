@@ -148,7 +148,8 @@ misc::result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
     if (bytes <= 0) {
       PLOG(WARNING) << "MTcpTransportTask send error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
-    } else if (bytes < remain_bytes) {
+    }
+    if (bytes < remain_bytes) {
       remain_bytes -= bytes;
       offset += bytes;
     } else {
@@ -193,6 +194,22 @@ MTcpTransport::~MTcpTransport() {
     recv_thread_.join();
   }
 
+  staged_queue_.stop();
+  if (staged_thread_.joinable()) {
+    staged_thread_.join();
+  }
+  while (true) {
+    auto pending = staged_queue_.pop(false);
+    if (!pending) {
+      break;
+    }
+    for (auto& seg : pending->segments) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+    }
+  }
+
   if (listen_fd_ != 0) {
     ::close(listen_fd_);
     listen_fd_ = 0;
@@ -206,6 +223,8 @@ MTcpTransport::~MTcpTransport() {
     }
     tasks_[i].reset();
   }
+
+  prune_async_tasks();
 
   LOG(INFO) << "[MTcpTransport] Destructor complete";
 }
@@ -238,6 +257,7 @@ int MTcpTransport::listen(const std::string& ip, uint16_t* port) {
   getsockname(listen_fd_, (struct sockaddr*)&server_addr_, &len);
   recv_thread_ = std::thread([this] { this->server_loop(); });
   send_thread_ = std::thread([this] { this->send_loop(); });
+  start_staged_thread();
 
   *port = ntohs(server_addr_.sin_port);
   return misc::SUCCESS;
@@ -252,6 +272,7 @@ int MTcpTransport::connect(const std::string& ip, uint16_t port, int retry) {
 
   recv_thread_ = std::thread([this] { this->client_loop(); });
   send_thread_ = std::thread([this] { this->send_loop(); });
+  start_staged_thread();
   return misc::SUCCESS;
 }
 
@@ -273,6 +294,32 @@ misc::result_t MTcpTransport::recv(const read_request_t& msg) {
           << " bytes=" << msg->get_local_tensor()->get_bytes();
   recv_queue_.push(msg, true, -1);
   return misc::SUCCESS;
+}
+
+void MTcpTransport::enqueue_stage_window(StageSendWindow window) {
+  if (stop_.load() || closed_.load()) {
+    for (auto& seg : window.segments) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+    }
+    return;
+  }
+  auto ptr = std::make_shared<StageSendWindow>(std::move(window));
+  if (staged_queue_.push(ptr, true, -1) != misc::SUCCESS) {
+    for (auto& seg : ptr->segments) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+    }
+  }
+  prune_async_tasks();
+}
+
+void MTcpTransport::start_staged_thread() {
+  if (!staged_thread_.joinable()) {
+    staged_thread_ = std::thread([this] { this->staged_send_loop(); });
+  }
 }
 
 void MTcpTransport::set_conn_count(int conn_count) {
@@ -302,7 +349,8 @@ void MTcpTransport::server_loop() {
         int ret = poll(fds, 1, 1000);
         if (ret == -1) {
           break;
-        } else if (ret == 0) {
+        }
+        if (ret == 0) {
           continue;
         }
 
@@ -359,7 +407,8 @@ void MTcpTransport::client_loop() {
           ::connect(sock_fds_[i], reinterpret_cast<struct sockaddr*>(&server_addr_), static_cast<socklen_t>(addr_len));
       if (ret == 0) {
         break;
-      } else if (ret == -1) {
+      }
+      if (ret == -1) {
         retry_count_++;
         sleep(1);
       }
@@ -646,7 +695,130 @@ void MTcpTransport::send_loop() {
       for (auto& future : batch_futures) {
         future.wait();
       }
+      prune_async_tasks();
     }
+  }
+}
+
+void MTcpTransport::staged_send_loop() {
+  while (!stop_.load()) {
+    if (!ready_.load()) {
+      if (stop_.load()) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      continue;
+    }
+
+    auto window_ptr = staged_queue_.pop(true, 100);
+    if (stop_.load()) {
+      break;
+    }
+    if (!window_ptr) {
+      prune_async_tasks();
+      continue;
+    }
+    process_stage_window(window_ptr);
+    prune_async_tasks();
+  }
+
+  while (true) {
+    auto window_ptr = staged_queue_.pop(false);
+    if (!window_ptr) {
+      break;
+    }
+    for (auto& seg : window_ptr->segments) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+    }
+  }
+  prune_async_tasks();
+}
+
+void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>& window) {
+  if (!window) {
+    return;
+  }
+
+  if (conn_count_ <= 0) {
+    for (auto& seg : window->segments) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+    }
+    return;
+  }
+
+  for (auto& seg : window->segments) {
+    if (stop_.load() || closed_.load()) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+      continue;
+    }
+    if (seg.data == nullptr || seg.bytes == 0) {
+      if (seg.on_complete) {
+        seg.on_complete(misc::FAILED);
+      }
+      continue;
+    }
+
+    int idx = next_send_task_.fetch_add(1);
+    idx = std::max(idx, 0);
+    int task_index = conn_count_ > 0 ? idx % conn_count_ : 0;
+    if (task_index < 0) {
+      task_index += conn_count_;
+    }
+
+    if (task_index >= conn_count_ || tasks_[task_index] == nullptr) {
+      LOG(WARNING) << "[MTcpTransport::process_stage_window] task unavailable idx=" << task_index
+                   << " conn_count=" << conn_count_;
+      if (seg.on_complete) {
+        seg.on_complete(misc::TRANSPORT_FAILED);
+      }
+      continue;
+    }
+
+    auto chunk = std::make_shared<MTcpTransportChunk>(reinterpret_cast<uint8_t*>(seg.data), seg.bytes);
+    tasks_[task_index]->push_send(chunk);
+    auto chunk_future = chunk->get_future();
+    auto callback = seg.on_complete;
+    auto metadata = seg.metadata;
+    auto request_key = window->request_key;
+    auto release_future = std::async(
+        std::launch::async,
+        [chunk_future = std::move(chunk_future), callback = std::move(callback), metadata, request_key]() mutable {
+          auto result = chunk_future.get();
+          if (callback) {
+            callback(result.status);
+          }
+          LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << metadata.window_seq
+                    << " segment=" << metadata.segment_idx << " bytes=" << metadata.bytes
+                    << " status=" << (result.status == misc::SUCCESS ? "ok" : "error");
+          return result;
+        });
+    {
+      std::lock_guard<std::mutex> lk(async_tasks_mutex_);
+      outstanding_async_tasks_.push_back(release_future.share());
+    }
+  }
+}
+
+void MTcpTransport::prune_async_tasks() {
+  std::lock_guard<std::mutex> lk(async_tasks_mutex_);
+  auto it = outstanding_async_tasks_.begin();
+  while (it != outstanding_async_tasks_.end()) {
+    if (!it->valid()) {
+      it = outstanding_async_tasks_.erase(it);
+      continue;
+    }
+    if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      (void)it->get();
+      it = outstanding_async_tasks_.erase(it);
+      continue;
+    }
+    ++it;
   }
 }
 

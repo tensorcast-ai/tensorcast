@@ -50,7 +50,8 @@ class DRAMStager : public MemoryStager {
   absl::StatusOr<void*> stage(
       const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
       uint64_t offset,
-      uint64_t bytes) override;
+      uint64_t bytes,
+      StageMode mode = StageMode::kBlocking) override;
 
   absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override;
 

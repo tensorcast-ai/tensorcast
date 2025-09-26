@@ -1,0 +1,234 @@
+// Copyright (c) 2025, TensorCast Team.
+
+#include "core/communicator/engine/staging_flow_controller.h"
+
+#include <atomic>
+#include <thread>
+
+#include "absl/status/status.h"
+#include "absl/time/time.h"
+#include "catch2/catch_test_macros.hpp"
+
+#include "core/communicator/transport/partition_tensor.h"
+
+namespace tensorcast::communicator::engine {
+
+namespace {
+
+class DummyStager : public MemoryStager {
+ public:
+  absl::StatusOr<void*> stage(
+      const std::shared_ptr<transport::PartitionTensor>& /*tensor*/,
+      uint64_t /*offset*/,
+      uint64_t /*bytes*/,
+      StageMode /*mode*/ = StageMode::kBlocking) override {
+    return absl::UnimplementedError("DummyStager stage not used");
+  }
+
+  absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override {
+    released_ptrs_.push_back(host_ptr);
+    return absl::OkStatus();
+  }
+
+  size_t get_chunk_size() const override {
+    return 1;
+  }
+
+  size_t get_num_buffers() const override {
+    return 1;
+  }
+
+  std::vector<void*> released_ptrs_;
+};
+
+struct DummyStage {
+  std::shared_ptr<DummyStager> stager = std::make_shared<DummyStager>();
+  std::atomic<int> credit_released{0};
+
+  StageLease make(void* ptr, FlowCreditLedger& ledger, StageTransport transport) {
+    StageLease::Metadata meta;
+    meta.transport = transport;
+    return StageLease(
+        stager,
+        &ledger,
+        ptr,
+        /*bytes=*/8,
+        /*mr=*/nullptr,
+        /*deregister_mr=*/false,
+        meta,
+        [this]() { credit_released.fetch_add(1); });
+  }
+};
+
+} // namespace
+
+TEST_CASE("FlowCreditLedger acquires and releases credit") {
+  FlowCreditLedger ledger(/*total_credit=*/4);
+
+  auto lease_or = ledger.acquire(2);
+  REQUIRE(lease_or.ok());
+  FlowCreditLedger::Lease lease = std::move(lease_or.value());
+  CHECK(ledger.outstanding_credit() == 2);
+
+  lease.mark_consumed(2);
+  CHECK(ledger.outstanding_credit() == 2);
+
+  // Releasing used credit happens through StageLease; unused credit returns via destructor.
+  lease.release_unused();
+  CHECK(ledger.outstanding_credit() == 2);
+  ledger.release(2);
+  CHECK(ledger.outstanding_credit() == 0);
+}
+
+TEST_CASE("FlowCreditLedger blocks until credit available") {
+  FlowCreditLedger ledger(/*total_credit=*/2);
+
+  auto lease_or = ledger.acquire(2);
+  REQUIRE(lease_or.ok());
+  FlowCreditLedger::Lease lease = std::move(lease_or.value());
+  lease.mark_consumed(2);
+
+  std::atomic<bool> blocked{false};
+  std::atomic<bool> acquired{false};
+
+  std::thread waiter([&]() {
+    blocked = true;
+    auto lease2_or = ledger.acquire(2);
+    REQUIRE(lease2_or.ok());
+    acquired = true;
+    FlowCreditLedger::Lease lease2 = std::move(lease2_or.value());
+    lease2.mark_consumed(2);
+    // Release when done
+    lease2.release_unused();
+  });
+
+  // Ensure waiter is blocked
+  while (!blocked.load()) {
+    std::this_thread::yield();
+  }
+  CHECK_FALSE(acquired.load());
+
+  // Simulate ACK returning credit
+  ledger.release(2);
+  waiter.join();
+  CHECK(acquired.load());
+  CHECK(ledger.outstanding_credit() == 2);
+  ledger.release(2);
+  CHECK(ledger.outstanding_credit() == 0);
+}
+
+TEST_CASE("FlowCreditLedger try_acquire returns available credit without blocking") {
+  FlowCreditLedger ledger(/*total_credit=*/3);
+
+  auto first = ledger.try_acquire(2);
+  REQUIRE(first.ok());
+  CHECK(first->granted_segments() == 2);
+  first->mark_consumed(2);
+
+  auto second = ledger.try_acquire(2);
+  REQUIRE(second.ok());
+  CHECK(second->granted_segments() == 1);
+  second->mark_consumed();
+
+  // With all credit outstanding, the next try should fail immediately.
+  auto third = ledger.try_acquire(1);
+  CHECK_FALSE(third.ok());
+  CHECK(third.status().code() == absl::StatusCode::kUnavailable);
+
+  // Release staged credit to restore availability.
+  ledger.release(3);
+}
+
+TEST_CASE("StageLease releases credit and buffers exactly once") {
+  FlowCreditLedger ledger(/*total_credit=*/3);
+  DummyStage helper;
+
+  auto lease_or = ledger.acquire(1);
+  REQUIRE(lease_or.ok());
+  FlowCreditLedger::Lease credit_lease = std::move(lease_or.value());
+  credit_lease.mark_consumed();
+
+  int value = 42;
+  StageLease lease = helper.make(&value, ledger, StageTransport::kRdma);
+  REQUIRE(lease.valid());
+
+  lease.release();
+  lease.release(); // second release is a no-op
+
+  CHECK(helper.credit_released.load() == 1);
+  CHECK(helper.stager->released_ptrs_.size() == 1);
+  CHECK(helper.stager->released_ptrs_.front() == &value);
+  CHECK(ledger.outstanding_credit() == 0);
+  credit_lease.release_unused();
+}
+
+TEST_CASE("StageLeaseRegistry stores and retrieves leases") {
+  FlowCreditLedger ledger(/*total_credit=*/2);
+  DummyStage helper;
+
+  auto lease_or = ledger.acquire(1);
+  REQUIRE(lease_or.ok());
+  lease_or->mark_consumed();
+  StageLease lease = helper.make(reinterpret_cast<void*>(0x1), ledger, StageTransport::kMtcp);
+
+  StageLeaseRegistry registry;
+  StageLeaseKey key{.request_key = "tensor:0", .window_seq = 7, .segment_idx = 2};
+  registry.put(key, lease);
+  CHECK(registry.size() == 1);
+
+  auto take_or = registry.take(key);
+  REQUIRE(take_or.ok());
+  StageLease taken = take_or.value();
+  CHECK(registry.size() == 0);
+  taken.release();
+}
+
+TEST_CASE("StagingWindow stages windows respecting credit") {
+  FlowCreditLedger ledger(/*total_credit=*/3);
+  DummyStage helper;
+
+  std::atomic<int> offsets{0};
+
+  StagingWindow window(
+      ledger,
+      [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
+        offsets.fetch_add(static_cast<int>(offset + bytes + segment_idx));
+        return helper.make(reinterpret_cast<void*>(offset), ledger, StageTransport::kRdma);
+      },
+      /*total_bytes=*/64,
+      /*chunk_size=*/16,
+      /*initial_offset=*/0,
+      /*max_window_segments=*/2);
+
+  auto first = window.stage_next();
+  REQUIRE(first.ok());
+  CHECK(first->segments.size() == 2);
+  CHECK(first->more_segments);
+
+  auto second = window.stage_next();
+  REQUIRE(second.ok());
+  CHECK(second->segments.size() == 1);
+  CHECK(second->more_segments);
+
+  for (auto& seg : first->segments) {
+    seg.lease.release();
+  }
+  for (auto& seg : second->segments) {
+    seg.lease.release();
+  }
+
+  auto third = window.stage_next();
+  REQUIRE(third.ok());
+  CHECK(third->segments.size() == 1);
+  CHECK_FALSE(third->more_segments);
+
+  for (auto& seg : third->segments) {
+    seg.lease.release();
+  }
+
+  auto done = window.stage_next();
+  CHECK_FALSE(done.ok());
+  CHECK(done.status().code() == absl::StatusCode::kOutOfRange);
+}
+
+} // namespace tensorcast::communicator::engine

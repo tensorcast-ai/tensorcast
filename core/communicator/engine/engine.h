@@ -108,7 +108,7 @@ class Communicator {
   absl::Status close_connection(const std::string& dst_ip, uint16_t dst_port);
 
   // Inject a UMA-backed lease provider for DRAM staging (optional).
-  void set_dram_lease_provider(std::shared_ptr<DRAMStager::LeaseProvider> provider);
+  void set_dram_lease_provider(const std::shared_ptr<DRAMStager::LeaseProvider>& provider);
 
   // Lightweight UMA residency provider (reserved)
   struct ResidencyProvider {
@@ -131,11 +131,6 @@ class Communicator {
 
   uint16_t listening_port() const;
 
-  size_t staged_segments_count_for_test() {
-    absl::MutexLock lk(&staged_mu_);
-    return staged_segments_.pairs().size();
-  }
-
  private:
   friend class CommunicatorTestPeer;
 
@@ -157,6 +152,18 @@ class Communicator {
 
   absl::StatusOr<channel_t> do_create_channel(const std::string& ip, uint16_t port);
 
+  absl::Status handle_rdma_read_request(
+      const channel_t& channel,
+      const transport::tcp_transport_t& control_transport,
+      const ProtoReadRequest& request,
+      const std::shared_ptr<transport::PartitionTensor>& tensor);
+  absl::Status handle_mtcp_read_request(
+      const channel_t& channel,
+      const transport::tcp_transport_t& control_transport,
+      const ProtoReadRequest& request,
+      const std::shared_ptr<transport::PartitionTensor>& tensor);
+  absl::Status resume_rdma_reads(const channel_t& channel);
+
   std::atomic_bool stop_;
   std::atomic_bool inited_;
   transport::tcp_context_t server_context_;
@@ -175,6 +182,8 @@ class Communicator {
   std::shared_ptr<ResidencyProvider> residency_provider_ = nullptr;
 
   uint64_t channel_expire_;
+  int buffers_per_flow_ = 4;
+  uint32_t max_window_segments_ = 0;
 
   // GPU->CPU staging uses unified GPU MemoryStager only
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
@@ -188,22 +197,6 @@ class Communicator {
   // Unified memory stager (CPU staging in TCP path)
   std::shared_ptr<engine::MemoryStager> memory_stager_;
   std::unique_ptr<MrCache> mr_cache_;
-
-  // --- RDMA staged response tracking (server-side) ---
-  struct StagedRdmaSegment {
-    void* ptr = nullptr;
-    size_t bytes = 0;
-    ibv_mr* mr = nullptr;
-    enum class Kind { CPU, GPU } kind = Kind::CPU;
-    uint64_t ts_us = 0;
-    bool deregister_mr = true;
-    // Remember which stager produced the buffer (CPU or GPU)
-    MemoryStager* stager_ptr = nullptr;
-  };
-
-  // key: request key "<tensor_key>:<offset>"
-  absl::Mutex staged_mu_;
-  misc::Map<std::string, StagedRdmaSegment> staged_segments_;
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;
