@@ -36,7 +36,12 @@ communicator::transport::rdma_transport_t Channel::get_rdma(
     const std::string& remote_dev_name) {
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
-  return rdma_.get(key.str());
+  auto endpoint = get_rdma_endpoint(local_dev_name, remote_dev_name);
+  if (endpoint == nullptr) {
+    return nullptr;
+  }
+  absl::MutexLock lock(&endpoint->mu);
+  return endpoint->transport;
 }
 
 void Channel::set_channel_type(int type) {
@@ -46,11 +51,24 @@ void Channel::set_channel_type(int type) {
 void Channel::set_transport(
     const std::string& local_dev_name,
     const std::string& remote_dev_name,
-    transport::rdma_transport_t t) {
+    transport::rdma_transport_t t,
+    HandshakeState initial_state) {
   misc::ASSERT(type_ == base::CHANNEL_RDMA, "cannot set rdma transport for tcp channel");
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
-  rdma_.put(key.str(), std::move(t));
+  auto endpoint = ensure_rdma_endpoint(local_dev_name, remote_dev_name);
+  absl::MutexLock endpoint_lock(&endpoint->mu);
+  endpoint->transport = std::move(t);
+  endpoint->state = initial_state;
+  endpoint->generation += 1;
+  endpoint->failure_count = 0;
+  endpoint->next_retry_at = absl::InfinitePast();
+  endpoint->retry_scheduled = false;
+  if (initial_state == HandshakeState::kReady) {
+    for (auto& pending : endpoint->pending_reads) {
+      pending.generation = endpoint->generation;
+    }
+  }
 }
 
 void Channel::set_transport(communicator::transport::mtcp_transport_t t) {
@@ -63,7 +81,8 @@ void Channel::del_transport(const std::string& local_dev_name, const std::string
   misc::ASSERT(type_ == base::CHANNEL_RDMA, "cannot set rdma transport for tcp channel");
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
-  rdma_.del(key.str());
+  absl::MutexLock lock(&rdma_mu_);
+  rdma_.erase(key.str());
 }
 
 misc::result_t Channel::close() {
@@ -74,7 +93,10 @@ misc::result_t Channel::close() {
   if (mtcp_ != nullptr) {
     mtcp_.reset();
   }
-  rdma_.clear();
+  {
+    absl::MutexLock lock(&rdma_mu_);
+    rdma_.clear();
+  }
   return misc::SUCCESS;
 }
 
@@ -87,6 +109,37 @@ bool Channel::is_expired(uint64_t now) const {
     return false;
   }
   return now > expired_time_;
+}
+
+std::shared_ptr<Channel::RdmaEndpoint> Channel::find_rdma_endpoint_locked(const std::string& key) const {
+  auto it = rdma_.find(key);
+  if (it == rdma_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+std::shared_ptr<Channel::RdmaEndpoint> Channel::get_rdma_endpoint(
+    const std::string& local_dev_name,
+    const std::string& remote_dev_name) {
+  std::stringstream key;
+  key << local_dev_name << ":" << remote_dev_name;
+  absl::MutexLock lock(&rdma_mu_);
+  return find_rdma_endpoint_locked(key.str());
+}
+
+std::shared_ptr<Channel::RdmaEndpoint> Channel::ensure_rdma_endpoint(
+    const std::string& local_dev_name,
+    const std::string& remote_dev_name) {
+  std::stringstream key;
+  key << local_dev_name << ":" << remote_dev_name;
+  absl::MutexLock lock(&rdma_mu_);
+  auto endpoint = find_rdma_endpoint_locked(key.str());
+  if (endpoint == nullptr) {
+    endpoint = std::make_shared<RdmaEndpoint>();
+    rdma_.insert({key.str(), endpoint});
+  }
+  return endpoint;
 }
 
 } // namespace tensorcast::communicator::engine

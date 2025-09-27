@@ -53,7 +53,7 @@ class GpuNetStager : public MemoryStager {
     // Perform synchronous D2H copy into pinned buffer
     int device_id = tensor->get_device_id();
     device_id = std::max(device_id, 0);
-    auto guard = tensorcast::cuda::set_device(device_id);
+    auto guard = cuda::set_device(device_id);
     if (!guard.ok()) {
       // Return the slot on failure
       absl::Status _ret = streaming_->return_chunk(slot);
@@ -63,7 +63,7 @@ class GpuNetStager : public MemoryStager {
       return guard;
     }
     void* src = reinterpret_cast<void*>(tensor->get_uint64_addr() + offset);
-    auto copy_st = tensorcast::cuda::memcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+    auto copy_st = cuda::memcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
     if (!copy_st.ok()) {
       absl::Status _ret = streaming_->return_chunk(slot);
       if (!_ret.ok()) {

@@ -287,6 +287,8 @@ Key characteristics:
 - Pool reuse: a single `PinnedBufferPool` services both staging paths (NUMA-specific pools are created when `simple_numa` is enabled).
 - Explicit release: MTCP senders free staged buffers once their socket writes complete, while RDMA paths rely on `RDMA_READ_DONE_EX` to release the corresponding `StageLease` entries in the registry.
 - Unified flow control: `FlowCreditLedger` grants staging credit per channel, `StagingWindow` slices responses into credit-bounded windows, and `stager.max_window_segments` (0 → auto) optionally caps the number of segments emitted per window.
+- Lane alignment on receive: MTCP derives the lane from each staged segment’s absolute offset (`offset + sub_offset_in_chunk`) so GPU reads that span multiple sockets enqueue work to the same lane ordering used by the sender, avoiding deadlocks when staging windows interleave connections.
+- Credit back-pressure: when MTCP exhausts staging credit, the engine now emits a warning and retries with backoff until credit returns (up to 30 s) instead of failing the transfer immediately.
 
 ### 3.5 TCP Mode Transfer Support Matrix
 
@@ -381,21 +383,26 @@ Use `CommunicatorConfig` fields instead of env vars:
 Location: `transport/rdma_transport.{h,cc}` (QP, posting logic) and the RDMA paths in `engine/engine.cc`.
 
 Key behaviors:
-- `Channel` holds RDMA transports keyed by `<local_dev>|<peer_dev>` and keeps per-pair pending read queues until the handshake completes.
+- `Channel::RdmaEndpoint` tracks each `<local_dev>|<peer_dev>` pair and governs the handshake lifecycle: `Idle → ConnectRequested → Ready → Failed`. Reads arriving while the endpoint is not `Ready` are enqueued with a generation token and drained only after the handshake succeeds.
+- When an endpoint sits in `Failed` backoff, new RDMA responses queue their reads and a dedicated retry worker schedules the next handshake exactly at `next_retry_at`, so queued requests resume automatically once the backoff expires (no additional control traffic is required to nudge the handshake).
 - `Communicator` stages every RDMA response into pinned buffers (`hdr->staged = 1`) and inserts each segment as a `StageLease` in the per-channel `StageLeaseRegistry`; `MrCache` reuses registrations per protection domain.
+- `on_receive_response()` only invokes `rdma_transport->read_multi()` after the endpoint transitions to `Ready`; handshake failures (connect response errors or explicit `ENGINE_OP_RDMA_CONNECT_FAILED`) flush the pending queue with an `absl::Status` that maps to `REMOTE_RDMA_CONNECT_FAILED` and schedule exponential backoff before retrying.
+- `rdma_transport::read_multi()` now rejects calls while `ready()` is `false`; QP transitions are solely driven by `connect()` so callers cannot post READ WRs against an uninitialised queue pair.
 - Clients send `RDMA_READ_DONE_EX` after all segments complete. The server looks up the lease, deregisters when required, returns the buffer to the originating stager, and credits the `FlowCreditLedger`.
 - `ack_ttl_ms` (configurable, default 30 s) guards against leaked ACKs by reaping overdue registry entries in the GC loop.
 - QP attributes (`traffic_class`, `qp_timeout`, `qp_retry`) and outstanding WR limits are derived from `CommunicatorConfig`.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Created: transport allocated
-  Created --> Handshake: ENGINE_OP_RDMA_CONNECT_RESPONSE
-  Handshake --> Ready: QP RTR/RTS
+  [*] --> Idle: endpoint initialised
+  Idle --> ConnectRequested: ENGINE_OP_RDMA_CONNECT_REQUEST sent
+  ConnectRequested --> Ready: ENGINE_OP_RDMA_CONNECT_RESPONSE applied (QP RTR/RTS)
   Ready --> ActiveRead: read_multi posted
   ActiveRead --> Ready: WC success + RDMA_READ_DONE_EX sent
+  Ready --> Failed: transport error or connect failure
+  Failed --> Idle: backoff elapsed -> retry handshake
   Ready --> Closed: channel close or GC
-  Handshake --> Closed: connect failure
+  ConnectRequested --> Failed: ENGINE_OP_RDMA_CONNECT_FAILED or QP setup error
 ```
 
 ---
@@ -571,6 +578,10 @@ Tune `stager.stage_chunk_mb_gpu`, `stager.buffers_per_flow`, and `transport.tcp_
    - Check channel expiration settings
    - Monitor staging buffer usage
 
+4. **RDMA handshake reports `ibv_modify_qp`: No such device [19]**
+   - Happens when the peer advertises a port number that does not exist on the local NIC. Reusing the peer’s `ib_port` for `qp_attr.ah_attr.port_num` makes `ibv_modify_qp` fail with ENODEV during the RTR transition.
+   - Fixed in `RdmaTransport::do_modify_qp_rtr()`: the transport now always uses the local `NetDev` port (`dev_->get_port()`) when programming the QP attributes, so port mismatches no longer break the handshake.
+
 ---
 
 ## 7. Message Protocol (engine/protocol.h)
@@ -657,8 +668,8 @@ sequenceDiagram
 - **Client request:** `do_read_request_loop()` sets `ProtoReadRequest.transport_type = ENGINE_TRANSPORT_RDMA` whenever `enable_rdma_` is true and records the `ReadRequest` in `pending_requests_` before the message is sent, preventing a fast response from beating the registration.
 - **Server staging:** `on_receive_request()` schedules staging sessions via `resume_rdma_reads()` instead of blocking. `StagingWindow` pulls non-blocking credit from the ledger with `try_acquire()`, stages whatever segments fit that grant (partial windows included), registers them via `MrCache::get_or_register()` or `NetDev::reg_mr()`, and records each as a `StageLease` in the channel’s registry; when staging succeeds the header flag `ProtoReadResponseExHeader.staged` is set to `1` so the client knows to ACK.
 - **Server failures:** If staging or MR registration fails, the session is removed from the pending queue, the server returns `ENGINE_OP_READ_FAILED` with reason `TENSORCAST_READ_FAILED_MEM_MISMATCH`, and any staged buffers are released before the control loop continues.
-- **Client handshake:** On the client side `on_receive_response()` locates the local NIC from `tensor->get_dev()`. Missing transports trigger `ENGINE_OP_RDMA_CONNECT_REQUEST`, and the request keeps any staged windows in its ACK queue until the connect response applies the peer QP parameters and completions begin to arrive.
-- **Posting READs:** When the transport is ready, the client builds `RdmaReadSeg` entries (remote `addr`/`rkey`, local destination based on `remote_offset_`) and invokes `transport->read_multi()`. Failures update the request status and drop it from `pending_requests_`.
+- **Client handshake:** On the client side `on_receive_response()` locates the local NIC from `tensor->get_dev()`. The first RDMA response ensures the endpoint transitions from `Idle → ConnectRequested`, queues the `ReadRequest`, and emits `ENGINE_OP_RDMA_CONNECT_REQUEST`. While in `ConnectRequested` additional reads are enqueued; explicit failures (`ENGINE_OP_RDMA_CONNECT_FAILED` or QP setup errors) transition the endpoint to `Failed`, flush the queue with `REMOTE_RDMA_CONNECT_FAILED`, and schedule an exponential backoff before retrying.
+- **Posting READs:** When the endpoint reaches `Ready`, the client builds `RdmaReadSeg` entries (remote `addr`/`rkey`, local destination based on `remote_offset_`) and invokes `transport->read_multi()`. The transport refuses to post READ WRs while `ready() == false`, so only the handshake path can transition the QP to RTS. Failures update the request status and drop it from `pending_requests_`.
 - **ACK and cleanup:** For staged responses the client installs an `ack_action` that batches all segment offsets into `ENGINE_OP_RDMA_READ_DONE_EX`. Once all RDMA completions fire, this ACK releases staged buffers, deregisters MRs when needed, and removes the corresponding `StageLease` entries from the registry so the channel credit ledger can refill.
 - **Staging backpressure:** If staging buffers are exhausted (for example, GPU tensors with chunked copies but few `StreamingPinnedBuffer` slots), the server logs `StreamingPinnedBuffer capacity exhausted...` warnings while waiting for the client’s `RDMA_READ_DONE_EX` to recycle buffers, making “hangs” due to undersized pools visible in logs.
 

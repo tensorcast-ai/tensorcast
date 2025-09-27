@@ -4,11 +4,14 @@
 #define CORE_COMMUNICATOR_ENGINE_ENGINE_H_
 
 #include <atomic>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/queue.h"
@@ -162,7 +165,35 @@ class Communicator {
       const transport::tcp_transport_t& control_transport,
       const ProtoReadRequest& request,
       const std::shared_ptr<transport::PartitionTensor>& tensor);
-  absl::Status resume_rdma_reads(const channel_t& channel);
+  static absl::Status resume_rdma_reads(const channel_t& channel);
+  void schedule_handshake_retry(
+      const channel_t& channel,
+      const std::string& local_dev_name,
+      const std::string& peer_dev_name,
+      absl::Duration delay);
+  void handshake_retry_loop();
+  void process_handshake_retry_task(
+      const std::weak_ptr<Channel>& channel_weak,
+      const std::string& local_dev_name,
+      const std::string& peer_dev_name);
+  void start_pending_rdma_handshake(
+      const channel_t& channel,
+      const std::shared_ptr<Channel::RdmaEndpoint>& endpoint,
+      const std::string& local_dev_name,
+      const std::string& peer_dev_name);
+
+  struct HandshakeRetryTask {
+    absl::Time resume_at;
+    std::weak_ptr<Channel> channel;
+    std::string local_dev_name;
+    std::string peer_dev_name;
+  };
+
+  struct HandshakeRetryCompare {
+    bool operator()(const HandshakeRetryTask& lhs, const HandshakeRetryTask& rhs) const {
+      return lhs.resume_at > rhs.resume_at;
+    }
+  };
 
   std::atomic_bool stop_;
   std::atomic_bool inited_;
@@ -212,6 +243,14 @@ class Communicator {
   // Helpers to select NUMA-aware stagers
   std::shared_ptr<engine::MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
   std::shared_ptr<engine::MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
+
+  absl::Mutex handshake_retry_mu_;
+  absl::CondVar handshake_retry_cv_;
+  std::priority_queue<HandshakeRetryTask, std::vector<HandshakeRetryTask>, HandshakeRetryCompare> handshake_retry_queue_
+      ABSL_GUARDED_BY(handshake_retry_mu_);
+  std::thread handshake_retry_thread_;
+  std::atomic_bool handshake_retry_stop_{false};
+  bool handshake_retry_thread_started_ = false;
 };
 
 } // namespace tensorcast::communicator::engine

@@ -45,6 +45,7 @@ All transports now use a common staging controller to guarantee progress even wh
 
 - **Flow credit ledger** &mdash; each channel owns a `FlowCreditLedger` sized from `stager.buffers_per_flow`. Windows may only stage when credit is granted, preventing deadlocks when tensors exceed pool capacity.
 - **Windowed staging** &mdash; `StagingWindow` slices RDMA and MTCP responses into credit-bounded windows (`stager.max_window_segments` caps the per-window grant when non-zero). StageLeases carry offsets, window sequence numbers, and transport metadata.
+- **Non-blocking refill** &mdash; RDMA read handlers enqueue staging sessions and call `resume_rdma_reads()` to drain credit opportunistically. If staging hits a credit or buffer wall the control loop returns to processing TCP messages; RDMA ACKs and the GC reaper re-invoke the helper so credit recirculates without deadlocking the receive thread.
 - **Lease tracking** &mdash; active leases live in a `StageLeaseRegistry` so RDMA ACKs, MTCP send completions, and the GC reaper can all reclaim buffers safely. Completion handlers emit `[staging_credit]` logs showing grant size, outstanding credit, and transport.
 - **Per-transport release** &mdash; RDMA clients return credit via `ENGINE_OP_RDMA_READ_DONE_EX`, while MTCP release hooks fire on socket completion. Both paths recycle pinned buffers automatically and unblock the next window.
 

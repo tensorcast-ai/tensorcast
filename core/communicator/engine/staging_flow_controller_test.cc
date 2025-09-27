@@ -6,7 +6,6 @@
 #include <thread>
 
 #include "absl/status/status.h"
-#include "absl/time/time.h"
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/communicator/transport/partition_tensor.h"
@@ -229,6 +228,53 @@ TEST_CASE("StagingWindow stages windows respecting credit") {
   auto done = window.stage_next();
   CHECK_FALSE(done.ok());
   CHECK(done.status().code() == absl::StatusCode::kOutOfRange);
+}
+
+TEST_CASE("StagingWindow surfaces unavailable while credit inflight") {
+  FlowCreditLedger ledger(/*total_credit=*/2);
+  DummyStage helper;
+
+  std::vector<StageLease> inflight;
+  inflight.reserve(2);
+
+  StagingWindow window(
+      ledger,
+      [&](uint64_t offset, uint32_t /*bytes*/, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
+        StageLease::Metadata meta;
+        meta.transport = StageTransport::kMtcp;
+        meta.offset = offset;
+        meta.segment_idx = segment_idx;
+        return helper.make(reinterpret_cast<void*>(offset + segment_idx), ledger, StageTransport::kMtcp);
+      },
+      /*total_bytes=*/48,
+      /*chunk_size=*/16,
+      /*initial_offset=*/0,
+      /*max_window_segments=*/2);
+
+  auto first = window.stage_next();
+  REQUIRE(first.ok());
+  CHECK(first->segments.size() == 2);
+  CHECK(first->more_segments);
+
+  for (auto& seg : first->segments) {
+    inflight.push_back(std::move(seg.lease));
+  }
+
+  auto second = window.stage_next();
+  CHECK_FALSE(second.ok());
+  CHECK(second.status().code() == absl::StatusCode::kUnavailable);
+
+  for (auto& lease : inflight) {
+    lease.release();
+  }
+  inflight.clear();
+
+  auto third = window.stage_next();
+  REQUIRE(third.ok());
+  CHECK_FALSE(third->segments.empty());
+  for (auto& seg : third->segments) {
+    seg.lease.release();
+  }
 }
 
 } // namespace tensorcast::communicator::engine

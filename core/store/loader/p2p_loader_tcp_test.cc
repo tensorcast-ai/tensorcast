@@ -349,5 +349,210 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     if (source_gpu_ptr != nullptr) {
       REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
     }
+
+    SECTION("Remote GPU to Local GPU via TCP with limited staging credit") {
+      const int tcp_conn_count = 8;
+      const std::size_t stage_chunk_bytes = 16ull * 1024 * 1024; // 16 MiB
+      const std::size_t artifact_size = stage_chunk_bytes * 6; // Requires >1 window when buffers_per_flow=2
+
+      int source_port = find_available_port();
+      REQUIRE(source_port > 0);
+      int target_port = find_available_port(source_port + 1);
+      REQUIRE(target_port > 0);
+
+      CommunicatorConfig src_cfg;
+      src_cfg.set_enable_rdma(false);
+      src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+      src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024)));
+      src_cfg.mutable_stager()->set_buffers_per_flow(2);
+      src_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
+      src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
+      auto source_engine = std::make_shared<Communicator>(src_cfg);
+      REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
+
+      void* source_gpu_ptr = nullptr;
+      auto alloc_status = tensorcast::cuda::malloc(&source_gpu_ptr, artifact_size);
+      CAPTURE(alloc_status.message());
+      REQUIRE(alloc_status.ok());
+
+      auto pattern = create_test_pattern(artifact_size, 211);
+      auto h2d_status = tensorcast::cuda::memcpy(source_gpu_ptr, pattern.data(), artifact_size, cudaMemcpyHostToDevice);
+      CAPTURE(h2d_status.message());
+      REQUIRE(h2d_status.ok());
+
+      Communicator::RegisterTensorOptions reg_opts;
+      reg_opts.register_mr = false;
+      reg_opts.needs_staging = true;
+      reg_opts.async = false;
+      auto reg_status = source_engine->register_tensor_ex(
+          "credit_artifact",
+          reinterpret_cast<uint64_t>(source_gpu_ptr),
+          artifact_size,
+          COMMUNICATE_ENGINE_DEV_GPU,
+          0,
+          reg_opts);
+      CAPTURE(reg_status.message());
+      REQUIRE(reg_status.ok());
+
+      CommunicatorConfig dst_cfg;
+      dst_cfg.set_enable_rdma(false);
+      dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+      dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024)));
+      dst_cfg.mutable_stager()->set_buffers_per_flow(2);
+      dst_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
+      dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
+      auto target_engine = std::make_shared<Communicator>(dst_cfg);
+      auto init_status = target_engine->init("127.0.0.1", target_port);
+      CAPTURE(init_status.message());
+      REQUIRE(init_status.ok());
+
+      P2PSource p2p_src;
+      p2p_src.size_bytes = artifact_size;
+      p2p_src.ip = "127.0.0.1";
+      p2p_src.port = source_port;
+      p2p_src.memory_keys = {"credit_artifact"};
+      p2p_src.buf_sizes = {artifact_size};
+      p2p_src.location.type = MemoryLocation::GPU;
+      p2p_src.location.device_id = 0;
+      p2p_src.comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{target_engine};
+
+      auto loader = std::make_shared<P2PLoader>(p2p_src);
+      auto loader_init = loader->initialize();
+      CAPTURE(loader_init.message());
+      REQUIRE(loader_init.ok());
+
+      // Provision the pinned pool to cover the maximum number of simultaneous staging buffers
+      // (TransferService defaults to 16 chunks when credit is saturated). Keep the pool large enough
+      // so we validate the intended MTCP behaviour instead of exercising OOM fallbacks.
+      auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 16, stage_chunk_bytes);
+      auto va_space = std::make_shared<VirtualAddressSpace>();
+      auto mem_manager = std::make_shared<ReplicaLoadController>(
+          "credit_artifact",
+          0,
+          pinned_pool,
+          va_space,
+          1024 * 1024 * 1024,
+          std::chrono::milliseconds::zero(),
+          artifact_size);
+
+      auto src_or = loader->open_source();
+      REQUIRE(src_or.ok());
+      auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
+      auto load_status = load_future.get();
+      CAPTURE(load_status.message());
+      REQUIRE(load_status.ok());
+
+      auto gpu_ptrs = mem_manager->get_pointer(MemoryLocation::GPU);
+      REQUIRE(gpu_ptrs.size() == 1);
+      REQUIRE(gpu_ptrs[0] != nullptr);
+
+      std::vector<uint8_t> verify(artifact_size);
+      auto d2h_status = tensorcast::cuda::memcpy(verify.data(), gpu_ptrs[0], artifact_size, cudaMemcpyDeviceToHost);
+      CAPTURE(d2h_status.message());
+      REQUIRE(d2h_status.ok());
+      REQUIRE(verify_pattern(verify.data(), artifact_size, 211));
+
+      REQUIRE(mem_manager->release_memory(MemoryLocation::GPU).ok());
+      REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
+    }
+
+    SECTION("Remote GPU to Local GPU via TCP with insufficient pinned pool capacity") {
+      const int tcp_conn_count = 4;
+      const std::size_t stage_chunk_bytes = 16ull * 1024 * 1024; // 16 MiB
+      const std::size_t artifact_size = stage_chunk_bytes * 4;
+
+      int source_port = find_available_port();
+      REQUIRE(source_port > 0);
+      int target_port = find_available_port(source_port + 1);
+      REQUIRE(target_port > 0);
+
+      CommunicatorConfig src_cfg;
+      src_cfg.set_enable_rdma(false);
+      src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+      src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
+      src_cfg.mutable_stager()->set_buffers_per_flow(2);
+      src_cfg.mutable_pool()->set_pool_size_bytes(artifact_size);
+      src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
+      auto source_engine = std::make_shared<Communicator>(src_cfg);
+      REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
+
+      void* source_gpu_ptr = nullptr;
+      auto alloc_status = tensorcast::cuda::malloc(&source_gpu_ptr, artifact_size);
+      REQUIRE(alloc_status.ok());
+
+      auto payload = create_test_pattern(artifact_size, 123);
+      REQUIRE(tensorcast::cuda::memcpy(source_gpu_ptr, payload.data(), artifact_size, cudaMemcpyHostToDevice).ok());
+
+      Communicator::RegisterTensorOptions reg_opts;
+      reg_opts.register_mr = false;
+      reg_opts.needs_staging = true;
+      reg_opts.async = false;
+      CAPTURE(source_engine
+                  ->register_tensor_ex(
+                      "credit_artifact_small_pool",
+                      reinterpret_cast<uint64_t>(source_gpu_ptr),
+                      artifact_size,
+                      COMMUNICATE_ENGINE_DEV_GPU,
+                      0,
+                      reg_opts)
+                  .message());
+      REQUIRE(source_engine
+                  ->register_tensor_ex(
+                      "credit_artifact_small_pool",
+                      reinterpret_cast<uint64_t>(source_gpu_ptr),
+                      artifact_size,
+                      COMMUNICATE_ENGINE_DEV_GPU,
+                      0,
+                      reg_opts)
+                  .ok());
+
+      CommunicatorConfig dst_cfg;
+      dst_cfg.set_enable_rdma(false);
+      dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
+      dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
+      dst_cfg.mutable_stager()->set_buffers_per_flow(2);
+      dst_cfg.mutable_pool()->set_pool_size_bytes(stage_chunk_bytes * 2); // intentionally undersized
+      dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
+      auto target_engine = std::make_shared<Communicator>(dst_cfg);
+      REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
+
+      P2PSource p2p_src;
+      p2p_src.size_bytes = artifact_size;
+      p2p_src.ip = "127.0.0.1";
+      p2p_src.port = source_port;
+      p2p_src.memory_keys = {"credit_artifact_small_pool"};
+      p2p_src.buf_sizes = {artifact_size};
+      p2p_src.location.type = MemoryLocation::GPU;
+      p2p_src.location.device_id = 0;
+      p2p_src.comm_engine = gsl::not_null<std::shared_ptr<Communicator>>{target_engine};
+
+      auto loader = std::make_shared<P2PLoader>(p2p_src);
+      REQUIRE(loader->initialize().ok());
+
+      auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 2, stage_chunk_bytes);
+      auto va_space = std::make_shared<VirtualAddressSpace>();
+      auto mem_manager = std::make_shared<ReplicaLoadController>(
+          "credit_artifact_small_pool",
+          0,
+          pinned_pool,
+          va_space,
+          stage_chunk_bytes * 2,
+          std::chrono::milliseconds::zero(),
+          artifact_size);
+
+      auto src_or = loader->open_source();
+      REQUIRE(src_or.ok());
+      auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
+      auto load_status = load_future.get();
+      CAPTURE(load_status.message());
+      REQUIRE_FALSE(load_status.ok());
+      const absl::string_view status_str = load_status.message();
+      if (status_str.find("PinnedBufferPool out of memory") == absl::string_view::npos &&
+          status_str.find("Failed to allocate chunks from pinned memory pool") == absl::string_view::npos) {
+        FAIL_CHECK("Expected pinned buffer pool OOM message, got: " << status_str);
+      }
+
+      REQUIRE(tensorcast::cuda::free(source_gpu_ptr).ok());
+    }
   }
 }

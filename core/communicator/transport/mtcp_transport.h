@@ -25,6 +25,7 @@ extern "C" {
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/request.h"
+#include "gsl/pointers"
 
 namespace tensorcast::communicator::transport {
 
@@ -99,7 +100,12 @@ using task_t = std::shared_ptr<MTcpTransportTask>;
 
 class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
  public:
-  explicit MTcpTransport(int conn_count);
+  MTcpTransport(
+      int conn_count,
+      gsl::not_null<std::shared_ptr<engine::MemoryStager>> memory_stager,
+      gsl::not_null<std::shared_ptr<engine::MemoryStager>> gpu_memory_stager,
+      gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool,
+      int buffers_per_flow_limit);
   ~MTcpTransport();
 
   misc::result_t listen(const std::string& ip, uint16_t* port);
@@ -125,15 +131,6 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   void enqueue_stage_window(StageSendWindow window);
 
   void set_conn_count(int conn_count);
-  void set_memory_pool(std::shared_ptr<common::memory::PinnedBufferPool> pool);
-
-  void set_memory_stager(std::shared_ptr<engine::MemoryStager> stager) {
-    memory_stager_ = std::move(stager);
-  }
-
-  void set_gpu_memory_stager(std::shared_ptr<engine::MemoryStager> stager) {
-    gpu_memory_stager_ = std::move(stager);
-  }
 
  private:
   void server_loop();
@@ -170,22 +167,22 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   task_t tasks_[base::kMaxTcpConns];
 
   // Unified GPU MemoryStager (required)
-  std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
+  gsl::not_null<std::shared_ptr<engine::MemoryStager>> gpu_memory_stager_;
 
   // GPU receive buffer management
-  std::shared_ptr<common::memory::PinnedBufferPool> memory_pool_;
-  std::unique_ptr<common::memory::StreamingPinnedBuffer> gpu_recv_buffer_;
+  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
+  gsl::not_null<std::shared_ptr<common::memory::StreamingPinnedBuffer>> gpu_recv_buffer_;
+
+  int buffers_per_flow_limit_;
 
   // Unified memory stager for CPU staging in TCP path (required)
-  std::shared_ptr<engine::MemoryStager> memory_stager_;
+  gsl::not_null<std::shared_ptr<engine::MemoryStager>> memory_stager_;
 
   // Track outstanding async tasks for proper cleanup
   mutable std::mutex async_tasks_mutex_;
   std::vector<std::shared_future<chunk_result_t>> outstanding_async_tasks_;
 
   misc::Queue<std::shared_ptr<StageSendWindow>> staged_queue_;
-  std::atomic<int> next_send_task_{0};
-
   // Socket tuning (typed-config): IP_TOS value; 0 to leave unchanged
   int tcp_tos_ = 0;
 

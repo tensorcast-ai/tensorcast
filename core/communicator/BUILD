@@ -135,6 +135,16 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "mtcp_transport_lane_test",
+    srcs = ["transport/mtcp_transport_lane_test.cc"],
+    deps = [
+        ":mtcp_transport_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Combined net_dev and partition_tensor to avoid circular dependency
 sc_cc_library(
     name = "partition_tensor_lib",

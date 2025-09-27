@@ -12,6 +12,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 // absl string utilities no longer needed in typed-config engine
 
@@ -153,6 +154,55 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
   }
 }
 
+absl::Duration compute_handshake_backoff(int failure_count) {
+  if (failure_count <= 0) {
+    return absl::Milliseconds(50);
+  }
+  const int capped = std::min(failure_count, 5);
+  return absl::Milliseconds(50 * (1 << capped));
+}
+
+std::vector<Channel::PendingRdmaRead> drain_pending_reads_for_generation(
+    const std::shared_ptr<Channel::RdmaEndpoint>& endpoint,
+    uint64_t generation) {
+  std::vector<Channel::PendingRdmaRead> drained;
+  absl::MutexLock lock(&endpoint->mu);
+  for (auto it = endpoint->pending_reads.begin(); it != endpoint->pending_reads.end();) {
+    if (generation == 0 || it->generation == generation) {
+      drained.push_back(std::move(*it));
+      it = endpoint->pending_reads.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return drained;
+}
+
+void log_handshake_transition(
+    const std::string& local_dev,
+    const std::string& peer_dev,
+    Channel::HandshakeState from,
+    Channel::HandshakeState to,
+    uint64_t generation,
+    size_t queue_depth) {
+  auto state_to_string = [](Channel::HandshakeState state) {
+    switch (state) {
+      case Channel::HandshakeState::kIdle:
+        return "idle";
+      case Channel::HandshakeState::kConnectRequested:
+        return "connecting";
+      case Channel::HandshakeState::kReady:
+        return "ready";
+      case Channel::HandshakeState::kFailed:
+        return "failed";
+    }
+    return "unknown";
+  };
+
+  LOG(INFO) << "[rdma_handshake] dev=" << local_dev << " peer=" << peer_dev << " state=" << state_to_string(from)
+            << " -> " << state_to_string(to) << " gen=" << generation << " pending=" << queue_depth;
+}
+
 } // namespace
 
 // Engine is fully typed-config driven; no environment-variable reads here.
@@ -264,6 +314,9 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
         }
       }
     }
+
+    handshake_retry_thread_ = std::thread([this]() { this->handshake_retry_loop(); });
+    handshake_retry_thread_started_ = true;
   }
 }
 
@@ -271,6 +324,11 @@ Communicator::~Communicator() {
   store_.clear();
   stop_.store(true);
   request_queue_.stop();
+  handshake_retry_stop_.store(true);
+  handshake_retry_cv_.SignalAll();
+  if (handshake_retry_thread_started_ && handshake_retry_thread_.joinable()) {
+    handshake_retry_thread_.join();
+  }
   if (request_thread_.joinable()) {
     request_thread_.join();
   }
@@ -599,19 +657,15 @@ absl::Status Communicator::handle_mtcp_read_request(
 
   auto transport = channel->get_mtcp();
   if (transport == nullptr) {
-    transport = std::make_shared<transport::MTcpTransport>(mtcp_conn_count_);
+    transport = std::make_shared<transport::MTcpTransport>(
+        mtcp_conn_count_,
+        gsl::not_null<std::shared_ptr<MemoryStager>>{memory_stager_},
+        gsl::not_null<std::shared_ptr<MemoryStager>>{gpu_memory_stager_},
+        gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{gpu_memory_pool_},
+        buffers_per_flow_);
     channel->set_transport(transport);
   }
   transport->set_tcp_tos(config_.transport().tcp_tos());
-  if (gpu_memory_stager_) {
-    transport->set_gpu_memory_stager(gpu_memory_stager_);
-  }
-  if (gpu_memory_pool_) {
-    transport->set_memory_pool(gpu_memory_pool_);
-  }
-  if (memory_stager_) {
-    transport->set_memory_stager(memory_stager_);
-  }
 
   auto rsp = std::make_shared<EngineMessage>(
       ENGINE_OP_READ_RESPONSE_EX,
@@ -678,12 +732,45 @@ absl::Status Communicator::handle_mtcp_read_request(
   StagingWindow window(
       flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
 
+  absl::Time retry_deadline = absl::Now() + absl::Seconds(30);
+  absl::Duration backoff = absl::Milliseconds(1);
+  constexpr absl::Duration kMaxBackoff = absl::Milliseconds(50);
+  int64_t consecutive_unavailable = 0;
+  absl::Time last_warning = absl::InfinitePast();
+
   while (true) {
     auto window_or = window.stage_next();
     if (!window_or.ok()) {
       if (absl::IsOutOfRange(window_or.status())) {
         break;
       }
+
+      if (absl::IsUnavailable(window_or.status()) || absl::IsResourceExhausted(window_or.status())) {
+        ++consecutive_unavailable;
+        const absl::Time now = absl::Now();
+        if (last_warning == absl::InfinitePast() || now - last_warning >= absl::Seconds(1)) {
+          LOG(WARNING) << "[staging_credit] request=" << request_key
+                       << " transport=mtcp waiting for staging credit outstanding="
+                       << flow_state->ledger.outstanding_credit() << "/" << flow_state->ledger.total_credit();
+          last_warning = now;
+        }
+
+        if (now >= retry_deadline) {
+          LOG(ERROR) << "MTCP staging credit wait exceeded deadline for request=" << request_key;
+          auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+          auto* payload = fail_msg->get_payload<ProtoReadFailed>();
+          memcpy(payload->tensor_key, request.tensor_key, kMaxTensorNameLen);
+          payload->offset = request.offset;
+          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+          control_transport->send(fail_msg);
+          return absl::ResourceExhaustedError("MTCP staging credit wait timed out");
+        }
+
+        absl::SleepFor(backoff);
+        backoff = std::min(backoff * 2, kMaxBackoff);
+        continue;
+      }
+
       LOG(ERROR) << "Failed to stage MTCP window: " << window_or.status();
       auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
       auto* payload = fail_msg->get_payload<ProtoReadFailed>();
@@ -693,6 +780,9 @@ absl::Status Communicator::handle_mtcp_read_request(
       control_transport->send(fail_msg);
       return window_or.status();
     }
+
+    consecutive_unavailable = 0;
+    backoff = absl::Milliseconds(1);
 
     auto staged_window = std::move(window_or).value();
     transport::MTcpTransport::StageSendWindow send_window;
@@ -727,9 +817,8 @@ absl::Status Communicator::handle_mtcp_read_request(
       send_segment.bytes = metadata.bytes;
       send_segment.metadata = metadata;
 
-      auto flow_state_ref = flow_state;
       send_segment.on_complete =
-          [flow_state_ref, key, metadata, lease = std::move(lease)](misc::result_t status) mutable {
+          [flow_state_ref = flow_state, key, metadata, lease = std::move(lease)](misc::result_t status) mutable {
             if (flow_state_ref) {
               auto lease_or = flow_state_ref->registry.take(key);
               if (lease_or.ok()) {
@@ -1088,12 +1177,112 @@ misc::result_t Communicator::on_receive_response(
       auto* req = msg->get_payload<ProtoRdmaConnectResponse>();
       std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
       std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
-      auto transport = channel->get_rdma(local_dev_name, peer_dev_name);
-      if (transport == nullptr) {
-        LOG(ERROR) << "failed to find transport from " << t->get_remote_url() << ", local-dev=" << local_dev_name
-                   << ", peer-dev=" << peer_dev_name;
+      auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+      if (endpoint == nullptr) {
+        LOG(WARNING) << "[rdma_handshake] received connect response for unknown endpoint: local_dev=" << local_dev_name
+                     << " peer_dev=" << peer_dev_name;
+        break;
       }
-      COMM_CHECK(transport->connect(&req->qp_info));
+
+      transport::rdma_transport_t transport;
+      uint64_t generation = 0;
+      Channel::HandshakeState from_state = Channel::HandshakeState::kConnectRequested;
+      bool already_ready = false;
+      {
+        absl::MutexLock lock(&endpoint->mu);
+        if (endpoint->state == Channel::HandshakeState::kConnectRequested) {
+          transport = endpoint->transport;
+          generation = endpoint->generation;
+          from_state = Channel::HandshakeState::kConnectRequested;
+        } else if (endpoint->state == Channel::HandshakeState::kReady && !endpoint->pending_reads.empty()) {
+          transport = endpoint->transport;
+          generation = endpoint->generation;
+          from_state = Channel::HandshakeState::kReady;
+          already_ready = true;
+        } else {
+          LOG(INFO) << "[rdma_handshake] ignoring late connect response: local_dev=" << local_dev_name
+                    << " peer_dev=" << peer_dev_name;
+          break;
+        }
+      }
+
+      if (transport == nullptr) {
+        LOG(WARNING) << "[rdma_handshake] connect response missing transport: local_dev=" << local_dev_name
+                     << " peer_dev=" << peer_dev_name;
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+        const absl::Status status = absl::UnavailableError("rdma transport missing while processing connect response");
+        for (auto& pending : failed_reads) {
+          pending_requests_.del(pending.request->get_key());
+          pending.request->set_result(status);
+        }
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          log_handshake_transition(
+              local_dev_name,
+              peer_dev_name,
+              Channel::HandshakeState::kConnectRequested,
+              Channel::HandshakeState::kFailed,
+              endpoint->generation,
+              endpoint->pending_reads.size());
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+        break;
+      }
+
+      if (!already_ready) {
+        misc::result_t connect_res = transport->connect(&req->qp_info);
+        if (connect_res != misc::SUCCESS) {
+          LOG(WARNING) << "[rdma_handshake] transport connect failed: local_dev=" << local_dev_name
+                       << " peer_dev=" << peer_dev_name << " res=" << connect_res;
+          auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+          const absl::Status status = absl::UnavailableError("remote RDMA connect failed");
+          for (auto& pending : failed_reads) {
+            pending_requests_.del(pending.request->get_key());
+            pending.request->set_result(status);
+          }
+          {
+            absl::MutexLock lock(&endpoint->mu);
+            log_handshake_transition(
+                local_dev_name,
+                peer_dev_name,
+                Channel::HandshakeState::kConnectRequested,
+                Channel::HandshakeState::kFailed,
+                endpoint->generation,
+                endpoint->pending_reads.size());
+            endpoint->state = Channel::HandshakeState::kFailed;
+            endpoint->transport.reset();
+            endpoint->failure_count += 1;
+            endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+            endpoint->retry_scheduled = false;
+          }
+          break;
+        }
+      }
+
+      size_t queued = 0;
+      {
+        absl::MutexLock lock(&endpoint->mu);
+        queued = endpoint->pending_reads.size();
+        endpoint->state = Channel::HandshakeState::kReady;
+        endpoint->failure_count = 0;
+        endpoint->next_retry_at = absl::InfinitePast();
+        endpoint->retry_scheduled = false;
+      }
+      log_handshake_transition(
+          local_dev_name, peer_dev_name, from_state, Channel::HandshakeState::kReady, generation, queued);
+
+      auto ready_reads = drain_pending_reads_for_generation(endpoint, generation);
+      for (auto& pending : ready_reads) {
+        pending.request->add_expected_completions(static_cast<int>(pending.segments.size()));
+        auto res = transport->read_multi(pending.request, pending.segments);
+        if (res != misc::SUCCESS) {
+          pending_requests_.del(pending.request->get_key());
+          pending.request->set_result(absl::UnavailableError("rdma read_multi failed after handshake"));
+        }
+      }
       break;
     }
     case ENGINE_OP_MTCP_CONNECT_RESPONSE: {
@@ -1133,28 +1322,17 @@ misc::result_t Communicator::on_receive_response(
         CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
 
         auto tensor = read_request->get_local_tensor();
-        auto transport = channel->get_rdma(tensor->get_dev()->get_name(), peer_dev_name);
-        if (transport == nullptr) {
-          transport = rdma_context_->create_transport(tensor->get_dev()->get_name());
-          auto req = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
-          auto* payload = req->get_payload<ProtoRdmaConnectRequest>();
-          COMM_CHECK(transport->get_local_info(&payload->qp_info));
-          misc::STRNCPY(payload->src_dev_name, tensor->get_dev()->get_name(), kMaxDevName);
-          misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
-          COMM_CHECK(t->send(req));
-          channel->set_transport(tensor->get_dev()->get_name(), peer_dev_name, transport);
-        }
-        if (!transport->ready()) {
-          LOG(ERROR) << "[on_receive_response] RDMA transport not ready before read_multi: request="
-                     << read_request->get_key() << " tensor=" << tensor_key
-                     << " local_dev=" << tensor->get_dev()->get_name() << " peer_dev=" << peer_dev_name
-                     << " remote=" << t->get_remote_url();
-        }
+        auto dev = tensor->get_dev();
+        CHECK(dev != nullptr) << "local tensor missing device metadata";
+        const std::string local_dev_name = dev->get_name();
+
+        auto endpoint = channel->ensure_rdma_endpoint(local_dev_name, peer_dev_name);
+
         std::vector<transport::RdmaTransport::RdmaReadSeg> rdma_segs;
         rdma_segs.reserve(hdr->num_segments);
         std::vector<uint64_t> ack_offsets;
         ack_offsets.reserve(hdr->num_segments);
-        uint64_t base_off = read_request->remote_offset_;
+        const uint64_t base_off = read_request->remote_offset_;
         for (uint32_t i = 0; i < hdr->num_segments; ++i) {
           auto* s = reinterpret_cast<ProtoReadResponseExSeg*>(
               reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
@@ -1168,7 +1346,7 @@ misc::result_t Communicator::on_receive_response(
           rdma_segs.emplace_back(seg);
           ack_offsets.emplace_back(s->offset);
         }
-        read_request->add_expected_completions(static_cast<int>(rdma_segs.size()));
+
         if (hdr->staged) {
           auto ctrl = channel->get_control();
           const std::string staged_key = tensor_key;
@@ -1195,12 +1373,214 @@ misc::result_t Communicator::on_receive_response(
           read_request->enqueue_window_ack(hdr->window_seq, std::move(ack_offsets), hdr->more_segments == 0);
         }
 
-        CHECK_WARN(transport->read_multi(read_request, rdma_segs), "failed to read (multi)");
-      } else if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
+        auto now = absl::Now();
+        transport::rdma_transport_t transport_to_use;
+        transport::rdma_transport_t prepared_transport;
+        std::shared_ptr<EngineMessage> connect_request_msg;
+        bool issue_now = false;
+        bool handshake_started = false;
+        bool queued_current = false;
+        bool deferred_for_backoff = false;
+        bool schedule_retry = false;
+        absl::Duration backoff_remaining = absl::ZeroDuration();
+        absl::Status immediate_failure = absl::OkStatus();
+        uint64_t generation = 0;
+
+        while (true) {
+          endpoint->mu.Lock();
+          auto state = endpoint->state;
+          if (state == Channel::HandshakeState::kReady) {
+            transport_to_use = endpoint->transport;
+            if (transport_to_use == nullptr || !transport_to_use->ready()) {
+              log_handshake_transition(
+                  local_dev_name,
+                  peer_dev_name,
+                  state,
+                  Channel::HandshakeState::kIdle,
+                  endpoint->generation,
+                  endpoint->pending_reads.size());
+              endpoint->state = Channel::HandshakeState::kIdle;
+              endpoint->transport.reset();
+              endpoint->mu.Unlock();
+              continue;
+            }
+            generation = endpoint->generation;
+            endpoint->mu.Unlock();
+            issue_now = true;
+            break;
+          }
+
+          if (state == Channel::HandshakeState::kConnectRequested) {
+            generation = endpoint->generation;
+            endpoint->pending_reads.push_back(
+                Channel::PendingRdmaRead{
+                    .request = read_request,
+                    .segments = std::move(rdma_segs),
+                    .enqueued_at = now,
+                    .generation = generation,
+                });
+            queued_current = true;
+            const size_t queue_depth = endpoint->pending_reads.size();
+            endpoint->mu.Unlock();
+            LOG(INFO) << "[rdma_handshake] queueing read while awaiting connect: request=" << read_request->get_key()
+                      << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
+                      << " queue_depth=" << queue_depth;
+            break;
+          }
+
+          if (state == Channel::HandshakeState::kIdle || state == Channel::HandshakeState::kFailed) {
+            const bool can_retry = state == Channel::HandshakeState::kIdle || now >= endpoint->next_retry_at;
+            if (!can_retry) {
+              generation = endpoint->generation;
+              endpoint->pending_reads.push_back(
+                  Channel::PendingRdmaRead{
+                      .request = read_request,
+                      .segments = std::move(rdma_segs),
+                      .enqueued_at = now,
+                      .generation = generation,
+                  });
+              queued_current = true;
+              deferred_for_backoff = true;
+              backoff_remaining = endpoint->next_retry_at - now;
+              if (!endpoint->retry_scheduled) {
+                endpoint->retry_scheduled = true;
+                schedule_retry = true;
+              }
+              const size_t queue_depth = endpoint->pending_reads.size();
+              endpoint->mu.Unlock();
+              LOG(WARNING) << "[rdma_handshake] deferring read during backoff: request=" << read_request->get_key()
+                           << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
+                           << " queue_depth=" << queue_depth
+                           << " wait_ms=" << absl::ToInt64Milliseconds(backoff_remaining);
+              break;
+            }
+
+            if (prepared_transport == nullptr) {
+              endpoint->mu.Unlock();
+              prepared_transport = rdma_context_->create_transport(local_dev_name);
+              if (prepared_transport == nullptr) {
+                immediate_failure = absl::InternalError("failed to allocate RDMA transport");
+                break;
+              }
+              connect_request_msg =
+                  EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+              auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
+              misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
+              if (info_res != misc::SUCCESS) {
+                immediate_failure = absl::InternalError("failed to prepare RDMA connect info");
+                prepared_transport.reset();
+                connect_request_msg.reset();
+                break;
+              }
+              misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
+              misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
+              continue;
+            }
+
+            Channel::HandshakeState from_state = state;
+            endpoint->transport = prepared_transport;
+            endpoint->generation += 1;
+            generation = endpoint->generation;
+            endpoint->state = Channel::HandshakeState::kConnectRequested;
+            endpoint->failure_count = 0;
+            endpoint->next_retry_at = absl::InfinitePast();
+            endpoint->retry_scheduled = false;
+            endpoint->pending_reads.push_back(
+                Channel::PendingRdmaRead{
+                    .request = read_request,
+                    .segments = std::move(rdma_segs),
+                    .enqueued_at = now,
+                    .generation = generation,
+                });
+            queued_current = true;
+            handshake_started = true;
+            const size_t queue_depth = endpoint->pending_reads.size();
+            endpoint->mu.Unlock();
+            log_handshake_transition(
+                local_dev_name,
+                peer_dev_name,
+                from_state,
+                Channel::HandshakeState::kConnectRequested,
+                generation,
+                queue_depth);
+            break;
+          }
+
+          endpoint->mu.Unlock();
+          immediate_failure = absl::InternalError("unexpected RDMA handshake state");
+          break;
+        }
+
+        if (!immediate_failure.ok()) {
+          LOG(WARNING) << "[rdma_handshake] immediate failure handling read: request=" << read_request->get_key()
+                       << " status=" << immediate_failure;
+          read_request->set_result(immediate_failure);
+          pending_requests_.del(req_key);
+          break;
+        }
+
+        if (issue_now) {
+          read_request->add_expected_completions(static_cast<int>(rdma_segs.size()));
+          auto res = transport_to_use->read_multi(read_request, rdma_segs);
+          if (res != misc::SUCCESS) {
+            read_request->set_result(absl::UnavailableError("rdma read_multi failed before completion"));
+            pending_requests_.del(req_key);
+          }
+          break;
+        }
+
+        if (handshake_started) {
+          auto send_res = t->send(connect_request_msg);
+          if (send_res != misc::SUCCESS) {
+            LOG(WARNING) << "[rdma_handshake] failed to send connect request: request=" << read_request->get_key()
+                         << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name << " res=" << send_res;
+            const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
+            auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+            for (auto& pending : failed_reads) {
+              pending_requests_.del(pending.request->get_key());
+              pending.request->set_result(send_error);
+            }
+            {
+              absl::MutexLock lock(&endpoint->mu);
+              log_handshake_transition(
+                  local_dev_name,
+                  peer_dev_name,
+                  Channel::HandshakeState::kConnectRequested,
+                  Channel::HandshakeState::kFailed,
+                  endpoint->generation,
+                  endpoint->pending_reads.size());
+              endpoint->state = Channel::HandshakeState::kFailed;
+              endpoint->transport.reset();
+              endpoint->failure_count += 1;
+              endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+              endpoint->retry_scheduled = false;
+            }
+          }
+          break;
+        }
+
+        if (queued_current && deferred_for_backoff) {
+          if (schedule_retry) {
+            if (backoff_remaining <= absl::ZeroDuration()) {
+              backoff_remaining = absl::Milliseconds(1);
+            }
+            schedule_handshake_retry(channel, local_dev_name, peer_dev_name, backoff_remaining);
+          }
+          break;
+        }
+
+        break;
+      }
+      if (hdr->transport_type == ENGINE_TRANSPORT_MTCP) {
         // MTCP path using EX header (no segments)
         auto transport = channel->get_mtcp();
         if (transport == nullptr) {
-          transport = std::make_shared<transport::MTcpTransport>(base::kMTcpConnCount);
+          transport = std::make_shared<transport::MTcpTransport>(
+              base::kMTcpConnCount,
+              gsl::not_null<std::shared_ptr<MemoryStager>>{memory_stager_},
+              gsl::not_null<std::shared_ptr<MemoryStager>>{gpu_memory_stager_},
+              gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{gpu_memory_pool_},
+              buffers_per_flow_);
           LOG(INFO) << "[on_receive_response] Sending MTCP_CONNECT_REQUEST for " << tensor_key;
           auto req = EngineMessage::make_message<ProtoMtcpConnectRequest>(ENGINE_OP_MTCP_CONNECT_REQUEST);
           auto* payload = req->get_payload<ProtoMtcpConnectRequest>();
@@ -1209,10 +1589,6 @@ misc::result_t Communicator::on_receive_response(
           channel->set_transport(transport);
         }
         transport->set_tcp_tos(config_.transport().tcp_tos());
-        if (gpu_memory_pool_)
-          transport->set_memory_pool(gpu_memory_pool_);
-        if (memory_stager_)
-          transport->set_memory_stager(memory_stager_);
         CHECK_WARN(transport->recv(read_request), "failed to recv via mtcp");
         // Remove pending entry now; completion is tracked in request future
         pending_requests_.del(req_key);
@@ -1228,7 +1604,40 @@ misc::result_t Communicator::on_receive_response(
       std::string peer_dev_name = reinterpret_cast<char*>(req->dst_dev_name);
       std::string local_dev_name = reinterpret_cast<char*>(req->src_dev_name);
       LOG(ERROR) << "[on_receive_response] RDMA_CONNECT_FAILED: local=" << local_dev_name << " peer=" << peer_dev_name;
-      channel->del_transport(local_dev_name, peer_dev_name);
+
+      auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+      if (endpoint == nullptr) {
+        break;
+      }
+
+      uint64_t generation = 0;
+      {
+        absl::MutexLock lock(&endpoint->mu);
+        generation = endpoint->generation;
+      }
+
+      auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+      const absl::Status status = absl::UnavailableError("remote RDMA connect failed");
+      for (auto& pending : failed_reads) {
+        pending_requests_.del(pending.request->get_key());
+        pending.request->set_result(status);
+      }
+
+      {
+        absl::MutexLock lock(&endpoint->mu);
+        log_handshake_transition(
+            local_dev_name,
+            peer_dev_name,
+            Channel::HandshakeState::kConnectRequested,
+            Channel::HandshakeState::kFailed,
+            endpoint->generation,
+            endpoint->pending_reads.size());
+        endpoint->state = Channel::HandshakeState::kFailed;
+        endpoint->transport.reset();
+        endpoint->failure_count += 1;
+        endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+        endpoint->retry_scheduled = false;
+      }
       break;
     }
     case ENGINE_OP_READ_FAILED: {
@@ -1253,6 +1662,220 @@ misc::result_t Communicator::on_receive_response(
   }
 
   return misc::SUCCESS;
+}
+
+void Communicator::schedule_handshake_retry(
+    const channel_t& channel,
+    const std::string& local_dev_name,
+    const std::string& peer_dev_name,
+    absl::Duration delay) {
+  if (!enable_rdma_ || !handshake_retry_thread_started_ || handshake_retry_stop_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (delay <= absl::ZeroDuration()) {
+    delay = absl::Milliseconds(1);
+  }
+
+  HandshakeRetryTask task;
+  task.resume_at = absl::Now() + delay;
+  task.channel = channel;
+  task.local_dev_name = local_dev_name;
+  task.peer_dev_name = peer_dev_name;
+
+  {
+    absl::MutexLock lock(&handshake_retry_mu_);
+    handshake_retry_queue_.push(std::move(task));
+  }
+  handshake_retry_cv_.Signal();
+}
+
+void Communicator::handshake_retry_loop() {
+  while (!handshake_retry_stop_.load(std::memory_order_relaxed)) {
+    HandshakeRetryTask task;
+    bool has_task = false;
+    {
+      absl::MutexLock lock(&handshake_retry_mu_);
+      while (!handshake_retry_stop_.load(std::memory_order_relaxed) && handshake_retry_queue_.empty()) {
+        handshake_retry_cv_.Wait(&handshake_retry_mu_);
+      }
+      if (handshake_retry_stop_.load(std::memory_order_relaxed)) {
+        break;
+      }
+      auto now = absl::Now();
+      const auto& next = handshake_retry_queue_.top();
+      if (next.resume_at > now) {
+        handshake_retry_cv_.WaitWithDeadline(&handshake_retry_mu_, next.resume_at);
+        continue;
+      }
+      task = handshake_retry_queue_.top();
+      handshake_retry_queue_.pop();
+      has_task = true;
+    }
+
+    if (!has_task) {
+      continue;
+    }
+
+    process_handshake_retry_task(task.channel, task.local_dev_name, task.peer_dev_name);
+  }
+}
+
+void Communicator::process_handshake_retry_task(
+    const std::weak_ptr<Channel>& channel_weak,
+    const std::string& local_dev_name,
+    const std::string& peer_dev_name) {
+  if (handshake_retry_stop_.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  auto channel = channel_weak.lock();
+  if (!channel) {
+    return;
+  }
+
+  auto endpoint = channel->get_rdma_endpoint(local_dev_name, peer_dev_name);
+  if (endpoint == nullptr) {
+    return;
+  }
+
+  start_pending_rdma_handshake(channel, endpoint, local_dev_name, peer_dev_name);
+}
+
+void Communicator::start_pending_rdma_handshake(
+    const channel_t& channel,
+    const std::shared_ptr<Channel::RdmaEndpoint>& endpoint,
+    const std::string& local_dev_name,
+    const std::string& peer_dev_name) {
+  if (!enable_rdma_ || handshake_retry_stop_.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  auto control = channel->get_control();
+  if (control == nullptr) {
+    return;
+  }
+
+  transport::rdma_transport_t prepared_transport;
+  std::shared_ptr<EngineMessage> connect_request_msg;
+
+  while (!handshake_retry_stop_.load(std::memory_order_relaxed)) {
+    endpoint->mu.Lock();
+    endpoint->retry_scheduled = false;
+    const auto state = endpoint->state;
+    const bool has_pending = !endpoint->pending_reads.empty();
+    const absl::Time now = absl::Now();
+
+    if (!has_pending) {
+      endpoint->mu.Unlock();
+      return;
+    }
+
+    if (state == Channel::HandshakeState::kConnectRequested || state == Channel::HandshakeState::kReady) {
+      endpoint->mu.Unlock();
+      return;
+    }
+
+    if (state == Channel::HandshakeState::kFailed && now < endpoint->next_retry_at) {
+      const absl::Duration delay = endpoint->next_retry_at - now;
+      endpoint->retry_scheduled = true;
+      endpoint->mu.Unlock();
+      schedule_handshake_retry(channel, local_dev_name, peer_dev_name, delay);
+      return;
+    }
+
+    if (prepared_transport == nullptr) {
+      endpoint->mu.Unlock();
+      prepared_transport = rdma_context_->create_transport(local_dev_name);
+      if (prepared_transport == nullptr) {
+        const absl::Status status = absl::InternalError("failed to allocate RDMA transport");
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, 0);
+        for (auto& pending : failed_reads) {
+          pending_requests_.del(pending.request->get_key());
+          pending.request->set_result(status);
+        }
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+        return;
+      }
+
+      connect_request_msg = EngineMessage::make_message<ProtoRdmaConnectRequest>(ENGINE_OP_RDMA_CONNECT_REQUEST);
+      auto* payload = connect_request_msg->get_payload<ProtoRdmaConnectRequest>();
+      misc::result_t info_res = prepared_transport->get_local_info(&payload->qp_info);
+      if (info_res != misc::SUCCESS) {
+        prepared_transport.reset();
+        connect_request_msg.reset();
+        const absl::Status status = absl::InternalError("failed to prepare RDMA connect info");
+        auto failed_reads = drain_pending_reads_for_generation(endpoint, 0);
+        for (auto& pending : failed_reads) {
+          pending_requests_.del(pending.request->get_key());
+          pending.request->set_result(status);
+        }
+        {
+          absl::MutexLock lock(&endpoint->mu);
+          endpoint->state = Channel::HandshakeState::kFailed;
+          endpoint->transport.reset();
+          endpoint->failure_count += 1;
+          endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+          endpoint->retry_scheduled = false;
+        }
+        return;
+      }
+
+      misc::STRNCPY(payload->src_dev_name, local_dev_name, kMaxDevName);
+      misc::STRNCPY(payload->dst_dev_name, peer_dev_name, kMaxDevName);
+      continue;
+    }
+
+    Channel::HandshakeState from_state = state;
+    endpoint->transport = prepared_transport;
+    endpoint->generation += 1;
+    uint64_t generation = endpoint->generation;
+    endpoint->state = Channel::HandshakeState::kConnectRequested;
+    endpoint->failure_count = 0;
+    endpoint->next_retry_at = absl::InfinitePast();
+    const size_t queue_depth = endpoint->pending_reads.size();
+    for (auto& pending : endpoint->pending_reads) {
+      pending.generation = generation;
+    }
+    endpoint->mu.Unlock();
+
+    log_handshake_transition(
+        local_dev_name, peer_dev_name, from_state, Channel::HandshakeState::kConnectRequested, generation, queue_depth);
+
+    auto send_res = control->send(connect_request_msg);
+    if (send_res != misc::SUCCESS) {
+      LOG(WARNING) << "[rdma_handshake] failed to send connect request: local_dev=" << local_dev_name
+                   << " peer_dev=" << peer_dev_name << " res=" << send_res;
+      const absl::Status send_error = absl::UnavailableError("failed to send RDMA connect request to peer");
+      auto failed_reads = drain_pending_reads_for_generation(endpoint, generation);
+      for (auto& pending : failed_reads) {
+        pending_requests_.del(pending.request->get_key());
+        pending.request->set_result(send_error);
+      }
+      {
+        absl::MutexLock lock(&endpoint->mu);
+        log_handshake_transition(
+            local_dev_name,
+            peer_dev_name,
+            Channel::HandshakeState::kConnectRequested,
+            Channel::HandshakeState::kFailed,
+            endpoint->generation,
+            endpoint->pending_reads.size());
+        endpoint->state = Channel::HandshakeState::kFailed;
+        endpoint->transport.reset();
+        endpoint->failure_count += 1;
+        endpoint->next_retry_at = absl::Now() + compute_handshake_backoff(endpoint->failure_count);
+        endpoint->retry_scheduled = false;
+      }
+    }
+    return;
+  }
 }
 
 net_dev_t Communicator::get_net_dev(int dev_type, int dev_id) {

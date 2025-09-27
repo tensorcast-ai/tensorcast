@@ -45,8 +45,18 @@ misc::result_t RdmaTransport::read(read_request_t request) {
 
 misc::result_t RdmaTransport::connect(RdmaTransportInfo* info) {
   memcpy(&peer_info_, info, sizeof(RdmaTransportInfo));
-  COMM_CHECK(do_modify_qp_rtr());
-  COMM_CHECK(do_modify_qp_rts());
+  misc::result_t res = do_modify_qp_rtr();
+  if (res != misc::SUCCESS) {
+    ready_.store(false);
+    std::memset(&peer_info_, 0, sizeof(peer_info_));
+    return res;
+  }
+  res = do_modify_qp_rts();
+  if (res != misc::SUCCESS) {
+    ready_.store(false);
+    std::memset(&peer_info_, 0, sizeof(peer_info_));
+    return res;
+  }
   ready_.store(true);
   if (io_thread_ != nullptr) {
     io_thread_->notify_send();
@@ -115,7 +125,12 @@ misc::result_t RdmaTransport::do_modify_qp_rtr() {
   qp_attr.ah_attr.grh.traffic_class = context_->traffic_class();
   qp_attr.ah_attr.sl = 0;
   qp_attr.ah_attr.src_path_bits = 0;
-  qp_attr.ah_attr.port_num = peer_info_.ib_port;
+  // `port_num` must refer to the local device port that owns this QP. Using the
+  // peer's advertised port can map to a non-existent local port (e.g. mlx5_0 has
+  // only port 1 while the peer runs on mlx5_9:2), which causes `ibv_modify_qp`
+  // to fail with ENODEV during RTR. Always use the port associated with the
+  // local NetDev to avoid that mismatch.
+  qp_attr.ah_attr.port_num = dev_->get_port();
   COMM_CHECK(
       misc::wrap_ibv_modify_qp(
           qp_,
@@ -211,12 +226,8 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   // Ensure QP is ready
   if (!ready_.load()) {
-    LOG(INFO) << "[rdma_transport] QP not ready, applying peer params: qpn=" << peer_info_.qpn
-              << " psn=" << peer_info_.psn;
-    CHECK_WARN(do_modify_qp_rtr(), "failed to modify qp rtr");
-    CHECK_WARN(do_modify_qp_rts(), "failed to modify qp rts");
-    ready_.store(true);
-    LOG(INFO) << "[rdma_transport] QP transitioned to RTS for request=" << request->get_key();
+    LOG(ERROR) << "[rdma_transport] read_multi invoked before handshake ready: request=" << request->get_key();
+    return misc::INVALID_ARGUMENT;
   }
 
   // Prepare batch of WRs
