@@ -34,15 +34,20 @@ class RdmaTransport {
   RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t th);
   ~RdmaTransport();
   misc::result_t read(read_request_t request);
+
   struct RdmaReadSeg {
     uint64_t local_addr;
     uint32_t length;
     uint64_t remote_addr;
     uint32_t rkey;
+    uint32_t window_seq = 0;
+    uint32_t segment_idx = 0;
   };
+
   misc::result_t read_multi(read_request_t request, const std::vector<RdmaReadSeg>& segs);
   misc::result_t connect(RdmaTransportInfo* info);
   misc::result_t get_local_info(RdmaTransportInfo* info);
+
   // Optional: set an ACK callback invoked when a READ completes.
   // The callback receives the completed request and can send control messages.
   void set_ack_callback(std::function<void(const read_request_t&)> cb) {
@@ -69,6 +74,7 @@ class RdmaTransport {
   int transport_index() const {
     return transport_index_;
   }
+
   void set_transport_index(int index) {
     transport_index_ = index;
   }
@@ -91,6 +97,7 @@ class RdmaTransport {
   friend class RdmaThread;
   int transport_index_{};
 };
+
 using rdma_transport_t = std::shared_ptr<RdmaTransport>;
 
 } // namespace tensorcast::communicator::transport

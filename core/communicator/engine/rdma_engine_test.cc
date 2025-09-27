@@ -10,6 +10,7 @@
 
 #include "core/communicator/engine/engine.h"
 
+#include "absl/synchronization/mutex.h"
 #include "core/common/cuda_api.h"
 #include "core/communicator/misc/utils.h"
 
@@ -302,24 +303,19 @@ TEST_CASE("RDMA Communication Engine", "[rdma][communicator]") {
   }
 }
 
+using namespace tensorcast::communicator::engine;
+
 TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][handshake]") {
   using tensorcast::communicator::base::CHANNEL_RDMA;
   using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
-  using tensorcast::communicator::engine::ENGINE_OP_RDMA_CONNECT_RESPONSE;
-  using tensorcast::communicator::engine::ENGINE_OP_READ_RESPONSE_EX;
-  using tensorcast::communicator::engine::ENGINE_TRANSPORT_RDMA;
-  using tensorcast::communicator::engine::EngineMessage;
-  using tensorcast::communicator::engine::ProtoRdmaConnectResponse;
-  using tensorcast::communicator::engine::ProtoReadResponseExHeader;
-  using tensorcast::communicator::engine::ProtoReadResponseExSeg;
   using tensorcast::communicator::misc::STRNCPY;
   using tensorcast::communicator::misc::SUCCESS;
 
   tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(true);
-  tensorcast::communicator::engine::Communicator client(cfg, /*channel_expire_sec=*/0);
+  Communicator client(cfg, /*channel_expire_sec=*/0);
 
-  auto& rdma_ctx = tensorcast::communicator::engine::CommunicatorTestPeer::rdma_context(client);
+  auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
   REQUIRE(net_dev != nullptr);
   const std::string local_dev_name = net_dev->get_name();
@@ -346,8 +342,7 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
       "rdma_handshake_tensor", remote_dev_name, /*addr=*/0xABC0, local_tensor->get_bytes(), /*rkey=*/0x1234);
   read_request->set_remote_tensor(remote_tensor);
 
-  tensorcast::communicator::engine::CommunicatorTestPeer::pending_requests(client).put(
-      read_request->get_key(), read_request);
+  CommunicatorTestPeer::pending_requests(client).put(read_request->get_key(), read_request);
 
   int sv[2];
   REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
@@ -359,17 +354,24 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
   auto control_transport =
       std::make_shared<tensorcast::communicator::transport::TcpTransport>(control_ctx.get(), sv[0], remote_addr);
 
-  auto channel = std::make_shared<tensorcast::communicator::engine::Channel>(control_transport, CHANNEL_RDMA);
-  tensorcast::communicator::engine::CommunicatorTestPeer::channels(client).put(read_request->get_dst_url(), channel);
+  auto channel = std::make_shared<Channel>(
+      control_transport,
+      CHANNEL_RDMA,
+      /*buffers_per_flow=*/4,
+      /*max_window_segments=*/4);
+  CommunicatorTestPeer::channels(client).put(read_request->get_dst_url(), channel);
 
   const uint32_t payload_size = sizeof(ProtoReadResponseExHeader) + sizeof(ProtoReadResponseExSeg);
   auto response = std::make_shared<EngineMessage>(ENGINE_OP_READ_RESPONSE_EX, payload_size);
   auto* hdr = response->get_payload<ProtoReadResponseExHeader>();
-  STRNCPY(hdr->tensor_key, "rdma_handshake_tensor", tensorcast::communicator::engine::kMaxTensorNameLen);
+  STRNCPY(hdr->tensor_key, "rdma_handshake_tensor", kMaxTensorNameLen);
   hdr->transport_type = ENGINE_TRANSPORT_RDMA;
   hdr->staged = 1;
-  STRNCPY(hdr->nic_name, remote_dev_name, tensorcast::communicator::engine::kMaxDevName);
+  STRNCPY(hdr->nic_name, remote_dev_name, kMaxDevName);
   hdr->num_segments = 1;
+  hdr->window_seq = 0;
+  hdr->credit_granted = 1;
+  hdr->more_segments = 0;
   auto* seg =
       reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
   seg->addr = remote_tensor->get_uint64_addr();
@@ -377,28 +379,38 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
   seg->bytes = static_cast<uint32_t>(local_tensor->get_bytes());
   seg->rkey = remote_tensor->get_rkey();
 
-  auto status = tensorcast::communicator::engine::CommunicatorTestPeer::on_receive_response(
-      client, channel, control_transport, response);
+  auto status = CommunicatorTestPeer::on_receive_response(client, channel, control_transport, response);
   REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
 
   auto rdma_transport = channel->get_rdma(local_dev_name, remote_dev_name);
   REQUIRE(rdma_transport != nullptr);
 
-  CHECK_FALSE(rdma_transport->ready());
   CHECK_FALSE(read_request->is_result_set());
-  CHECK(channel->pending_rdma_read_count(local_dev_name, remote_dev_name) == 1);
+  CHECK(read_request->expected_completions_.load() == 1);
+  {
+    absl::MutexLock lock(&read_request->ack_mu_);
+    CHECK(read_request->pending_ack_windows_.size() == 1);
+    const auto& pending_window = read_request->pending_ack_windows_.front();
+    CHECK(pending_window.window_seq == 0);
+    CHECK(pending_window.final_window);
+    CHECK(pending_window.offsets.size() == 1);
+    CHECK(pending_window.offsets[0] == 0);
+  }
 
   auto connect_rsp = EngineMessage::make_message<ProtoRdmaConnectResponse>(ENGINE_OP_RDMA_CONNECT_RESPONSE);
   auto* connect_payload = connect_rsp->get_payload<ProtoRdmaConnectResponse>();
-  STRNCPY(connect_payload->src_dev_name, local_dev_name, tensorcast::communicator::engine::kMaxDevName);
-  STRNCPY(connect_payload->dst_dev_name, remote_dev_name, tensorcast::communicator::engine::kMaxDevName);
+  STRNCPY(connect_payload->src_dev_name, local_dev_name, kMaxDevName);
+  STRNCPY(connect_payload->dst_dev_name, remote_dev_name, kMaxDevName);
   CHECK(rdma_transport->get_local_info(&connect_payload->qp_info) == SUCCESS);
 
-  status = tensorcast::communicator::engine::CommunicatorTestPeer::on_receive_response(
-      client, channel, control_transport, connect_rsp);
+  status = CommunicatorTestPeer::on_receive_response(client, channel, control_transport, connect_rsp);
   REQUIRE(status == tensorcast::communicator::misc::SUCCESS);
 
-  CHECK(channel->pending_rdma_read_count(local_dev_name, remote_dev_name) == 0);
+  CHECK(read_request->expected_completions_.load() == 1);
+  {
+    absl::MutexLock lock(&read_request->ack_mu_);
+    CHECK(read_request->pending_ack_windows_.size() == 1);
+  }
   if (rdma_transport->ready()) {
     CHECK_FALSE(read_request->is_result_set());
   } else {
@@ -406,14 +418,14 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
     CHECK_FALSE(read_request->status_.status.ok());
   }
 
-  auto& pending_map = tensorcast::communicator::engine::CommunicatorTestPeer::pending_requests(client);
+  auto& pending_map = CommunicatorTestPeer::pending_requests(client);
   if (pending_map.exist(read_request->get_key())) {
     pending_map.del(read_request->get_key());
   }
-  tensorcast::communicator::engine::CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
+  CommunicatorTestPeer::channels(client).del(read_request->get_dst_url());
 
   ::close(sv[1]);
-  tensorcast::communicator::engine::CommunicatorTestPeer::stop_workers(client);
+  CommunicatorTestPeer::stop_workers(client);
 
   auto free_status = tensorcast::cuda::free(local_gpu_buffer);
   REQUIRE(free_status.ok());

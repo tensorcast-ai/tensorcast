@@ -26,7 +26,8 @@ class GpuNetStager : public MemoryStager {
   absl::StatusOr<void*> stage(
       const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
       uint64_t offset,
-      uint64_t bytes) override {
+      uint64_t bytes,
+      StageMode mode = StageMode::kBlocking) override {
     if (bytes == 0)
       return absl::InvalidArgumentError("GpuNetStager: zero bytes");
     if (offset + bytes > tensor->get_bytes()) {
@@ -40,7 +41,8 @@ class GpuNetStager : public MemoryStager {
       if (!st.ok())
         return st;
     }
-    auto slot_or = streaming_->get_free_chunk();
+    absl::StatusOr<int> slot_or =
+        mode == StageMode::kBlocking ? streaming_->get_free_chunk() : streaming_->try_get_free_chunk();
     if (!slot_or.ok())
       return slot_or.status();
     int slot = *slot_or;

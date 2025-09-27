@@ -12,13 +12,16 @@ extern "C" {
 #include <unistd.h>
 }
 
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/engine/memory_stager.h"
+#include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/metric.h"
 #include "core/communicator/transport/request.h"
@@ -105,6 +108,22 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   misc::result_t send(const write_request_t& request);
   misc::result_t recv(const read_request_t& request);
 
+  struct StageSendSegment {
+    void* data = nullptr;
+    size_t bytes = 0;
+    engine::StageLease::Metadata metadata;
+    std::function<void(misc::result_t)> on_complete;
+  };
+
+  struct StageSendWindow {
+    std::string request_key;
+    uint32_t window_seq = 0;
+    bool final_window = false;
+    std::vector<StageSendSegment> segments;
+  };
+
+  void enqueue_stage_window(StageSendWindow window);
+
   void set_conn_count(int conn_count);
   void set_memory_pool(std::shared_ptr<common::memory::PinnedBufferPool> pool);
 
@@ -121,8 +140,13 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   void client_loop();
 
   void send_loop();
+  void staged_send_loop();
+  void process_stage_window(const std::shared_ptr<StageSendWindow>& window);
+  void prune_async_tasks();
   void recv_loop();
   misc::result_t init_socket_fd(int sock_fd);
+
+  void start_staged_thread();
 
   int listen_fd_ = 0;
   int retry_count_;
@@ -137,6 +161,7 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
 
   std::thread recv_thread_;
   std::thread send_thread_;
+  std::thread staged_thread_;
 
   std::atomic_bool stop_;
   std::atomic_bool closed_;
@@ -157,6 +182,9 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   // Track outstanding async tasks for proper cleanup
   mutable std::mutex async_tasks_mutex_;
   std::vector<std::shared_future<chunk_result_t>> outstanding_async_tasks_;
+
+  misc::Queue<std::shared_ptr<StageSendWindow>> staged_queue_;
+  std::atomic<int> next_send_task_{0};
 
   // Socket tuning (typed-config): IP_TOS value; 0 to leave unchanged
   int tcp_tos_ = 0;

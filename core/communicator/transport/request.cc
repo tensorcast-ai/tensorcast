@@ -88,9 +88,6 @@ std::future<read_result_t> ReadRequest::get_read_result_future(std::string error
   return f;
 }
 
-// set_ack_action and invoke_ack_action_once are inline in header; no additional
-// implementation needed here.
-
 WriteRequest::WriteRequest(tensor_t local_tensor, std::string tensor_key, uint64_t offset, uint64_t bytes)
     : local_tensor_(local_tensor), tensor_key_(tensor_key), offset_(offset), bytes_(bytes) {}
 

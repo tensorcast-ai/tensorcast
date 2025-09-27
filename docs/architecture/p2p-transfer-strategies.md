@@ -39,6 +39,34 @@ graph TB
     SD1 -->|8. RegisterReplica| REG
 ```
 
+## Unified Staging Flow Control
+
+All transports now use a common staging controller to guarantee progress even when artifacts are larger than the staging pool:
+
+- **Flow credit ledger** &mdash; each channel owns a `FlowCreditLedger` sized from `stager.buffers_per_flow`. Windows may only stage when credit is granted, preventing deadlocks when tensors exceed pool capacity.
+- **Windowed staging** &mdash; `StagingWindow` slices RDMA and MTCP responses into credit-bounded windows (`stager.max_window_segments` caps the per-window grant when non-zero). StageLeases carry offsets, window sequence numbers, and transport metadata.
+- **Lease tracking** &mdash; active leases live in a `StageLeaseRegistry` so RDMA ACKs, MTCP send completions, and the GC reaper can all reclaim buffers safely. Completion handlers emit `[staging_credit]` logs showing grant size, outstanding credit, and transport.
+- **Per-transport release** &mdash; RDMA clients return credit via `ENGINE_OP_RDMA_READ_DONE_EX`, while MTCP release hooks fire on socket completion. Both paths recycle pinned buffers automatically and unblock the next window.
+
+### Benchmark Quickstart
+
+1. Build the communicator with fake CUDA so tests can run locally:
+   ```bash
+   USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+   ```
+2. Exercise the RDMA window flow with logs enabled:
+   ```bash
+   bazel test //core/communicator:rdma_engine_test --test_output=all --define=use_fake_cuda=true
+   ```
+   Inspect `[staging_credit]` lines to verify window grant/release cadence.
+3. Stress the MTCP path and observe staged completions:
+   ```bash
+   bazel test //core/communicator:tcp_engine_test --test_output=all --define=use_fake_cuda=true
+   ```
+   Adjust `stager.buffers_per_flow` or `stager.max_window_segments` in a test config snippet to evaluate different credit budgets.
+4. For mixed transport scenarios, run both tests back-to-back while tailing server logs; use the emitted outstanding-credit gauges to identify tuning opportunities before running large-scale soak tests.
+5. To validate the unified flow controller end-to-end, run `bazel test //core/communicator:cross_transport_soak_test --define=use_fake_cuda=true`; on hosts with RDMA hardware this target issues concurrent RDMA+MTCP reads against a 128 MiB tensor and surfaces `[staging_credit]` activity across transports (it exits early with a success note when verbs support is unavailable).
+
 ## Load Balancing Strategy
 
 ### Replica Prioritization Algorithm
