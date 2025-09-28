@@ -26,7 +26,6 @@
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/mr_cache.h"
 #include "core/communicator/engine/store.h"
-#include "core/communicator/misc/ibv_wrap.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::communicator::engine {
@@ -128,7 +127,7 @@ class Communicator {
    * When false the engine falls back to pure TCP transports and only supports
    * CPU memory registration / transfer.
    */
-  inline bool is_rdma_enabled() const {
+  bool is_rdma_enabled() const {
     return enable_rdma_;
   }
 
@@ -181,6 +180,17 @@ class Communicator {
       const std::shared_ptr<Channel::RdmaEndpoint>& endpoint,
       const std::string& local_dev_name,
       const std::string& peer_dev_name);
+
+  struct MtcpReadTask {
+    channel_t channel;
+    transport::tcp_transport_t control_transport;
+    ProtoReadRequest request;
+    std::shared_ptr<transport::PartitionTensor> tensor;
+  };
+
+  void mtcp_staging_loop();
+  void process_mtcp_read_task(MtcpReadTask task);
+  static void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
 
   struct HandshakeRetryTask {
     absl::Time resume_at;
@@ -251,6 +261,9 @@ class Communicator {
   std::thread handshake_retry_thread_;
   std::atomic_bool handshake_retry_stop_{false};
   bool handshake_retry_thread_started_ = false;
+
+  misc::Queue<MtcpReadTask> mtcp_staging_queue_;
+  std::thread mtcp_staging_thread_;
 };
 
 } // namespace tensorcast::communicator::engine

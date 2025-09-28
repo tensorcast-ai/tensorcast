@@ -132,6 +132,7 @@ flowchart LR
 #### Communicator Threads
 1. **request_thread_** — Dequeues read requests and initiates remote operations
 2. **gc_thread_** — Periodically scans and closes idle channels
+3. **mtcp_staging_thread_** — Drains the MTCP staging queue so staging work happens off the control loop, keeping connect handshakes responsive
 
 #### TCP Infrastructure Threads
 1. **TcpContext::listen_thread_** — Accepts incoming TCP connections
@@ -193,9 +194,11 @@ classDiagram
     -bool enable_rdma_
     -Map channels_
     -Queue request_queue_
+    -Queue mtcp_staging_queue_
     -PartitionTensorStore store_
     -thread request_thread_
     -thread gc_thread_
+    -thread mtcp_staging_thread_
     -GpuNetStager gpu_memory_stager_
     -MemoryStager memory_stager_
     -PinnedBufferPool gpu_memory_pool_
@@ -213,7 +216,7 @@ classDiagram
 
 Key design points:
 - All public methods are thread-safe.
-- Internal worker threads (`request_thread_`, `gc_thread_`) handle async operations and lifecycle cleanup.
+- Internal worker threads (`request_thread_`, `gc_thread_`, `mtcp_staging_thread_`) handle async operations and lifecycle cleanup.
 - Memory staging pools (GPU and CPU) plus the MR cache are constructed from `CommunicatorConfig` on startup.
 - RDMA responses always stage into pinned buffers; clients acknowledge completions with `RDMA_READ_DONE_EX` so the server can recycle buffers.
 

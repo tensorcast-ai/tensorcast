@@ -36,7 +36,7 @@ absl::flat_hash_map<int, std::unique_ptr<GpuSchedDev>> g_sched ABSL_GUARDED_BY(g
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> g_meter;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_if_bytes_gauge;
 
-static void inflight_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
+void inflight_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
   auto obs =
       opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
           result);

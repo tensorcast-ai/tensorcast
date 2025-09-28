@@ -276,6 +276,8 @@ TEST_CASE("GpuMemorySink error handling", "[gpu_memory_sink]") {
 
     // Should fail due to invalid device
     REQUIRE(!status.ok());
+    // 清理 CUDA 错误状态，避免影响后续子用例
+    (void)tensorcast::cuda::get_last_error();
   }
 
   SECTION("Multiple writes exceeding limit") {
