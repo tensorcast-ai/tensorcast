@@ -1084,20 +1084,132 @@ class Store:
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
     ) -> tuple[MaterializedArtifact, int]:
+        return self._attempt_get(
+            artifact_id=artifact_id,
+            key=key,
+            device=device,
+            fallback=fallback,
+            cancel_event=cancel_event,
+        )
+
+    def _attempt_get(
+        self,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        device: torch.device | str | None,
+        fallback: FallbackOptions | None,
+        cancel_event: threading.Event | None,
+    ) -> tuple[MaterializedArtifact, int]:
         artifact_id, key = self._resolve_identifiers(artifact_id, key)
         resolved_fallback = fallback or self._opts.fallback
         self._ensure_fallback_supported(resolved_fallback)
         device_id = self._resolve_device_selector(device)
         options = self._build_get_options(resolved_fallback)
-        materialized = self._materialize(
-            artifact_id=artifact_id,
-            key=key,
-            device_id=device_id,
-            options=options,
-            fallback=resolved_fallback,
-            cancel_event=cancel_event,
-        )
+        try:
+            materialized = self._materialize(
+                artifact_id=artifact_id,
+                key=key,
+                device_id=device_id,
+                options=options,
+                fallback=resolved_fallback,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise self._map_materialization_error(exc) from exc
         return materialized, device_id
+
+    def _perform_get_with_retry(
+        self,
+        *,
+        method: str,
+        artifact_id: str | None,
+        key: str | None,
+        device: torch.device | str | None,
+        fallback: FallbackOptions | None,
+        cancel_event: threading.Event | None,
+    ) -> tuple[MaterializedArtifact, int]:
+        policy = self._retry_policies.get(method, self._retry_policies.get("get"))
+        attempt = 1
+        start_time = time.monotonic()
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise ArtifactError(
+                    "Retrieval cancelled",
+                    status_code="CANCELLED",
+                    retryable=False,
+                )
+            try:
+                return self._attempt_get(
+                    artifact_id=artifact_id,
+                    key=key,
+                    device=device,
+                    fallback=fallback,
+                    cancel_event=cancel_event,
+                )
+            except ArtifactError as error:
+                should_retry = self._should_retry_registration(
+                    method,
+                    error,
+                    attempt=attempt,
+                    policy=policy,
+                    start_time=start_time,
+                    cancel_event=cancel_event,
+                )
+                if not should_retry:
+                    raise
+                assert policy is not None
+                delay = self._compute_retry_delay(policy, attempt)
+                remaining = self._remaining_budget(policy, start_time)
+                if remaining is not None and remaining <= 0:
+                    raise
+                if remaining is not None:
+                    delay = min(delay, max(0.0, remaining))
+                if delay > 0:
+                    logger.info(
+                        "store.get_retry",
+                        extra={
+                            "tc.store.daemon": self._daemon_endpoint,
+                            "tc.store.method": method,
+                            "tc.store.attempt": attempt + 1,
+                            "tc.store.delay_sec": delay,
+                            "tc.store.status_code": error.status_code,
+                        },
+                    )
+                    time.sleep(delay)
+                attempt += 1
+            except Exception as exc:  # noqa: BLE001
+                error = self._map_materialization_error(exc)
+                should_retry = self._should_retry_registration(
+                    method,
+                    error,
+                    attempt=attempt,
+                    policy=policy,
+                    start_time=start_time,
+                    cancel_event=cancel_event,
+                )
+                if not should_retry:
+                    raise error from None
+                assert policy is not None
+                delay = self._compute_retry_delay(policy, attempt)
+                remaining = self._remaining_budget(policy, start_time)
+                if remaining is not None and remaining <= 0:
+                    raise error from None
+                if remaining is not None:
+                    delay = min(delay, max(0.0, remaining))
+                if delay > 0:
+                    logger.info(
+                        "store.get_retry",
+                        extra={
+                            "tc.store.daemon": self._daemon_endpoint,
+                            "tc.store.method": method,
+                            "tc.store.attempt": attempt + 1,
+                            "tc.store.delay_sec": delay,
+                            "tc.store.status_code": error.status_code,
+                        },
+                    )
+                    time.sleep(delay)
+                attempt += 1
 
     def _release_materialized(
         self, materialized: MaterializedArtifact, client: DaemonCtl
@@ -1115,6 +1227,32 @@ class Store:
                     "tc.store.disk_path": disk_path,
                 },
             )
+
+    def _map_materialization_error(self, exc: Exception) -> ArtifactError:
+        if isinstance(exc, ArtifactError):
+            return exc
+        if isinstance(exc, CancelledError):
+            return ArtifactError(
+                "Retrieval cancelled",
+                status_code="CANCELLED",
+                retryable=False,
+            )
+        message = str(exc) or "retrieval failed"
+        if isinstance(exc, TimeoutError):
+            return ArtifactError(
+                message, status_code="DEADLINE_EXCEEDED", retryable=True
+            )
+        if isinstance(exc, TensorCastError):
+            return ArtifactError(
+                message, status_code="FAILED_PRECONDITION", retryable=False
+            )
+        if isinstance(exc, RuntimeError):
+            lowered = message.lower()
+            if "not found" in lowered:
+                return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
+            if "unavailable" in lowered or "not available" in lowered:
+                return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
+        return ArtifactError(message, status_code="UNKNOWN", retryable=False)
 
     @property
     def capabilities(self) -> StoreCapabilities:
@@ -1229,11 +1367,12 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> dict[str, torch.Tensor]:
-        materialized, _ = self._perform_get(
+        materialized, _ = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
             device=device,
             fallback=fallback,
+            method="get",
             cancel_event=None,
         )
         return materialized.state_dict
@@ -1252,11 +1391,12 @@ class Store:
 
         def _task() -> dict[str, torch.Tensor]:
             try:
-                materialized, _ = self._perform_get(
+                materialized, _ = self._perform_get_with_retry(
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
                     fallback=fallback,
+                    method="get",
                     cancel_event=cancel_event,
                 )
                 with mat_lock:
@@ -1273,6 +1413,10 @@ class Store:
                     status_code="CANCELLED",
                     retryable=False,
                 ) from exc
+            except ArtifactError as exc:
+                with mat_lock:
+                    mat_ref["value"] = None
+                raise exc
             finally:
                 with mat_lock:
                     mat_ref["value"] = None
@@ -1302,11 +1446,12 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> None:
-        materialized, device_id = self._perform_get(
+        materialized, device_id = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
             device=device,
             fallback=fallback,
+            method="get_into",
             cancel_event=None,
         )
         canonical_index = self._canonical_index_from_bytes(
@@ -1336,11 +1481,12 @@ class Store:
 
         def _task() -> None:
             try:
-                materialized, device_id = self._perform_get(
+                materialized, device_id = self._perform_get_with_retry(
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
                     fallback=fallback,
+                    method="get_into",
                     cancel_event=cancel_event,
                 )
                 with mat_lock:
@@ -1369,6 +1515,10 @@ class Store:
                     status_code="CANCELLED",
                     retryable=False,
                 ) from exc
+            except ArtifactError as exc:
+                with mat_lock:
+                    mat_ref["value"] = None
+                raise exc
             finally:
                 with mat_lock:
                     mat_ref["value"] = None
