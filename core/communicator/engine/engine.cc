@@ -407,18 +407,33 @@ void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status st
 
 void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   if (!task.channel || !task.tensor) {
+    if (task.channel) {
+      task.channel->mtcp_request_finished();
+    }
     fail_mtcp_read_task(task, absl::FailedPreconditionError("invalid MTCP staging task"));
     return;
   }
 
+  auto release_called = std::make_shared<std::atomic<bool>>(false);
+  auto release_once = [channel = task.channel, release_called]() {
+    if (!release_called->exchange(true, std::memory_order_acq_rel)) {
+      channel->mtcp_request_finished();
+    }
+  };
+  bool release_handed_off = false;
+
   auto flow_state = task.channel->flow_state();
   if (!flow_state) {
+    release_once();
+    release_handed_off = true;
     fail_mtcp_read_task(task, absl::InternalError("channel missing flow state"));
     return;
   }
 
   auto transport = task.channel->get_mtcp();
   if (transport == nullptr) {
+    release_once();
+    release_handed_off = true;
     fail_mtcp_read_task(task, absl::InternalError("missing MTCP transport"));
     return;
   }
@@ -441,6 +456,8 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     stager = memory_stager_;
   }
   if (!stager) {
+    release_once();
+    release_handed_off = true;
     fail_mtcp_read_task(task, absl::FailedPreconditionError("no staging backend available for MTCP tensor"));
     return;
   }
@@ -490,6 +507,8 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
 
         if (now >= retry_deadline) {
           LOG(ERROR) << "MTCP staging credit wait exceeded deadline for request=" << request_key;
+          release_once();
+          release_handed_off = true;
           fail_mtcp_read_task(task, absl::ResourceExhaustedError("MTCP staging credit wait timed out"));
           return;
         }
@@ -500,6 +519,8 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       }
 
       LOG(ERROR) << "Failed to stage MTCP window: " << window_or.status();
+      release_once();
+      release_handed_off = true;
       fail_mtcp_read_task(task, window_or.status());
       return;
     }
@@ -512,6 +533,13 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     send_window.window_seq = staged_window.window_seq;
     send_window.final_window = !staged_window.more_segments;
     send_window.segments.reserve(staged_window.segments.size());
+
+    if (send_window.final_window) {
+      send_window.pending_segments = std::make_shared<std::atomic<int>>(0);
+      auto release_cb = release_once;
+      send_window.on_window_complete = [release_cb]() { release_cb(); };
+      release_handed_off = true;
+    }
 
     LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
               << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
@@ -561,7 +589,15 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       send_window.segments.push_back(std::move(send_segment));
     }
 
+    if (send_window.pending_segments) {
+      send_window.pending_segments->store(static_cast<int>(send_window.segments.size()), std::memory_order_relaxed);
+    }
+
     transport->enqueue_stage_window(std::move(send_window));
+  }
+
+  if (!release_handed_off) {
+    release_once();
   }
 }
 
@@ -897,6 +933,14 @@ absl::Status Communicator::handle_mtcp_read_request(
   }
   transport->set_tcp_tos(config_.transport().tcp_tos());
 
+  channel->mtcp_request_started();
+  bool request_handed_off = false;
+  absl::Cleanup mtcp_request_guard = [&]() {
+    if (!request_handed_off) {
+      channel->mtcp_request_finished();
+    }
+  };
+
   auto rsp = std::make_shared<EngineMessage>(
       ENGINE_OP_READ_RESPONSE_EX,
       static_cast<uint32_t>(sizeof(ProtoReadResponseExHeader) + sizeof(ProtoReadResponseExSeg)));
@@ -927,6 +971,7 @@ absl::Status Communicator::handle_mtcp_read_request(
     return status;
   }
 
+  request_handed_off = true;
   return absl::OkStatus();
 }
 

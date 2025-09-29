@@ -18,6 +18,7 @@
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 
 #include "core/common/async_copy_manager.h"
@@ -243,6 +244,7 @@ MTcpTransport::MTcpTransport(
       gpu_memory_stager_(std::move(gpu_memory_stager)),
       memory_pool_(std::move(memory_pool)),
       gpu_recv_buffer_(make_streaming_buffer(memory_pool_, conn_count, buffers_per_flow_limit)),
+      gpu_init_retry_timeout_(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::minutes(1))),
       buffers_per_flow_limit_(buffers_per_flow_limit),
       memory_stager_(std::move(memory_stager)) {
   misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
@@ -251,8 +253,35 @@ MTcpTransport::MTcpTransport(
   bzero(&server_addr_, sizeof(struct sockaddr_in));
   bzero(client_addrs_, sizeof(struct sockaddr_in) * base::kMaxTcpConns);
 
-  auto init_status = gpu_recv_buffer_->initialize();
-  CHECK(init_status.ok()) << "Failed to initialize GPU receive buffer: " << init_status;
+  const auto init_wait_start = std::chrono::steady_clock::now();
+  int init_retry_count = 0;
+
+  // Block until pinned buffers become available; log a warning once per minute while waiting.
+  while (true) {
+    auto init_status = gpu_recv_buffer_->initialize(gpu_init_retry_timeout_);
+    if (init_status.ok()) {
+      gpu_buffer_ready_.store(true, std::memory_order_release);
+      if (init_retry_count > 0) {
+        const auto total_wait = std::chrono::steady_clock::now() - init_wait_start;
+        const auto total_wait_seconds = std::chrono::duration_cast<std::chrono::seconds>(total_wait).count();
+        LOG(INFO) << "[MTcpTransport] GPU receive buffer initialization succeeded after " << total_wait_seconds
+                  << "s of waiting";
+      }
+      break;
+    }
+
+    if (init_status.code() == absl::StatusCode::kDeadlineExceeded) {
+      ++init_retry_count;
+      const auto elapsed = std::chrono::steady_clock::now() - init_wait_start;
+      const auto elapsed_minutes =
+          std::max(1, static_cast<int>(std::chrono::duration_cast<std::chrono::minutes>(elapsed).count()));
+      LOG(WARNING) << "[MTcpTransport] Waiting for GPU receive buffer initialization; " << elapsed_minutes
+                   << " minute(s) elapsed. Status: " << init_status;
+      continue;
+    }
+
+    LOG(FATAL) << "Failed to initialize GPU receive buffer: " << init_status;
+  }
 }
 
 MTcpTransport::~MTcpTransport() {
@@ -312,6 +341,7 @@ MTcpTransport::~MTcpTransport() {
   }
 
   prune_async_tasks();
+  release_receive_resources();
 
   LOG(INFO) << "[MTcpTransport] Destructor complete";
 }
@@ -384,21 +414,55 @@ misc::result_t MTcpTransport::recv(const read_request_t& msg) {
 }
 
 void MTcpTransport::enqueue_stage_window(StageSendWindow window) {
-  if (stop_.load() || closed_.load()) {
-    for (auto& seg : window.segments) {
-      if (seg.on_complete) {
-        seg.on_complete(misc::TRANSPORT_FAILED);
+  auto notify_segment = [](StageSendWindow& w, StageSendSegment& seg, misc::result_t status) {
+    if (seg.on_complete) {
+      seg.on_complete(status);
+    }
+    if (w.pending_segments) {
+      const int previous = w.pending_segments->fetch_sub(1, std::memory_order_acq_rel);
+      if (previous == 1 && w.on_window_complete) {
+        w.on_window_complete();
       }
     }
+  };
+
+  if (window.pending_segments) {
+    window.pending_segments->store(static_cast<int>(window.segments.size()), std::memory_order_relaxed);
+  }
+
+  if (stop_.load() || closed_.load()) {
+    if (window.segments.empty()) {
+      if (window.on_window_complete) {
+        window.on_window_complete();
+      }
+      prune_async_tasks();
+      return;
+    }
+    for (auto& seg : window.segments) {
+      notify_segment(window, seg, misc::TRANSPORT_FAILED);
+    }
+    prune_async_tasks();
     return;
   }
+
+  if (window.segments.empty()) {
+    if (window.on_window_complete) {
+      window.on_window_complete();
+    }
+    prune_async_tasks();
+    return;
+  }
+
   auto ptr = std::make_shared<StageSendWindow>(std::move(window));
   if (staged_queue_.push(ptr, true, -1) != misc::SUCCESS) {
     for (auto& seg : ptr->segments) {
-      if (seg.on_complete) {
-        seg.on_complete(misc::TRANSPORT_FAILED);
-      }
+      notify_segment(*ptr, seg, misc::TRANSPORT_FAILED);
     }
+    if (ptr->segments.empty() && ptr->on_window_complete) {
+      ptr->on_window_complete();
+    }
+    prune_async_tasks();
+    return;
   }
   prune_async_tasks();
 }
@@ -412,6 +476,38 @@ void MTcpTransport::start_staged_thread() {
 void MTcpTransport::set_conn_count(int conn_count) {
   misc::ASSERT(!ready_.load(), "failed to set connection count");
   conn_count_ = conn_count;
+}
+
+void MTcpTransport::release_receive_resources() {
+  if (!gpu_buffer_ready_.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::unique_lock<std::mutex> lock(gpu_buffer_mutex_);
+  if (!gpu_buffer_ready_.load(std::memory_order_acquire)) {
+    return;
+  }
+  absl::Status release_status = gpu_recv_buffer_->release();
+  if (!release_status.ok()) {
+    LOG(WARNING) << "[MTcpTransport] Failed to release GPU receive buffer: " << release_status;
+    return;
+  }
+  gpu_buffer_ready_.store(false, std::memory_order_release);
+}
+
+absl::Status MTcpTransport::ensure_gpu_buffer_ready() {
+  if (gpu_buffer_ready_.load(std::memory_order_acquire)) {
+    return absl::OkStatus();
+  }
+  std::unique_lock<std::mutex> lock(gpu_buffer_mutex_);
+  if (gpu_buffer_ready_.load(std::memory_order_acquire)) {
+    return absl::OkStatus();
+  }
+  auto init_status = gpu_recv_buffer_->initialize(gpu_init_retry_timeout_);
+  if (!init_status.ok()) {
+    return init_status;
+  }
+  gpu_buffer_ready_.store(true, std::memory_order_release);
+  return absl::OkStatus();
 }
 
 void MTcpTransport::server_loop() {
@@ -813,11 +909,27 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     return;
   }
 
-  if (conn_count_ <= 0) {
-    for (auto& seg : window->segments) {
-      if (seg.on_complete) {
-        seg.on_complete(misc::TRANSPORT_FAILED);
+  auto mark_segment = [&](StageSendSegment& seg, misc::result_t status) {
+    if (seg.on_complete) {
+      seg.on_complete(status);
+    }
+    if (window->pending_segments) {
+      const int previous = window->pending_segments->fetch_sub(1, std::memory_order_acq_rel);
+      if (previous == 1 && window->on_window_complete) {
+        window->on_window_complete();
       }
+    }
+  };
+
+  if (conn_count_ <= 0) {
+    if (window->segments.empty()) {
+      if (window->on_window_complete) {
+        window->on_window_complete();
+      }
+      return;
+    }
+    for (auto& seg : window->segments) {
+      mark_segment(seg, misc::TRANSPORT_FAILED);
     }
     return;
   }
@@ -831,17 +943,20 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     active_conn = std::min(conn_count_, 1);
   }
 
+  if (window->segments.empty()) {
+    if (window->on_window_complete) {
+      window->on_window_complete();
+    }
+    return;
+  }
+
   for (auto& seg : window->segments) {
     if (stop_.load() || closed_.load()) {
-      if (seg.on_complete) {
-        seg.on_complete(misc::TRANSPORT_FAILED);
-      }
+      mark_segment(seg, misc::TRANSPORT_FAILED);
       continue;
     }
     if (seg.data == nullptr || seg.bytes == 0) {
-      if (seg.on_complete) {
-        seg.on_complete(misc::FAILED);
-      }
+      mark_segment(seg, misc::FAILED);
       continue;
     }
 
@@ -850,9 +965,7 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     if (task_index >= conn_count_ || tasks_[task_index] == nullptr) {
       LOG(WARNING) << "[MTcpTransport::process_stage_window] task unavailable idx=" << task_index
                    << " active_conn=" << active_conn << " conn_count=" << conn_count_;
-      if (seg.on_complete) {
-        seg.on_complete(misc::TRANSPORT_FAILED);
-      }
+      mark_segment(seg, misc::TRANSPORT_FAILED);
       continue;
     }
 
@@ -862,12 +975,23 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     auto callback = seg.on_complete;
     auto metadata = seg.metadata;
     auto request_key = window->request_key;
+    auto window_ptr = window;
     auto release_future = std::async(
         std::launch::async,
-        [chunk_future = std::move(chunk_future), callback = std::move(callback), metadata, request_key]() mutable {
+        [chunk_future = std::move(chunk_future),
+         callback = std::move(callback),
+         metadata,
+         request_key,
+         window_ptr]() mutable {
           auto result = chunk_future.get();
           if (callback) {
             callback(result.status);
+          }
+          if (window_ptr->pending_segments) {
+            const int previous = window_ptr->pending_segments->fetch_sub(1, std::memory_order_acq_rel);
+            if (previous == 1 && window_ptr->on_window_complete) {
+              window_ptr->on_window_complete();
+            }
           }
           LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << metadata.window_seq
                     << " segment=" << metadata.segment_idx << " bytes=" << metadata.bytes
@@ -954,6 +1078,19 @@ void MTcpTransport::recv_loop() {
 
       // Use StreamingPinnedBuffer for efficient memory management
       VLOG(1) << "Using StreamingPinnedBuffer for GPU receive";
+
+      if (!gpu_buffer_ready_.load(std::memory_order_acquire)) {
+        absl::Status ensure_status = ensure_gpu_buffer_ready();
+        if (!ensure_status.ok()) {
+          LOG(ERROR) << "[MTcpTransport::recv_loop] Failed to prepare GPU receive buffer: " << ensure_status;
+          msg->set_result(absl::InternalError("failed to prepare GPU receive buffer"));
+          continue;
+        }
+      }
+      absl::Status reset_status = gpu_recv_buffer_->reset_for_new_production();
+      if (!reset_status.ok()) {
+        LOG(WARNING) << "[MTcpTransport::recv_loop] reset_for_new_production failed: " << reset_status;
+      }
 
       // Process chunks with streaming buffer (supports sub-chunking)
       bool processing_failed = false;

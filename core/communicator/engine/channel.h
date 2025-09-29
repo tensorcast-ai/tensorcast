@@ -1,6 +1,7 @@
 // Copyright (c) 2025, TensorCast Team.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -72,6 +73,8 @@ class Channel {
       transport::rdma_transport_t t,
       HandshakeState initial_state = HandshakeState::kReady);
   void set_transport(communicator::transport::mtcp_transport_t t);
+  void mtcp_request_started();
+  void mtcp_request_finished();
   void del_transport(const std::string& local_dev_name, const std::string& remote_dev_name);
 
   misc::result_t close();
@@ -104,6 +107,7 @@ class Channel {
   absl::flat_hash_map<std::string, std::shared_ptr<RdmaEndpoint>> rdma_ ABSL_GUARDED_BY(rdma_mu_);
   mutable absl::Mutex rdma_mu_;
   transport::mtcp_transport_t mtcp_;
+  std::atomic<int> mtcp_active_requests_{0};
   uint64_t expired_time_;
   std::shared_ptr<FlowState> flow_state_;
 };

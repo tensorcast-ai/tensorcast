@@ -1,10 +1,9 @@
 ---
-id: design-0001-docs-system-reorg-design
-slug: 0001-docs-system-reorg-design
+slug: 0001-docs-system-design
 title: Human–AI Collaborative Documentation System (Design)
 status: accepted
 links:
-  plan: ../plans/0001-docs-system-reorg-migration.md
+  plan: ../plans/0001-docs-system-migration.md
 ---
 
 # Summary
@@ -52,6 +51,13 @@ flowchart LR
 - `schema.sql` (repo root) — Canonical, versioned relational schema for the project’s persistent data; designs that change data must reference and modify this file.
 - `README.md` and `AGENTS.md` — Placed at meaningful boundaries (module roots, service dirs, tools). These files give localized guidance to humans and agents. See “Localized Guidance” below.
 
+## File Naming
+
+- `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.
+- The numeric prefix increments monotonically; do not reuse or skip numbers except when explicitly superseding a document (record the relationship in frontmatter).
+- Companion designs and plans share the same sequence number to make the pairing obvious (e.g., `docs/designs/0015-foo.md` ↔ `docs/plans/0015-foo.md`).
+- The `<slug>` portion of the filename is a descriptive string reused in the frontmatter `slug` field without the numeric prefix.
+
 ## Document Types and Required Content
 
 Design (docs/designs/<slug>.md)
@@ -93,25 +99,18 @@ Guides (docs/guides/<topic>.md)
 Each document starts with YAML frontmatter. Minimal required keys:
 
 ```yaml
-id: design-YYYYMMDD-<slug> | plan-YYYYMMDD-<slug>
-slug: <slug>
 title: <Human readable title>
 status: draft | proposed | accepted | deprecated | superseded | retired
-owners: ["team-or-individual"]
-reviewers: ["areas or individuals"]
 created: YYYY-MM-DD
 last_updated: YYYY-MM-DD
 links:
   design: ../designs/<slug>.md        # for plans
   plan: ../plans/<slug>.md            # for designs
-  schema: ../../schema.sql            # if applicable
 ```
 
 Optional keys:
 - `areas`: ["core", "daemon", "global_store", "sdk", "infra"]
 - `related_code`: ["paths/glob"]
-- `supersedes` / `superseded_by`: id(s)
-- `decision_record`: true/false (use for final, accepted designs)
 
 # Localized Guidance (README.md & AGENTS.md)
 
@@ -179,14 +178,9 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 Design (minimal)
 ```md
 ---
-id: design-YYYYMMDD-<slug>
 slug: <slug>
 title: <Title>
 status: draft|proposed|accepted|...
-owners: ["..."]
-reviewers: ["..."]
-created: YYYY-MM-DD
-last_updated: YYYY-MM-DD
 links:
   plan: ../plans/<slug>.md
   schema: ../../schema.sql
@@ -210,14 +204,9 @@ links:
 Plan (minimal)
 ```md
 ---
-id: plan-YYYYMMDD-<slug>
 slug: <slug>
 title: <Title>
 status: draft|proposed|accepted|...
-owners: ["..."]
-reviewers: ["..."]
-created: YYYY-MM-DD
-last_updated: YYYY-MM-DD
 links:
   design: ../designs/<slug>.md
 ---

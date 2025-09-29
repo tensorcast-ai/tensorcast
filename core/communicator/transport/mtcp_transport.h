@@ -12,12 +12,16 @@ extern "C" {
 #include <unistd.h>
 }
 
+#include <atomic>
+#include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/engine/memory_stager.h"
@@ -126,9 +130,13 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
     uint32_t window_seq = 0;
     bool final_window = false;
     std::vector<StageSendSegment> segments;
+    std::shared_ptr<std::atomic<int>> pending_segments;
+    std::function<void()> on_window_complete;
   };
 
   void enqueue_stage_window(StageSendWindow window);
+  void release_receive_resources();
+  absl::Status ensure_gpu_buffer_ready();
 
   void set_conn_count(int conn_count);
 
@@ -172,6 +180,10 @@ class MTcpTransport : public std::enable_shared_from_this<MTcpTransport> {
   // GPU receive buffer management
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
   gsl::not_null<std::shared_ptr<common::memory::StreamingPinnedBuffer>> gpu_recv_buffer_;
+
+  std::atomic<bool> gpu_buffer_ready_{false};
+  mutable std::mutex gpu_buffer_mutex_;
+  const std::chrono::milliseconds gpu_init_retry_timeout_;
 
   int buffers_per_flow_limit_;
 
