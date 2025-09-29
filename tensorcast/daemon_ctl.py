@@ -7,7 +7,7 @@ import random
 import time
 from contextlib import contextmanager, suppress
 from threading import RLock
-from typing import Iterator, Tuple
+from typing import Any, Iterator, Tuple, cast
 
 import grpc
 from opentelemetry import trace
@@ -271,6 +271,39 @@ class DaemonCtl:
                 return False
             else:
                 return response
+
+    def unload_replica(
+        self,
+        replica_uuid: str,
+        *,
+        disk_path: str = "",
+        target_device_type: int = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        version: str = "",
+    ) -> bool:
+        if not replica_uuid:
+            return False
+        with self._client_span("Client/UnloadReplica") as span:
+            request = store_daemon_pb2.UnloadReplicaRequest(
+                disk_path=disk_path,
+                replica_uuid=replica_uuid,
+                target_device_type=cast(Any, target_device_type),
+                pid=self._get_effective_pid(),
+            )
+            if version:
+                request.version = version
+            try:
+                self._unary_call(
+                    self.stub.UnloadReplica,
+                    request,
+                    span=span,
+                    timeout=10.0,
+                    retries=1,
+                )
+                return True
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                logger.error(f"UnloadReplica failed: {e}")
+                return False
 
     def load_into_gpu(
         self,

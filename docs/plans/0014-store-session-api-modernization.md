@@ -102,6 +102,7 @@ for attempt in range(max_retries):
 - [x] Refactor `_register.py` helpers into internal functions consumed by `Store.register`/`put`; delete duplicated keepalive threads
 - [x] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
 - [x] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
+- [x] Wire cancellation propagation for `Store.get_async`/`get_into_async` using daemon unload hooks
 - [ ] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
 - [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path
 - [ ] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline

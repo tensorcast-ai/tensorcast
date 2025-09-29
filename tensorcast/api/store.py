@@ -614,6 +614,7 @@ class Store:
         device_id: int,
         options: GetArtifactOptions,
         fallback: FallbackOptions | None,
+        cancel_event: threading.Event | None = None,
     ) -> MaterializedArtifact:
         client = self._ensure_client()
         disk_error: Exception | None = None
@@ -644,12 +645,15 @@ class Store:
                         "verify": bool(fallback_opts.verify_checksums),
                     },
                 )
-                return self._materialize_from_disk(
+                result = self._materialize_from_disk(
                     disk_path=disk_path,
                     artifact_id=resolved_artifact_id,
                     device_id=device_id,
                     verify_checksums=fallback_opts.verify_checksums,
                 )
+                if cancel_event and cancel_event.is_set():
+                    raise CancelledError
+                return result
             if fallback_opts and not fallback_opts.allow_p2p:
                 if disk_error is not None:
                     raise ArtifactError(
@@ -682,6 +686,9 @@ class Store:
                 "allow_p2p": bool(fallback is None or fallback.allow_p2p),
             },
         )
+        if cancel_event and cancel_event.is_set():
+            self._release_materialized(result, client)
+            raise CancelledError
         return result
 
     def _resolve_disk_path(
@@ -821,6 +828,47 @@ class Store:
             validated.append((tgt, src))
         return validated
 
+    def _perform_get(
+        self,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        device: torch.device | str | None,
+        fallback: FallbackOptions | None,
+        cancel_event: threading.Event | None,
+    ) -> tuple[MaterializedArtifact, int]:
+        artifact_id, key = self._resolve_identifiers(artifact_id, key)
+        resolved_fallback = fallback or self._opts.fallback
+        self._ensure_fallback_supported(resolved_fallback)
+        device_id = self._resolve_device_selector(device)
+        options = self._build_get_options(resolved_fallback)
+        materialized = self._materialize(
+            artifact_id=artifact_id,
+            key=key,
+            device_id=device_id,
+            options=options,
+            fallback=resolved_fallback,
+            cancel_event=cancel_event,
+        )
+        return materialized, device_id
+
+    def _release_materialized(
+        self, materialized: MaterializedArtifact, client: DaemonCtl
+    ) -> None:
+        replica_uuid = materialized.replica_uuid
+        if not replica_uuid:
+            return
+        disk_path = materialized.disk_path or ""
+        if not client.unload_replica(replica_uuid, disk_path=disk_path):
+            logger.warning(
+                "store.cancel_unload_failed",
+                extra={
+                    "tc.store.daemon": self._daemon_endpoint,
+                    "tc.store.replica_uuid": replica_uuid,
+                    "tc.store.disk_path": disk_path,
+                },
+            )
+
     # ------------------------------------------------------------------
     # Verb placeholders – wired up in later milestones.
     # ------------------------------------------------------------------
@@ -928,17 +976,12 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> dict[str, torch.Tensor]:
-        artifact_id, key = self._resolve_identifiers(artifact_id, key)
-        resolved_fallback = fallback or self._opts.fallback
-        self._ensure_fallback_supported(resolved_fallback)
-        device_id = self._resolve_device_selector(device)
-        options = self._build_get_options(resolved_fallback)
-        materialized = self._materialize(
+        materialized, _ = self._perform_get(
             artifact_id=artifact_id,
             key=key,
-            device_id=device_id,
-            options=options,
-            fallback=resolved_fallback,
+            device=device,
+            fallback=fallback,
+            cancel_event=None,
         )
         return materialized.state_dict
 
@@ -950,15 +993,52 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> ArtifactFuture[dict[str, torch.Tensor]]:
-        future = self._executor.submit(
-            self.get,
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-        )
+        cancel_event = threading.Event()
+        mat_lock = threading.Lock()
+        mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
+
+        def _task() -> dict[str, torch.Tensor]:
+            try:
+                materialized, _ = self._perform_get(
+                    artifact_id=artifact_id,
+                    key=key,
+                    device=device,
+                    fallback=fallback,
+                    cancel_event=cancel_event,
+                )
+                with mat_lock:
+                    mat_ref["value"] = materialized
+                if cancel_event.is_set():
+                    with mat_lock:
+                        mat_ref["value"] = None
+                    self._release_materialized(materialized, self._ensure_client())
+                    raise CancelledError
+                return materialized.state_dict
+            except CancelledError as exc:
+                raise ArtifactError(
+                    "Retrieval cancelled",
+                    status_code="CANCELLED",
+                    retryable=False,
+                ) from exc
+            finally:
+                with mat_lock:
+                    mat_ref["value"] = None
+
+        future = self._executor.submit(_task)
         self._track_future(future)
-        return ArtifactFuture(future)
+
+        def _cancel() -> bool:
+            if cancel_event.is_set():
+                return False
+            cancel_event.set()
+            with mat_lock:
+                materialized = mat_ref["value"]
+                mat_ref["value"] = None
+            if materialized is not None:
+                self._release_materialized(materialized, self._ensure_client())
+            return True
+
+        return ArtifactFuture(future, cancel_callback=_cancel)
 
     def get_into(
         self,
@@ -969,17 +1049,12 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> None:
-        artifact_id, key = self._resolve_identifiers(artifact_id, key)
-        resolved_fallback = fallback or self._opts.fallback
-        self._ensure_fallback_supported(resolved_fallback)
-        device_id = self._resolve_device_selector(device)
-        options = self._build_get_options(resolved_fallback)
-        materialized = self._materialize(
+        materialized, device_id = self._perform_get(
             artifact_id=artifact_id,
             key=key,
-            device_id=device_id,
-            options=options,
-            fallback=resolved_fallback,
+            device=device,
+            fallback=fallback,
+            cancel_event=None,
         )
         canonical_index = self._canonical_index_from_bytes(
             materialized.canonical_index_bytes
@@ -1002,16 +1077,64 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> ArtifactFuture[None]:
-        future = self._executor.submit(
-            self.get_into,
-            target,
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-        )
+        cancel_event = threading.Event()
+        mat_lock = threading.Lock()
+        mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
+
+        def _task() -> None:
+            try:
+                materialized, device_id = self._perform_get(
+                    artifact_id=artifact_id,
+                    key=key,
+                    device=device,
+                    fallback=fallback,
+                    cancel_event=cancel_event,
+                )
+                with mat_lock:
+                    mat_ref["value"] = materialized
+                if cancel_event.is_set():
+                    with mat_lock:
+                        mat_ref["value"] = None
+                    self._release_materialized(materialized, self._ensure_client())
+                    raise CancelledError
+                canonical_index = self._canonical_index_from_bytes(
+                    materialized.canonical_index_bytes
+                )
+                pairs = self._validate_targets(
+                    canonical_index=canonical_index,
+                    target=target,
+                    source=materialized.state_dict,
+                    device_id=device_id,
+                )
+                for tgt, src in pairs:
+                    if cancel_event.is_set():
+                        raise CancelledError
+                    tgt.copy_(src)
+            except CancelledError as exc:
+                raise ArtifactError(
+                    "Retrieval cancelled",
+                    status_code="CANCELLED",
+                    retryable=False,
+                ) from exc
+            finally:
+                with mat_lock:
+                    mat_ref["value"] = None
+
+        future = self._executor.submit(_task)
         self._track_future(future)
-        return ArtifactFuture(future)
+
+        def _cancel() -> bool:
+            if cancel_event.is_set():
+                return False
+            cancel_event.set()
+            with mat_lock:
+                materialized = mat_ref["value"]
+                mat_ref["value"] = None
+            if materialized is not None:
+                self._release_materialized(materialized, self._ensure_client())
+            return True
+
+        return ArtifactFuture(future, cancel_callback=_cancel)
 
 
 __all__ = [
