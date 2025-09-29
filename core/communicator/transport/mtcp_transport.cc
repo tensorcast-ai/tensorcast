@@ -10,6 +10,7 @@
 #include <cerrno>
 
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -63,6 +64,28 @@ int compute_gpu_lane_for_subchunk_internal(
   return static_cast<int>(((segment_offset / stage_unit) % static_cast<uint64_t>(lanes_to_use)));
 }
 
+int compute_active_lanes_internal(uint64_t total_bytes, size_t stage_unit, int conn_count, int buffers_per_flow_limit) {
+  if (total_bytes == 0) {
+    return 1;
+  }
+  const int total_conn = std::max(1, conn_count);
+  int lanes_to_use = total_conn;
+  if (buffers_per_flow_limit > 0) {
+    lanes_to_use = std::min(lanes_to_use, buffers_per_flow_limit);
+  }
+
+  if (stage_unit > 0 && total_bytes > 0) {
+    const uint64_t ceil_div = (total_bytes + stage_unit - 1) / stage_unit;
+    const int required_lanes =
+        static_cast<int>(std::min<uint64_t>(ceil_div, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    lanes_to_use = std::min(lanes_to_use, std::max(1, required_lanes));
+  }
+
+  lanes_to_use = std::max(1, lanes_to_use);
+  lanes_to_use = std::min(lanes_to_use, total_conn);
+  return lanes_to_use;
+}
+
 } // namespace
 
 namespace testing {
@@ -73,6 +96,10 @@ int compute_gpu_lane_for_subchunk(
     uint64_t stage_unit,
     int lanes_to_use) {
   return compute_gpu_lane_for_subchunk_internal(chunk_base_offset, sub_offset_in_chunk, stage_unit, lanes_to_use);
+}
+
+int compute_active_lanes(uint64_t total_bytes, size_t stage_unit, int conn_count, int buffers_per_flow_limit) {
+  return compute_active_lanes_internal(total_bytes, stage_unit, conn_count, buffers_per_flow_limit);
 }
 
 } // namespace testing
@@ -934,23 +961,13 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
     return;
   }
 
-  const int total_conn = std::max(1, conn_count_);
-  const uint64_t total_bytes = window->total_bytes;
-  int lanes_to_use = total_conn;
-  if (buffers_per_flow_limit_ > 0) {
-    lanes_to_use = std::min(lanes_to_use, buffers_per_flow_limit_);
-  }
   size_t stage_unit = gpu_memory_stager_->get_chunk_size();
   if (stage_unit == 0) {
     stage_unit = memory_pool_->slice_bytes();
   }
-  if (stage_unit > 0 && total_bytes > 0) {
-    int required_lanes = static_cast<int>((total_bytes + stage_unit - 1) / stage_unit);
-    lanes_to_use = std::min(lanes_to_use, std::max(1, required_lanes));
-  }
-  if (lanes_to_use <= 0) {
-    lanes_to_use = 1;
-  }
+  const int lanes_to_use =
+      compute_active_lanes_internal(window->total_bytes, stage_unit, conn_count_, buffers_per_flow_limit_);
+  const int total_conn = std::max(1, conn_count_);
 
   if (window->segments.empty()) {
     if (window->on_window_complete) {
@@ -979,9 +996,9 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
       task_index %= total_conn;
     }
 
-    LOG(INFO) << "[MTCP send] enqueue window=" << window->window_seq << " segment=" << seg.metadata.segment_idx
-              << " offset=" << seg.metadata.offset << " bytes=" << seg.bytes << " lane=" << task_index
-              << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_;
+    VLOG(1) << "[MTCP send] enqueue window=" << window->window_seq << " segment=" << seg.metadata.segment_idx
+            << " offset=" << seg.metadata.offset << " bytes=" << seg.bytes << " lane=" << task_index
+            << " lanes_to_use=" << lanes_to_use << " conn_count=" << conn_count_;
 
     if (task_index >= conn_count_ || tasks_[task_index] == nullptr) {
       LOG(WARNING) << "[MTcpTransport::process_stage_window] task unavailable idx=" << task_index
@@ -1008,8 +1025,8 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
          request_key,
          window_ptr]() mutable {
           auto result = chunk_future.get();
-          LOG(INFO) << "[MTCP send] complete window=" << window_ptr->window_seq << " segment=" << metadata.segment_idx
-                    << " offset=" << metadata.offset << " status=" << (result.status == misc::SUCCESS ? "ok" : "err");
+          VLOG(1) << "[MTCP send] complete window=" << window_ptr->window_seq << " segment=" << metadata.segment_idx
+                  << " offset=" << metadata.offset << " status=" << (result.status == misc::SUCCESS ? "ok" : "err");
           if (callback) {
             callback(result.status);
           }
@@ -1071,27 +1088,16 @@ void MTcpTransport::recv_loop() {
     auto tensor = msg->get_local_tensor();
     auto bytes = tensor->get_bytes();
 
-    const int max_conn = std::max(1, conn_count_);
-    int lanes_to_use = max_conn;
-    if (buffers_per_flow_limit_ > 0) {
-      lanes_to_use = std::min(lanes_to_use, buffers_per_flow_limit_);
-    }
     size_t stager_chunk_bytes = gpu_memory_stager_->get_chunk_size();
-    if (stager_chunk_bytes > 0) {
-      int required_lanes = static_cast<int>((bytes + stager_chunk_bytes - 1) / stager_chunk_bytes);
-      lanes_to_use = std::min(lanes_to_use, std::max(1, required_lanes));
+    if (stager_chunk_bytes == 0) {
+      stager_chunk_bytes = memory_pool_->slice_bytes();
     }
+    const int lanes_to_use =
+        compute_active_lanes_internal(bytes, stager_chunk_bytes, conn_count_, buffers_per_flow_limit_);
 
-    // Clamp the active lane count to the actual connection count to mirror send-side
-    // behaviour (which limits fan-out when staging credit is scarce). This prevents
-    // assigning receive buffers to connections that never see the corresponding
-    // sub-chunk, which previously resulted in stalled futures and leaked staging
-    // credit for large transfers.
-    lanes_to_use = std::min(lanes_to_use, max_conn);
-
-    LOG(INFO) << "[MTcpTransport::recv_loop] key=" << msg->get_key() << " bytes=" << bytes
-              << " conn_count=" << conn_count_ << " lanes_to_use=" << lanes_to_use
-              << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stager_chunk_bytes=" << stager_chunk_bytes;
+    VLOG(1) << "[MTcpTransport::recv_loop] key=" << msg->get_key() << " bytes=" << bytes
+            << " conn_count=" << conn_count_ << " lanes_to_use=" << lanes_to_use
+            << " buffers_per_flow_limit=" << buffers_per_flow_limit_ << " stager_chunk_bytes=" << stager_chunk_bytes;
 
     auto chunk_size = (bytes + lanes_to_use - 1) / lanes_to_use;
     std::vector<future_chunk_result_t> results;
@@ -1100,8 +1106,8 @@ void MTcpTransport::recv_loop() {
     if (tensor->get_mem_type() == base::COMMUNICATE_ENGINE_DEV_GPU) {
       // Handle GPU tensor with staging - recv to CPU first, then copy to GPU
       VLOG(1) << "Receiving to GPU tensor of " << bytes << " bytes in " << conn_count_ << " chunks with staging";
-      LOG(INFO) << "[MTcpTransport::recv_loop] GPU recv starting for " << msg->get_key() << " bytes=" << bytes
-                << " chunks=" << conn_count_ << " tensor_ptr=" << tensor.get();
+      VLOG(1) << "[MTcpTransport::recv_loop] GPU recv starting for " << msg->get_key() << " bytes=" << bytes
+              << " chunks=" << conn_count_ << " tensor_ptr=" << tensor.get();
 
       // Determine pool chunk size once for this tensor receive
       size_t pool_chunk_size = memory_pool_->slice_bytes();
@@ -1165,8 +1171,8 @@ void MTcpTransport::recv_loop() {
           int slot_id = *slot_result;
           char* staged_ptr = gpu_recv_buffer_->get_chunk_ptr(slot_id);
 
-          LOG(INFO) << "[MTcpTransport::recv_loop] Got buffer slot #" << slot_id << " for sub-chunk ("
-                    << sub_offset_in_chunk << "/" << real_chunk_size << ") of lane #" << lane;
+          VLOG(2) << "[MTcpTransport::recv_loop] Got buffer slot #" << slot_id << " for sub-chunk ("
+                  << sub_offset_in_chunk << "/" << real_chunk_size << ") of lane #" << lane;
 
           // Create chunk for receiving into staged buffer
           auto chunk = std::make_shared<MTcpTransportChunk>(reinterpret_cast<uint8_t*>(staged_ptr), sub_chunk_size);
@@ -1196,8 +1202,8 @@ void MTcpTransport::recv_loop() {
                slot_id,
                recv_buffer,
                gpu_global_offset]() mutable -> chunk_result_t {
-                LOG(INFO) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
-                          << " waiting for sub-chunk recv to complete";
+                VLOG(2) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
+                        << " waiting for sub-chunk recv to complete";
 
                 auto result = chunk_future.get();
                 if (result.status != misc::SUCCESS) {
@@ -1211,13 +1217,13 @@ void MTcpTransport::recv_loop() {
                   const uint64_t head_sample = *reinterpret_cast<const uint64_t*>(staged_ptr);
                   const uint64_t tail_sample =
                       *reinterpret_cast<const uint64_t*>(staged_ptr + sub_chunk_size - sizeof(uint64_t));
-                  LOG(INFO) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
-                            << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " first=0x"
-                            << absl::Hex(head_sample, absl::kZeroPad16) << " last=0x"
-                            << absl::Hex(tail_sample, absl::kZeroPad16);
+                  VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
+                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " first=0x"
+                          << absl::Hex(head_sample, absl::kZeroPad16) << " last=0x"
+                          << absl::Hex(tail_sample, absl::kZeroPad16);
                 } else {
-                  LOG(INFO) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
-                            << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " (<8 bytes payload)";
+                  VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
+                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " (<8 bytes payload)";
                 }
 
                 // Copy from staged buffer to GPU
@@ -1255,8 +1261,8 @@ void MTcpTransport::recv_loop() {
                   LOG(ERROR) << "H2D copy failed: " << wait_st;
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
-                LOG(INFO) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << slot_id
-                          << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset;
+                VLOG(2) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << slot_id
+                        << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset;
                 return result;
               });
 
@@ -1299,16 +1305,16 @@ void MTcpTransport::recv_loop() {
     }
 
     misc::result_t result = misc::SUCCESS;
-    LOG(INFO) << "[MTcpTransport::recv_loop] Waiting for " << results.size() << " async operations for "
-              << msg->get_key();
+    VLOG(1) << "[MTcpTransport::recv_loop] Waiting for " << results.size() << " async operations for "
+            << msg->get_key();
     for (size_t i = 0; i < results.size(); ++i) {
-      LOG(INFO) << "[MTcpTransport::recv_loop] Awaiting sub-chunk future index=" << i;
+      VLOG(2) << "[MTcpTransport::recv_loop] Awaiting sub-chunk future index=" << i;
       auto chunk_result = results[i].get();
       if (chunk_result.status != misc::SUCCESS) {
         LOG(ERROR) << "[MTcpTransport::recv_loop] Chunk " << i << " failed for " << msg->get_key();
         result = misc::FAILED;
       }
-      LOG(INFO) << "[MTcpTransport::recv_loop] Completed sub-chunk future index=" << i;
+      VLOG(2) << "[MTcpTransport::recv_loop] Completed sub-chunk future index=" << i;
     }
 
     if (result == misc::SUCCESS) {
