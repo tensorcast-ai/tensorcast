@@ -44,7 +44,7 @@ class Communicator {
    * @param local_port local port
    * @return  init result
    */
-  absl::Status init(const std::string& local_ip, uint16_t local_port, int conn_count = base::kMTcpConnCount);
+  absl::Status init(const std::string& local_ip, uint16_t local_port, int conn_count = -1);
 
   /**
    * Read a remote tensor

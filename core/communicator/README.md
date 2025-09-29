@@ -132,7 +132,7 @@ flowchart LR
 #### Communicator Threads
 1. **request_thread_** — Dequeues read requests and initiates remote operations
 2. **gc_thread_** — Periodically scans and closes idle channels
-3. **mtcp_staging_thread_** — Drains the MTCP staging queue so staging work happens off the control loop, keeping connect handshakes responsive
+3. **mtcp_staging_thread_** — Drains the MTCP staging queue so staging work happens off the control loop, keeping connect handshakes responsive. During shutdown it now drains and fails any remaining tasks before the queue stops so MTCP reads surface `READ_FAILED` and release staging credit.
 
 #### TCP Infrastructure Threads
 1. **TcpContext::listen_thread_** — Accepts incoming TCP connections
@@ -390,7 +390,7 @@ Key behaviors:
 - `Channel::RdmaEndpoint` tracks each `<local_dev>|<peer_dev>` pair and governs the handshake lifecycle: `Idle → ConnectRequested → Ready → Failed`. Reads arriving while the endpoint is not `Ready` are enqueued with a generation token and drained only after the handshake succeeds.
 - When an endpoint sits in `Failed` backoff, new RDMA responses queue their reads and a dedicated retry worker schedules the next handshake exactly at `next_retry_at`, so queued requests resume automatically once the backoff expires (no additional control traffic is required to nudge the handshake).
 - `Communicator` stages every RDMA response into pinned buffers (`hdr->staged = 1`) and inserts each segment as a `StageLease` in the per-channel `StageLeaseRegistry`; `MrCache` reuses registrations per protection domain.
-- `on_receive_response()` only invokes `rdma_transport->read_multi()` after the endpoint transitions to `Ready`; handshake failures (connect response errors or explicit `ENGINE_OP_RDMA_CONNECT_FAILED`) flush the pending queue with an `absl::Status` that maps to `REMOTE_RDMA_CONNECT_FAILED` and schedule exponential backoff before retrying.
+- `on_receive_response()` only invokes `rdma_transport->read_multi()` after the endpoint transitions to `Ready`; handshake failures (connect response errors or explicit `ENGINE_OP_RDMA_CONNECT_FAILED`) flush the pending queue with an `absl::Status` that maps to `REMOTE_RDMA_CONNECT_FAILED` and schedule exponential backoff before retrying. When a fresh handshake attempt begins (`Idle` or `Failed` → `ConnectRequested`), the communicator now resets the failure counter so exponential backoff restarts from the minimum interval instead of inheriting the previous attempt's penalty.
 - `rdma_transport::read_multi()` now rejects calls while `ready()` is `false`; QP transitions are solely driven by `connect()` so callers cannot post READ WRs against an uninitialised queue pair.
 - Clients send `RDMA_READ_DONE_EX` after all segments complete. The server looks up the lease, deregisters when required, returns the buffer to the originating stager, and credits the `FlowCreditLedger`.
 - `ack_ttl_ms` (configurable, default 30 s) guards against leaked ACKs by reaping overdue registry entries in the GC loop.
@@ -528,7 +528,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 "CommunicatorConfig Migration" for YAML examples. Key proto fields:
 
 - `enable_rdma`: enables RDMA transports and MR caching.
-- `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts.
+- `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts. The engine now honors the configured TCP fan-out during both the server listener setup and client dial; values ≤1 are automatically raised to the default multi-socket budget so staging credit math stays consistent.
 - `stager.stage_chunk_mb_{gpu,cpu}` & `stager.buffers_per_flow`: staging chunk size and pipeline depth.
 - `pool.pool_size_bytes` / `pool.preregister_mr`: pinned pool sizing and prereregistration policy.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.

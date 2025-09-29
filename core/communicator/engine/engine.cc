@@ -250,7 +250,9 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   if (configured_conn <= 0) {
     configured_conn = base::kMTcpConnCount;
   }
-  const size_t mtcp_conn_budget = static_cast<size_t>(std::max(1, configured_conn));
+  configured_conn = std::max(2, configured_conn);
+  mtcp_conn_count_ = configured_conn;
+  const auto mtcp_conn_budget = static_cast<size_t>(configured_conn);
   const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
   const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
   const size_t computed_pool_size = gpu_chunk_size * computed_pool_buffers;
@@ -344,13 +346,14 @@ Communicator::~Communicator() {
   request_queue_.stop();
   handshake_retry_stop_.store(true);
   handshake_retry_cv_.SignalAll();
-  mtcp_staging_queue_.stop();
+  mtcp_staging_queue_.notify();
   if (handshake_retry_thread_started_ && handshake_retry_thread_.joinable()) {
     handshake_retry_thread_.join();
   }
   if (mtcp_staging_thread_.joinable()) {
     mtcp_staging_thread_.join();
   }
+  mtcp_staging_queue_.stop();
   if (request_thread_.joinable()) {
     request_thread_.join();
   }
@@ -532,6 +535,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     send_window.request_key = request_key;
     send_window.window_seq = staged_window.window_seq;
     send_window.final_window = !staged_window.more_segments;
+    send_window.total_bytes = total_bytes;
     send_window.segments.reserve(staged_window.segments.size());
 
     if (send_window.final_window) {
@@ -620,7 +624,9 @@ absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_c
   if (server_context_->open(ip, port, [this](tcp_transport_t t) { return this->on_new_client(t); }) != SUCCESS) {
     return absl::InternalError("failed to open server " + ip + ":" + std::to_string(port));
   }
-  mtcp_conn_count_ = conn_count;
+  if (conn_count > 0) {
+    mtcp_conn_count_ = conn_count;
+  }
   return absl::OkStatus();
 }
 
@@ -953,6 +959,11 @@ absl::Status Communicator::handle_mtcp_read_request(
   hdr->window_seq = 0;
   hdr->credit_granted = 0;
   hdr->more_segments = 0;
+  absl::Status shutdown_status = absl::CancelledError("communicator shutting down");
+  if (stop_.load(std::memory_order_relaxed)) {
+    fail_mtcp_read_task(task, shutdown_status);
+    return shutdown_status;
+  }
   auto* s0 =
       reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
   s0->addr = 0;
@@ -963,6 +974,11 @@ absl::Status Communicator::handle_mtcp_read_request(
   misc::result_t send_res = control_transport->send(rsp);
   if (send_res != misc::SUCCESS) {
     return absl::InternalError("failed to send READ_RESPONSE_EX for MTCP");
+  }
+
+  if (stop_.load(std::memory_order_relaxed)) {
+    fail_mtcp_read_task(task, shutdown_status);
+    return shutdown_status;
   }
 
   if (mtcp_staging_queue_.push(task) != misc::SUCCESS) {
@@ -1425,8 +1441,10 @@ misc::result_t Communicator::on_receive_response(
       auto* ip = inet_ntoa(sin_addr);
       LOG(INFO) << "[on_receive_response] MTCP_CONNECT_RESPONSE: connecting to " << ip << ":" << rsp->port
                 << " with conn_count=" << rsp->conn_count;
-      COMM_CHECK(transport->connect(ip, rsp->port, mtcp_conn_count_));
-      LOG(INFO) << "mtcp connect done " << ip << ":" << rsp->port << " " << mtcp_conn_count_;
+      const int negotiated_conn = std::max(2, static_cast<int>(rsp->conn_count));
+      transport->set_conn_count(negotiated_conn);
+      COMM_CHECK(transport->connect(ip, rsp->port, negotiated_conn));
+      LOG(INFO) << "mtcp connect done " << ip << ":" << rsp->port << " " << negotiated_conn;
       break;
     }
     // case ENGINE_OP_READ_RESPONSE: (legacy) removed
@@ -1612,6 +1630,7 @@ misc::result_t Communicator::on_receive_response(
             endpoint->generation += 1;
             generation = endpoint->generation;
             endpoint->state = Channel::HandshakeState::kConnectRequested;
+            endpoint->failure_count = 0;
             endpoint->next_retry_at = absl::InfinitePast();
             endpoint->retry_scheduled = false;
             endpoint->pending_reads.push_back(
@@ -1704,8 +1723,9 @@ misc::result_t Communicator::on_receive_response(
         // MTCP path using EX header (no segments)
         auto transport = channel->get_mtcp();
         if (transport == nullptr) {
+          const int requested_conn = std::max(2, mtcp_conn_count_);
           transport = std::make_shared<transport::MTcpTransport>(
-              base::kMTcpConnCount,
+              requested_conn,
               gsl::not_null<std::shared_ptr<MemoryStager>>{memory_stager_},
               gsl::not_null<std::shared_ptr<MemoryStager>>{gpu_memory_stager_},
               gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{gpu_memory_pool_},
@@ -1713,7 +1733,7 @@ misc::result_t Communicator::on_receive_response(
           LOG(INFO) << "[on_receive_response] Sending MTCP_CONNECT_REQUEST for " << tensor_key;
           auto req = EngineMessage::make_message<ProtoMtcpConnectRequest>(ENGINE_OP_MTCP_CONNECT_REQUEST);
           auto* payload = req->get_payload<ProtoMtcpConnectRequest>();
-          payload->conn_count = base::kMTcpConnCount;
+          payload->conn_count = requested_conn;
           COMM_CHECK(t->send(req));
           channel->set_transport(transport);
         }
@@ -1966,6 +1986,7 @@ void Communicator::start_pending_rdma_handshake(
     endpoint->generation += 1;
     uint64_t generation = endpoint->generation;
     endpoint->state = Channel::HandshakeState::kConnectRequested;
+    endpoint->failure_count = 0;
     endpoint->next_retry_at = absl::InfinitePast();
     const size_t queue_depth = endpoint->pending_reads.size();
     for (auto& pending : endpoint->pending_reads) {
