@@ -81,7 +81,7 @@ for attempt in range(max_retries):
   - [x] Milestone 3.1: Extract canonical-index fetch + replica selection code from `_loader.get_artifact_*` into reusable Store helpers with fallback policy evaluation
   - [x] Milestone 3.2: Implement `Store.get`/`get_async` returning `dict[str, torch.Tensor]` with automatic lease keepalive and future completion/cancellation semantics
   - [x] Milestone 3.3: Implement `Store.get_into`/`get_into_async`, including strict tensor layout validation and zero-copy CUDA IPC path selection
-  - [ ] Milestone 3.4: Wire fallback options (disk, P2P) and verification toggles through the Store API; emit telemetry for fallback decisions
+  - [x] Milestone 3.4: Wire fallback options (disk, P2P) and verification toggles through the Store API; emit telemetry for fallback decisions
 - [ ] Phase 4: Legacy API Shims & Observability
   - [ ] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
   - [ ] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md`

@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import json
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,8 @@ from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 
 T = TypeVar("T")
 
+
+logger = logging.getLogger(__name__)
 
 TensorDict = Mapping[str, torch.Tensor]
 
@@ -606,6 +609,15 @@ class Store:
                 artifact_id=artifact_id,
             )
             if disk_path:
+                self._record_fallback_event(
+                    mode="disk",
+                    artifact_id=resolved_artifact_id,
+                    key=key,
+                    detail={
+                        "disk_path": disk_path,
+                        "verify": bool(fallback_opts.verify_checksums),
+                    },
+                )
                 return self._materialize_from_disk(
                     disk_path=disk_path,
                     artifact_id=resolved_artifact_id,
@@ -625,7 +637,7 @@ class Store:
                     retryable=False,
                 )
 
-        return materialize_artifact(
+        result = materialize_artifact(
             client=client,
             daemon_address=self._daemon_endpoint,
             device_id=device_id,
@@ -633,6 +645,16 @@ class Store:
             key=key,
             options=options,
         )
+        self._record_fallback_event(
+            mode="p2p",
+            artifact_id=result.artifact_id or artifact_id,
+            key=key,
+            detail={
+                "disk_requested": bool(fallback and fallback.prefer_disk),
+                "allow_p2p": bool(fallback is None or fallback.allow_p2p),
+            },
+        )
+        return result
 
     def _resolve_disk_path(
         self,
@@ -696,6 +718,25 @@ class Store:
             canonical_index_bytes=canonical_index,
             replica_uuid="",
             disk_path=disk_path,
+        )
+
+    def _record_fallback_event(
+        self,
+        *,
+        mode: str,
+        artifact_id: str | None,
+        key: str | None,
+        detail: Mapping[str, object],
+    ) -> None:
+        logger.info(
+            "store.fallback",  # structured log tag
+            extra={
+                "tc.store.daemon": self._daemon_endpoint,
+                "tc.store.mode": mode,
+                "tc.store.artifact_id": artifact_id or "",
+                "tc.store.key": key or "",
+                "tc.store.detail": dict(detail),
+            },
         )
 
     def _validate_targets(
