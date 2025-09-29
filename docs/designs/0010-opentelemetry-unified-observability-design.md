@@ -1,8 +1,6 @@
 ---
-id: design-0010-opentelemetry-unified-observability
 slug: 0010-opentelemetry-unified-observability-design
 title: OpenTelemetry Unified Observability (Design)
-status: draft
 links:
   plan: ../plans/0010-opentelemetry-unified-observability.md
 ---

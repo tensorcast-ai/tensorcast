@@ -1,20 +1,14 @@
 ---
-id: design-0002-vs-uma-transfer-architecture
 slug: 0002-vs-uma-transfer-architecture
 title: VS (Virtual Address Space), UMA Ownership, TransferService, and Unified Loader (Design)
-status: accepted
 links:
   plan: ../plans/0002-dvmp-uma-transfer-architecture.md
-areas: ["core", "daemon"]
 related_code:
   - core/common/memory/virtual_address_space.*
   - core/store/replica/unified_memory_authority.*
   - core/store/replica/transfer_service.*
   - core/store/replica/memory_export_registry.*
   - core/store/replica/replica_load_controller.*
-supersedes: ["rfc-0002", "rfc-0004"]
-created: 2025-08-10
-last_updated: 2025-09-09
 ---
 
 # Summary

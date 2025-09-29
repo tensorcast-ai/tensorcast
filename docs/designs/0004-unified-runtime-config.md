@@ -1,9 +1,6 @@
 ---
-id: design-0004-unified-runtime-config
 slug: 0004-unified-runtime-config
 title: Unified Runtime Configuration System (Design)
-status: proposed
-areas: ["daemon", "global_store", "sdk", "core"]
 related_code:
   - proto/tensorcast/config/v1/*.proto
   - core/communicator/config_io.*

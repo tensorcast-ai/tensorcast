@@ -1,13 +1,6 @@
 ---
-id: design-20250912-0012-uma-dvmp-transactional-transfer
 slug: 0012-uma-dvmp-transactional-transfer
 title: 统一内存权威 V3 与内存系统重构（设计）
-status: accepted
-owners: ["store-runtime", "memory-systems"]
-reviewers: ["platform", "infra", "communicator", "perf"]
-areas: ["core", "daemon", "store"]
-created: 2025-09-12
-last_updated: 2025-09-13
 related_code:
   - "core/common/memory/*"
   - "core/store/replica/*"
@@ -18,8 +11,6 @@ links:
   plan_sub_0: ../plans/0012-sub-0-unified-memory-architecture-v3.md
   plan_sub_1: ../plans/0012-sub-1-unified-memory-architecture-v3.md
   plan_sub_2: ../plans/0012-sub-2-unified-memory-architecture-v3.md
-is_umbrella: true
-decision_record: true
 ---
 
 # Summary

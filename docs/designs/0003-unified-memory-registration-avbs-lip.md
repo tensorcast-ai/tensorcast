@@ -1,17 +1,9 @@
 ---
-id: design-0003-unified-memory-registration-avbs-lip
 slug: 0003-unified-memory-registration-avbs-lip
 title: Unified Memory Artifact Registration (AVBS + Coalesced VRAM + LIP)
-status: accepted
-owners: ["tensorcast-team"]
-reviewers: ["core", "daemon", "sdk", "global_store"]
-areas: ["core", "daemon", "sdk", "global_store"]
-created: 2025-09-09
-last_updated: 2025-09-09
 links:
   schema: ../../schema.sql
 related_code: ["core/store", "daemon", "tensorcast/api", "tensorcast/global_store"]
-supersedes: ["rfc-0006-memory-artifact-registration", "rfc-0014-unified-avbs-with-lip"]
 ---
 
 # Summary

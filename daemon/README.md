@@ -105,11 +105,6 @@ Contract highlights:
 
 These conventions improve observability while keeping best‑effort paths fast and non‑fatal.
 
-## Ownership
-
-- Area: `daemon`
-- Owners: Store Daemon maintainers (see CODEOWNERS)
-
 ## Key Links
 
 - Architecture overview: `../docs/architecture/architecture-overview.md`

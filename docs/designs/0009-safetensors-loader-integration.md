@@ -1,9 +1,6 @@
 ---
-id: design-0009-safetensors-loader-integration
 slug: 0009-safetensors-loader-integration
 title: Safetensors Loader Integration (Design)
-status: accepted
-areas: ["core", "sdk"]
 links:
   plan: ../plans/0009-safetensors-loader-integration.md
 related_code:

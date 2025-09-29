@@ -1,9 +1,6 @@
 ---
 slug: 0001-docs-system-design
 title: Human–AI Collaborative Documentation System (Design)
-status: accepted
-links:
-  plan: ../plans/0001-docs-system-migration.md
 ---
 
 # Summary
@@ -100,12 +97,8 @@ Each document starts with YAML frontmatter. Minimal required keys:
 
 ```yaml
 title: <Human readable title>
-status: draft | proposed | accepted | deprecated | superseded | retired
-created: YYYY-MM-DD
-last_updated: YYYY-MM-DD
 links:
-  design: ../designs/<slug>.md        # for plans
-  plan: ../plans/<slug>.md            # for designs
+  design: ../designs/<slug>.md        # for plans. (designs don't need a plan link)
 ```
 
 Optional keys:
@@ -145,7 +138,6 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 
 # Ownership, Reviews, and Status Lifecycle
 
-- Owners: Each design/plan lists responsible owner(s); codeowners of affected areas are mandatory reviewers.
 - Status:
   - draft → proposed → accepted → (deprecated|superseded|retired)
   - Plans track execution; designs capture intent and compatibility commitment.
@@ -154,7 +146,7 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 # Guardrails (What must be true)
 
 - Frontmatter validation: required keys present; status is valid; cross‑links resolve.
-- 1:1 linkage: every plan points to exactly one design and vice versa (except umbrella designs/plans which declare `is_umbrella: true`).
+- 1:1 linkage: every plan points to exactly one design and vice versa.
 - Link hygiene: CI link checker passes.
 - Doc Sync: PRs that change code touching an owned area must link a design/plan and update localized README/AGENTS.md.
 - Schema discipline: designs referencing data models must link `schema.sql`; plans must include migration/testing steps.
@@ -180,10 +172,7 @@ Design (minimal)
 ---
 slug: <slug>
 title: <Title>
-status: draft|proposed|accepted|...
 links:
-  plan: ../plans/<slug>.md
-  schema: ../../schema.sql
 ---
 
 # Summary
@@ -206,7 +195,6 @@ Plan (minimal)
 ---
 slug: <slug>
 title: <Title>
-status: draft|proposed|accepted|...
 links:
   design: ../designs/<slug>.md
 ---

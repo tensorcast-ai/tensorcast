@@ -1,9 +1,6 @@
 ---
-id: design-0007-content-addressed-artifact-id
 slug: 0007-content-addressed-artifact-id
 title: Content-Addressed Artifact ID (mi2)
-status: proposed
-areas: ["core", "daemon", "global_store", "sdk"]
 links:
   plan: ../plans/0007-content-addressed-artifact-id.md
 related_code:

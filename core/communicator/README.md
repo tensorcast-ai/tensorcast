@@ -1,5 +1,4 @@
 ---
-id: developer-guides/core/communicator/README
 title: Communicator (C++)
 sidebar_label: Communicator
 ---

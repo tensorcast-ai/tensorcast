@@ -1,11 +1,6 @@
 ---
-id: design-0006-unified-memory-stager-and-staged-p2p
 slug: 0006-unified-memory-stager-and-staged-p2p
 title: Unified Memory Stager and Staged P2P (Design)
-status: proposed
-owners: ["tensorcast-team"]
-reviewers: ["core", "communicator", "store", "daemon"]
-areas: ["core"]
 related_code:
   - core/communicator/engine/engine.*
   - core/communicator/engine/memory_stager.*
@@ -14,8 +9,6 @@ related_code:
   - core/common/memory/pinned_buffer_pool.h (alias of pinned_buffer_pool.*)
   - core/communicator/transport/mtcp_transport.*
   - core/store/replica/chunk_export_service.*
-created: 2025-09-09
-last_updated: 2025-09-09
 links:
   plan: ../plans/0006-unified-memory-stager-and-staged-p2p.md
 ---

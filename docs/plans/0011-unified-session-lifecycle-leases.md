@@ -1,12 +1,6 @@
 ---
-id: plan-20250911-unified-session-lifecycle-leases
 slug: 0011-unified-session-lifecycle-leases
 title: Plan — Unified Session Lifecycle via Leases, Guards, and Finalizers
-status: completed
-owners: ["daemon"]
-reviewers: ["core", "store", "infra"]
-created: 2025-09-11
-last_updated: 2025-09-11
 links:
   design: ../designs/0011-unified-session-lifecycle-leases.md
 ---

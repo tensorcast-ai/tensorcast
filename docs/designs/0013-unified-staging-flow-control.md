@@ -1,11 +1,6 @@
 ---
-id: design-20250926-rdma-staging-flow-control
 slug: 0013-rdma-staging-flow-control
 title: Unified Staging Flow Control for RDMA and MTCP
-status: implemented
-owners: ["tensorcast-communicator"]
-reviewers: ["core", "communicator", "daemon", "sdk"]
-areas: ["core", "communicator"]
 related_code:
   - core/communicator/engine/engine.cc
   - core/communicator/engine/engine.h

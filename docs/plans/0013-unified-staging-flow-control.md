@@ -1,12 +1,6 @@
 ---
-id: plan-20250926-rdma-staging-flow-control
 slug: 0013-rdma-staging-flow-control
 title: Unified Staging Flow Control Rollout
-status: completed
-owners: ["tensorcast-communicator"]
-reviewers: ["core", "communicator", "daemon", "sdk"]
-created: 2025-09-26
-last_updated: 2025-09-28
 links:
   design: ../designs/0013-rdma-staging-flow-control.md
 ---

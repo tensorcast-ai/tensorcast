@@ -1,11 +1,6 @@
 ---
-id: design-0005-async-copy-manager
 slug: 0005-async-copy-manager
 title: Async Copy Manager (Design)
-status: proposed
-owners: ["tensorcast-team"]
-reviewers: ["core", "communicator", "checkpoint"]
-areas: ["core"]
 related_code:
   - core/common/async_copy_manager.*
   - core/common/memory/streaming_pinned_buffer.*
@@ -13,8 +8,6 @@ related_code:
   - core/store/replica/memory_manager.*
   - core/checkpoint/streaming_tensor_writer.*
   - core/communicator/transport/mtcp_transport.*
-created: 2025-09-09
-last_updated: 2025-09-09
 links:
   plan: ../plans/0005-async-copy-manager.md
 ---# SummaryIntroduce a process-wide Async Copy Manager (ACM) that centralizes GPU copy submission and completion handling across H2D, D2H, D2D, and H2H. ACM provides a minimal, uniform interface to submit a single async copy and receive a lightweight host callback upon completion; it does not own chunking, throttling, fairness, or UMA/VS state. The design aligns copy boundaries with VS chunk boundaries, integrates with StreamingPinnedBuffer (SPB) for pinned staging, eliminates per-chunk stream synchronizations, and establishes consistent observability via tracing and metrics.Target outcomes (same hardware, same datasets):

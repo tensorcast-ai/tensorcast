@@ -1,13 +1,6 @@
 ---
-id: 0012-plan-unified-memory-architecture-v3
 slug: uma-v3-final-cutover
 title: UMA V3 最终态落地与全仓收束（无灰度/无兼容层）
-status: completed
-owners: ["store-runtime", "memory-systems"]
-reviewers: ["platform", "infra", "communicator", "perf"]
-areas: ["core", "daemon", "store"]
-created: 2025-09-13
-last_updated: 2025-09-13
 links:
   design: ../designs/0012-uma-dvmp-transactional-transfer.md
 ---
