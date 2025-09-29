@@ -16,6 +16,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
@@ -32,6 +33,9 @@ from tensorcast.api._indices import (
 )
 from tensorcast.api._io_disk import load_dict_from_disk
 from tensorcast.api._loader import MaterializedArtifact, materialize_artifact
+from tensorcast.api._register import (
+    RegisteredArtifact as _RegisterHandle,
+)
 from tensorcast.api._register import (
     RegisteredLease,
     RegistrationResult,
@@ -440,6 +444,12 @@ class Store:
     def _raise_registration_error(self, exc: Exception) -> None:
         if isinstance(exc, ArtifactError):
             raise exc
+        if isinstance(exc, CancelledError):
+            raise ArtifactError(
+                "Registration cancelled",
+                status_code="CANCELLED",
+                retryable=False,
+            ) from exc
         message = str(exc) or "registration failed"
         if isinstance(exc, DeviceMismatch):
             raise ArtifactError(
@@ -469,6 +479,8 @@ class Store:
         *,
         key: str | None,
         plan: PlanType,
+        cancel_event: threading.Event | None = None,
+        on_begin: Callable[[_RegisterHandle], None] | None = None,
     ) -> RegisteredArtifact:
         material = dict(tensors)
         if not material:
@@ -498,6 +510,8 @@ class Store:
                 prevalidate_disk=False,
                 client=self._ensure_client(),
                 daemon_address=self._daemon_endpoint,
+                cancel_event=cancel_event,
+                on_begin=on_begin,
             )
         except Exception as exc:  # noqa: BLE001
             self._raise_registration_error(exc)
@@ -822,14 +836,42 @@ class Store:
     def register_async(
         self, tensors: TensorDict, *, key: str | None = None
     ) -> ArtifactFuture[RegisteredArtifact]:
-        future = self._executor.submit(
-            self._perform_registration,
-            tensors,
-            key=key,
-            plan=PlanType.VRAM_LEASED,
-        )
+        cancel_event = threading.Event()
+        handle_lock = threading.Lock()
+        handle_ref: dict[str, _RegisterHandle | None] = {"handle": None}
+
+        def _on_begin(handle: _RegisterHandle) -> None:
+            with handle_lock:
+                handle_ref["handle"] = handle
+
+        def _task() -> RegisteredArtifact:
+            try:
+                return self._perform_registration(
+                    tensors,
+                    key=key,
+                    plan=PlanType.VRAM_LEASED,
+                    cancel_event=cancel_event,
+                    on_begin=_on_begin,
+                )
+            finally:
+                with handle_lock:
+                    handle_ref["handle"] = None
+
+        future = self._executor.submit(_task)
         self._track_future(future)
-        return ArtifactFuture(future)
+
+        def _cancel() -> bool:
+            if cancel_event.is_set():
+                return False
+            cancel_event.set()
+            with handle_lock:
+                handle = handle_ref.get("handle")
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    return bool(handle.abort(timeout_s=5.0))
+            return True
+
+        return ArtifactFuture(future, cancel_callback=_cancel)
 
     def put(self, tensors: TensorDict, *, key: str | None = None) -> RegisteredArtifact:
         return self._perform_registration(
@@ -841,14 +883,42 @@ class Store:
     def put_async(
         self, tensors: TensorDict, *, key: str | None = None
     ) -> ArtifactFuture[RegisteredArtifact]:
-        future = self._executor.submit(
-            self._perform_registration,
-            tensors,
-            key=key,
-            plan=PlanType.VRAM_COALESCED,
-        )
+        cancel_event = threading.Event()
+        handle_lock = threading.Lock()
+        handle_ref: dict[str, _RegisterHandle | None] = {"handle": None}
+
+        def _on_begin(handle: _RegisterHandle) -> None:
+            with handle_lock:
+                handle_ref["handle"] = handle
+
+        def _task() -> RegisteredArtifact:
+            try:
+                return self._perform_registration(
+                    tensors,
+                    key=key,
+                    plan=PlanType.VRAM_COALESCED,
+                    cancel_event=cancel_event,
+                    on_begin=_on_begin,
+                )
+            finally:
+                with handle_lock:
+                    handle_ref["handle"] = None
+
+        future = self._executor.submit(_task)
         self._track_future(future)
-        return ArtifactFuture(future)
+
+        def _cancel() -> bool:
+            if cancel_event.is_set():
+                return False
+            cancel_event.set()
+            with handle_lock:
+                handle = handle_ref.get("handle")
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    return bool(handle.abort(timeout_s=5.0))
+            return True
+
+        return ArtifactFuture(future, cancel_callback=_cancel)
 
     def get(
         self,

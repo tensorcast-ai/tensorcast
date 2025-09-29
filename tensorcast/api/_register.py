@@ -7,6 +7,8 @@ import contextlib
 import logging
 import threading
 import weakref
+from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -533,6 +535,7 @@ class _CoalescedUploader:
         layout: CoalescedLayout,
         handle: RegisteredArtifact,
         handshake: Handshake,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, torch.Tensor]:
         if not isinstance(handshake, CoalescedHandshake):
             raise TensorCastError("Unexpected handshake type for coalesced plan")
@@ -544,7 +547,11 @@ class _CoalescedUploader:
             layout.offsets,
             True,
         )
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError
         for name, src in artifact.items():
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError
             dst = dest_state_dict[name]
             local = src
             if not local.is_cuda:
@@ -561,6 +568,8 @@ class _CoalescedUploader:
                     f"Shape mismatch for tensor '{name}': {tuple(local.shape)} vs {tuple(dst.shape)}"
                 )
             dst.copy_(local, non_blocking=True)
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError
         torch.cuda.synchronize(ctx.device_id)
         return dest_state_dict
 
@@ -574,6 +583,7 @@ class _LeaseUploader:
         layout: CoalescedLayout,
         handle: RegisteredArtifact,
         handshake: Handshake,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, torch.Tensor]:
         def _export_cuda_ipc_handle(ptr: int) -> bytes:
             return get_cuda_memory_handle(ctx.device_id, int(ptr))
@@ -582,6 +592,8 @@ class _LeaseUploader:
         chunks = list(layout.unique_chunks)
         chunks.sort(key=lambda x: int(x[2]))
         for src_off, size_bytes, dst_off, _stream in chunks:
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError
             handle_bytes = _export_cuda_ipc_handle(int(src_off))
             segments.append(
                 LeaseSegment(
@@ -592,6 +604,8 @@ class _LeaseUploader:
                     dst_offset=int(dst_off),
                 )
             )
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError
         ctl = handle.client
         ok = ctl.feed_register_artifact_lease_segments(handle.registration_id, segments)
         if not ok:
@@ -615,6 +629,8 @@ def _register_artifact_core(
     prevalidate_disk: bool = True,
     client: DaemonCtl | None = None,
     daemon_address: str | None = None,
+    cancel_event: threading.Event | None = None,
+    on_begin: Callable[[RegisteredArtifact], None] | None = None,
 ) -> RegistrationResult:
     if client is None:
         runtime_ctx = startup.require_initialized()
@@ -676,69 +692,86 @@ def _register_artifact_core(
             client=ctl,
             daemon_address=addr,
         )
+        if on_begin is not None:
+            on_begin(handle)
+        if cancel_event and cancel_event.is_set():
+            with contextlib.suppress(Exception):
+                handle.abort(timeout_s=5.0)
+            raise CancelledError
 
         registrar = PLAN_REGISTRY[plan_type]
         with handle:
-            # Upload per plan
-            if isinstance(registrar, _CoalescedUploader):
-                state_dict = registrar.upload(
-                    artifact=artifact,
-                    ctx=ctx,
-                    layout=layout,
-                    handle=handle,
-                    handshake=hs,
-                )
-                commit_res = handle.commit(timeout_s=60.0)
-                desc = commit_res.descriptor
-                _persist_publish_if_needed(
-                    desc=desc,
-                    options=options,
-                    state_dict_to_save=state_dict,
-                    client=ctl,
-                )
-                return RegistrationResult(
-                    state_dict=state_dict,
-                    descriptor=desc,
-                    lease=None,
-                    build=ctx,
-                    layout=layout,
-                    index_bytes=index_bytes,
-                    plan=plan_type,
-                )
+            try:
+                # Upload per plan
+                if isinstance(registrar, _CoalescedUploader):
+                    state_dict = registrar.upload(
+                        artifact=artifact,
+                        ctx=ctx,
+                        layout=layout,
+                        handle=handle,
+                        handshake=hs,
+                        cancel_event=cancel_event,
+                    )
+                    if cancel_event and cancel_event.is_set():
+                        raise CancelledError
+                    commit_res = handle.commit(timeout_s=60.0)
+                    desc = commit_res.descriptor
+                    _persist_publish_if_needed(
+                        desc=desc,
+                        options=options,
+                        state_dict_to_save=state_dict,
+                        client=ctl,
+                    )
+                    return RegistrationResult(
+                        state_dict=state_dict,
+                        descriptor=desc,
+                        lease=None,
+                        build=ctx,
+                        layout=layout,
+                        index_bytes=index_bytes,
+                        plan=plan_type,
+                    )
 
-            if isinstance(registrar, _LeaseUploader):
-                _ = registrar.upload(
-                    artifact=artifact,
-                    ctx=ctx,
-                    layout=layout,
-                    handle=handle,
-                    handshake=hs,
-                )
-                commit_res = handle.commit(timeout_s=60.0)
-                desc = commit_res.descriptor
-                _persist_publish_if_needed(
-                    desc=desc,
-                    options=options,
-                    state_dict_to_save=None,
-                    client=ctl,
-                )
-                lease_obj: RegisteredLease = RegisteredLease(
-                    registration_id=handle.registration_id,
-                    daemon_address=addr,
-                    ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
-                    owner_pid=ctl._get_effective_pid(),
-                    client=ctl,
-                )
-                # For lease plans, return original artifact as the state_dict
-                return RegistrationResult(
-                    state_dict=artifact,
-                    descriptor=desc,
-                    lease=lease_obj,
-                    build=ctx,
-                    layout=layout,
-                    index_bytes=index_bytes,
-                    plan=plan_type,
-                )
+                if isinstance(registrar, _LeaseUploader):
+                    _ = registrar.upload(
+                        artifact=artifact,
+                        ctx=ctx,
+                        layout=layout,
+                        handle=handle,
+                        handshake=hs,
+                        cancel_event=cancel_event,
+                    )
+                    if cancel_event and cancel_event.is_set():
+                        raise CancelledError
+                    commit_res = handle.commit(timeout_s=60.0)
+                    desc = commit_res.descriptor
+                    _persist_publish_if_needed(
+                        desc=desc,
+                        options=options,
+                        state_dict_to_save=None,
+                        client=ctl,
+                    )
+                    lease_obj: RegisteredLease = RegisteredLease(
+                        registration_id=handle.registration_id,
+                        daemon_address=addr,
+                        ttl_ms=int(ttl_ms) if ttl_ms and ttl_ms > 0 else 600_000,
+                        owner_pid=ctl._get_effective_pid(),
+                        client=ctl,
+                    )
+                    # For lease plans, return original artifact as the state_dict
+                    return RegistrationResult(
+                        state_dict=artifact,
+                        descriptor=desc,
+                        lease=lease_obj,
+                        build=ctx,
+                        layout=layout,
+                        index_bytes=index_bytes,
+                        plan=plan_type,
+                    )
+            except CancelledError:
+                with contextlib.suppress(Exception):
+                    handle.abort(timeout_s=5.0)
+                raise
 
     raise InvalidPlan(f"Unknown plan: {plan_type}")
 

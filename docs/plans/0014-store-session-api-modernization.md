@@ -69,7 +69,7 @@ for attempt in range(max_retries):
   - [ ] Milestone 0.2: Add targeted tracing around `tensorcast.api.register_artifact` and `get_artifact_*` to confirm daemon/global store RPC contracts before refactor (temporary instrumentation removed once new Store is live)
 - [ ] Phase 1: Session & Future Infrastructure
   - [x] Milestone 1.1: Introduce `tensorcast/api/store.py` with type aliases (`TensorDict`, `ArtifactStatusCode`, `RetryPolicy`, etc.) matching the design
-  - [ ] Milestone 1.2: Implement `ArtifactFuture` wrapper + single-threaded completion executor (reuse async-copy manager hooks from Design 0005) with cancellation propagation skeletons
+  - [x] Milestone 1.2: Implement `ArtifactFuture` wrapper + single-threaded completion executor (reuse async-copy manager hooks from Design 0005) with cancellation propagation skeletons
   - [ ] Milestone 1.3: Build `Store` constructor that resolves `DaemonCtl` connections via `tensorcast.daemon_ctl.get_daemon_client` and performs one-time capability discovery + telemetry registration
   - [x] Milestone 1.4: Port lease/keepalive management from `RegisteredArtifact` / `RegisteredLease` into Store-scoped helpers with deterministic shutdown
 - [ ] Phase 2: Registration & Put Verbs
@@ -101,7 +101,7 @@ for attempt in range(max_retries):
 - [ ] Implement `Store` lifecycle (channel pool, capability probe, lease scheduler, metrics hooks)
 - [x] Refactor `_register.py` helpers into internal functions consumed by `Store.register`/`put`; delete duplicated keepalive threads
 - [x] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
-- [ ] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
+- [x] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [ ] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
 - [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path
 - [ ] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
