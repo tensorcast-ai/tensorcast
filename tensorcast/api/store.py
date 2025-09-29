@@ -27,6 +27,7 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
+from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
@@ -252,6 +253,7 @@ class Store:
             "daemon_endpoint": daemon_endpoint,
             "session_id": self._session_id,
         }
+        self._metrics_latencies: dict[str, float] = {}
         self._capabilities: StoreCapabilities | None = None
         self._retry_policies = self._build_retry_policies()
         self._client_lock = threading.RLock()
@@ -386,6 +388,14 @@ class Store:
             capabilities = self._capabilities_from_config(config)
         self._capabilities = capabilities
         self._record_session_start(capabilities)
+        self._session_labels.update(
+            {
+                "mem_pool_bytes": str(capabilities.mem_pool_bytes),
+                "tx_slice_bytes": str(capabilities.tx_slice_bytes),
+                "supports_coalesced": str(capabilities.supports_coalesced),
+                "supports_lease": str(capabilities.supports_lease),
+            }
+        )
 
     def _install_at_fork(self) -> None:
         Store._AT_FORK_REGISTRY.add(self)
@@ -425,6 +435,7 @@ class Store:
             "daemon_endpoint": self._daemon_endpoint,
             "session_id": self._session_id,
         }
+        self._metrics_latencies = {}
         self._capabilities = None
         self._retry_policies = self._build_retry_policies()
 
@@ -718,21 +729,33 @@ class Store:
         policy = self._retry_policies.get(method)
         attempt = 1
         start_time = time.monotonic()
+
+        def record_outcome(status: str) -> None:
+            duration = time.monotonic() - start_time
+            store_metrics.observe_latency(
+                method, self._daemon_endpoint, status, duration
+            )
+            if status not in {"OK", "CANCELLED"}:
+                store_metrics.increment_error(method, self._daemon_endpoint, status)
+
         while True:
             if cancel_event and cancel_event.is_set():
+                record_outcome("CANCELLED")
                 raise ArtifactError(
                     "Registration cancelled",
                     status_code="CANCELLED",
                     retryable=False,
                 )
             try:
-                return self._attempt_registration(
+                result = self._attempt_registration(
                     tensors,
                     key=key,
                     plan=plan,
                     cancel_event=cancel_event,
                     on_begin=on_begin,
                 )
+                record_outcome("OK")
+                return result
             except ArtifactError as error:
                 should_retry = self._should_retry_registration(
                     method,
@@ -743,14 +766,19 @@ class Store:
                     cancel_event=cancel_event,
                 )
                 if not should_retry:
+                    record_outcome(error.status_code)
                     raise
                 assert policy is not None
                 delay = self._compute_retry_delay(policy, attempt)
                 remaining = self._remaining_budget(policy, start_time)
                 if remaining is not None and remaining <= 0:
+                    record_outcome(error.status_code)
                     raise
                 if remaining is not None:
                     delay = min(delay, max(0.0, remaining))
+                store_metrics.increment_retry(
+                    method, self._daemon_endpoint, error.status_code
+                )
                 if delay > 0:
                     logger.info(
                         "store.registration_retry",
@@ -1132,21 +1160,33 @@ class Store:
         policy = self._retry_policies.get(method, self._retry_policies.get("get"))
         attempt = 1
         start_time = time.monotonic()
+
+        def record_outcome(status: str) -> None:
+            duration = time.monotonic() - start_time
+            store_metrics.observe_latency(
+                method, self._daemon_endpoint, status, duration
+            )
+            if status not in {"OK", "CANCELLED"}:
+                store_metrics.increment_error(method, self._daemon_endpoint, status)
+
         while True:
             if cancel_event and cancel_event.is_set():
+                record_outcome("CANCELLED")
                 raise ArtifactError(
                     "Retrieval cancelled",
                     status_code="CANCELLED",
                     retryable=False,
                 )
             try:
-                return self._attempt_get(
+                materialized, device_id = self._attempt_get(
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
                     fallback=fallback,
                     cancel_event=cancel_event,
                 )
+                record_outcome("OK")
+                return materialized, device_id
             except ArtifactError as error:
                 should_retry = self._should_retry_registration(
                     method,
@@ -1157,14 +1197,19 @@ class Store:
                     cancel_event=cancel_event,
                 )
                 if not should_retry:
+                    record_outcome(error.status_code)
                     raise
                 assert policy is not None
                 delay = self._compute_retry_delay(policy, attempt)
                 remaining = self._remaining_budget(policy, start_time)
                 if remaining is not None and remaining <= 0:
+                    record_outcome(error.status_code)
                     raise
                 if remaining is not None:
                     delay = min(delay, max(0.0, remaining))
+                store_metrics.increment_retry(
+                    method, self._daemon_endpoint, error.status_code
+                )
                 if delay > 0:
                     logger.info(
                         "store.get_retry",
@@ -1189,14 +1234,19 @@ class Store:
                     cancel_event=cancel_event,
                 )
                 if not should_retry:
+                    record_outcome(error.status_code)
                     raise error from None
                 assert policy is not None
                 delay = self._compute_retry_delay(policy, attempt)
                 remaining = self._remaining_budget(policy, start_time)
                 if remaining is not None and remaining <= 0:
+                    record_outcome(error.status_code)
                     raise error from None
                 if remaining is not None:
                     delay = min(delay, max(0.0, remaining))
+                store_metrics.increment_retry(
+                    method, self._daemon_endpoint, error.status_code
+                )
                 if delay > 0:
                     logger.info(
                         "store.get_retry",
