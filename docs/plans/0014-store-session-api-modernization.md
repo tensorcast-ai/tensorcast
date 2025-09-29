@@ -78,8 +78,8 @@ for attempt in range(max_retries):
   - [ ] Milestone 2.3: Integrate retry policy evaluation + `ArtifactError` mapping for all registration failure paths
   - [ ] Milestone 2.4: Add metrics counters for registration success/failure/latency tagged by daemon endpoint
 - [ ] Phase 3: Retrieval & In-Place Verbs
-  - [ ] Milestone 3.1: Extract canonical-index fetch + replica selection code from `_loader.get_artifact_*` into reusable Store helpers with fallback policy evaluation
-  - [ ] Milestone 3.2: Implement `Store.get`/`get_async` returning `dict[str, torch.Tensor]` with automatic lease keepalive and future completion/cancellation semantics
+  - [x] Milestone 3.1: Extract canonical-index fetch + replica selection code from `_loader.get_artifact_*` into reusable Store helpers with fallback policy evaluation
+  - [x] Milestone 3.2: Implement `Store.get`/`get_async` returning `dict[str, torch.Tensor]` with automatic lease keepalive and future completion/cancellation semantics
   - [ ] Milestone 3.3: Implement `Store.get_into`/`get_into_async`, including strict tensor layout validation and zero-copy CUDA IPC path selection
   - [ ] Milestone 3.4: Wire fallback options (disk, P2P) and verification toggles through the Store API; emit telemetry for fallback decisions
 - [ ] Phase 4: Legacy API Shims & Observability
@@ -100,7 +100,7 @@ for attempt in range(max_retries):
 - [x] Create `tensorcast/api/store.py` with type definitions, `StoreOptions`, `FallbackOptions`, `RetryPolicy`, `ArtifactError`, `RegisteredArtifact`
 - [ ] Implement `Store` lifecycle (channel pool, capability probe, lease scheduler, metrics hooks)
 - [x] Refactor `_register.py` helpers into internal functions consumed by `Store.register`/`put`; delete duplicated keepalive threads
-- [ ] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
+- [x] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
 - [ ] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [ ] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
 - [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path

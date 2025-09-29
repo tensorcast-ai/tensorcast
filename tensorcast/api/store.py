@@ -20,8 +20,10 @@ from typing import Generic, Literal, TypeVar
 
 import torch
 
-from tensorcast.api._config import PlanType, RegisterArtifactOptions
+from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
+from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
+from tensorcast.api._loader import MaterializedArtifact, materialize_artifact
 from tensorcast.api._register import (
     RegisteredLease,
     RegistrationResult,
@@ -507,6 +509,76 @@ class Store:
 
         future.add_done_callback(_cleanup)
 
+    @staticmethod
+    def _resolve_identifiers(
+        artifact_id: str | None, key: str | None
+    ) -> tuple[str | None, str | None]:
+        if artifact_id and key:
+            raise ArtifactError(
+                "Specify either artifact_id or key, not both",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not artifact_id and not key:
+            raise ArtifactError(
+                "Either artifact_id or key is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return artifact_id, key
+
+    @staticmethod
+    def _resolve_device_selector(selector: torch.device | str | None) -> int:
+        if selector is None:
+            if not torch.cuda.is_available():
+                raise ArtifactError(
+                    "CUDA device required for retrieval",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=True,
+                )
+            return int(torch.cuda.current_device())
+        if isinstance(selector, torch.device):
+            if selector.type != "cuda":
+                raise ArtifactError(
+                    f"Unsupported device selector {selector}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return int(selector.index or 0)
+        return resolve_device(selector)
+
+    def _build_get_options(
+        self, fallback: FallbackOptions | None
+    ) -> GetArtifactOptions:
+        prefer = "disk" if fallback and fallback.prefer_disk else "p2p"
+        return GetArtifactOptions(prefer=prefer)
+
+    def _ensure_fallback_supported(self, fallback: FallbackOptions | None) -> None:
+        if fallback and fallback.prefer_disk:
+            raise ArtifactError(
+                "Disk fallback is not implemented yet",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+    def _materialize(
+        self,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        device_id: int,
+        options: GetArtifactOptions,
+    ) -> MaterializedArtifact:
+        client = self._ensure_client()
+        return materialize_artifact(
+            client=client,
+            daemon_address=self._daemon_endpoint,
+            device_id=device_id,
+            artifact_id=artifact_id,
+            key=key,
+            options=options,
+        )
+
     # ------------------------------------------------------------------
     # Verb placeholders – wired up in later milestones.
     # ------------------------------------------------------------------
@@ -558,7 +630,18 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> dict[str, torch.Tensor]:
-        raise NotImplementedError
+        artifact_id, key = self._resolve_identifiers(artifact_id, key)
+        resolved_fallback = fallback or self._opts.fallback
+        self._ensure_fallback_supported(resolved_fallback)
+        device_id = self._resolve_device_selector(device)
+        options = self._build_get_options(resolved_fallback)
+        materialized = self._materialize(
+            artifact_id=artifact_id,
+            key=key,
+            device_id=device_id,
+            options=options,
+        )
+        return materialized.state_dict
 
     def get_async(
         self,
@@ -568,7 +651,15 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> ArtifactFuture[dict[str, torch.Tensor]]:
-        raise NotImplementedError
+        future = self._executor.submit(
+            self.get,
+            artifact_id=artifact_id,
+            key=key,
+            device=device,
+            fallback=fallback,
+        )
+        self._track_future(future)
+        return ArtifactFuture(future)
 
     def get_into(
         self,
