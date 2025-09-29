@@ -34,6 +34,7 @@ communicator:
     stage_chunk_mb_cpu: 4
     stage_chunk_mb_gpu: 16
     buffers_per_flow: 4
+    expected_gpu_channels: 0
   rdma:
     outstanding_wr: 64
     ack_ttl_ms: 30000

@@ -13,6 +13,8 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 // absl string utilities no longer needed in typed-config engine
@@ -53,6 +55,18 @@ struct RdmaReadSession {
   net_dev_t dev;
   tcp_transport_t control_transport;
   std::unique_ptr<StagingWindow> window;
+};
+
+struct Communicator::GpuChannelLease {
+  explicit GpuChannelLease(Communicator* owner) : owner(owner) {}
+
+  ~GpuChannelLease() {
+    if (owner != nullptr) {
+      owner->release_gpu_channel_slot();
+    }
+  }
+
+  Communicator* owner;
 };
 
 namespace {
@@ -272,6 +286,43 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   gpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
   gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
 
+  const size_t total_gpu_slices = gpu_memory_pool_->capacity_slices();
+  if (total_gpu_slices == 0) {
+    LOG(FATAL) << "GPU pinned buffer pool initialized with zero slices";
+  }
+  const size_t stager_reserve = num_buffers;
+  size_t available_gpu_slices = 0;
+  if (total_gpu_slices > stager_reserve) {
+    available_gpu_slices = total_gpu_slices - stager_reserve;
+  }
+  size_t computed_gpu_channel_limit = 0;
+  if (buffers_per_flow_ > 0) {
+    computed_gpu_channel_limit = available_gpu_slices / static_cast<size_t>(buffers_per_flow_);
+  }
+
+  const uint32_t configured_gpu_channels = config_.stager().expected_gpu_channels();
+  if (configured_gpu_channels > 0) {
+    if (configured_gpu_channels > computed_gpu_channel_limit) {
+      LOG(FATAL) << "expected_gpu_channels=" << configured_gpu_channels
+                 << " exceeds staging capacity. gpu_pool_slices=" << total_gpu_slices << " reserve=" << stager_reserve
+                 << " buffers_per_flow=" << buffers_per_flow_ << " computed_limit=" << computed_gpu_channel_limit
+                 << ". Increase pool.pool_size_bytes or reduce expected_gpu_channels.";
+    }
+    max_gpu_channels_ = static_cast<int>(configured_gpu_channels);
+    enforce_gpu_channel_limit_ = max_gpu_channels_ > 0;
+  } else {
+    max_gpu_channels_ = static_cast<int>(computed_gpu_channel_limit);
+    enforce_gpu_channel_limit_ = max_gpu_channels_ > 0;
+  }
+
+  if (enforce_gpu_channel_limit_) {
+    LOG(INFO) << "[Communicator] GPU staging pool allows up to " << max_gpu_channels_
+              << " concurrent MTCP transports before additional channels are rejected";
+  } else {
+    LOG(WARNING) << "[Communicator] GPU staging pool has insufficient headroom to compute MTCP channel limit;"
+                 << " concurrent GPU reads may block waiting for staging buffers.";
+  }
+
   // CPU staging pool honors CPU chunk size; size conservatively for one flow
   if (cpu_chunk_size != gpu_chunk_size) {
     const size_t cpu_pool_size = cpu_chunk_size * num_buffers; // minimal to honor buffers_per_flow
@@ -406,6 +457,37 @@ void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status st
   }
 
   LOG(WARNING) << "MTCP staging task failed for key=" << tensor_key << ": " << status;
+}
+
+absl::StatusOr<std::shared_ptr<void>> Communicator::acquire_gpu_channel_slot() {
+  if (!enforce_gpu_channel_limit_ || max_gpu_channels_ <= 0) {
+    return std::shared_ptr<void>{};
+  }
+
+  int current = active_gpu_channels_.load(std::memory_order_relaxed);
+  while (true) {
+    if (current >= max_gpu_channels_) {
+      return absl::ResourceExhaustedError(
+          absl::StrFormat(
+              "GPU staging pool capacity exceeded: %d active MTCP channels, limit=%d (buffers_per_flow=%d)",
+              current,
+              max_gpu_channels_,
+              buffers_per_flow_));
+    }
+    if (active_gpu_channels_.compare_exchange_weak(
+            current, current + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+      auto lease = std::shared_ptr<GpuChannelLease>(new GpuChannelLease(this));
+      return std::static_pointer_cast<void>(lease);
+    }
+  }
+}
+
+void Communicator::release_gpu_channel_slot() {
+  int previous = active_gpu_channels_.fetch_sub(1, std::memory_order_acq_rel);
+  if (previous <= 0) {
+    active_gpu_channels_.store(0, std::memory_order_relaxed);
+    LOG(WARNING) << "[Communicator] GPU channel slot release underflow";
+  }
 }
 
 void Communicator::process_mtcp_read_task(MtcpReadTask task) {
@@ -914,6 +996,7 @@ absl::Status Communicator::handle_mtcp_read_request(
     const tcp_transport_t& control_transport,
     const ProtoReadRequest& request,
     const std::shared_ptr<PartitionTensor>& tensor) {
+  const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
   MtcpReadTask task;
   task.channel = channel;
   task.control_transport = control_transport;
@@ -929,6 +1012,22 @@ absl::Status Communicator::handle_mtcp_read_request(
 
   auto transport = channel->get_mtcp();
   if (transport == nullptr) {
+    auto slot_or = acquire_gpu_channel_slot();
+    if (!slot_or.ok()) {
+      auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+      auto* payload = fail_msg->get_payload<ProtoReadFailed>();
+      memcpy(payload->tensor_key, request.tensor_key, kMaxTensorNameLen);
+      payload->offset = request.offset;
+      payload->reason = absl::IsResourceExhausted(slot_or.status()) ? TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED
+                                                                    : TENSORCAST_READ_FAILED_MEM_MISMATCH;
+      misc::result_t send_res = control_transport->send(fail_msg);
+      if (send_res != misc::SUCCESS) {
+        LOG(WARNING) << "Failed to send READ_FAILED after GPU channel limit hit: key=" << tensor_key
+                     << " res=" << send_res;
+      }
+      return slot_or.status();
+    }
+    std::shared_ptr<void> gpu_slot_handle = std::move(slot_or).value();
     transport = std::make_shared<transport::MTcpTransport>(
         mtcp_conn_count_,
         gsl::not_null<std::shared_ptr<MemoryStager>>{memory_stager_},
@@ -936,6 +1035,7 @@ absl::Status Communicator::handle_mtcp_read_request(
         gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{gpu_memory_pool_},
         buffers_per_flow_);
     channel->set_transport(transport);
+    channel->set_gpu_slot_handle(std::move(gpu_slot_handle));
   }
   transport->set_tcp_tos(config_.transport().tcp_tos());
 
@@ -1803,7 +1903,23 @@ misc::result_t Communicator::on_receive_response(
         break;
       }
       pending_requests_.del(req_key);
-      read_request->set_result(absl::InternalError("failed to read from peer"));
+      absl::Status failure_status = absl::InternalError("failed to read from peer");
+      switch (rsp->reason) {
+        case TENSORCAST_READ_FAILED_NO_TENSOR:
+          failure_status = absl::NotFoundError(absl::StrCat("tensor not found: ", tensor_key));
+          break;
+        case TENSORCAST_READ_FAILED_OVERFLOW:
+          failure_status =
+              absl::OutOfRangeError(absl::StrCat("read overflow for tensor ", tensor_key, " offset=", rsp->offset));
+          break;
+        case TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED:
+          failure_status = absl::ResourceExhaustedError("GPU staging pool capacity exceeded");
+          break;
+        case TENSORCAST_READ_FAILED_MEM_MISMATCH:
+        default:
+          break;
+      }
+      read_request->set_result(failure_status);
       break;
     }
     default:

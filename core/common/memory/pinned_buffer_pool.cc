@@ -149,6 +149,11 @@ size_t PinnedBufferPool::get_available_size() const {
   return free_list_.size() * chunk_size_;
 }
 
+size_t PinnedBufferPool::capacity_slices() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return pool_.size();
+}
+
 std::vector<gsl::not_null<char*>> PinnedBufferPool::list_buffers() const {
   std::vector<gsl::not_null<char*>> out;
   {

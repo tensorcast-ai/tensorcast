@@ -118,6 +118,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
     cfg.mutable_stager()->set_buffers_per_flow(2); /* reduce staging footprint for concurrent cycling */
+    cfg.mutable_stager()->set_buffers_per_flow(2); /* reduce staging footprint for concurrent cycling */
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -423,6 +424,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+    cfg.mutable_stager()->set_buffers_per_flow(2); /* keep per-flow staging buffers bounded */
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -543,8 +545,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
+    const int num_cycles = 10;
+
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+    cfg.mutable_stager()->set_buffers_per_flow(2);
+    cfg.mutable_stager()->set_expected_gpu_channels(num_cycles);
+    const size_t chunk_bytes =
+        (cfg.stager().stage_chunk_mb_gpu() > 0 ? cfg.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
+    const size_t required_slices = static_cast<size_t>(cfg.stager().buffers_per_flow()) * (num_cycles + 1);
+    cfg.mutable_pool()->set_pool_size_bytes(required_slices * chunk_bytes);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -568,7 +578,6 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Rapidly create connections, transfer, and close
-    const int num_cycles = 10;
     std::atomic<int> successful_cycles(0);
     std::vector<std::future<void>> futures;
 
@@ -588,6 +597,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
         cfg.mutable_stager()->set_buffers_per_flow(2); /* keep per-flow staging buffers bounded */
+        cfg.mutable_stager()->set_expected_gpu_channels(num_cycles); /* share same limit as source */
+        cfg.mutable_pool()->set_pool_size_bytes(required_slices * chunk_bytes);
         auto engine = std::make_shared<Communicator>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
@@ -644,6 +655,89 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(successful_cycles.load() == num_cycles);
 
     // Cleanup
+    REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
+  }
+
+  SECTION("GPU MTCP concurrency limit is enforced") {
+    LOG(INFO) << "Test: GPU MTCP concurrency limit enforcement";
+
+    int source_port = find_available_port(50000);
+    REQUIRE(source_port > 0);
+
+    communicator::v1::CommunicatorConfig cfg;
+    cfg.set_enable_rdma(false);
+    cfg.mutable_stager()->set_buffers_per_flow(2);
+    cfg.mutable_stager()->set_expected_gpu_channels(1);
+    auto source_engine = std::make_shared<Communicator>(cfg);
+    REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
+
+    const std::size_t tensor_size = 8 * 1024;
+    void* gpu_ptr;
+    REQUIRE(tensorcast::cuda::malloc(&gpu_ptr, tensor_size).ok());
+
+    auto test_data = create_test_pattern(tensor_size, 42);
+    REQUIRE(tensorcast::cuda::memcpy(gpu_ptr, test_data.data(), tensor_size, cudaMemcpyHostToDevice).ok());
+
+    Communicator::RegisterTensorOptions opts;
+    opts.register_mr = false;
+    opts.needs_staging = true;
+    opts.async = false;
+    REQUIRE(source_engine
+                ->register_tensor_ex(
+                    "limit_test", reinterpret_cast<uint64_t>(gpu_ptr), tensor_size, COMMUNICATE_ENGINE_DEV_GPU, 0, opts)
+                .ok());
+
+    auto make_target_engine = [&](const std::string& label) {
+      communicator::v1::CommunicatorConfig target_cfg;
+      target_cfg.set_enable_rdma(false);
+      target_cfg.mutable_stager()->set_buffers_per_flow(2);
+      auto engine = std::make_shared<Communicator>(target_cfg);
+      int port = find_available_port(source_port + 100);
+      REQUIRE(port > 0);
+      auto status = engine->init("127.0.0.1", port);
+      REQUIRE(status.ok());
+      LOG(INFO) << label << " engine connected";
+      return engine;
+    };
+
+    auto engine_a = make_target_engine("engine_a");
+    void* buffer_a = std::malloc(tensor_size);
+    REQUIRE(buffer_a != nullptr);
+    auto future_a = engine_a->read_tensor(
+        "limit_test",
+        reinterpret_cast<uint64_t>(buffer_a),
+        tensor_size,
+        COMMUNICATE_ENGINE_DEV_CPU,
+        0,
+        "127.0.0.1",
+        source_port);
+
+    auto result_a = future_a.get();
+    REQUIRE(result_a.status.ok());
+    REQUIRE(verify_pattern(buffer_a, tensor_size, 42));
+
+    auto engine_b = make_target_engine("engine_b");
+    void* buffer_b = std::malloc(tensor_size);
+    REQUIRE(buffer_b != nullptr);
+    auto future_b = engine_b->read_tensor(
+        "limit_test",
+        reinterpret_cast<uint64_t>(buffer_b),
+        tensor_size,
+        COMMUNICATE_ENGINE_DEV_CPU,
+        0,
+        "127.0.0.1",
+        source_port);
+
+    auto result_b = future_b.get();
+    REQUIRE_FALSE(result_b.status.ok());
+    INFO("Engine B read status: " << result_b.status.ToString());
+    REQUIRE(result_b.status.code() == absl::StatusCode::kResourceExhausted);
+
+    std::free(buffer_b);
+    CHECK_OK(engine_b->close_connection("127.0.0.1", source_port));
+    std::free(buffer_a);
+    CHECK_OK(engine_a->close_connection("127.0.0.1", source_port));
+
     REQUIRE(tensorcast::cuda::free(gpu_ptr).ok());
   }
 
@@ -1395,8 +1489,16 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
+    const int num_iterations = 10;
+
     communicator::v1::CommunicatorConfig cfg15;
     cfg15.set_enable_rdma(false); /* disable RDMA */
+    cfg15.mutable_stager()->set_buffers_per_flow(2);
+    cfg15.mutable_stager()->set_expected_gpu_channels(num_iterations);
+    const size_t raii_chunk_bytes =
+        (cfg15.stager().stage_chunk_mb_gpu() > 0 ? cfg15.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
+    const size_t raii_required_slices = static_cast<size_t>(cfg15.stager().buffers_per_flow()) * (num_iterations + 1);
+    cfg15.mutable_pool()->set_pool_size_bytes(raii_required_slices * raii_chunk_bytes);
     auto source_engine = std::make_shared<Communicator>(cfg15);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -1420,7 +1522,6 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     }
 
     // Test multiple scenarios
-    const int num_iterations = 10;
     std::atomic<int> buffers_acquired(0);
     std::atomic<int> buffers_released(0);
     std::atomic<int> read_status_fail_count(0);
@@ -1440,6 +1541,9 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg16;
         cfg16.set_enable_rdma(false); /* disable RDMA */
+        cfg16.mutable_stager()->set_buffers_per_flow(2);
+        cfg16.mutable_stager()->set_expected_gpu_channels(num_iterations);
+        cfg16.mutable_pool()->set_pool_size_bytes(raii_required_slices * raii_chunk_bytes);
         auto engine = std::make_shared<Communicator>(cfg16);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
