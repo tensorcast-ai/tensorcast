@@ -458,8 +458,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     SECTION("Remote GPU to Local GPU via TCP with insufficient pinned pool capacity") {
       const int tcp_conn_count = 4;
+      const int buffers_per_flow = 2;
       const std::size_t stage_chunk_bytes = 16ull * 1024 * 1024; // 16 MiB
       const std::size_t artifact_size = stage_chunk_bytes * 4;
+      const std::size_t communicator_pool_bytes =
+          stage_chunk_bytes * buffers_per_flow * (static_cast<std::size_t>(tcp_conn_count) + 1);
 
       int source_port = find_available_port();
       REQUIRE(source_port > 0);
@@ -470,8 +473,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       src_cfg.set_enable_rdma(false);
       src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
       src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-      src_cfg.mutable_stager()->set_buffers_per_flow(2);
-      src_cfg.mutable_pool()->set_pool_size_bytes(artifact_size);
+      src_cfg.mutable_stager()->set_buffers_per_flow(buffers_per_flow);
+      src_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
       src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto source_engine = std::make_shared<Communicator>(src_cfg);
       REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
@@ -510,8 +513,8 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       dst_cfg.set_enable_rdma(false);
       dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
       dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-      dst_cfg.mutable_stager()->set_buffers_per_flow(2);
-      dst_cfg.mutable_pool()->set_pool_size_bytes(stage_chunk_bytes * 2); // intentionally undersized
+      dst_cfg.mutable_stager()->set_buffers_per_flow(buffers_per_flow);
+      dst_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
       dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto target_engine = std::make_shared<Communicator>(dst_cfg);
       REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
@@ -529,6 +532,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       auto loader = std::make_shared<P2PLoader>(p2p_src);
       REQUIRE(loader->initialize().ok());
 
+      // ReplicaLoadController pool intentionally remains undersized to trigger pinned OOM behaviour.
       auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 2, stage_chunk_bytes);
       auto va_space = std::make_shared<VirtualAddressSpace>();
       auto mem_manager = std::make_shared<ReplicaLoadController>(

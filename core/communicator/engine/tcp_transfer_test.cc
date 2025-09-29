@@ -186,8 +186,21 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     CAPTURE(target_port);
     REQUIRE(target_port > 0);
 
+    // Keep concurrency modest so fake CUDA runs on low-spec CI machines without exhausting staging buffers.
+    constexpr uint32_t kStageChunkMiB = 16;
+    constexpr uint32_t kBuffersPerFlow = 4;
+    constexpr uint32_t kTcpConnCount = 2;
+    const uint64_t chunk_bytes = static_cast<uint64_t>(kStageChunkMiB) * 1024ULL * 1024ULL;
+    const uint64_t pool_buffers = static_cast<uint64_t>(kBuffersPerFlow) * (static_cast<uint64_t>(kTcpConnCount) + 1);
+    const uint64_t pool_size_bytes = chunk_bytes * pool_buffers;
+
     communicator::v1::CommunicatorConfig cfg5;
     cfg5.set_enable_rdma(false); /* disable RDMA */
+    cfg5.mutable_transport()->set_tcp_conn_count(kTcpConnCount);
+    cfg5.mutable_stager()->set_stage_chunk_mb_gpu(kStageChunkMiB);
+    cfg5.mutable_stager()->set_buffers_per_flow(kBuffersPerFlow);
+    cfg5.mutable_pool()->set_chunk_bytes(chunk_bytes);
+    cfg5.mutable_pool()->set_pool_size_bytes(pool_size_bytes);
     auto source_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg5);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
@@ -195,6 +208,11 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
 
     communicator::v1::CommunicatorConfig cfg6;
     cfg6.set_enable_rdma(false); /* disable RDMA */
+    cfg6.mutable_transport()->set_tcp_conn_count(kTcpConnCount);
+    cfg6.mutable_stager()->set_stage_chunk_mb_gpu(kStageChunkMiB);
+    cfg6.mutable_stager()->set_buffers_per_flow(kBuffersPerFlow);
+    cfg6.mutable_pool()->set_chunk_bytes(chunk_bytes);
+    cfg6.mutable_pool()->set_pool_size_bytes(pool_size_bytes);
     auto target_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg6);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
