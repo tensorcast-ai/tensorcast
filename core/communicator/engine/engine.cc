@@ -246,10 +246,25 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
     }
     max_window_segments_ = std::min(configured_max_window, static_cast<uint32_t>(num_buffers));
   }
-  const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
-  const size_t total_pool_size = config_.pool().pool_size_bytes() > 0
-      ? config_.pool().pool_size_bytes()
-      : gpu_chunk_size * (num_buffers + recv_num_buffers);
+  int configured_conn = config_.transport().tcp_conn_count();
+  if (configured_conn <= 0) {
+    configured_conn = base::kMTcpConnCount;
+  }
+  const size_t mtcp_conn_budget = static_cast<size_t>(std::max(1, configured_conn));
+  const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
+  const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
+  const size_t computed_pool_size = gpu_chunk_size * computed_pool_buffers;
+
+  size_t total_pool_size = computed_pool_size;
+  if (config_.pool().pool_size_bytes() > 0) {
+    total_pool_size = config_.pool().pool_size_bytes();
+    if (total_pool_size < computed_pool_size) {
+      LOG(FATAL) << "Configured pinned pool size (" << total_pool_size << ") is smaller than required staging budget ("
+                 << computed_pool_size << ") for buffers_per_flow=" << num_buffers
+                 << " and tcp_conn_count=" << config_.transport().tcp_conn_count()
+                 << ". Increase pool.pool_size_bytes or reduce staging fan-out.";
+    }
+  }
 
   // GPU staging pool and stager
   gpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);

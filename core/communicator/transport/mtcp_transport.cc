@@ -245,12 +245,6 @@ MTcpTransport::MTcpTransport(
       gpu_recv_buffer_(make_streaming_buffer(memory_pool_, conn_count, buffers_per_flow_limit)),
       buffers_per_flow_limit_(buffers_per_flow_limit),
       memory_stager_(std::move(memory_stager)) {
-  if (cuda::is_fake() && buffers_per_flow_limit_ > 1) {
-    buffers_per_flow_limit_ = 1;
-    gpu_recv_buffer_ = make_streaming_buffer(memory_pool_, conn_count, buffers_per_flow_limit_);
-    LOG(WARNING)
-        << "MTcpTransport: using buffers_per_flow_limit=1 under Fake CUDA to keep staging credit cycling on CPU-only hosts";
-  }
   misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
   misc::ASSERT(conn_count <= base::kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
   bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));
