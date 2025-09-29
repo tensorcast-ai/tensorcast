@@ -6,6 +6,14 @@ This file provides guidance to AI when working with code in this repository.
 
 TensorCast is a high-performance distributed artifact storage and loading system. It uses a distributed master-worker architecture; see Architecture Overview below for details.
 
+## Command Execution
+
+- When running any Python script or module, you MUST use `uv run <script>`.
+- Never invoke `python`, `python3`, or `python -m` directly; this applies to ad-hoc scripts, tooling helpers, tests, `setup.py`, and all other Python entry points.
+- You must use `uv run pytest tests/python/xxxx` to run python tests
+- You must use `bazel test //core/component:xxx_test` to run cxx tests
+- These policies keep virtualenv isolation consistent; violating them can break the build and introduce environment skew.
+
 ## Architecture Overview
 
 ### Runtime Topology
@@ -85,8 +93,8 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
   - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
   - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
 
-- When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-reorg-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
-
+- When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
+- `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.
 
 ## Platform Assumptions
 
@@ -150,6 +158,7 @@ bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=f
 **Fake CUDA Mode Features:**
 - Enables development and testing without GPU hardware
 - Simulates 4 GPUs for testing multi-device scenarios
+- Stream and event APIs now execute callbacks asynchronously on a lightweight worker so `AsyncCopyManager` and staged transfers behave like the real runtime
 - All CUDA operations return successful status
 - Memory allocations tracked but use CPU memory
 - Zero overhead when using real CUDA backend
@@ -295,11 +304,6 @@ if (fd < 0) {
  - **not_null dereference**: For `gsl::not_null<T*>` and `gsl::not_null<std::shared_ptr<T>>`, use `var->member` instead of `var.get()->member`; prefer `operator->` for readability.
 
 ### Python Guidelines
-
-#### Development Environment
-- use `uv run xxx.py` to run python scripts instead of `python xxx.py`
-- use `uv run pytest tests/python/xxxx` to run python tests
-- use `bazel test //core/component:xxx_test` to run cxx tests (e.g., `bazel test //core/store:store_engine_test`)
 
 #### Python Naming Conventions
 - **Files/Directories**: `snake_case` (e.g., `tensorcast/global_store/manager.py`)

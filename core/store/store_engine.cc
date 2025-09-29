@@ -18,8 +18,10 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
@@ -1127,6 +1129,12 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
     const MaterializeHints& hints) {
+  const std::string canonical_artifact_id = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
+
+  if (canonical_artifact_id.empty() && mode != MaterializeMode::COPY_ONLY) {
+    return absl::InvalidArgumentError("MaterializeHints must provide artifact_id or disk_path for LOAD modes");
+  }
+
   // ────────────────────────────────────────────────────────────────────
   // Validate target device early to avoid entering CUDA paths with
   // invalid ordinals or unsupported device types.
@@ -1147,7 +1155,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
   // ────────────────────────────────────────────────────────────────────
   // Fast-path: instance already present on the requested device.
   // ────────────────────────────────────────────────────────────────────
-  const ReplicaKey dst_key{.artifact_id = hints.artifact_id, .device = target_device, /*replica=*/.replica = 0};
+  const ReplicaKey dst_key{.artifact_id = canonical_artifact_id, .device = target_device, /*replica=*/.replica = 0};
   if (auto existing_or = replica_registry_->find(dst_key); existing_or.ok()) {
     const auto& replica = existing_or.value();
 
@@ -1188,7 +1196,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     if (!hints.disk_path.empty()) {
       disk_src.path = std::filesystem::path(hints.disk_path);
     } else {
-      disk_src.path = std::filesystem::path(hints.artifact_id);
+      disk_src.path = std::filesystem::path(canonical_artifact_id);
     }
 
     loading::ReplicaTarget target;
@@ -1196,8 +1204,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         (dev_key.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
     target.location.device_id = dev_key.ordinal;
 
-    return ingest_from_disk_internal(
-        hints.disk_path.empty() ? hints.artifact_id : hints.disk_path, disk_src, target, hints);
+    return ingest_from_disk_internal(canonical_artifact_id, disk_src, target, hints);
   };
 
   // ────────────────────────────────────────────────────────────────────
@@ -1293,7 +1300,12 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     }
 
     case MaterializeMode::LOAD_ONLY: {
-      return load_from_disk(target_device);
+      auto handle_or = load_from_disk(target_device);
+      if (!handle_or.ok()) {
+        VLOG(1) << "StoreEngine::materialize_replica LOAD_ONLY artifact=" << canonical_artifact_id
+                << " device=" << target_device.ordinal << " status=" << handle_or.status();
+      }
+      return handle_or;
     }
 
     case MaterializeMode::AUTO: {
@@ -1420,6 +1432,8 @@ int StoreEngine::wait_replica_ready(const ReplicaKey& key) {
 int StoreEngine::unload_replica(const ReplicaKey& key) {
   auto replica_or = replica_registry_->find(key);
   if (!replica_or.ok()) {
+    VLOG(1) << "StoreEngine::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+            << " not found in registry: " << replica_or.status();
     return 1; // Instance not found.
   }
 
@@ -1433,12 +1447,55 @@ int StoreEngine::unload_replica(const ReplicaKey& key) {
   store::MemoryState before_state = replica->get_memory_state(loc);
 
   if (before_state <= MemoryState::UNALLOCATED) {
-    // Nothing to release – another thread has already unloaded this instance.
-    return -1;
+    // The materialize call may have just scheduled the load and not yet
+    // transitioned the replica into ALLOCATED/LOADING. Give it a brief window
+    // to advance before concluding that there is truly nothing to unload.
+    constexpr absl::Duration kLoadProgressProbe = absl::Milliseconds(250);
+    constexpr absl::Duration kProbeInterval = absl::Milliseconds(5);
+    const absl::Time probe_deadline = absl::Now() + kLoadProgressProbe;
+
+    MemoryState observed_state = before_state;
+    while (observed_state <= MemoryState::UNALLOCATED && absl::Now() < probe_deadline) {
+      absl::SleepFor(kProbeInterval);
+      observed_state = replica->get_memory_state(loc);
+    }
+
+    if (observed_state <= MemoryState::UNALLOCATED) {
+      // Still nothing allocated and no load in-flight; treat as a no-op unload.
+      VLOG(1) << "StoreEngine::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+              << ": no allocation observed after probe window; treating as no-op unload.";
+      return -1;
+    }
+
+    before_state = observed_state;
   }
 
-  absl::Status st = replica->release_memory(loc);
-  return st.ok() ? 0 : -1;
+  absl::Status release_status = replica->release_memory(loc);
+
+  if (absl::IsFailedPrecondition(release_status)) {
+    // A release requested while a load is still in-flight. Wait for the load
+    // to settle (either succeed or fail) and retry once before giving up so
+    // callers see the expected best-effort unload semantics.
+    constexpr absl::Duration kUnloadRetryTimeout = absl::Seconds(30);
+    absl::Status wait_status = replica->wait_until_loaded(loc, kUnloadRetryTimeout);
+
+    if (!wait_status.ok() && !absl::IsFailedPrecondition(wait_status)) {
+      // Deadline exceeded or another unexpected error – surface the failure so
+      // higher layers can decide whether to retry.
+      VLOG(1) << "StoreEngine::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+              << ": wait for load completion returned " << wait_status;
+      return -1;
+    }
+
+    release_status = replica->release_memory(loc);
+  }
+
+  if (!release_status.ok()) {
+    VLOG(1) << "StoreEngine::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+            << ": unload failed with " << release_status;
+  }
+
+  return release_status.ok() ? 0 : -1;
 }
 
 MemoryState StoreEngine::get_replica_state(const ReplicaKey& key, DeviceType memory_type) const {

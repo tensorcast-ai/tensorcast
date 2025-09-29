@@ -3,6 +3,7 @@
 #include <sstream>
 #include <utility>
 
+#include "absl/log/log.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/misc/utils.h"
 
@@ -85,12 +86,33 @@ void Channel::del_transport(const std::string& local_dev_name, const std::string
   rdma_.erase(key.str());
 }
 
+void Channel::mtcp_request_started() {
+  mtcp_active_requests_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Channel::mtcp_request_finished() {
+  const int previous = mtcp_active_requests_.fetch_sub(1, std::memory_order_acq_rel);
+  if (previous <= 0) {
+    LOG(WARNING) << "[Channel] mtcp_request_finished underflow for MTCP channel";
+    mtcp_active_requests_.store(0, std::memory_order_relaxed);
+    return;
+  }
+  if (previous == 1) {
+    VLOG(1) << "[Channel] Last MTCP request completed; releasing receive buffers";
+    if (mtcp_ != nullptr) {
+      mtcp_->release_receive_resources();
+    }
+  }
+}
+
 misc::result_t Channel::close() {
   if (control_ != nullptr) {
     control_->close();
     control_.reset();
   }
+  mtcp_active_requests_.store(0, std::memory_order_relaxed);
   if (mtcp_ != nullptr) {
+    mtcp_->release_receive_resources();
     mtcp_.reset();
   }
   {

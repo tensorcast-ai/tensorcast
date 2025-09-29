@@ -5,7 +5,7 @@ alwaysApply: false
 
 # Technical Design Index
 
-- Canonical rules and structure: `docs/designs/0001-docs-system-reorg-design.md`
+- Canonical rules and structure: `docs/designs/0001-docs-system-design.md`
 - Designs (why/what): `docs/designs/`
 - Plans (how): `docs/plans/` (1:1 with designs via frontmatter links)
 - Guides: `docs/guides/`

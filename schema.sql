@@ -1,7 +1,7 @@
 -- TensorCast canonical schema (schema.sql)
 --
 -- This file is the single source of truth for persistent relational data
--- structures across the repository (see docs/designs/0001-docs-system-reorg-design.md).
+-- structures across the repository (see docs/designs/0001-docs-system-design.md).
 --
 -- Areas currently covered:
 --   - Global Store (DuckDB-backed): workers, artifact_replicas, replica_counters,

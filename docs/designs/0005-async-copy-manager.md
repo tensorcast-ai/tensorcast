@@ -63,7 +63,9 @@ struct DeviceRegion { int device_id; void* dev_ptr; size_t length; };struct Copy
 - Exactly one device copy per call; chunking is handled by planners before submission.
 - The host callback is attached via `cudaLaunchHostFunc` and is intentionally lightweight: return SPB slots, notify UMA/VS chunk completion, enqueue follow-on work. To comply with CUDA's restriction on host callbacks, it performs no CUDA runtime calls and simply records completion metadata. If `cudaLaunchHostFunc` is unavailable (older drivers, restricted runtimes), ACM falls back to a detached thread that `cudaStreamSynchronize`s before firing the callback, ensuring data is resident before slots recycle. Runtime errors surface through `CopyHandle::wait()`; submission-time errors surface via `StatusOr`.
 - Callbacks receive an `absl::Status` describing the stream completion result; `CopyHandle::wait()` (or `ok()`) runs the CUDA runtime checks (`cudaSetDevice`, `cudaGetLastError`) on the caller thread before returning, so asynchronous failures still surface even when host callbacks execute on restricted threads.
-- FAKE CUDA backend executes the copy synchronously and immediately schedules the callback, preserving “async-equivalent” semantics for tests.SPB interaction patterns
+- FAKE CUDA backend enqueues copies on a lightweight worker thread and fires callbacks asynchronously to mirror stream ordering while still running entirely on CPU memory. This keeps staging credit and slot recycling behaviour aligned with the real runtime.
+
+SPB interaction patterns
 - H2D (VS/Loader/Network→GPU): producers fill SPB slots (memcpy from VS view, file I/O, or `recv` directly into pinned). ACM submits H2D; the callback returns the slot and optionally advances UMA state.
 - D2H (GPU→Disk/VS): ACM submits D2H into SPB; callbacks either mark the slot ready for consumer threads (disk writer) or notify higher layers to `vs->write_at(...)`, after which the slot is returned.Observability
 - All submissions are wrapped by the existing tracing helpers (`core/common/trace/trace_cuda_async_fn.h`) with spans covering queue→DMA→callback. Prometheus metrics export per-direction throughput and SPB slot usage (e.g., `tc_spb_slots_in_use{device}`).# Schema Changes (if any)None. This design is an internal C++ runtime component and does not modify persistent schemas.# Trade‑offs & RisksTrade‑offs
@@ -74,7 +76,7 @@ struct DeviceRegion { int device_id; void* dev_ptr; size_t length; };struct Copy
 - Callback nesting: Disallow heavy work or recursive submissions inside callbacks. Mitigation: callbacks only notify; heavier work is dispatched to planner-owned threads.
 - P2P/NUMA variability: Cross-device D2D might require staged D2H→H2D fallback. Mitigation: retain peer-access probing and fallback paths in ReplicaLoadController.
 - Cancellation semantics: In-flight DMA is not cancelable; planners must stop new submissions and drain outstanding handles. Document clearly.# Compatibility & Acceptance CriteriaCompatibility
-- Works with FAKE CUDA: copies complete synchronously; callbacks still fire; tests remain deterministic.
+- Works with FAKE CUDA: copies execute on the simulated stream worker, callbacks still fire, and ordering matches the real runtime so tests remain deterministic.
 - Unifies all H2D/D2H/D2D/H2H through ACM; removes per-chunk `stream_synchronize()` sites and ad‑hoc slot returns.
 - Same-device D2D is handled by ACM; cross-device peer or staged fallback remains in ReplicaLoadController.Acceptance and success criteria
 - Throughput improves by the stated targets for MTCP receive→GPU and Checkpoint GPU→disk.

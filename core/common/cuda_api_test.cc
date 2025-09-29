@@ -1,6 +1,7 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -212,5 +213,53 @@ TEST_CASE("CUDA API abstraction layer", "[cuda]") {
       status = cuda::free(ptr);
       REQUIRE(status.ok());
     }
+  }
+
+  SECTION("Asynchronous stream operations") {
+    constexpr size_t kSize = 256 * 1024;
+    void* gpu_ptr = nullptr;
+    void* host_ptr = nullptr;
+
+    REQUIRE(cuda::malloc(&gpu_ptr, kSize).ok());
+    REQUIRE(cuda::malloc_host(&host_ptr, kSize).ok());
+
+    auto* host_bytes = static_cast<uint8_t*>(host_ptr);
+    for (size_t i = 0; i < kSize; ++i) {
+      host_bytes[i] = static_cast<uint8_t>((i * 7) % 251);
+    }
+
+    cudaStream_t stream = nullptr;
+    REQUIRE(cuda::stream_create(&stream).ok());
+
+    std::atomic<int> callback_count{0};
+    REQUIRE(cuda::memset_async(gpu_ptr, 0, kSize, stream).ok());
+    REQUIRE(cuda::memcpy_async(gpu_ptr, host_ptr, kSize, cudaMemcpyHostToDevice, stream).ok());
+    REQUIRE(
+        cuda::stream_add_callback(
+            stream,
+            [](cudaStream_t, cudaError_t, void* ctx) {
+              auto* counter = static_cast<std::atomic<int>*>(ctx);
+              counter->fetch_add(1, std::memory_order_relaxed);
+            },
+            &callback_count,
+            0)
+            .ok());
+
+    REQUIRE(cuda::stream_synchronize(stream).ok());
+    REQUIRE(callback_count.load(std::memory_order_relaxed) == 1);
+
+    std::vector<uint8_t> verify(kSize);
+    REQUIRE(cuda::memcpy(verify.data(), gpu_ptr, kSize, cudaMemcpyDeviceToHost).ok());
+    REQUIRE(std::memcmp(verify.data(), host_ptr, kSize) == 0);
+
+    // Ensure device-level synchronize drains all streams
+    std::memset(host_ptr, 0, kSize);
+    REQUIRE(cuda::memcpy_async(host_ptr, gpu_ptr, kSize, cudaMemcpyDeviceToHost, stream).ok());
+    REQUIRE(cuda::device_synchronize().ok());
+    REQUIRE(std::memcmp(host_ptr, verify.data(), kSize) == 0);
+
+    REQUIRE(cuda::stream_destroy(stream).ok());
+    REQUIRE(cuda::free(gpu_ptr).ok());
+    REQUIRE(cuda::free_host(host_ptr).ok());
   }
 }

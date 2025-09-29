@@ -12,6 +12,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 // absl string utilities no longer needed in typed-config engine
@@ -245,10 +246,27 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
     }
     max_window_segments_ = std::min(configured_max_window, static_cast<uint32_t>(num_buffers));
   }
-  const size_t recv_num_buffers = num_buffers; // unify receiver buffering under stager policy
-  const size_t total_pool_size = config_.pool().pool_size_bytes() > 0
-      ? config_.pool().pool_size_bytes()
-      : gpu_chunk_size * (num_buffers + recv_num_buffers);
+  int configured_conn = config_.transport().tcp_conn_count();
+  if (configured_conn <= 0) {
+    configured_conn = base::kMTcpConnCount;
+  }
+  configured_conn = std::max(2, configured_conn);
+  mtcp_conn_count_ = configured_conn;
+  const auto mtcp_conn_budget = static_cast<size_t>(configured_conn);
+  const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
+  const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
+  const size_t computed_pool_size = gpu_chunk_size * computed_pool_buffers;
+
+  size_t total_pool_size = computed_pool_size;
+  if (config_.pool().pool_size_bytes() > 0) {
+    total_pool_size = config_.pool().pool_size_bytes();
+    if (total_pool_size < computed_pool_size) {
+      LOG(FATAL) << "Configured pinned pool size (" << total_pool_size << ") is smaller than required staging budget ("
+                 << computed_pool_size << ") for buffers_per_flow=" << num_buffers
+                 << " and tcp_conn_count=" << config_.transport().tcp_conn_count()
+                 << ". Increase pool.pool_size_bytes or reduce staging fan-out.";
+    }
+  }
 
   // GPU staging pool and stager
   gpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
@@ -318,6 +336,8 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
     handshake_retry_thread_ = std::thread([this]() { this->handshake_retry_loop(); });
     handshake_retry_thread_started_ = true;
   }
+
+  mtcp_staging_thread_ = std::thread([this]() { this->mtcp_staging_loop(); });
 }
 
 Communicator::~Communicator() {
@@ -326,9 +346,14 @@ Communicator::~Communicator() {
   request_queue_.stop();
   handshake_retry_stop_.store(true);
   handshake_retry_cv_.SignalAll();
+  mtcp_staging_queue_.notify();
   if (handshake_retry_thread_started_ && handshake_retry_thread_.joinable()) {
     handshake_retry_thread_.join();
   }
+  if (mtcp_staging_thread_.joinable()) {
+    mtcp_staging_thread_.join();
+  }
+  mtcp_staging_queue_.stop();
   if (request_thread_.joinable()) {
     request_thread_.join();
   }
@@ -341,6 +366,243 @@ Communicator::~Communicator() {
   }
 
   pending_requests_.clear();
+}
+
+void Communicator::mtcp_staging_loop() {
+  while (!stop_.load()) {
+    MtcpReadTask task = mtcp_staging_queue_.pop(true, 1000);
+    if (!task.channel) {
+      continue;
+    }
+    process_mtcp_read_task(std::move(task));
+  }
+
+  while (true) {
+    MtcpReadTask task = mtcp_staging_queue_.pop(false);
+    if (!task.channel) {
+      break;
+    }
+    fail_mtcp_read_task(task, absl::CancelledError("communicator shutting down"));
+  }
+}
+
+void Communicator::fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status) {
+  if (status.ok()) {
+    return;
+  }
+
+  const std::string tensor_key(reinterpret_cast<const char*>(task.request.tensor_key));
+
+  if (task.control_transport) {
+    auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
+    auto* payload = fail_msg->get_payload<ProtoReadFailed>();
+    memcpy(payload->tensor_key, task.request.tensor_key, kMaxTensorNameLen);
+    payload->offset = task.request.offset;
+    payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
+    misc::result_t send_res = task.control_transport->send(fail_msg);
+    if (send_res != misc::SUCCESS) {
+      LOG(WARNING) << "Failed to send READ_FAILED after staging failure: key=" << tensor_key << " res=" << send_res;
+    }
+  }
+
+  LOG(WARNING) << "MTCP staging task failed for key=" << tensor_key << ": " << status;
+}
+
+void Communicator::process_mtcp_read_task(MtcpReadTask task) {
+  if (!task.channel || !task.tensor) {
+    if (task.channel) {
+      task.channel->mtcp_request_finished();
+    }
+    fail_mtcp_read_task(task, absl::FailedPreconditionError("invalid MTCP staging task"));
+    return;
+  }
+
+  auto release_called = std::make_shared<std::atomic<bool>>(false);
+  auto release_once = [channel = task.channel, release_called]() {
+    if (!release_called->exchange(true, std::memory_order_acq_rel)) {
+      channel->mtcp_request_finished();
+    }
+  };
+  bool release_handed_off = false;
+
+  auto flow_state = task.channel->flow_state();
+  if (!flow_state) {
+    release_once();
+    release_handed_off = true;
+    fail_mtcp_read_task(task, absl::InternalError("channel missing flow state"));
+    return;
+  }
+
+  auto transport = task.channel->get_mtcp();
+  if (transport == nullptr) {
+    release_once();
+    release_handed_off = true;
+    fail_mtcp_read_task(task, absl::InternalError("missing MTCP transport"));
+    return;
+  }
+
+  const ProtoReadRequest& request = task.request;
+  const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
+  const uint64_t total_bytes = request.bytes;
+  const uint64_t start_offset = request.offset;
+  const std::string request_key = transport::get_request_key(tensor_key, start_offset);
+
+  const bool needs_gpu_staging =
+      task.tensor->needs_staging() || task.tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
+  std::shared_ptr<MemoryStager> stager;
+  if (needs_gpu_staging) {
+    stager = get_gpu_mem_stager_for_id(task.tensor->get_device_id());
+    if (!stager) {
+      stager = gpu_memory_stager_;
+    }
+  } else {
+    stager = memory_stager_;
+  }
+  if (!stager) {
+    release_once();
+    release_handed_off = true;
+    fail_mtcp_read_task(task, absl::FailedPreconditionError("no staging backend available for MTCP tensor"));
+    return;
+  }
+
+  const uint64_t chunk_size = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : total_bytes;
+
+  auto stage_fn = [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
+    auto staged_or = stager->stage(task.tensor, offset, bytes, MemoryStager::StageMode::kBlocking);
+    if (!staged_or.ok()) {
+      return staged_or.status();
+    }
+    void* host_ptr = *staged_or;
+
+    StageLease::Metadata metadata;
+    metadata.transport = StageTransport::kMtcp;
+    metadata.request_key = transport::get_request_key(tensor_key, offset);
+    metadata.offset = offset;
+    metadata.bytes = bytes;
+    metadata.segment_idx = segment_idx;
+
+    return StageLease(stager, &flow_state->ledger, host_ptr, bytes, /*mr=*/nullptr, /*deregister_mr=*/false, metadata);
+  };
+
+  StagingWindow window(
+      flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
+
+  absl::Time retry_deadline = absl::Now() + absl::Seconds(30);
+  absl::Duration backoff = absl::Milliseconds(1);
+  constexpr absl::Duration kMaxBackoff = absl::Milliseconds(50);
+  absl::Time last_warning = absl::InfinitePast();
+
+  while (true) {
+    auto window_or = window.stage_next();
+    if (!window_or.ok()) {
+      if (absl::IsOutOfRange(window_or.status())) {
+        break;
+      }
+
+      if (absl::IsUnavailable(window_or.status()) || absl::IsResourceExhausted(window_or.status())) {
+        const absl::Time now = absl::Now();
+        if (last_warning == absl::InfinitePast() || now - last_warning >= absl::Seconds(1)) {
+          LOG(WARNING) << "[staging_credit] request=" << request_key
+                       << " transport=mtcp waiting for staging credit outstanding="
+                       << flow_state->ledger.outstanding_credit() << "/" << flow_state->ledger.total_credit();
+          last_warning = now;
+        }
+
+        if (now >= retry_deadline) {
+          LOG(ERROR) << "MTCP staging credit wait exceeded deadline for request=" << request_key;
+          release_once();
+          release_handed_off = true;
+          fail_mtcp_read_task(task, absl::ResourceExhaustedError("MTCP staging credit wait timed out"));
+          return;
+        }
+
+        absl::SleepFor(backoff);
+        backoff = std::min(backoff * 2, kMaxBackoff);
+        continue;
+      }
+
+      LOG(ERROR) << "Failed to stage MTCP window: " << window_or.status();
+      release_once();
+      release_handed_off = true;
+      fail_mtcp_read_task(task, window_or.status());
+      return;
+    }
+
+    backoff = absl::Milliseconds(1);
+
+    auto staged_window = std::move(window_or).value();
+    transport::MTcpTransport::StageSendWindow send_window;
+    send_window.request_key = request_key;
+    send_window.window_seq = staged_window.window_seq;
+    send_window.final_window = !staged_window.more_segments;
+    send_window.total_bytes = total_bytes;
+    send_window.segments.reserve(staged_window.segments.size());
+
+    if (send_window.final_window) {
+      send_window.pending_segments = std::make_shared<std::atomic<int>>(0);
+      auto release_cb = release_once;
+      send_window.on_window_complete = [release_cb]() { release_cb(); };
+      release_handed_off = true;
+    }
+
+    LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
+              << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
+              << " outstanding=" << flow_state->ledger.outstanding_credit();
+
+    for (auto& segment : staged_window.segments) {
+      StageLease lease = std::move(segment.lease);
+      StageLease::Metadata metadata = lease.metadata();
+      metadata.window_seq = staged_window.window_seq;
+      metadata.segment_idx = segment.segment_idx;
+      metadata.offset = segment.offset;
+      metadata.bytes = segment.bytes;
+      lease.set_metadata(metadata);
+
+      StageLeaseKey key{
+          .request_key = metadata.request_key,
+          .window_seq = metadata.window_seq,
+          .segment_idx = metadata.segment_idx,
+      };
+
+      flow_state->registry.put(key, lease);
+
+      transport::MTcpTransport::StageSendSegment send_segment;
+      send_segment.data = lease.host_ptr();
+      send_segment.bytes = metadata.bytes;
+      send_segment.metadata = metadata;
+
+      send_segment.on_complete =
+          [flow_state_ref = flow_state, key, metadata, lease = std::move(lease)](misc::result_t status) mutable {
+            if (flow_state_ref) {
+              auto lease_or = flow_state_ref->registry.take(key);
+              if (lease_or.ok()) {
+                lease_or->release();
+              } else {
+                VLOG(1) << "[MTCP] StageLease missing during release: key=" << key.request_key
+                        << " window=" << key.window_seq << " segment=" << key.segment_idx;
+              }
+            }
+            lease.release();
+            if (status != misc::SUCCESS) {
+              LOG(WARNING) << "[MTCP] StageLease send failure request=" << metadata.request_key
+                           << " window=" << metadata.window_seq << " segment=" << metadata.segment_idx
+                           << " status=" << status;
+            }
+          };
+
+      send_window.segments.push_back(std::move(send_segment));
+    }
+
+    if (send_window.pending_segments) {
+      send_window.pending_segments->store(static_cast<int>(send_window.segments.size()), std::memory_order_relaxed);
+    }
+
+    transport->enqueue_stage_window(std::move(send_window));
+  }
+
+  if (!release_handed_off) {
+    release_once();
+  }
 }
 
 void Communicator::set_dram_lease_provider(const std::shared_ptr<DRAMStager::LeaseProvider>& provider) {
@@ -362,7 +624,9 @@ absl::Status Communicator::init(const std::string& ip, uint16_t port, int conn_c
   if (server_context_->open(ip, port, [this](tcp_transport_t t) { return this->on_new_client(t); }) != SUCCESS) {
     return absl::InternalError("failed to open server " + ip + ":" + std::to_string(port));
   }
-  mtcp_conn_count_ = conn_count;
+  if (conn_count > 0) {
+    mtcp_conn_count_ = conn_count;
+  }
   return absl::OkStatus();
 }
 
@@ -650,9 +914,17 @@ absl::Status Communicator::handle_mtcp_read_request(
     const tcp_transport_t& control_transport,
     const ProtoReadRequest& request,
     const std::shared_ptr<PartitionTensor>& tensor) {
+  MtcpReadTask task;
+  task.channel = channel;
+  task.control_transport = control_transport;
+  task.request = request;
+  task.tensor = tensor;
+
   auto flow_state = channel->flow_state();
   if (!flow_state) {
-    return absl::InternalError("channel missing flow state");
+    auto status = absl::InternalError("channel missing flow state");
+    fail_mtcp_read_task(task, status);
+    return status;
   }
 
   auto transport = channel->get_mtcp();
@@ -667,6 +939,14 @@ absl::Status Communicator::handle_mtcp_read_request(
   }
   transport->set_tcp_tos(config_.transport().tcp_tos());
 
+  channel->mtcp_request_started();
+  bool request_handed_off = false;
+  absl::Cleanup mtcp_request_guard = [&]() {
+    if (!request_handed_off) {
+      channel->mtcp_request_finished();
+    }
+  };
+
   auto rsp = std::make_shared<EngineMessage>(
       ENGINE_OP_READ_RESPONSE_EX,
       static_cast<uint32_t>(sizeof(ProtoReadResponseExHeader) + sizeof(ProtoReadResponseExSeg)));
@@ -679,6 +959,11 @@ absl::Status Communicator::handle_mtcp_read_request(
   hdr->window_seq = 0;
   hdr->credit_granted = 0;
   hdr->more_segments = 0;
+  absl::Status shutdown_status = absl::CancelledError("communicator shutting down");
+  if (stop_.load(std::memory_order_relaxed)) {
+    fail_mtcp_read_task(task, shutdown_status);
+    return shutdown_status;
+  }
   auto* s0 =
       reinterpret_cast<ProtoReadResponseExSeg*>(reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader));
   s0->addr = 0;
@@ -691,157 +976,18 @@ absl::Status Communicator::handle_mtcp_read_request(
     return absl::InternalError("failed to send READ_RESPONSE_EX for MTCP");
   }
 
-  const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
-  const uint64_t total_bytes = request.bytes;
-  const uint64_t start_offset = request.offset;
-  const std::string request_key = transport::get_request_key(tensor_key, start_offset);
-
-  const bool needs_gpu_staging = tensor->needs_staging() || tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_GPU;
-  std::shared_ptr<MemoryStager> stager;
-  if (needs_gpu_staging) {
-    stager = get_gpu_mem_stager_for_id(tensor->get_device_id());
-    if (!stager) {
-      stager = gpu_memory_stager_;
-    }
-  } else {
-    stager = memory_stager_;
-  }
-  if (!stager) {
-    return absl::FailedPreconditionError("no staging backend available for MTCP tensor");
+  if (stop_.load(std::memory_order_relaxed)) {
+    fail_mtcp_read_task(task, shutdown_status);
+    return shutdown_status;
   }
 
-  const uint64_t chunk_size = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : total_bytes;
-
-  auto stage_fn = [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
-    auto staged_or = stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kBlocking);
-    if (!staged_or.ok()) {
-      return staged_or.status();
-    }
-    void* host_ptr = *staged_or;
-
-    StageLease::Metadata metadata;
-    metadata.transport = StageTransport::kMtcp;
-    metadata.request_key = transport::get_request_key(tensor_key, offset);
-    metadata.offset = offset;
-    metadata.bytes = bytes;
-    metadata.segment_idx = segment_idx;
-
-    return StageLease(stager, &flow_state->ledger, host_ptr, bytes, /*mr=*/nullptr, /*deregister_mr=*/false, metadata);
-  };
-
-  StagingWindow window(
-      flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
-
-  absl::Time retry_deadline = absl::Now() + absl::Seconds(30);
-  absl::Duration backoff = absl::Milliseconds(1);
-  constexpr absl::Duration kMaxBackoff = absl::Milliseconds(50);
-  int64_t consecutive_unavailable = 0;
-  absl::Time last_warning = absl::InfinitePast();
-
-  while (true) {
-    auto window_or = window.stage_next();
-    if (!window_or.ok()) {
-      if (absl::IsOutOfRange(window_or.status())) {
-        break;
-      }
-
-      if (absl::IsUnavailable(window_or.status()) || absl::IsResourceExhausted(window_or.status())) {
-        ++consecutive_unavailable;
-        const absl::Time now = absl::Now();
-        if (last_warning == absl::InfinitePast() || now - last_warning >= absl::Seconds(1)) {
-          LOG(WARNING) << "[staging_credit] request=" << request_key
-                       << " transport=mtcp waiting for staging credit outstanding="
-                       << flow_state->ledger.outstanding_credit() << "/" << flow_state->ledger.total_credit();
-          last_warning = now;
-        }
-
-        if (now >= retry_deadline) {
-          LOG(ERROR) << "MTCP staging credit wait exceeded deadline for request=" << request_key;
-          auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
-          auto* payload = fail_msg->get_payload<ProtoReadFailed>();
-          memcpy(payload->tensor_key, request.tensor_key, kMaxTensorNameLen);
-          payload->offset = request.offset;
-          payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
-          control_transport->send(fail_msg);
-          return absl::ResourceExhaustedError("MTCP staging credit wait timed out");
-        }
-
-        absl::SleepFor(backoff);
-        backoff = std::min(backoff * 2, kMaxBackoff);
-        continue;
-      }
-
-      LOG(ERROR) << "Failed to stage MTCP window: " << window_or.status();
-      auto fail_msg = EngineMessage::make_message<ProtoReadFailed>(ENGINE_OP_READ_FAILED);
-      auto* payload = fail_msg->get_payload<ProtoReadFailed>();
-      memcpy(payload->tensor_key, request.tensor_key, kMaxTensorNameLen);
-      payload->offset = request.offset;
-      payload->reason = TENSORCAST_READ_FAILED_MEM_MISMATCH;
-      control_transport->send(fail_msg);
-      return window_or.status();
-    }
-
-    consecutive_unavailable = 0;
-    backoff = absl::Milliseconds(1);
-
-    auto staged_window = std::move(window_or).value();
-    transport::MTcpTransport::StageSendWindow send_window;
-    send_window.request_key = request_key;
-    send_window.window_seq = staged_window.window_seq;
-    send_window.final_window = !staged_window.more_segments;
-    send_window.segments.reserve(staged_window.segments.size());
-
-    LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
-              << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
-              << " outstanding=" << flow_state->ledger.outstanding_credit();
-
-    for (auto& segment : staged_window.segments) {
-      StageLease lease = std::move(segment.lease);
-      StageLease::Metadata metadata = lease.metadata();
-      metadata.window_seq = staged_window.window_seq;
-      metadata.segment_idx = segment.segment_idx;
-      metadata.offset = segment.offset;
-      metadata.bytes = segment.bytes;
-      lease.set_metadata(metadata);
-
-      StageLeaseKey key{
-          .request_key = metadata.request_key,
-          .window_seq = metadata.window_seq,
-          .segment_idx = metadata.segment_idx,
-      };
-
-      flow_state->registry.put(key, lease);
-
-      transport::MTcpTransport::StageSendSegment send_segment;
-      send_segment.data = lease.host_ptr();
-      send_segment.bytes = metadata.bytes;
-      send_segment.metadata = metadata;
-
-      send_segment.on_complete =
-          [flow_state_ref = flow_state, key, metadata, lease = std::move(lease)](misc::result_t status) mutable {
-            if (flow_state_ref) {
-              auto lease_or = flow_state_ref->registry.take(key);
-              if (lease_or.ok()) {
-                lease_or->release();
-              } else {
-                VLOG(1) << "[MTCP] StageLease missing during release: key=" << key.request_key
-                        << " window=" << key.window_seq << " segment=" << key.segment_idx;
-              }
-            }
-            lease.release();
-            if (status != misc::SUCCESS) {
-              LOG(WARNING) << "[MTCP] StageLease send failure request=" << metadata.request_key
-                           << " window=" << metadata.window_seq << " segment=" << metadata.segment_idx
-                           << " status=" << status;
-            }
-          };
-
-      send_window.segments.push_back(std::move(send_segment));
-    }
-
-    transport->enqueue_stage_window(std::move(send_window));
+  if (mtcp_staging_queue_.push(task) != misc::SUCCESS) {
+    auto status = absl::InternalError("failed to enqueue MTCP staging task");
+    fail_mtcp_read_task(task, status);
+    return status;
   }
 
+  request_handed_off = true;
   return absl::OkStatus();
 }
 
@@ -1295,8 +1441,10 @@ misc::result_t Communicator::on_receive_response(
       auto* ip = inet_ntoa(sin_addr);
       LOG(INFO) << "[on_receive_response] MTCP_CONNECT_RESPONSE: connecting to " << ip << ":" << rsp->port
                 << " with conn_count=" << rsp->conn_count;
-      COMM_CHECK(transport->connect(ip, rsp->port, mtcp_conn_count_));
-      LOG(INFO) << "mtcp connect done " << ip << ":" << rsp->port << " " << mtcp_conn_count_;
+      const int negotiated_conn = std::max(2, static_cast<int>(rsp->conn_count));
+      transport->set_conn_count(negotiated_conn);
+      COMM_CHECK(transport->connect(ip, rsp->port, negotiated_conn));
+      LOG(INFO) << "mtcp connect done " << ip << ":" << rsp->port << " " << negotiated_conn;
       break;
     }
     // case ENGINE_OP_READ_RESPONSE: (legacy) removed
@@ -1575,8 +1723,9 @@ misc::result_t Communicator::on_receive_response(
         // MTCP path using EX header (no segments)
         auto transport = channel->get_mtcp();
         if (transport == nullptr) {
+          const int requested_conn = std::max(2, mtcp_conn_count_);
           transport = std::make_shared<transport::MTcpTransport>(
-              base::kMTcpConnCount,
+              requested_conn,
               gsl::not_null<std::shared_ptr<MemoryStager>>{memory_stager_},
               gsl::not_null<std::shared_ptr<MemoryStager>>{gpu_memory_stager_},
               gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{gpu_memory_pool_},
@@ -1584,7 +1733,7 @@ misc::result_t Communicator::on_receive_response(
           LOG(INFO) << "[on_receive_response] Sending MTCP_CONNECT_REQUEST for " << tensor_key;
           auto req = EngineMessage::make_message<ProtoMtcpConnectRequest>(ENGINE_OP_MTCP_CONNECT_REQUEST);
           auto* payload = req->get_payload<ProtoMtcpConnectRequest>();
-          payload->conn_count = base::kMTcpConnCount;
+          payload->conn_count = requested_conn;
           COMM_CHECK(t->send(req));
           channel->set_transport(transport);
         }

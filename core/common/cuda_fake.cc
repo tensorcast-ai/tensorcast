@@ -2,21 +2,73 @@
 
 #include "core/common/cuda_api.h"
 
+#include <algorithm>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <random>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 // NOLINTBEGIN
 
 namespace tensorcast::cuda {
 namespace {
+
+struct StreamTask {
+  uint64_t id = 0;
+  std::function<void()> work;
+  absl::Duration delay = absl::ZeroDuration();
+  const char* label = nullptr;
+};
+
+class FakeStream {
+ public:
+  FakeStream();
+  ~FakeStream();
+
+  absl::StatusOr<uint64_t> Enqueue(StreamTask task);
+  void WaitUntilIdle();
+  void Stop();
+
+ private:
+  void RunLoop();
+
+  absl::Mutex mu_;
+  absl::CondVar cv_;
+  absl::CondVar idle_cv_;
+  std::deque<StreamTask> tasks_ ABSL_GUARDED_BY(mu_);
+  bool stop_ ABSL_GUARDED_BY(mu_) = false;
+  uint64_t next_task_id_ ABSL_GUARDED_BY(mu_) = 1;
+  uint64_t last_completed_id_ ABSL_GUARDED_BY(mu_) = 0;
+  std::thread worker_;
+};
+
+struct FakeEvent {
+  void ResetForRecord();
+  void MarkCompleted();
+  void MarkDestroyed();
+  absl::Status Wait();
+
+  absl::Mutex mu;
+  absl::CondVar cv;
+  bool recorded ABSL_GUARDED_BY(mu) = false;
+  bool completed ABSL_GUARDED_BY(mu) = false;
+  bool destroyed ABSL_GUARDED_BY(mu) = false;
+  absl::Time record_time ABSL_GUARDED_BY(mu);
+  absl::Time complete_time ABSL_GUARDED_BY(mu);
+};
 
 // Fake GPU memory allocation structure
 struct FakeAllocation {
@@ -35,6 +87,11 @@ struct FakeCudaState {
 
   // IPC handle mapping (handle -> pointer)
   absl::flat_hash_map<std::string, void*> ipc_handles ABSL_GUARDED_BY(mutex);
+
+  // Streams and events for async simulation
+  std::shared_ptr<FakeStream> default_stream ABSL_GUARDED_BY(mutex);
+  absl::flat_hash_map<cudaStream_t, std::shared_ptr<FakeStream>> streams ABSL_GUARDED_BY(mutex);
+  absl::flat_hash_map<cudaEvent_t, std::shared_ptr<FakeEvent>> events ABSL_GUARDED_BY(mutex);
 
   // Current device
   int current_device ABSL_GUARDED_BY(mutex) = 0;
@@ -60,6 +117,161 @@ std::string generate_random_handle() {
     ss << std::hex << std::setw(2) << std::setfill('0') << dis(gen);
   }
   return ss.str();
+}
+
+FakeStream::FakeStream() {
+  worker_ = std::thread(&FakeStream::RunLoop, this);
+}
+
+FakeStream::~FakeStream() {
+  Stop();
+}
+
+absl::StatusOr<uint64_t> FakeStream::Enqueue(StreamTask task) {
+  absl::MutexLock lock(&mu_);
+  if (stop_) {
+    return absl::FailedPreconditionError("FakeStream already stopped");
+  }
+  task.id = next_task_id_++;
+  tasks_.push_back(std::move(task));
+  cv_.Signal();
+  return task.id;
+}
+
+void FakeStream::WaitUntilIdle() {
+  absl::MutexLock lock(&mu_);
+  const uint64_t target = next_task_id_ - 1;
+  while ((last_completed_id_ < target) || !tasks_.empty()) {
+    idle_cv_.Wait(&mu_);
+  }
+}
+
+void FakeStream::Stop() {
+  {
+    absl::MutexLock lock(&mu_);
+    if (stop_) {
+      return;
+    }
+    stop_ = true;
+    cv_.SignalAll();
+  }
+  if (worker_.joinable()) {
+    worker_.join();
+  }
+}
+
+void FakeStream::RunLoop() {
+  mu_.Lock();
+  while (true) {
+    while (!stop_ && tasks_.empty()) {
+      idle_cv_.SignalAll();
+      cv_.Wait(&mu_);
+    }
+    if (stop_ && tasks_.empty()) {
+      idle_cv_.SignalAll();
+      mu_.Unlock();
+      break;
+    }
+    StreamTask task = std::move(tasks_.front());
+    tasks_.pop_front();
+    mu_.Unlock();
+
+    if (task.delay > absl::ZeroDuration()) {
+      absl::SleepFor(task.delay);
+    }
+    if (task.label) {
+      VLOG(3) << "FakeCuda stream executing task '" << task.label << "'";
+    }
+    if (task.work) {
+      task.work();
+    }
+
+    mu_.Lock();
+    last_completed_id_ = task.id;
+    idle_cv_.SignalAll();
+  }
+}
+
+void FakeEvent::ResetForRecord() {
+  absl::MutexLock lock(&mu);
+  recorded = true;
+  destroyed = false;
+  completed = false;
+  record_time = absl::Now();
+}
+
+void FakeEvent::MarkCompleted() {
+  absl::MutexLock lock(&mu);
+  completed = true;
+  complete_time = absl::Now();
+  cv.SignalAll();
+}
+
+void FakeEvent::MarkDestroyed() {
+  absl::MutexLock lock(&mu);
+  destroyed = true;
+  cv.SignalAll();
+}
+
+absl::Status FakeEvent::Wait() {
+  absl::MutexLock lock(&mu);
+  while (!completed && !destroyed) {
+    cv.Wait(&mu);
+  }
+  if (destroyed && !completed) {
+    return absl::FailedPreconditionError("fake CUDA event destroyed before completion");
+  }
+  return absl::OkStatus();
+}
+
+absl::Duration simulate_async_delay(size_t bytes) {
+  if (bytes == 0) {
+    return absl::Microseconds(10);
+  }
+  constexpr double kEffectiveBandwidthBytesPerSec = 12.0 * 1024 * 1024 * 1024; // 12 GiB/s
+  const double seconds = static_cast<double>(bytes) / kEffectiveBandwidthBytesPerSec;
+  absl::Duration delay = absl::Seconds(seconds);
+  if (delay < absl::Microseconds(10)) {
+    delay = absl::Microseconds(10);
+  }
+  if (delay > absl::Milliseconds(2)) {
+    delay = absl::Milliseconds(2);
+  }
+  return delay;
+}
+
+std::shared_ptr<FakeStream> ensure_default_stream_locked(FakeCudaState& state)
+    ABSL_EXCLUSIVE_LOCKS_REQUIRED(state.mutex) {
+  if (!state.default_stream) {
+    state.default_stream = std::make_shared<FakeStream>();
+  }
+  return state.default_stream;
+}
+
+absl::StatusOr<std::shared_ptr<FakeStream>> get_stream_state(cudaStream_t stream) {
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+  if (stream == nullptr) {
+    return ensure_default_stream_locked(state);
+  }
+  auto it = state.streams.find(stream);
+  if (it == state.streams.end()) {
+    return absl::InvalidArgumentError("invalid fake CUDA stream handle");
+  }
+  return it->second;
+}
+
+absl::StatusOr<std::shared_ptr<FakeEvent>> get_event_state(cudaEvent_t event) {
+  if (event == nullptr) {
+    return absl::InvalidArgumentError("invalid fake CUDA event handle");
+  }
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+  auto it = state.events.find(event);
+  if (it == state.events.end()) {
+    return absl::InvalidArgumentError("invalid fake CUDA event handle");
+  }
+  return it->second;
 }
 
 } // namespace
@@ -150,14 +362,37 @@ absl::Status free_host(void* ptr) {
 }
 
 absl::Status memcpy(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind) {
+  static_cast<void>(kind);
   // In fake backend, all memory is CPU memory, so just use std::memcpy
   std::memcpy(dst, src, bytes);
   return absl::OkStatus();
 }
 
 absl::Status memcpy_async(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind, cudaStream_t stream) {
-  // In fake backend, async is the same as sync
-  return memcpy(dst, src, bytes, kind);
+  static_cast<void>(kind);
+  if (bytes > 0 && (dst == nullptr || src == nullptr)) {
+    return absl::InvalidArgumentError("null pointer passed to fake cudaMemcpyAsync");
+  }
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  auto stream_ptr = *stream_or;
+
+  StreamTask task;
+  task.label = "memcpy_async";
+  task.delay = simulate_async_delay(bytes);
+  task.work = [dst, src, bytes]() {
+    VLOG(2) << "FakeCuda memcpy_async executing copy of " << bytes << " bytes";
+    std::memcpy(dst, src, bytes);
+  };
+
+  auto enqueue_or = stream_ptr->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
+  }
+
+  return absl::OkStatus();
 }
 
 absl::Status memset(void* ptr, int value, size_t bytes) {
@@ -227,13 +462,52 @@ absl::Status close_ipc_handle(void* ptr) {
 }
 
 absl::Status device_synchronize() {
-  // In fake backend, all operations are synchronous
+  auto& state = get_state();
+  std::vector<std::shared_ptr<FakeStream>> streams;
+  {
+    absl::MutexLock lock(&state.mutex);
+    if (state.default_stream) {
+      streams.push_back(state.default_stream);
+    }
+    streams.reserve(streams.size() + state.streams.size());
+    for (auto& entry : state.streams) {
+      streams.push_back(entry.second);
+    }
+  }
+
+  for (auto& stream : streams) {
+    if (stream) {
+      stream->WaitUntilIdle();
+    }
+  }
+
   return absl::OkStatus();
 }
 
 absl::Status memset_async(void* ptr, int value, size_t bytes, cudaStream_t stream) {
-  // In fake backend, async is same as sync
-  return memset(ptr, value, bytes);
+  if (bytes > 0 && ptr == nullptr) {
+    return absl::InvalidArgumentError("null pointer passed to fake cudaMemsetAsync");
+  }
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  auto stream_ptr = *stream_or;
+
+  StreamTask task;
+  task.label = "memset_async";
+  task.delay = simulate_async_delay(bytes);
+  task.work = [ptr, value, bytes]() {
+    VLOG(2) << "FakeCuda memset_async executing memset of " << bytes << " bytes";
+    std::memset(ptr, value, bytes);
+  };
+
+  auto enqueue_or = stream_ptr->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
+  }
+
+  return absl::OkStatus();
 }
 
 absl::Status get_device_properties(int device_id, void* prop) {
@@ -314,32 +588,83 @@ absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes*
 
 // Stream management
 absl::Status stream_create(cudaStream_t* stream) {
-  // Create a fake stream - just use a unique pointer value
-  static int stream_counter = 1;
-  *stream = reinterpret_cast<cudaStream_t>(static_cast<intptr_t>(stream_counter++));
+  if (stream == nullptr) {
+    return absl::InvalidArgumentError("stream pointer is null");
+  }
+  auto new_stream = std::make_shared<FakeStream>();
+  cudaStream_t handle = reinterpret_cast<cudaStream_t>(new_stream.get());
+  auto& state = get_state();
+  {
+    absl::MutexLock lock(&state.mutex);
+    if (!state.streams.emplace(handle, new_stream).second) {
+      return absl::InternalError("duplicate fake CUDA stream handle");
+    }
+  }
+  *stream = handle;
+  VLOG(2) << "FakeCuda created stream " << reinterpret_cast<const void*>(handle);
   return absl::OkStatus();
 }
 
-absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int flags) {
-  // Create a fake stream - just use a unique pointer value
-  // Ignore flags for fake implementation
-  static int stream_counter = 1000; // Start from different value to distinguish
-  *stream = reinterpret_cast<cudaStream_t>(static_cast<intptr_t>(stream_counter++));
-  return absl::OkStatus();
+absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int /*flags*/) {
+  return stream_create(stream);
 }
 
 absl::Status stream_destroy(cudaStream_t stream) {
-  // Nothing to do in fake backend
+  if (stream == nullptr) {
+    return absl::InvalidArgumentError("cannot destroy default fake CUDA stream");
+  }
+
+  std::shared_ptr<FakeStream> to_destroy;
+  auto& state = get_state();
+  {
+    absl::MutexLock lock(&state.mutex);
+    auto it = state.streams.find(stream);
+    if (it == state.streams.end()) {
+      return absl::InvalidArgumentError("unknown fake CUDA stream handle");
+    }
+    to_destroy = std::move(it->second);
+    state.streams.erase(it);
+  }
+
+  if (to_destroy) {
+    to_destroy->Stop();
+  }
   return absl::OkStatus();
 }
 
 absl::Status stream_synchronize(cudaStream_t stream) {
-  // In fake backend, all operations are synchronous
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  (*stream_or)->WaitUntilIdle();
   return absl::OkStatus();
 }
 
 absl::Status stream_wait_event(cudaStream_t stream, cudaEvent_t event) {
-  // In fake backend, all operations are synchronous
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  auto event_or = get_event_state(event);
+  if (!event_or.ok()) {
+    return event_or.status();
+  }
+
+  StreamTask task;
+  task.label = "stream_wait_event";
+  auto event_ptr = *event_or;
+  task.work = [event_ptr]() {
+    absl::Status st = event_ptr->Wait();
+    if (!st.ok()) {
+      LOG(WARNING) << "Fake CUDA stream_wait_event wait failed: " << st;
+    }
+  };
+
+  auto enqueue_or = (*stream_or)->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
+  }
   return absl::OkStatus();
 }
 
@@ -347,53 +672,162 @@ absl::Status stream_add_callback(
     cudaStream_t stream,
     void (*callback)(cudaStream_t, cudaError_t, void*),
     void* user_data,
-    unsigned int flags) {
-  // In fake backend, execute callback immediately
-  if (callback) {
-    callback(stream, cudaSuccess, user_data);
+    unsigned int /*flags*/) {
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
   }
+
+  StreamTask task;
+  task.label = "stream_add_callback";
+  task.work = [callback, stream, user_data]() {
+    VLOG(2) << "FakeCuda stream_add_callback running";
+    if (callback) {
+      callback(stream, cudaSuccess, user_data);
+    }
+  };
+
+  auto enqueue_or = (*stream_or)->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
+  }
+
   return absl::OkStatus();
 }
 
 absl::Status launch_host_func(cudaStream_t stream, void (*func)(void*), void* user_data) {
-  // In fake backend, execute function immediately
-  if (func) {
-    func(user_data);
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+
+  StreamTask task;
+  task.label = "launch_host_func";
+  task.work = [func, user_data]() {
+    VLOG(2) << "FakeCuda launch_host_func executing";
+    if (func) {
+      func(user_data);
+    }
+  };
+
+  auto enqueue_or = (*stream_or)->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
   }
   return absl::OkStatus();
 }
 
 // Event management
 absl::Status event_create(cudaEvent_t* event) {
-  // Create a fake event - just use a unique pointer value
-  static int event_counter = 1000; // Start from 1000 to differentiate from streams
-  *event = reinterpret_cast<cudaEvent_t>(static_cast<intptr_t>(event_counter++));
+  if (event == nullptr) {
+    return absl::InvalidArgumentError("event pointer is null");
+  }
+  auto fake_event = std::make_shared<FakeEvent>();
+  cudaEvent_t handle = reinterpret_cast<cudaEvent_t>(fake_event.get());
+  auto& state = get_state();
+  {
+    absl::MutexLock lock(&state.mutex);
+    if (!state.events.emplace(handle, fake_event).second) {
+      return absl::InternalError("duplicate fake CUDA event handle");
+    }
+  }
+  *event = handle;
   return absl::OkStatus();
 }
 
-absl::Status event_create_with_flags(cudaEvent_t* event, unsigned int flags) {
-  // In fake backend, flags are ignored
+absl::Status event_create_with_flags(cudaEvent_t* event, unsigned int /*flags*/) {
   return event_create(event);
 }
 
 absl::Status event_destroy(cudaEvent_t event) {
-  // Nothing to do in fake backend
+  if (event == nullptr) {
+    return absl::InvalidArgumentError("invalid fake CUDA event handle");
+  }
+  std::shared_ptr<FakeEvent> to_destroy;
+  auto& state = get_state();
+  {
+    absl::MutexLock lock(&state.mutex);
+    auto it = state.events.find(event);
+    if (it == state.events.end()) {
+      return absl::InvalidArgumentError("invalid fake CUDA event handle");
+    }
+    to_destroy = std::move(it->second);
+    state.events.erase(it);
+  }
+  if (to_destroy) {
+    to_destroy->MarkDestroyed();
+  }
   return absl::OkStatus();
 }
 
 absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
-  // In fake backend, events are instantly recorded
+  auto stream_or = get_stream_state(stream);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  auto event_or = get_event_state(event);
+  if (!event_or.ok()) {
+    return event_or.status();
+  }
+
+  auto fake_event = *event_or;
+  fake_event->ResetForRecord();
+
+  StreamTask task;
+  task.label = "event_record";
+  task.work = [fake_event]() { fake_event->MarkCompleted(); };
+
+  auto enqueue_or = (*stream_or)->Enqueue(std::move(task));
+  if (!enqueue_or.ok()) {
+    return enqueue_or.status();
+  }
   return absl::OkStatus();
 }
 
 absl::Status event_synchronize(cudaEvent_t event) {
-  // In fake backend, all operations are synchronous
-  return absl::OkStatus();
+  auto event_or = get_event_state(event);
+  if (!event_or.ok()) {
+    return event_or.status();
+  }
+  auto fake_event = *event_or;
+  return fake_event->Wait();
 }
 
 absl::Status event_elapsed_time(float* ms, cudaEvent_t start, cudaEvent_t end) {
-  // Return a fake elapsed time
-  *ms = 0.1f; // Always report 0.1ms
+  if (ms == nullptr) {
+    return absl::InvalidArgumentError("ms pointer is null");
+  }
+  auto start_or = get_event_state(start);
+  if (!start_or.ok()) {
+    return start_or.status();
+  }
+  auto end_or = get_event_state(end);
+  if (!end_or.ok()) {
+    return end_or.status();
+  }
+
+  auto start_event = *start_or;
+  auto end_event = *end_or;
+
+  absl::Time start_time;
+  {
+    absl::MutexLock lock(&start_event->mu);
+    if (!start_event->completed) {
+      return absl::FailedPreconditionError("start event not completed");
+    }
+    start_time = start_event->complete_time;
+  }
+
+  absl::Time end_time;
+  {
+    absl::MutexLock lock(&end_event->mu);
+    if (!end_event->completed) {
+      return absl::FailedPreconditionError("end event not completed");
+    }
+    end_time = end_event->complete_time;
+  }
+
+  *ms = static_cast<float>(absl::ToDoubleMilliseconds(end_time - start_time));
   return absl::OkStatus();
 }
 
