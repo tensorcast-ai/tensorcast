@@ -23,7 +23,6 @@
 #include "absl/strings/str_cat.h"
 
 #include "core/common/async_copy_manager.h"
-#include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
@@ -965,8 +964,13 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
   if (stage_unit == 0) {
     stage_unit = memory_pool_->slice_bytes();
   }
+  // Enforce strict non-zero stage unit; configuration must guarantee >0.
+  if (stage_unit == 0) {
+    LOG(FATAL) << "MTcpTransport::process_stage_window: stage_unit must be > 0 (check stager and pool config)";
+  }
   const int lanes_to_use =
       compute_active_lanes_internal(window->total_bytes, stage_unit, conn_count_, buffers_per_flow_limit_);
+  ABSL_CHECK_GE(lanes_to_use, 1) << "lanes_to_use must be >= 1";
   const int total_conn = std::max(1, conn_count_);
 
   if (window->segments.empty()) {
@@ -986,12 +990,7 @@ void MTcpTransport::process_stage_window(const std::shared_ptr<StageSendWindow>&
       continue;
     }
 
-    int task_index = 0;
-    if (stage_unit > 0) {
-      task_index = compute_gpu_lane_for_subchunk_internal(seg.metadata.offset, 0, stage_unit, lanes_to_use);
-    } else {
-      task_index = static_cast<int>(seg.metadata.segment_idx % lanes_to_use);
-    }
+    int task_index = compute_gpu_lane_for_subchunk_internal(seg.metadata.offset, 0, stage_unit, lanes_to_use);
     if (task_index >= total_conn) {
       task_index %= total_conn;
     }
@@ -1089,9 +1088,7 @@ void MTcpTransport::recv_loop() {
     auto bytes = tensor->get_bytes();
 
     size_t stager_chunk_bytes = gpu_memory_stager_->get_chunk_size();
-    if (stager_chunk_bytes == 0) {
-      stager_chunk_bytes = memory_pool_->slice_bytes();
-    }
+    ABSL_CHECK_GT(stager_chunk_bytes, 0) << "MTcpTransport::recv_loop: stager_chunk_bytes must be > 0";
     const int lanes_to_use =
         compute_active_lanes_internal(bytes, stager_chunk_bytes, conn_count_, buffers_per_flow_limit_);
 
@@ -1111,6 +1108,7 @@ void MTcpTransport::recv_loop() {
 
       // Determine pool chunk size once for this tensor receive
       size_t pool_chunk_size = memory_pool_->slice_bytes();
+      ABSL_CHECK_GT(pool_chunk_size, 0) << "MTcpTransport::recv_loop: pool_chunk_size must be > 0";
       if (chunk_size > pool_chunk_size) {
         VLOG(1) << "chunk_size (" << chunk_size << ") larger than pool_chunk_size (" << pool_chunk_size
                 << ") – enabling sub-chunked receive";
@@ -1134,10 +1132,7 @@ void MTcpTransport::recv_loop() {
 
       // Process chunks with streaming buffer (supports sub-chunking)
       bool processing_failed = false;
-      uint64_t stage_unit = stager_chunk_bytes > 0 ? stager_chunk_bytes : memory_pool_->slice_bytes();
-      if (stage_unit == 0) {
-        stage_unit = chunk_size;
-      }
+      const uint64_t stage_unit = stager_chunk_bytes;
 
       for (uint64_t offset = 0; offset < bytes && !processing_failed;) {
         uint64_t real_chunk_size = chunk_size;

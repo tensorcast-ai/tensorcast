@@ -243,12 +243,19 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
   // No default residency provider required; staging policy no longer consults UMA bridges.
 
-  // Staging resources sized from config
-  const size_t gpu_chunk_size =
-      (config_.stager().stage_chunk_mb_gpu() > 0 ? config_.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
-  const size_t cpu_chunk_size =
-      (config_.stager().stage_chunk_mb_cpu() > 0 ? config_.stager().stage_chunk_mb_cpu() : 4) * 1024ULL * 1024ULL;
-  const size_t num_buffers = (config_.stager().buffers_per_flow() > 0 ? config_.stager().buffers_per_flow() : 4);
+  // Staging resources sized from config (strict: no legacy defaults)
+  if (config_.stager().stage_chunk_mb_gpu() <= 0) {
+    LOG(FATAL) << "stager.stage_chunk_mb_gpu must be > 0 (MB)";
+  }
+  if (config_.stager().stage_chunk_mb_cpu() <= 0) {
+    LOG(FATAL) << "stager.stage_chunk_mb_cpu must be > 0 (MB)";
+  }
+  if (config_.stager().buffers_per_flow() <= 0) {
+    LOG(FATAL) << "stager.buffers_per_flow must be > 0";
+  }
+  const size_t gpu_chunk_size = static_cast<size_t>(config_.stager().stage_chunk_mb_gpu()) * 1024ULL * 1024ULL;
+  const size_t cpu_chunk_size = static_cast<size_t>(config_.stager().stage_chunk_mb_cpu()) * 1024ULL * 1024ULL;
+  const size_t num_buffers = static_cast<size_t>(config_.stager().buffers_per_flow());
   buffers_per_flow_ = static_cast<int>(num_buffers);
   const uint32_t configured_max_window = config_.stager().max_window_segments();
   if (configured_max_window == 0) {
