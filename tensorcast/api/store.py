@@ -18,7 +18,7 @@ import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import torch
 
@@ -130,7 +130,7 @@ class ReplicaInfo:
     replica_id: str
     replica_type: ReplicaType
     device: torch.device
-    plan: Literal["vram_coalesced", "vram_leased"]
+    plan: PlanType
     size_bytes: int
 
 
@@ -232,7 +232,7 @@ class Store:
             max_workers=1, thread_name_prefix="tensorcast-store"
         )
         self._executor_handle = _ForkAwareHandle(self._executor.shutdown)
-        self._pending_futures: set[concurrent.futures.Future[object]] = set()
+        self._pending_futures: set[concurrent.futures.Future[Any]] = set()
         self._leases_lock = threading.RLock()
         self._active_leases: set[RegisteredLease] = set()
         self._closed = False
@@ -366,10 +366,10 @@ class Store:
         )
 
     @staticmethod
-    def _replica_type_for_plan(plan: PlanType) -> tuple[ReplicaType, str]:
+    def _replica_type_for_plan(plan: PlanType) -> tuple[ReplicaType, PlanType]:
         if plan is PlanType.VRAM_COALESCED:
-            return "COALESCED_VRAM", "vram_coalesced"
-        return "VRAM_LEASE_IN_PLACE", "vram_leased"
+            return "COALESCED_VRAM", PlanType.VRAM_COALESCED
+        return "VRAM_LEASE_IN_PLACE", PlanType.VRAM_LEASED
 
     def _replica_info_from_result(self, result: RegistrationResult) -> ReplicaInfo:
         replica_type, plan = self._replica_type_for_plan(result.plan)
@@ -489,7 +489,7 @@ class Store:
             else self._select_device_for_put(material)
         )
         try:
-            result = _register_artifact_core(
+            registration_result = _register_artifact_core(
                 artifact=material,
                 options=options,
                 device_id=device_id,
@@ -501,7 +501,8 @@ class Store:
             )
         except Exception as exc:  # noqa: BLE001
             self._raise_registration_error(exc)
-        return self._registration_to_artifact(result)
+            raise AssertionError("unreachable") from exc
+        return self._registration_to_artifact(registration_result)
 
     def _registration_to_artifact(
         self, result: RegistrationResult
@@ -518,10 +519,10 @@ class Store:
             state_dict=result.state_dict,
         )
 
-    def _track_future(self, future: concurrent.futures.Future[object]) -> None:
+    def _track_future(self, future: concurrent.futures.Future[Any]) -> None:
         self._pending_futures.add(future)
 
-        def _cleanup(_future: concurrent.futures.Future[object]) -> None:
+        def _cleanup(_future: concurrent.futures.Future[Any]) -> None:
             self._pending_futures.discard(_future)
 
         future.add_done_callback(_cleanup)
@@ -562,6 +563,15 @@ class Store:
                     retryable=False,
                 )
             return int(selector.index or 0)
+        if isinstance(selector, str):
+            device = torch.device(selector)
+            if device.type != "cuda":
+                raise ArtifactError(
+                    f"Unsupported device selector {selector}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return int(device.index or 0)
         return resolve_device(selector)
 
     def _build_get_options(
@@ -596,6 +606,8 @@ class Store:
         disk_path: str | None = None
         resolved_artifact_id = artifact_id
         fallback_opts = fallback
+
+        result: MaterializedArtifact | None = None
 
         if fallback_opts and (
             fallback_opts.prefer_disk
@@ -637,14 +649,16 @@ class Store:
                     retryable=False,
                 )
 
-        result = materialize_artifact(
-            client=client,
-            daemon_address=self._daemon_endpoint,
-            device_id=device_id,
-            artifact_id=artifact_id,
-            key=key,
-            options=options,
-        )
+        if result is None:
+            result = materialize_artifact(
+                client=client,
+                daemon_address=self._daemon_endpoint,
+                device_id=device_id,
+                artifact_id=artifact_id,
+                key=key,
+                options=options,
+            )
+        assert result is not None
         self._record_fallback_event(
             mode="p2p",
             artifact_id=result.artifact_id or artifact_id,

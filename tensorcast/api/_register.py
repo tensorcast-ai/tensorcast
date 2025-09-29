@@ -274,7 +274,8 @@ def begin_register_artifact_sdk(
         daemon_addr = runtime_ctx.address
     else:
         ctl = client
-        daemon_addr = daemon_address or getattr(client, "server_address", "")
+        resolved_addr = daemon_address or client.server_address
+        daemon_addr = str(resolved_addr)
     out = ctl.begin_register_artifact(
         device_id=device_id,
         total_size_bytes=total_size_bytes,
@@ -621,7 +622,8 @@ def _register_artifact_core(
         addr = runtime_ctx.address
     else:
         ctl = client
-        addr = daemon_address or getattr(client, "server_address", "")
+        resolved_addr = daemon_address or client.server_address
+        addr = str(resolved_addr)
 
     if not artifact:
         raise TensorCastError("artifact must not be empty")
