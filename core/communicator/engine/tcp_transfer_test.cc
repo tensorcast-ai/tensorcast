@@ -200,7 +200,7 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
 
-    // Test with 256MB tensor
+    // Test with a large tensor
     const std::size_t tensor_size = 256 * 1024 * 1024;
     void* source_gpu_ptr;
     void* target_gpu_ptr;

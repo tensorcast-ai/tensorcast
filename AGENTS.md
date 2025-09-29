@@ -150,6 +150,7 @@ bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=f
 **Fake CUDA Mode Features:**
 - Enables development and testing without GPU hardware
 - Simulates 4 GPUs for testing multi-device scenarios
+- Stream and event APIs now execute callbacks asynchronously on a lightweight worker so `AsyncCopyManager` and staged transfers behave like the real runtime
 - All CUDA operations return successful status
 - Memory allocations tracked but use CPU memory
 - Zero overhead when using real CUDA backend

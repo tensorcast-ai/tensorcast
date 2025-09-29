@@ -12,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "absl/strings/str_cat.h"
 
 #include "core/common/async_copy_manager.h"
+#include "core/common/cuda_api.h"
 #include "core/common/device_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
@@ -170,9 +172,20 @@ misc::result_t MTcpTransportTask::do_recv_bytes(uint8_t* buf, int size) const {
   ssize_t bytes;
   while (remain_bytes > 0) {
     bytes = ::recv(sock_fd_, buf + offset, remain_bytes, 0);
-    if (bytes <= 0) {
+    if (bytes < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        std::this_thread::yield();
+        continue;
+      }
       PLOG(WARNING) << "MTcpTransportTask recv error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
+    }
+    if (bytes == 0) {
+      LOG(WARNING) << "MTcpTransportTask recv peer closed connection, remain_bytes=" << remain_bytes;
+      return misc::REMOTE_ERROR;
     }
     if (bytes < remain_bytes) {
       remain_bytes -= bytes;
@@ -190,9 +203,20 @@ misc::result_t MTcpTransportTask::do_send_bytes(uint8_t* buf, int size) const {
   ssize_t bytes;
   while (remain_bytes > 0) {
     bytes = ::send(sock_fd_, buf + offset, remain_bytes, 0);
-    if (bytes <= 0) {
+    if (bytes < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        std::this_thread::yield();
+        continue;
+      }
       PLOG(WARNING) << "MTcpTransportTask send error, remain_bytes=" << remain_bytes;
       return misc::SYS_ERROR;
+    }
+    if (bytes == 0) {
+      std::this_thread::yield();
+      continue;
     }
     if (bytes < remain_bytes) {
       remain_bytes -= bytes;
@@ -221,6 +245,12 @@ MTcpTransport::MTcpTransport(
       gpu_recv_buffer_(make_streaming_buffer(memory_pool_, conn_count, buffers_per_flow_limit)),
       buffers_per_flow_limit_(buffers_per_flow_limit),
       memory_stager_(std::move(memory_stager)) {
+  if (cuda::is_fake() && buffers_per_flow_limit_ > 1) {
+    buffers_per_flow_limit_ = 1;
+    gpu_recv_buffer_ = make_streaming_buffer(memory_pool_, conn_count, buffers_per_flow_limit_);
+    LOG(WARNING)
+        << "MTcpTransport: using buffers_per_flow_limit=1 under Fake CUDA to keep staging credit cycling on CPU-only hosts";
+  }
   misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
   misc::ASSERT(conn_count <= base::kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
   bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));

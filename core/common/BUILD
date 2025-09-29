@@ -24,6 +24,8 @@ sc_cc_library(
         ":error_handling_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
         "@cublas",
         "@cublas//:cublasLt",
         "@cudart",

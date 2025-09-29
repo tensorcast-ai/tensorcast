@@ -680,6 +680,7 @@ sequenceDiagram
 - `[staging_credit]` INFO logs emit whenever a window is staged or released; the log includes the request key, transport, window sequence, credit granted, and the current outstanding credit. Use these entries to verify that credit is cycling while transfers are in flight.
 - The GC reaper logs `[staging_credit]` WARN entries when a lease exceeds `ack_ttl_ms`; if these appear, confirm that clients are issuing `RDMA_READ_DONE_EX`/MTCP send completions promptly.
 - Tune `stager.max_window_segments` (0 → auto) when operators need to bound the number of segments per window without increasing `buffers_per_flow`.
+- When running with the Fake CUDA backend the runtime automatically caps `buffers_per_flow_limit` to `1` so MTCP staging windows advance even though GPU copies are serviced synchronously.
 
 ### 7.4 Request Object States (`ReadRequest`)
 
