@@ -87,11 +87,11 @@ def load_tensor_indices_from_dir(
     tensor_meta_index: TensorMetaIndex = {}
     tensor_data_index: TensorDataIndex = {}
     for name, meta in tensor_index.items():
-        if len(meta) == 5:
-            offset, size, shape, stride, dtype = meta
-            storage_offset = 0
-        else:
-            offset, size, shape, stride, dtype, storage_offset = meta
+        if len(meta) != 6:
+            raise IndexParseError(
+                f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
+            )
+        offset, size, shape, stride, dtype, storage_offset = meta
 
         tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
         tensor_data_index[name] = (offset, size)

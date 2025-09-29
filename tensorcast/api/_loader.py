@@ -442,11 +442,11 @@ def get_artifact_sync(
         tensor_meta_index: TensorMetaIndex = {}
         tensor_data_index: TensorDataIndex = {}
         for name, meta in index_obj.items():
-            if len(meta) == 5:
-                offset, size, shape, stride, dtype = meta
-                storage_offset = 0
-            else:
-                offset, size, shape, stride, dtype, storage_offset = meta
+            if len(meta) != 6:
+                raise IndexParseError(
+                    f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
+                )
+            offset, size, shape, stride, dtype, storage_offset = meta
             tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
             tensor_data_index[name] = (int(offset), int(size))
         tensor_device_offsets, _ = calculate_tensor_device_offsets(
@@ -591,11 +591,11 @@ def get_artifact_async(
     tensor_meta_index: TensorMetaIndex = {}
     tensor_data_index: TensorDataIndex = {}
     for name, meta in index_obj.items():
-        if len(meta) == 5:
-            offset, size, shape, stride, dtype = meta
-            storage_offset = 0
-        else:
-            offset, size, shape, stride, dtype, storage_offset = meta
+        if len(meta) != 6:
+            raise IndexParseError(
+                f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
+            )
+        offset, size, shape, stride, dtype, storage_offset = meta
         tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
         tensor_data_index[name] = (int(offset), int(size))
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
