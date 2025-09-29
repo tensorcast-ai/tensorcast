@@ -75,7 +75,7 @@ for attempt in range(max_retries):
 - [ ] Phase 2: Registration & Put Verbs
   - [x] Milestone 2.1: Refactor `_register._register_artifact_core` to a pure helper consumed by `Store.register`/`register_async`
   - [x] Milestone 2.2: Implement `Store.put`/`put_async`, consolidating coalesced VRAM flows and returning the new `RegisteredArtifact` dataclass with canonical index materialization
-  - [ ] Milestone 2.3: Integrate retry policy evaluation + `ArtifactError` mapping for all registration failure paths
+  - [x] Milestone 2.3: Integrate retry policy evaluation + `ArtifactError` mapping for all registration failure paths
   - [ ] Milestone 2.4: Add metrics counters for registration success/failure/latency tagged by daemon endpoint
 - [ ] Phase 3: Retrieval & In-Place Verbs
   - [x] Milestone 3.1: Extract canonical-index fetch + replica selection code from `_loader.get_artifact_*` into reusable Store helpers with fallback policy evaluation

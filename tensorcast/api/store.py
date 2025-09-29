@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import threading
 import time
 import uuid
@@ -252,6 +253,7 @@ class Store:
             "session_id": self._session_id,
         }
         self._capabilities: StoreCapabilities | None = None
+        self._retry_policies = self._build_retry_policies()
         self._client_lock = threading.RLock()
         self._client: DaemonCtl | None = None
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -298,6 +300,41 @@ class Store:
             supports_lease=supports_lease,
             server_config=config,
         )
+
+    def _build_retry_policies(self) -> dict[str, RetryPolicy]:
+        defaults: dict[str, RetryPolicy] = {
+            "register": RetryPolicy(
+                deadline_seconds=30.0,
+                max_attempts=2,
+                base_backoff_seconds=0.2,
+                backoff_multiplier=2.0,
+                jitter=0.5,
+            ),
+            "put": RetryPolicy(
+                deadline_seconds=45.0,
+                max_attempts=2,
+                base_backoff_seconds=0.2,
+                backoff_multiplier=2.0,
+                jitter=0.5,
+            ),
+            "get": RetryPolicy(
+                deadline_seconds=40.0,
+                max_attempts=3,
+                base_backoff_seconds=0.1,
+                backoff_multiplier=2.0,
+                jitter=0.5,
+            ),
+            "get_into": RetryPolicy(
+                deadline_seconds=40.0,
+                max_attempts=3,
+                base_backoff_seconds=0.1,
+                backoff_multiplier=2.0,
+                jitter=0.5,
+            ),
+        }
+        overrides = dict(self._opts.retry_overrides or {})
+        defaults.update(overrides)
+        return defaults
 
     def _record_session_start(self, capabilities: StoreCapabilities) -> None:
         attributes = {
@@ -389,6 +426,7 @@ class Store:
             "session_id": self._session_id,
         }
         self._capabilities = None
+        self._retry_policies = self._build_retry_policies()
 
     def _ensure_client(self) -> DaemonCtl:
         if self._closed:
@@ -550,39 +588,37 @@ class Store:
                 return 0
         return 0
 
-    def _raise_registration_error(self, exc: Exception) -> None:
+    def _map_registration_error(self, exc: Exception) -> ArtifactError:
         if isinstance(exc, ArtifactError):
-            raise exc
+            return exc
         if isinstance(exc, CancelledError):
-            raise ArtifactError(
+            return ArtifactError(
                 "Registration cancelled",
                 status_code="CANCELLED",
                 retryable=False,
-            ) from exc
+            )
         message = str(exc) or "registration failed"
         if isinstance(exc, DeviceMismatch):
-            raise ArtifactError(
+            return ArtifactError(
                 message, status_code="INVALID_ARGUMENT", retryable=False
-            ) from exc
+            )
         if isinstance(exc, MemoryError):
-            raise ArtifactError(
+            return ArtifactError(
                 message, status_code="RESOURCE_EXHAUSTED", retryable=True
-            ) from exc
+            )
         if isinstance(exc, TimeoutError):
-            raise ArtifactError(
+            return ArtifactError(
                 message, status_code="DEADLINE_EXCEEDED", retryable=True
-            ) from exc
+            )
         if isinstance(exc, TensorCastError):
-            raise ArtifactError(
+            return ArtifactError(
                 message, status_code="FAILED_PRECONDITION", retryable=False
-            ) from exc
+            )
         if isinstance(exc, RuntimeError) and "not available" in message.lower():
-            raise ArtifactError(
-                message, status_code="UNAVAILABLE", retryable=True
-            ) from exc
-        raise ArtifactError(message, status_code="UNKNOWN", retryable=False) from exc
+            return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
+        return ArtifactError(message, status_code="UNKNOWN", retryable=False)
 
-    def _perform_registration(
+    def _attempt_registration(
         self,
         tensors: TensorDict,
         *,
@@ -623,9 +659,111 @@ class Store:
                 on_begin=on_begin,
             )
         except Exception as exc:  # noqa: BLE001
-            self._raise_registration_error(exc)
-            raise AssertionError("unreachable") from exc
+            raise self._map_registration_error(exc) from exc
         return self._registration_to_artifact(registration_result)
+
+    def _should_retry_registration(
+        self,
+        method: str,
+        error: ArtifactError,
+        *,
+        attempt: int,
+        policy: RetryPolicy | None,
+        start_time: float,
+        cancel_event: threading.Event | None,
+    ) -> bool:
+        if cancel_event and cancel_event.is_set():
+            return False
+        if policy is None:
+            return False
+        if attempt >= policy.max_attempts:
+            return False
+        if not error.retryable:
+            return False
+        if error.status_code not in {"UNAVAILABLE", "DEADLINE_EXCEEDED", "ABORTED"}:
+            return False
+        if policy.deadline_seconds > 0:
+            elapsed = time.monotonic() - start_time
+            if elapsed >= policy.deadline_seconds:
+                return False
+        return True
+
+    @staticmethod
+    def _compute_retry_delay(policy: RetryPolicy, attempt: int) -> float:
+        delay = policy.base_backoff_seconds * (
+            policy.backoff_multiplier ** max(0, attempt - 1)
+        )
+        if policy.jitter > 0:
+            factor = 1.0 + random.uniform(-policy.jitter, policy.jitter)
+            delay = max(0.0, delay * factor)
+        return delay
+
+    @staticmethod
+    def _remaining_budget(policy: RetryPolicy, start_time: float) -> float | None:
+        if policy.deadline_seconds <= 0:
+            return None
+        remaining = policy.deadline_seconds - (time.monotonic() - start_time)
+        return remaining
+
+    def _perform_registration(
+        self,
+        tensors: TensorDict,
+        *,
+        key: str | None,
+        plan: PlanType,
+        cancel_event: threading.Event | None = None,
+        on_begin: Callable[[_RegisterHandle], None] | None = None,
+    ) -> RegisteredArtifact:
+        method = "register" if plan is PlanType.VRAM_LEASED else "put"
+        policy = self._retry_policies.get(method)
+        attempt = 1
+        start_time = time.monotonic()
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise ArtifactError(
+                    "Registration cancelled",
+                    status_code="CANCELLED",
+                    retryable=False,
+                )
+            try:
+                return self._attempt_registration(
+                    tensors,
+                    key=key,
+                    plan=plan,
+                    cancel_event=cancel_event,
+                    on_begin=on_begin,
+                )
+            except ArtifactError as error:
+                should_retry = self._should_retry_registration(
+                    method,
+                    error,
+                    attempt=attempt,
+                    policy=policy,
+                    start_time=start_time,
+                    cancel_event=cancel_event,
+                )
+                if not should_retry:
+                    raise
+                assert policy is not None
+                delay = self._compute_retry_delay(policy, attempt)
+                remaining = self._remaining_budget(policy, start_time)
+                if remaining is not None and remaining <= 0:
+                    raise
+                if remaining is not None:
+                    delay = min(delay, max(0.0, remaining))
+                if delay > 0:
+                    logger.info(
+                        "store.registration_retry",
+                        extra={
+                            "tc.store.daemon": self._daemon_endpoint,
+                            "tc.store.method": method,
+                            "tc.store.attempt": attempt + 1,
+                            "tc.store.delay_sec": delay,
+                            "tc.store.status_code": error.status_code,
+                        },
+                    )
+                    time.sleep(delay)
+                attempt += 1
 
     def _registration_to_artifact(
         self, result: RegistrationResult
