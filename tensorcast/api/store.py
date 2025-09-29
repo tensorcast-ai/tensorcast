@@ -16,6 +16,7 @@ import time
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Generic, Literal, TypeVar
 
 import torch
@@ -23,12 +24,19 @@ import torch
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
+from tensorcast.api._indices import (
+    build_v2_index_bytes,
+    calculate_tensor_device_offsets,
+    load_tensor_indices_from_dir,
+)
+from tensorcast.api._io_disk import load_dict_from_disk
 from tensorcast.api._loader import MaterializedArtifact, materialize_artifact
 from tensorcast.api._register import (
     RegisteredLease,
     RegistrationResult,
     _register_artifact_core,
 )
+from tensorcast.api._utils import compose_artifact_dir, validate_disk_index_matches
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 
 T = TypeVar("T")
@@ -556,14 +564,18 @@ class Store:
     def _build_get_options(
         self, fallback: FallbackOptions | None
     ) -> GetArtifactOptions:
-        prefer = "disk" if fallback and fallback.prefer_disk else "p2p"
-        return GetArtifactOptions(prefer=prefer)
+        enable_verification = True if fallback is None else fallback.verify_checksums
+        return GetArtifactOptions(
+            prefer="p2p",
+            enable_verification=enable_verification,
+            wait_for_completion=True,
+        )
 
     def _ensure_fallback_supported(self, fallback: FallbackOptions | None) -> None:
-        if fallback and fallback.prefer_disk:
+        if fallback and fallback.disk_path and fallback.disk_path.strip() == "":
             raise ArtifactError(
-                "Disk fallback is not implemented yet",
-                status_code="FAILED_PRECONDITION",
+                "Fallback disk_path must not be empty",
+                status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
 
@@ -574,8 +586,45 @@ class Store:
         key: str | None,
         device_id: int,
         options: GetArtifactOptions,
+        fallback: FallbackOptions | None,
     ) -> MaterializedArtifact:
         client = self._ensure_client()
+        disk_error: Exception | None = None
+        disk_path: str | None = None
+        resolved_artifact_id = artifact_id
+        fallback_opts = fallback
+
+        if fallback_opts and (
+            fallback_opts.prefer_disk
+            or fallback_opts.disk_path
+            or not fallback_opts.allow_p2p
+        ):
+            disk_path, resolved_artifact_id, disk_error = self._resolve_disk_path(
+                fallback=fallback_opts,
+                client=client,
+                key=key,
+                artifact_id=artifact_id,
+            )
+            if disk_path:
+                return self._materialize_from_disk(
+                    disk_path=disk_path,
+                    artifact_id=resolved_artifact_id,
+                    device_id=device_id,
+                    verify_checksums=fallback_opts.verify_checksums,
+                )
+            if fallback_opts and not fallback_opts.allow_p2p:
+                if disk_error is not None:
+                    raise ArtifactError(
+                        f"Disk fallback lookup failed: {disk_error}",
+                        status_code="UNAVAILABLE",
+                        retryable=True,
+                    ) from disk_error
+                raise ArtifactError(
+                    "Disk fallback required but disk_path unavailable",
+                    status_code="NOT_FOUND",
+                    retryable=False,
+                )
+
         return materialize_artifact(
             client=client,
             daemon_address=self._daemon_endpoint,
@@ -583,6 +632,70 @@ class Store:
             artifact_id=artifact_id,
             key=key,
             options=options,
+        )
+
+    def _resolve_disk_path(
+        self,
+        *,
+        fallback: FallbackOptions,
+        client: DaemonCtl,
+        key: str | None,
+        artifact_id: str | None,
+    ) -> tuple[str | None, str | None, Exception | None]:
+        disk_path = fallback.disk_path
+        resolved_artifact_id = artifact_id
+        if disk_path:
+            return disk_path, resolved_artifact_id, None
+        if key is None:
+            return None, resolved_artifact_id, None
+        try:
+            resolved_id, mapped_path = client.resolve_key_mapping(key)
+        except Exception as exc:  # noqa: BLE001
+            return None, resolved_artifact_id, exc
+        if mapped_path:
+            if not resolved_artifact_id:
+                resolved_artifact_id = resolved_id or resolved_artifact_id
+            return mapped_path, resolved_artifact_id, None
+        return None, resolved_artifact_id, None
+
+    def _materialize_from_disk(
+        self,
+        *,
+        disk_path: str,
+        artifact_id: str | None,
+        device_id: int,
+        verify_checksums: bool,
+    ) -> MaterializedArtifact:
+        raw_path = compose_artifact_dir(Path(str(disk_path)), None)
+        if not raw_path.exists():
+            raise ArtifactError(
+                f"Disk path '{disk_path}' not found",
+                status_code="NOT_FOUND",
+                retryable=False,
+            )
+        tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(raw_path)
+        tensor_device_offsets, _ = calculate_tensor_device_offsets(
+            tensor_data_index, device_id
+        )
+        canonical_index = build_v2_index_bytes(
+            tensor_meta_index,
+            tensor_data_index,
+            tensor_device_offsets,
+            device_id,
+        )
+        if verify_checksums:
+            validate_disk_index_matches(canonical_index, str(raw_path))
+        state_dict = load_dict_from_disk(
+            disk_path,
+            device_id=device_id,
+            storage_path=None,
+        )
+        return MaterializedArtifact(
+            artifact_id=artifact_id or "",
+            state_dict=state_dict,
+            canonical_index_bytes=canonical_index,
+            replica_uuid="",
+            disk_path=disk_path,
         )
 
     def _validate_targets(
@@ -700,6 +813,7 @@ class Store:
             key=key,
             device_id=device_id,
             options=options,
+            fallback=resolved_fallback,
         )
         return materialized.state_dict
 
@@ -740,6 +854,7 @@ class Store:
             key=key,
             device_id=device_id,
             options=options,
+            fallback=resolved_fallback,
         )
         canonical_index = self._canonical_index_from_bytes(
             materialized.canonical_index_bytes
