@@ -165,6 +165,12 @@ The SDK is organized under `tensorcast/api`. New internal modules:
 
 Public entry points are exported from `tensorcast/api/__init__.py` and should be imported via `tensorcast.api`.
 
+The Store session API consolidates retrieval verbs (`Store.get`, `Store.get_into`) so callers can express
+fallback policies declaratively. When `FallbackOptions.prefer_disk` is set—or when only disk access is
+permitted (`allow_p2p=False`)—the Store validates the on-disk canonical index before materializing tensors
+and emits telemetry indicating whether the request was served from disk or via the daemon’s P2P path.
+These disk fallbacks reuse the existing `_io_disk` helpers to avoid duplicating validation logic.
+
 ### Client Reuse & Resiliency
 
 - The Python SDK establishes a single gRPC client per process during `tensorcast.startup.init()` and

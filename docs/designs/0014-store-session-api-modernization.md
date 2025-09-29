@@ -108,6 +108,8 @@ class StoreOptions:
 from dataclasses import dataclass
 from typing import Literal
 
+from tensorcast.api._config import PlanType
+
 ReplicaType = Literal["COALESCED_VRAM", "VRAM_LEASE_IN_PLACE", "VRAM_LEASED"]
 
 @dataclass(frozen=True)
@@ -131,7 +133,7 @@ class ReplicaInfo:
     replica_id: str
     replica_type: ReplicaType
     device: torch.device
-    plan: Literal["vram_coalesced", "vram_leased"]
+    plan: PlanType
     size_bytes: int
 
 @dataclass(frozen=True)
@@ -152,6 +154,7 @@ class RegisteredArtifact:
 - `CanonicalIndexEntry.segment_offset` is the byte offset within the Artifact Virtual Byte Stream (AVBS) defined in Design 0003. PAD segments are implied (not listed) and always zero-filled.
 - `CanonicalIndex.avbs_hash` is the PAD-zeroed multihash stored alongside the artifact in the Global Store; it must match the daemon-computed hash returned on Commit.
 - `ReplicaInfo.device` is the CUDA device where the replica currently resides. For staged copies the Store selects and records the destination device on completion.
+- `ReplicaInfo.plan` is expressed with the shared `PlanType` enum so call sites no longer need to compare raw string identifiers when branching on storage semantics.
 - `LeaseHandle.expires_at_monotonic` uses the host monotonic clock (`time.monotonic()`) to avoid skew when coordinating keepalive timers.
 - `RegisteredArtifact.lease` is `None` for daemon-owned replicas; callers retain the object while they intend to use the lease.
 
@@ -307,7 +310,7 @@ Parameters
 - `target` (`dict[str, torch.Tensor]`): Mutable tensor dict whose buffers will be populated in-place. Each tensor must have capacity ≥ the Canonical Index requirement, matching dtype, shape, and stride.
 - `artifact_id`, `key`: Same semantics as `get`; at least one identifier must be supplied.
 - `device` (`DeviceSelector`): Optional override for destination device. When omitted, the Store infers the device from the provided tensors and validates compatibility with the selected replica.
-- `fallback` (`FallbackOptions | None`): Optional override to request disk/P2P behavior specific to this call. Defaults to the Store-level configuration when `None`. A per-call `disk_path` allows the caller to choose a specific artifact cache directory.
+- `fallback` (`FallbackOptions | None`): Optional override to request disk/P2P behavior specific to this call. Defaults to the Store-level configuration when `None`. A per-call `disk_path` allows the caller to choose a specific artifact cache directory. When a disk path is used the Store performs canonical-index validation (and optional checksum verification) before exposing tensors to the caller and logs a structured fallback event for observability.
 
 Behavior
 - Validate target compatibility before mutating any buffer. On mismatch the method raises `INVALID_ARGUMENT` without partial writes.
