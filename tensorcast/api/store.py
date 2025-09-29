@@ -306,11 +306,11 @@ class Store:
             retryable=False,
         )
 
-    def _canonical_index_from_result(
-        self, result: RegistrationResult
+    def _canonical_index_from_bytes(
+        self, index_bytes: bytes, *, avbs_hash: str = ""
     ) -> CanonicalIndex:
         try:
-            raw = json.loads(result.index_bytes.decode("utf-8"))
+            raw = json.loads(index_bytes.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             raise ArtifactError(
                 "Failed to parse canonical index JSON",
@@ -341,11 +341,17 @@ class Store:
             entries.append(entry)
             total += entry.size_bytes
 
-        avbs_hash = result.descriptor.data_multihash
         return CanonicalIndex(
             entries=tuple(entries),
             total_size_bytes=total,
             avbs_hash=avbs_hash,
+        )
+
+    def _canonical_index_from_result(
+        self, result: RegistrationResult
+    ) -> CanonicalIndex:
+        return self._canonical_index_from_bytes(
+            result.index_bytes, avbs_hash=result.descriptor.data_multihash
         )
 
     @staticmethod
@@ -579,6 +585,60 @@ class Store:
             options=options,
         )
 
+    def _validate_targets(
+        self,
+        *,
+        canonical_index: CanonicalIndex,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        validated: list[tuple[torch.Tensor, torch.Tensor]] = []
+        device = torch.device("cuda", device_id)
+        for entry in canonical_index.entries:
+            if entry.name not in target:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' missing",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if entry.name not in source:
+                raise ArtifactError(
+                    f"Source tensor '{entry.name}' missing",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            tgt = target[entry.name]
+            src = source[entry.name]
+            if not isinstance(tgt, torch.Tensor):
+                raise ArtifactError(
+                    f"Target '{entry.name}' must be a tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tgt.device != device:
+                raise ArtifactError(
+                    (
+                        f"Target tensor '{entry.name}' on {tgt.device}, expected cuda:{device.index}"
+                    ),
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tgt.dtype != src.dtype:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' dtype {tgt.dtype} != {src.dtype}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tuple(tgt.shape) != entry.shape:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' shape {tuple(tgt.shape)} != {entry.shape}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            validated.append((tgt, src))
+        return validated
+
     # ------------------------------------------------------------------
     # Verb placeholders – wired up in later milestones.
     # ------------------------------------------------------------------
@@ -670,7 +730,28 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> None:
-        raise NotImplementedError
+        artifact_id, key = self._resolve_identifiers(artifact_id, key)
+        resolved_fallback = fallback or self._opts.fallback
+        self._ensure_fallback_supported(resolved_fallback)
+        device_id = self._resolve_device_selector(device)
+        options = self._build_get_options(resolved_fallback)
+        materialized = self._materialize(
+            artifact_id=artifact_id,
+            key=key,
+            device_id=device_id,
+            options=options,
+        )
+        canonical_index = self._canonical_index_from_bytes(
+            materialized.canonical_index_bytes
+        )
+        pairs = self._validate_targets(
+            canonical_index=canonical_index,
+            target=target,
+            source=materialized.state_dict,
+            device_id=device_id,
+        )
+        for tgt, src in pairs:
+            tgt.copy_(src)
 
     def get_into_async(
         self,
@@ -681,7 +762,16 @@ class Store:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> ArtifactFuture[None]:
-        raise NotImplementedError
+        future = self._executor.submit(
+            self.get_into,
+            target,
+            artifact_id=artifact_id,
+            key=key,
+            device=device,
+            fallback=fallback,
+        )
+        self._track_future(future)
+        return ArtifactFuture(future)
 
 
 __all__ = [
