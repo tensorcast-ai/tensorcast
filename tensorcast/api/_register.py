@@ -60,14 +60,18 @@ DEFAULT_ALIGN = 1
 class RegistrationResult:
     """Unified result for registration APIs.
 
-    - state_dict: destination state dict for coalesced/UMA/VS; original artifact for lease
-    - descriptor: content-addressed artifact descriptor
-    - lease: post-commit lease handle when using lease-in-place; otherwise None
+    Provides additional build metadata so higher-level callers (e.g., Store
+    sessions) can construct canonical index models and replica descriptors
+    without recomputing tensor layout.
     """
 
     state_dict: dict[str, torch.Tensor] | None
     descriptor: ArtifactDescriptor
     lease: RegisteredLease | None
+    build: "BuildContext"
+    layout: "CoalescedLayout"
+    index_bytes: bytes
+    plan: PlanType
 
 
 logger = logging.getLogger(__name__)
@@ -241,6 +245,18 @@ class RegisteredLease:
             except Exception:  # noqa: BLE001
                 continue
 
+    @property
+    def ttl_ms(self) -> int:
+        return self._ttl_ms
+
+    @property
+    def owner_pid(self) -> int:
+        return self._owner_pid
+
+    @property
+    def daemon_address(self) -> str:
+        return self._addr
+
 
 def begin_register_artifact_sdk(
     *,
@@ -249,10 +265,16 @@ def begin_register_artifact_sdk(
     ttl_ms: int | None,
     tensor_index_data: bytes,
     plan: CoalescedPlan | LeasePlan,
+    client: DaemonCtl | None = None,
+    daemon_address: str | None = None,
 ) -> tuple[RegisteredArtifact, Handshake]:
-    runtime_ctx = startup.require_initialized()
-    ctl = runtime_ctx.client
-    daemon_addr = runtime_ctx.address
+    if client is None:
+        runtime_ctx = startup.require_initialized()
+        ctl = runtime_ctx.client
+        daemon_addr = runtime_ctx.address
+    else:
+        ctl = client
+        daemon_addr = daemon_address or getattr(client, "server_address", "")
     out = ctl.begin_register_artifact(
         device_id=device_id,
         total_size_bytes=total_size_bytes,
@@ -590,9 +612,16 @@ def _register_artifact_core(
     ttl_ms: int | None,
     force_lease_in_place: bool = False,
     prevalidate_disk: bool = True,
+    client: DaemonCtl | None = None,
+    daemon_address: str | None = None,
 ) -> RegistrationResult:
-    runtime_ctx = startup.require_initialized()
-    addr = runtime_ctx.address
+    if client is None:
+        runtime_ctx = startup.require_initialized()
+        ctl = runtime_ctx.client
+        addr = runtime_ctx.address
+    else:
+        ctl = client
+        addr = daemon_address or getattr(client, "server_address", "")
 
     if not artifact:
         raise TensorCastError("artifact must not be empty")
@@ -642,6 +671,8 @@ def _register_artifact_core(
             ttl_ms=ttl_ms,
             tensor_index_data=index_bytes,
             plan=plan_model,
+            client=ctl,
+            daemon_address=addr,
         )
 
         registrar = PLAN_REGISTRY[plan_type]
@@ -661,10 +692,16 @@ def _register_artifact_core(
                     desc=desc,
                     options=options,
                     state_dict_to_save=state_dict,
-                    client=runtime_ctx.client,
+                    client=ctl,
                 )
                 return RegistrationResult(
-                    state_dict=state_dict, descriptor=desc, lease=None
+                    state_dict=state_dict,
+                    descriptor=desc,
+                    lease=None,
+                    build=ctx,
+                    layout=layout,
+                    index_bytes=index_bytes,
+                    plan=plan_type,
                 )
 
             if isinstance(registrar, _LeaseUploader):
@@ -681,9 +718,8 @@ def _register_artifact_core(
                     desc=desc,
                     options=options,
                     state_dict_to_save=None,
-                    client=runtime_ctx.client,
+                    client=ctl,
                 )
-                ctl = runtime_ctx.client
                 lease_obj: RegisteredLease = RegisteredLease(
                     registration_id=handle.registration_id,
                     daemon_address=addr,
@@ -693,7 +729,13 @@ def _register_artifact_core(
                 )
                 # For lease plans, return original artifact as the state_dict
                 return RegistrationResult(
-                    state_dict=artifact, descriptor=desc, lease=lease_obj
+                    state_dict=artifact,
+                    descriptor=desc,
+                    lease=lease_obj,
+                    build=ctx,
+                    layout=layout,
+                    index_bytes=index_bytes,
+                    plan=plan_type,
                 )
 
     raise InvalidPlan(f"Unknown plan: {plan_type}")

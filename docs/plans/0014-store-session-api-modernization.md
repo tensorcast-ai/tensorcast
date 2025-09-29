@@ -71,10 +71,10 @@ for attempt in range(max_retries):
   - [x] Milestone 1.1: Introduce `tensorcast/api/store.py` with type aliases (`TensorDict`, `ArtifactStatusCode`, `RetryPolicy`, etc.) matching the design
   - [ ] Milestone 1.2: Implement `ArtifactFuture` wrapper + single-threaded completion executor (reuse async-copy manager hooks from Design 0005) with cancellation propagation skeletons
   - [ ] Milestone 1.3: Build `Store` constructor that resolves `DaemonCtl` connections via `tensorcast.daemon_ctl.get_daemon_client` and performs one-time capability discovery + telemetry registration
-  - [ ] Milestone 1.4: Port lease/keepalive management from `RegisteredArtifact` / `RegisteredLease` into Store-scoped helpers with deterministic shutdown
+  - [x] Milestone 1.4: Port lease/keepalive management from `RegisteredArtifact` / `RegisteredLease` into Store-scoped helpers with deterministic shutdown
 - [ ] Phase 2: Registration & Put Verbs
-  - [ ] Milestone 2.1: Refactor `_register._register_artifact_core` to a pure helper consumed by `Store.register`/`register_async`
-  - [ ] Milestone 2.2: Implement `Store.put`/`put_async`, consolidating coalesced VRAM flows and returning the new `RegisteredArtifact` dataclass with canonical index materialization
+  - [x] Milestone 2.1: Refactor `_register._register_artifact_core` to a pure helper consumed by `Store.register`/`register_async`
+  - [x] Milestone 2.2: Implement `Store.put`/`put_async`, consolidating coalesced VRAM flows and returning the new `RegisteredArtifact` dataclass with canonical index materialization
   - [ ] Milestone 2.3: Integrate retry policy evaluation + `ArtifactError` mapping for all registration failure paths
   - [ ] Milestone 2.4: Add metrics counters for registration success/failure/latency tagged by daemon endpoint
 - [ ] Phase 3: Retrieval & In-Place Verbs
@@ -99,7 +99,7 @@ for attempt in range(max_retries):
 
 - [x] Create `tensorcast/api/store.py` with type definitions, `StoreOptions`, `FallbackOptions`, `RetryPolicy`, `ArtifactError`, `RegisteredArtifact`
 - [ ] Implement `Store` lifecycle (channel pool, capability probe, lease scheduler, metrics hooks)
-- [ ] Refactor `_register.py` helpers into internal functions consumed by `Store.register`/`put`; delete duplicated keepalive threads
+- [x] Refactor `_register.py` helpers into internal functions consumed by `Store.register`/`put`; delete duplicated keepalive threads
 - [ ] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
 - [ ] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [ ] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
