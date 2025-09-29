@@ -14,6 +14,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 import weakref
 from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
 import torch
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
@@ -43,6 +46,8 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._utils import compose_artifact_dir, validate_disk_index_matches
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
+from tensorcast.observability.otel import set_span_attributes
+from tensorcast.types import ServerConfig
 
 T = TypeVar("T")
 
@@ -155,6 +160,16 @@ class RegisteredArtifact:
     state_dict: dict[str, torch.Tensor] | None = None
 
 
+@dataclass(frozen=True)
+class StoreCapabilities:
+    mem_pool_bytes: int
+    tx_slice_bytes: int
+    artifact_chunk_bytes: int
+    supports_coalesced: bool
+    supports_lease: bool
+    server_config: ServerConfig | None = None
+
+
 class ArtifactFuture(Generic[T]):
     """Wrapper around :class:`concurrent.futures.Future` with confirm support."""
 
@@ -230,6 +245,13 @@ class Store:
     ) -> None:
         self._daemon_endpoint = daemon_endpoint
         self._opts = opts or StoreOptions()
+        self._session_id = uuid.uuid4().hex
+        self._tracer = trace.get_tracer(__name__)
+        self._session_labels: dict[str, str] = {
+            "daemon_endpoint": daemon_endpoint,
+            "session_id": self._session_id,
+        }
+        self._capabilities: StoreCapabilities | None = None
         self._client_lock = threading.RLock()
         self._client: DaemonCtl | None = None
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -243,12 +265,90 @@ class Store:
 
         self._install_at_fork()
         self._client = self._create_client()
+        self._initialize_session_metadata(self._client)
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
     # ------------------------------------------------------------------
     def _create_client(self) -> DaemonCtl:
         return get_daemon_client(self._daemon_endpoint)
+
+    @staticmethod
+    def _default_capabilities() -> StoreCapabilities:
+        return StoreCapabilities(
+            mem_pool_bytes=0,
+            tx_slice_bytes=0,
+            artifact_chunk_bytes=0,
+            supports_coalesced=False,
+            supports_lease=False,
+            server_config=None,
+        )
+
+    def _capabilities_from_config(self, config: ServerConfig) -> StoreCapabilities:
+        mem_pool = int(getattr(config, "mem_pool_size", 0))
+        tx_slice = int(getattr(config, "tx_slice_bytes", 0))
+        artifact_chunk = int(getattr(config, "artifact_chunk_bytes", 0))
+        supports_coalesced = mem_pool > 0
+        supports_lease = True
+        return StoreCapabilities(
+            mem_pool_bytes=mem_pool,
+            tx_slice_bytes=tx_slice,
+            artifact_chunk_bytes=artifact_chunk,
+            supports_coalesced=supports_coalesced,
+            supports_lease=supports_lease,
+            server_config=config,
+        )
+
+    def _record_session_start(self, capabilities: StoreCapabilities) -> None:
+        attributes = {
+            "tc.store.session_id": self._session_id,
+            "tc.store.daemon": self._daemon_endpoint,
+            "tc.store.mem_pool_bytes": int(capabilities.mem_pool_bytes),
+            "tc.store.tx_slice_bytes": int(capabilities.tx_slice_bytes),
+            "tc.store.artifact_chunk_bytes": int(capabilities.artifact_chunk_bytes),
+            "tc.store.supports_coalesced": bool(capabilities.supports_coalesced),
+            "tc.store.supports_lease": bool(capabilities.supports_lease),
+        }
+        with self._tracer.start_as_current_span("Store/Init", kind=SpanKind.INTERNAL):
+            set_span_attributes(attributes)
+        logger.info(
+            "store.session_initialized",
+            extra={
+                "tc.store.session_id": self._session_id,
+                "tc.store.daemon": self._daemon_endpoint,
+                "tc.store.capabilities": {
+                    "mem_pool_bytes": capabilities.mem_pool_bytes,
+                    "tx_slice_bytes": capabilities.tx_slice_bytes,
+                    "artifact_chunk_bytes": capabilities.artifact_chunk_bytes,
+                    "supports_coalesced": capabilities.supports_coalesced,
+                    "supports_lease": capabilities.supports_lease,
+                },
+            },
+        )
+        self._session_labels.update(
+            {
+                "supports_coalesced": str(capabilities.supports_coalesced),
+                "supports_lease": str(capabilities.supports_lease),
+            }
+        )
+
+    def _initialize_session_metadata(self, client: DaemonCtl) -> None:
+        capabilities = self._default_capabilities()
+        try:
+            config = client.get_server_config()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "store.capabilities_fetch_failed",
+                extra={
+                    "tc.store.daemon": self._daemon_endpoint,
+                    "tc.store.session_id": self._session_id,
+                },
+                exc_info=exc,
+            )
+        else:
+            capabilities = self._capabilities_from_config(config)
+        self._capabilities = capabilities
+        self._record_session_start(capabilities)
 
     def _install_at_fork(self) -> None:
         Store._AT_FORK_REGISTRY.add(self)
@@ -283,6 +383,12 @@ class Store:
         self._pending_futures = set()
         self._leases_lock = threading.RLock()
         self._active_leases = set()
+        self._session_id = uuid.uuid4().hex
+        self._session_labels = {
+            "daemon_endpoint": self._daemon_endpoint,
+            "session_id": self._session_id,
+        }
+        self._capabilities = None
 
     def _ensure_client(self) -> DaemonCtl:
         if self._closed:
@@ -290,6 +396,9 @@ class Store:
         with self._client_lock:
             if self._client is None:
                 self._client = self._create_client()
+                self._initialize_session_metadata(self._client)
+            elif self._capabilities is None:
+                self._initialize_session_metadata(self._client)
             return self._client
 
     def close(self) -> None:
@@ -869,6 +978,12 @@ class Store:
                 },
             )
 
+    @property
+    def capabilities(self) -> StoreCapabilities:
+        if self._capabilities is None:
+            return self._default_capabilities()
+        return self._capabilities
+
     # ------------------------------------------------------------------
     # Verb placeholders – wired up in later milestones.
     # ------------------------------------------------------------------
@@ -1147,6 +1262,7 @@ __all__ = [
     "LeaseHandle",
     "RegisteredArtifact",
     "ReplicaInfo",
+    "StoreCapabilities",
     "RetryPolicy",
     "Store",
     "StoreOptions",
