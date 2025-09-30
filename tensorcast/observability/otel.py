@@ -14,12 +14,16 @@ Environment knobs (standard OTel):
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from importlib import metadata as importlib_metadata
-from typing import Any
+from typing import Mapping
 
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+    OTLPMetricExporter,
+)
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
     OTLPSpanExporter as GrpcExporter,
@@ -30,6 +34,11 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
 from opentelemetry.instrumentation.grpc import (
     GrpcInstrumentorClient,
     GrpcInstrumentorServer,
+)
+from opentelemetry.metrics import set_meter_provider
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -49,6 +58,9 @@ _INIT_LOCK = threading.Lock()
 _OTEL_INITIALIZED = False
 _GRPC_INSTRUMENTED = False
 _GRPC_AIO_INSTRUMENTED = False
+_METRICS_INITIALIZED = False
+
+logger = logging.getLogger(__name__)
 
 
 def _instrument_grpc() -> None:
@@ -82,6 +94,22 @@ def _instrument_grpc() -> None:
             # Treat missing aio or instrument failure as an error to surface
             # misconfiguration early in development.
             raise RuntimeError(f"Failed to instrument gRPC aio: {exc}") from exc
+
+
+def _setup_metrics_provider(resource: Resource) -> None:
+    """Install a MeterProvider that exports metrics via OTLP."""
+
+    global _METRICS_INITIALIZED
+    if _METRICS_INITIALIZED:
+        return
+    try:
+        metric_exporter = OTLPMetricExporter()
+        reader = PeriodicExportingMetricReader(metric_exporter)
+        provider = MeterProvider(resource=resource, metric_readers=[reader])
+        set_meter_provider(provider)
+        _METRICS_INITIALIZED = True
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Failed to initialise OpenTelemetry metrics") from exc
 
 
 def _sampler_from_env():
@@ -179,6 +207,7 @@ def setup_otel(service_default: str, role: str) -> bool:
                 provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
 
             trace.set_tracer_provider(provider)
+            _setup_metrics_provider(resource)
             _OTEL_INITIALIZED = True
 
         # Instrument both sync and asyncio gRPC
@@ -188,7 +217,7 @@ def setup_otel(service_default: str, role: str) -> bool:
 
 
 # New: setup OTel directly from Observability proto (no environment required)
-def setup_otel_from_observability(obs: Any, role: str) -> bool:
+def setup_otel_from_observability(obs: commonpb.Observability, role: str) -> bool:
     # Idempotent
     global _OTEL_INITIALIZED
     with _INIT_LOCK:
@@ -252,6 +281,7 @@ def setup_otel_from_observability(obs: Any, role: str) -> bool:
         provider.add_span_processor(BatchSpanProcessor(exporter))
 
         trace.set_tracer_provider(provider)
+        _setup_metrics_provider(resource)
         _instrument_grpc()
         _OTEL_INITIALIZED = True
         return True
@@ -304,7 +334,7 @@ def ensure_client_otel(
     # No client config or observability not provided → default off (no-op)
 
 
-def set_span_attributes(attrs: dict[str, Any]) -> None:
+def set_span_attributes(attrs: Mapping[str, bool | int | float | str]) -> None:
     """Attach attributes to the current active span, if any.
 
     Best-practice filtering: by default, high-cardinality attributes are

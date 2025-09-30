@@ -21,11 +21,11 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import Generic, Iterator, Literal, TypeVar, cast
 
 import torch
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
@@ -57,6 +57,8 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 TensorDict = Mapping[str, torch.Tensor]
+
+SpanAttributeValue = bool | int | float | str
 
 ArtifactStatusCode = Literal[
     "OK",
@@ -254,7 +256,6 @@ class Store:
             "daemon_endpoint": daemon_endpoint,
             "session_id": self._session_id,
         }
-        self._metrics_latencies: dict[str, float] = {}
         self._capabilities: StoreCapabilities | None = None
         self._retry_policies = self._build_retry_policies()
         self._client_lock = threading.RLock()
@@ -263,7 +264,7 @@ class Store:
             max_workers=1, thread_name_prefix="tensorcast-store"
         )
         self._executor_handle = _ForkAwareHandle(self._executor.shutdown)
-        self._pending_futures: set[concurrent.futures.Future[Any]] = set()
+        self._pending_futures: set[concurrent.futures.Future[object]] = set()
         self._leases_lock = threading.RLock()
         self._active_leases: set[RegisteredLease] = set()
         self._closed = False
@@ -340,7 +341,7 @@ class Store:
         return defaults
 
     def _record_session_start(self, capabilities: StoreCapabilities) -> None:
-        attributes = {
+        attributes: dict[str, SpanAttributeValue] = {
             "tc.store.session_id": self._session_id,
             "tc.store.daemon": self._daemon_endpoint,
             "tc.store.mem_pool_bytes": int(capabilities.mem_pool_bytes),
@@ -436,7 +437,6 @@ class Store:
             "daemon_endpoint": self._daemon_endpoint,
             "session_id": self._session_id,
         }
-        self._metrics_latencies = {}
         self._capabilities = None
         self._retry_policies = self._build_retry_policies()
 
@@ -761,75 +761,103 @@ class Store:
         device_override: int | torch.device | None = None,
     ) -> RegisteredArtifact:
         method = "register" if plan is PlanType.VRAM_LEASED else "put"
+        span_name = "Store/Register" if plan is PlanType.VRAM_LEASED else "Store/Put"
+        attributes: dict[str, SpanAttributeValue] = {
+            "tc.store.daemon": self._daemon_endpoint,
+            "tc.store.session_id": self._session_id,
+            "tc.store.plan": plan.value,
+            "tc.store.key_present": bool(key),
+        }
         policy = self._retry_policies.get(method)
         attempt = 1
         start_time = time.monotonic()
 
-        def record_outcome(status: str) -> None:
-            duration = time.monotonic() - start_time
-            store_metrics.observe_latency(
-                method, self._daemon_endpoint, status, duration
-            )
-            if status not in {"OK", "CANCELLED"}:
-                store_metrics.increment_error(method, self._daemon_endpoint, status)
+        with self._operation_span(span_name, attributes) as span:
 
-        while True:
-            if cancel_event and cancel_event.is_set():
-                record_outcome("CANCELLED")
-                raise ArtifactError(
-                    "Registration cancelled",
-                    status_code="CANCELLED",
-                    retryable=False,
+            def record_outcome(status: str) -> None:
+                duration = time.monotonic() - start_time
+                store_metrics.observe_latency(
+                    method, self._daemon_endpoint, status, duration
                 )
-            try:
-                result = self._attempt_registration(
-                    tensors,
-                    key=key,
-                    plan=plan,
-                    cancel_event=cancel_event,
-                    on_begin=on_begin,
-                    options_override=options_override,
-                    ttl_override=ttl_override,
-                    device_override=device_override,
-                )
-                record_outcome("OK")
-                return result
-            except ArtifactError as error:
-                should_retry = self._should_retry_registration(
-                    method,
-                    error,
-                    attempt=attempt,
-                    policy=policy,
-                    start_time=start_time,
-                    cancel_event=cancel_event,
-                )
-                if not should_retry:
-                    record_outcome(error.status_code)
-                    raise
-                assert policy is not None
-                delay = self._compute_retry_delay(policy, attempt)
-                remaining = self._remaining_budget(policy, start_time)
-                if remaining is not None and remaining <= 0:
-                    record_outcome(error.status_code)
-                    raise
-                if remaining is not None:
-                    delay = min(delay, max(0.0, remaining))
-                store_metrics.increment_retry(
-                    method, self._daemon_endpoint, error.status_code
-                )
-                if delay > 0:
-                    logger.info(
-                        "store.registration_retry",
-                        extra={
-                            "tc.store.daemon": self._daemon_endpoint,
-                            "tc.store.method": method,
-                            "tc.store.attempt": attempt + 1,
-                            "tc.store.delay_sec": delay,
-                            "tc.store.status_code": error.status_code,
+                span.set_attribute("tc.store.status", status)
+                if status not in {"OK", "CANCELLED"}:
+                    store_metrics.increment_error(method, self._daemon_endpoint, status)
+
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    record_outcome("CANCELLED")
+                    span.set_status(Status(StatusCode.ERROR, "CANCELLED"))
+                    raise ArtifactError(
+                        "Registration cancelled",
+                        status_code="CANCELLED",
+                        retryable=False,
+                    )
+                try:
+                    result = self._attempt_registration(
+                        tensors,
+                        key=key,
+                        plan=plan,
+                        cancel_event=cancel_event,
+                        on_begin=on_begin,
+                        options_override=options_override,
+                        ttl_override=ttl_override,
+                        device_override=device_override,
+                    )
+                    record_outcome("OK")
+                    span.set_attribute("tc.store.retry.count", attempt)
+                    span.set_attribute("tc.replica.type", result.replica.replica_type)
+                    span.set_attribute(
+                        "tc.device.id", int(result.replica.device.index or 0)
+                    )
+                    span.set_status(Status(StatusCode.OK))
+                    span.set_attribute("tc.artifact.id", result.artifact_id)
+                    return result
+                except ArtifactError as error:
+                    span.record_exception(error)
+                    should_retry = self._should_retry_registration(
+                        method,
+                        error,
+                        attempt=attempt,
+                        policy=policy,
+                        start_time=start_time,
+                        cancel_event=cancel_event,
+                    )
+                    if not should_retry:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise
+                    assert policy is not None
+                    delay = self._compute_retry_delay(policy, attempt)
+                    remaining = self._remaining_budget(policy, start_time)
+                    if remaining is not None and remaining <= 0:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise
+                    if remaining is not None:
+                        delay = min(delay, max(0.0, remaining))
+                    store_metrics.increment_retry(
+                        method, self._daemon_endpoint, error.status_code
+                    )
+                    span.add_event(
+                        "store.retry",
+                        {
+                            "tc.store.retry_attempt": attempt + 1,
+                            "tc.store.status": error.status_code,
                         },
                     )
-                    time.sleep(delay)
-                attempt += 1
+                    if delay > 0:
+                        logger.info(
+                            "store.registration_retry",
+                            extra={
+                                "tc.store.daemon": self._daemon_endpoint,
+                                "tc.store.method": method,
+                                "tc.store.attempt": attempt + 1,
+                                "tc.store.delay_sec": delay,
+                                "tc.store.status_code": error.status_code,
+                            },
+                        )
+                        time.sleep(delay)
+                    attempt += 1
 
     def _registration_to_artifact(
         self, result: RegistrationResult
@@ -847,13 +875,25 @@ class Store:
             registration_result=result,
         )
 
-    def _track_future(self, future: concurrent.futures.Future[Any]) -> None:
+    def _track_future(self, future: concurrent.futures.Future[object]) -> None:
         self._pending_futures.add(future)
 
-        def _cleanup(_future: concurrent.futures.Future[Any]) -> None:
+        def _cleanup(_future: concurrent.futures.Future[object]) -> None:
             self._pending_futures.discard(_future)
 
         future.add_done_callback(_cleanup)
+
+    @contextlib.contextmanager
+    def _operation_span(
+        self,
+        name: str,
+        attributes: Mapping[str, SpanAttributeValue] | None = None,
+    ) -> Iterator[Span]:
+        with self._tracer.start_as_current_span(name, kind=SpanKind.CLIENT) as span:
+            if attributes:
+                for key, value in attributes.items():
+                    span.set_attribute(str(key), value)
+            yield span
 
     @staticmethod
     def _resolve_identifiers(
@@ -932,6 +972,7 @@ class Store:
         options: GetArtifactOptions,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None = None,
+        span: Span | None = None,
     ) -> MaterializedArtifact:
         client = self._ensure_client()
         disk_error: Exception | None = None
@@ -962,6 +1003,17 @@ class Store:
                         "verify": bool(fallback_opts.verify_checksums),
                     },
                 )
+                if span is not None:
+                    span.add_event(
+                        "store.fallback.disk",
+                        {
+                            "tc.artifact.id": resolved_artifact_id or "",
+                            "tc.store.disk_path_present": True,
+                            "tc.store.verify_checksums": bool(
+                                fallback_opts.verify_checksums
+                            ),
+                        },
+                    )
                 result = self._materialize_from_disk(
                     disk_path=disk_path,
                     artifact_id=resolved_artifact_id,
@@ -1003,6 +1055,15 @@ class Store:
                 "allow_p2p": bool(fallback is None or fallback.allow_p2p),
             },
         )
+        if span is not None:
+            span.add_event(
+                "store.materialize.p2p",
+                {
+                    "tc.artifact.id": result.artifact_id or artifact_id or "",
+                    "tc.store.disk_requested": bool(fallback and fallback.prefer_disk),
+                    "tc.store.allow_p2p": bool(fallback is None or fallback.allow_p2p),
+                },
+            )
         if cancel_event and cancel_event.is_set():
             self._release_materialized(result, client)
             raise CancelledError
@@ -1173,6 +1234,7 @@ class Store:
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
+        span: Span | None = None,
     ) -> tuple[MaterializedArtifact, int]:
         artifact_id, key = self._resolve_identifiers(artifact_id, key)
         resolved_fallback = fallback or self._opts.fallback
@@ -1187,6 +1249,7 @@ class Store:
                 options=options,
                 fallback=resolved_fallback,
                 cancel_event=cancel_event,
+                span=span,
             )
         except Exception as exc:  # noqa: BLE001
             raise self._map_materialization_error(exc) from exc
@@ -1206,107 +1269,149 @@ class Store:
         policy = self._retry_policies.get(method, self._retry_policies.get("get"))
         attempt = 1
         start_time = time.monotonic()
+        span_name = "Store/GetInto" if method == "get_into" else "Store/Get"
+        attributes: dict[str, SpanAttributeValue] = {
+            "tc.store.daemon": self._daemon_endpoint,
+            "tc.store.session_id": self._session_id,
+            "tc.store.method": method,
+            "tc.store.lookup.by_key": bool(key),
+            "tc.store.lookup.by_id": bool(artifact_id),
+            "tc.store.fallback.prefer_disk": bool(fallback and fallback.prefer_disk),
+            "tc.store.fallback.allow_p2p": bool(fallback is None or fallback.allow_p2p),
+        }
 
-        def record_outcome(status: str) -> None:
-            duration = time.monotonic() - start_time
-            store_metrics.observe_latency(
-                method, self._daemon_endpoint, status, duration
-            )
-            if status not in {"OK", "CANCELLED"}:
-                store_metrics.increment_error(method, self._daemon_endpoint, status)
+        with self._operation_span(span_name, attributes) as span:
 
-        while True:
-            if cancel_event and cancel_event.is_set():
-                record_outcome("CANCELLED")
-                raise ArtifactError(
-                    "Retrieval cancelled",
-                    status_code="CANCELLED",
-                    retryable=False,
+            def record_outcome(status: str) -> None:
+                duration = time.monotonic() - start_time
+                store_metrics.observe_latency(
+                    method, self._daemon_endpoint, status, duration
                 )
-            try:
-                materialized, device_id = self._attempt_get(
-                    artifact_id=artifact_id,
-                    key=key,
-                    device=device,
-                    fallback=fallback,
-                    cancel_event=cancel_event,
-                    options_override=options_override,
-                )
-                record_outcome("OK")
-                return materialized, device_id
-            except ArtifactError as error:
-                should_retry = self._should_retry_registration(
-                    method,
-                    error,
-                    attempt=attempt,
-                    policy=policy,
-                    start_time=start_time,
-                    cancel_event=cancel_event,
-                )
-                if not should_retry:
-                    record_outcome(error.status_code)
-                    raise
-                assert policy is not None
-                delay = self._compute_retry_delay(policy, attempt)
-                remaining = self._remaining_budget(policy, start_time)
-                if remaining is not None and remaining <= 0:
-                    record_outcome(error.status_code)
-                    raise
-                if remaining is not None:
-                    delay = min(delay, max(0.0, remaining))
-                store_metrics.increment_retry(
-                    method, self._daemon_endpoint, error.status_code
-                )
-                if delay > 0:
-                    logger.info(
-                        "store.get_retry",
-                        extra={
-                            "tc.store.daemon": self._daemon_endpoint,
-                            "tc.store.method": method,
-                            "tc.store.attempt": attempt + 1,
-                            "tc.store.delay_sec": delay,
-                            "tc.store.status_code": error.status_code,
+                span.set_attribute("tc.store.status", status)
+                if status not in {"OK", "CANCELLED"}:
+                    store_metrics.increment_error(method, self._daemon_endpoint, status)
+
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    record_outcome("CANCELLED")
+                    span.set_status(Status(StatusCode.ERROR, "CANCELLED"))
+                    raise ArtifactError(
+                        "Retrieval cancelled",
+                        status_code="CANCELLED",
+                        retryable=False,
+                    )
+                try:
+                    materialized, device_id = self._attempt_get(
+                        artifact_id=artifact_id,
+                        key=key,
+                        device=device,
+                        fallback=fallback,
+                        cancel_event=cancel_event,
+                        options_override=options_override,
+                        span=span,
+                    )
+                    record_outcome("OK")
+                    span.set_attribute("tc.store.retry.count", attempt)
+                    span.set_attribute("tc.device.id", int(device_id))
+                    span.set_attribute("tc.artifact.id", materialized.artifact_id)
+                    span.set_attribute(
+                        "tc.store.fallback.used_disk", bool(materialized.disk_path)
+                    )
+                    span.set_status(Status(StatusCode.OK))
+                    return materialized, device_id
+                except ArtifactError as error:
+                    span.record_exception(error)
+                    should_retry = self._should_retry_registration(
+                        method,
+                        error,
+                        attempt=attempt,
+                        policy=policy,
+                        start_time=start_time,
+                        cancel_event=cancel_event,
+                    )
+                    if not should_retry:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise
+                    assert policy is not None
+                    delay = self._compute_retry_delay(policy, attempt)
+                    remaining = self._remaining_budget(policy, start_time)
+                    if remaining is not None and remaining <= 0:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise
+                    if remaining is not None:
+                        delay = min(delay, max(0.0, remaining))
+                    store_metrics.increment_retry(
+                        method, self._daemon_endpoint, error.status_code
+                    )
+                    span.add_event(
+                        "store.retry",
+                        {
+                            "tc.store.retry_attempt": attempt + 1,
+                            "tc.store.status": error.status_code,
                         },
                     )
-                    time.sleep(delay)
-                attempt += 1
-            except Exception as exc:  # noqa: BLE001
-                error = self._map_materialization_error(exc)
-                should_retry = self._should_retry_registration(
-                    method,
-                    error,
-                    attempt=attempt,
-                    policy=policy,
-                    start_time=start_time,
-                    cancel_event=cancel_event,
-                )
-                if not should_retry:
-                    record_outcome(error.status_code)
-                    raise error from None
-                assert policy is not None
-                delay = self._compute_retry_delay(policy, attempt)
-                remaining = self._remaining_budget(policy, start_time)
-                if remaining is not None and remaining <= 0:
-                    record_outcome(error.status_code)
-                    raise error from None
-                if remaining is not None:
-                    delay = min(delay, max(0.0, remaining))
-                store_metrics.increment_retry(
-                    method, self._daemon_endpoint, error.status_code
-                )
-                if delay > 0:
-                    logger.info(
-                        "store.get_retry",
-                        extra={
-                            "tc.store.daemon": self._daemon_endpoint,
-                            "tc.store.method": method,
-                            "tc.store.attempt": attempt + 1,
-                            "tc.store.delay_sec": delay,
-                            "tc.store.status_code": error.status_code,
+                    if delay > 0:
+                        logger.info(
+                            "store.get_retry",
+                            extra={
+                                "tc.store.daemon": self._daemon_endpoint,
+                                "tc.store.method": method,
+                                "tc.store.attempt": attempt + 1,
+                                "tc.store.delay_sec": delay,
+                                "tc.store.status_code": error.status_code,
+                            },
+                        )
+                        time.sleep(delay)
+                    attempt += 1
+                except Exception as exc:  # noqa: BLE001
+                    error = self._map_materialization_error(exc)
+                    span.record_exception(error)
+                    should_retry = self._should_retry_registration(
+                        method,
+                        error,
+                        attempt=attempt,
+                        policy=policy,
+                        start_time=start_time,
+                        cancel_event=cancel_event,
+                    )
+                    if not should_retry:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise error from None
+                    assert policy is not None
+                    delay = self._compute_retry_delay(policy, attempt)
+                    remaining = self._remaining_budget(policy, start_time)
+                    if remaining is not None and remaining <= 0:
+                        record_outcome(error.status_code)
+                        span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        raise error from None
+                    if remaining is not None:
+                        delay = min(delay, max(0.0, remaining))
+                    store_metrics.increment_retry(
+                        method, self._daemon_endpoint, error.status_code
+                    )
+                    span.add_event(
+                        "store.retry",
+                        {
+                            "tc.store.retry_attempt": attempt + 1,
+                            "tc.store.status": error.status_code,
                         },
                     )
-                    time.sleep(delay)
-                attempt += 1
+                    if delay > 0:
+                        logger.info(
+                            "store.get_retry",
+                            extra={
+                                "tc.store.daemon": self._daemon_endpoint,
+                                "tc.store.method": method,
+                                "tc.store.attempt": attempt + 1,
+                                "tc.store.delay_sec": delay,
+                                "tc.store.status_code": error.status_code,
+                            },
+                        )
+                        time.sleep(delay)
+                    attempt += 1
 
     def _release_materialized(
         self, materialized: MaterializedArtifact, client: DaemonCtl
@@ -1408,7 +1513,7 @@ class Store:
                     handle_ref["handle"] = None
 
         future = self._executor.submit(_task)
-        self._track_future(future)
+        self._track_future(cast(concurrent.futures.Future[object], future))
 
         def _cancel() -> bool:
             if cancel_event.is_set():
@@ -1471,7 +1576,7 @@ class Store:
                     handle_ref["handle"] = None
 
         future = self._executor.submit(_task)
-        self._track_future(future)
+        self._track_future(cast(concurrent.futures.Future[object], future))
 
         def _cancel() -> bool:
             if cancel_event.is_set():
@@ -1553,7 +1658,7 @@ class Store:
                     mat_ref["value"] = None
 
         future = self._executor.submit(_task)
-        self._track_future(future)
+        self._track_future(cast(concurrent.futures.Future[object], future))
 
         def _cancel() -> bool:
             if cancel_event.is_set():
@@ -1659,7 +1764,7 @@ class Store:
                     mat_ref["value"] = None
 
         future = self._executor.submit(_task)
-        self._track_future(future)
+        self._track_future(cast(concurrent.futures.Future[object], future))
 
         def _cancel() -> bool:
             if cancel_event.is_set():

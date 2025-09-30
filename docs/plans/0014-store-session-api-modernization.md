@@ -86,7 +86,7 @@ for attempt in range(max_retries):
   - [x] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
     - Notes: `tensorcast/api/__init__.py` now instantiates a cached `Store`, emits deprecation warnings, and falls back to legacy helpers on `ArtifactError` while preserving return types.
   - [ ] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md`
-  - [ ] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle
+  - [x] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle *(2025-10-01 – `tensorcast/api/store.py` emits `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, `tc_store_operation_retries_total`; spans annotate retry outcomes; docs/architecture updated with signal catalog)*
   - [ ] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims
 - [ ] Phase 5: Validation, Rollout, & Backout Readiness
   - [ ] Milestone 5.1: Extend Python tests to cover sync/async variants, cancellation, and fallback permutations (`tests/python/test_register_*`, new `test_store_session_api.py`)
@@ -118,7 +118,7 @@ for attempt in range(max_retries):
 
 ## Tooling & Telemetry
 
-- [ ] Add OTEL spans and Prometheus counters for Store verbs (`tensorcast/observability/otel.py`, metrics exporters)
+- [x] Add OTEL spans and Prometheus counters for Store verbs (`tensorcast/observability/otel.py`, metrics exporters)
 - [ ] Update CLI tooling (`tensorcast/cli_utils`) to print Store session status for debugging
 - [ ] Provide Grafana dashboard snippets capturing Store client metrics (attach to ops runbook)
 
