@@ -168,6 +168,8 @@ The legacy module-level helpers (`register_artifact`, `get_artifact_sync`, `load
 remain available for compatibility, but they now delegate to a process-scoped `Store` and emit a
 `DeprecationWarning`. New integrations should instantiate `Store` directly to access type-safe
 sync/async verbs and observability hooks (OpenTelemetry spans + `tc_store_*` metrics).
+Set `TENSORCAST_STORE_SESSION_REQUIRED=1` to make these legacy helpers raise immediately so that
+downstream applications can verify they no longer rely on the shim layer.
 
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.

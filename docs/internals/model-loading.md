@@ -207,3 +207,6 @@ These disk fallbacks reuse the existing `_io_disk` helpers to avoid duplicating 
   `"127.0.0.1:50052"`, `"unix:///tmp/tensorcastd.sock"`). Code that previously relied on global
   state should accept a `Store` instance explicitly or construct one using the daemon address that
   `tensorcast.startup.init()` exposes.
+- Set `TENSORCAST_STORE_SESSION_REQUIRED=1` in the environment to turn these legacy helpers into
+  hard errors, which helps downstream applications confirm they are no longer depending on shimmed
+  paths before the helpers are removed entirely.

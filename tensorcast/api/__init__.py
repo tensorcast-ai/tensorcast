@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 import warnings
 from os import PathLike
@@ -67,6 +68,16 @@ _legacy_store_lock = threading.RLock()
 _legacy_store_atexit = False
 _legacy_warnings: set[str] = set()
 
+
+def _truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+_STORE_SESSION_REQUIRED = _truthy(os.getenv("TENSORCAST_STORE_SESSION_REQUIRED"))
+
 RegisteredArtifact = _LegacyRegisteredArtifact
 
 
@@ -89,6 +100,15 @@ def _emit_deprecation(symbol: str, guidance: str) -> None:
         f"tensorcast.api.{symbol} is deprecated; {guidance}",
         DeprecationWarning,
         stacklevel=2,
+    )
+
+
+def _require_store_session(symbol: str) -> None:
+    if not _STORE_SESSION_REQUIRED:
+        return
+    raise RuntimeError(
+        "Legacy helper usage is disabled by TENSORCAST_STORE_SESSION_REQUIRED. "
+        f"Instantiate tensorcast.api.Store and call {symbol} instead."
     )
 
 
@@ -172,6 +192,7 @@ def register_artifact(
     device_id: int | torch.device | None = None,
     ttl_ms: int | None = None,
 ) -> RegistrationResult:
+    _require_store_session("Store.register/Store.put")
     opts = options
     _emit_deprecation(
         "register_artifact", "instantiate tensorcast.api.Store and call register/put"
@@ -234,6 +255,7 @@ def get_artifact_sync(
     options: GetArtifactOptions | None = None,
 ) -> dict[str, torch.Tensor]:
     opts = options or GetArtifactOptions()
+    _require_store_session("Store.get")
     _emit_deprecation("get_artifact_sync", "use Store.get instead")
     fallback = _fallback_from_options(opts)
     try:
@@ -260,6 +282,7 @@ def get_artifact_async(
     options: GetArtifactOptions | None = None,
 ) -> LoadHandle:
     opts = options or GetArtifactOptions()
+    _require_store_session("Store.get_async")
     _emit_deprecation("get_artifact_async", "use Store.get_async instead")
     fallback = _fallback_from_options(opts)
     try:
@@ -287,6 +310,7 @@ def load_dict_sync(
     enable_verification: bool = True,
     pinned_allocation_timeout_ms: int = 30_000,
 ) -> dict[str, torch.Tensor]:
+    _require_store_session("Store.get with disk fallback")
     _emit_deprecation("load_dict_sync", "use Store.get with disk fallback")
     return _legacy_load_dict_sync(
         disk_path=disk_path,
@@ -304,6 +328,7 @@ def load_dict_async(
     enable_verification: bool = True,
     pinned_allocation_timeout_ms: int = 30_000,
 ) -> LoadHandle:
+    _require_store_session("Store.get_async with disk fallback")
     _emit_deprecation("load_dict_async", "use Store.get_async with disk fallback")
     return _legacy_load_dict_async(
         disk_path=disk_path,

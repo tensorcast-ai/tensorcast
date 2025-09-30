@@ -105,7 +105,7 @@ for attempt in range(max_retries):
 - [x] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [x] Wire cancellation propagation for `Store.get_async`/`get_into_async` using daemon unload hooks
 - [x] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
-- [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path
+- [x] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path *(2025-10-01 – honoring `TENSORCAST_STORE_SESSION_REQUIRED` disables legacy helpers and forces direct Store usage)*
 - [x] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
 - [x] Refresh examples under `examples/` to instantiate `Store`
 
