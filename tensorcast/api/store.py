@@ -19,7 +19,7 @@ import uuid
 import weakref
 from collections.abc import Callable, Mapping
 from concurrent.futures import CancelledError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
@@ -160,6 +160,7 @@ class RegisteredArtifact:
     canonical_index: CanonicalIndex
     lease: LeaseHandle | None
     state_dict: dict[str, torch.Tensor] | None = None
+    registration_result: RegistrationResult | None = None
 
 
 @dataclass(frozen=True)
@@ -637,6 +638,9 @@ class Store:
         plan: PlanType,
         cancel_event: threading.Event | None = None,
         on_begin: Callable[[_RegisterHandle], None] | None = None,
+        options_override: RegisterArtifactOptions | None = None,
+        ttl_override: int | None = None,
+        device_override: int | torch.device | None = None,
     ) -> RegisteredArtifact:
         material = dict(tensors)
         if not material:
@@ -645,17 +649,36 @@ class Store:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        options = RegisterArtifactOptions(
-            plan=plan,
-            lease_in_place=plan is PlanType.VRAM_LEASED,
-            key=key,
-        )
-        ttl_ms = self._DEFAULT_LEASE_TTL_MS if plan is PlanType.VRAM_LEASED else None
-        device_id = (
-            None
+        resolved_key = key
+        options = options_override
+        if options is not None:
+            if options.plan is not plan:
+                options = replace(options, plan=plan)
+            if plan is PlanType.VRAM_LEASED and not options.lease_in_place:
+                options = replace(options, lease_in_place=True)
+            if resolved_key is None:
+                resolved_key = options.key
+            elif options.key != resolved_key:
+                options = replace(options, key=resolved_key)
+        else:
+            options = RegisterArtifactOptions(
+                plan=plan,
+                lease_in_place=plan is PlanType.VRAM_LEASED,
+                key=resolved_key,
+            )
+        ttl_ms = (
+            ttl_override
+            if ttl_override is not None
+            else self._DEFAULT_LEASE_TTL_MS
             if plan is PlanType.VRAM_LEASED
-            else self._select_device_for_put(material)
+            else None
         )
+        if plan is PlanType.VRAM_LEASED:
+            device_id = None
+        elif device_override is not None:
+            device_id = resolve_device(device_override)
+        else:
+            device_id = self._select_device_for_put(material)
         try:
             registration_result = _register_artifact_core(
                 artifact=material,
@@ -663,7 +686,7 @@ class Store:
                 device_id=device_id,
                 ttl_ms=ttl_ms,
                 force_lease_in_place=plan is PlanType.VRAM_LEASED,
-                prevalidate_disk=False,
+                prevalidate_disk=self._should_prevalidate_disk(options),
                 client=self._ensure_client(),
                 daemon_address=self._daemon_endpoint,
                 cancel_event=cancel_event,
@@ -716,6 +739,15 @@ class Store:
         remaining = policy.deadline_seconds - (time.monotonic() - start_time)
         return remaining
 
+    @staticmethod
+    def _should_prevalidate_disk(options: RegisterArtifactOptions) -> bool:
+        disk_path = options.disk_path
+        if disk_path is None:
+            return False
+        if not isinstance(disk_path, str):
+            return False
+        return disk_path.strip() != ""
+
     def _perform_registration(
         self,
         tensors: TensorDict,
@@ -724,6 +756,9 @@ class Store:
         plan: PlanType,
         cancel_event: threading.Event | None = None,
         on_begin: Callable[[_RegisterHandle], None] | None = None,
+        options_override: RegisterArtifactOptions | None = None,
+        ttl_override: int | None = None,
+        device_override: int | torch.device | None = None,
     ) -> RegisteredArtifact:
         method = "register" if plan is PlanType.VRAM_LEASED else "put"
         policy = self._retry_policies.get(method)
@@ -753,6 +788,9 @@ class Store:
                     plan=plan,
                     cancel_event=cancel_event,
                     on_begin=on_begin,
+                    options_override=options_override,
+                    ttl_override=ttl_override,
+                    device_override=device_override,
                 )
                 record_outcome("OK")
                 return result
@@ -806,6 +844,7 @@ class Store:
             canonical_index=canonical_index,
             lease=lease_handle,
             state_dict=result.state_dict,
+            registration_result=result,
         )
 
     def _track_future(self, future: concurrent.futures.Future[Any]) -> None:
@@ -864,14 +903,17 @@ class Store:
         return resolve_device(selector)
 
     def _build_get_options(
-        self, fallback: FallbackOptions | None
+        self,
+        fallback: FallbackOptions | None,
+        options_override: GetArtifactOptions | None,
     ) -> GetArtifactOptions:
-        enable_verification = True if fallback is None else fallback.verify_checksums
-        return GetArtifactOptions(
-            prefer="p2p",
-            enable_verification=enable_verification,
-            wait_for_completion=True,
-        )
+        options = options_override or GetArtifactOptions()
+        if (
+            fallback is not None
+            and options.enable_verification != fallback.verify_checksums
+        ):
+            options = replace(options, enable_verification=fallback.verify_checksums)
+        return options
 
     def _ensure_fallback_supported(self, fallback: FallbackOptions | None) -> None:
         if fallback and fallback.disk_path and fallback.disk_path.strip() == "":
@@ -1111,6 +1153,7 @@ class Store:
         device: torch.device | str | None,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
+        options_override: GetArtifactOptions | None,
     ) -> tuple[MaterializedArtifact, int]:
         return self._attempt_get(
             artifact_id=artifact_id,
@@ -1118,6 +1161,7 @@ class Store:
             device=device,
             fallback=fallback,
             cancel_event=cancel_event,
+            options_override=options_override,
         )
 
     def _attempt_get(
@@ -1128,12 +1172,13 @@ class Store:
         device: torch.device | str | None,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
+        options_override: GetArtifactOptions | None,
     ) -> tuple[MaterializedArtifact, int]:
         artifact_id, key = self._resolve_identifiers(artifact_id, key)
         resolved_fallback = fallback or self._opts.fallback
         self._ensure_fallback_supported(resolved_fallback)
         device_id = self._resolve_device_selector(device)
-        options = self._build_get_options(resolved_fallback)
+        options = self._build_get_options(resolved_fallback, options_override)
         try:
             materialized = self._materialize(
                 artifact_id=artifact_id,
@@ -1156,6 +1201,7 @@ class Store:
         device: torch.device | str | None,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
+        options_override: GetArtifactOptions | None,
     ) -> tuple[MaterializedArtifact, int]:
         policy = self._retry_policies.get(method, self._retry_policies.get("get"))
         attempt = 1
@@ -1184,6 +1230,7 @@ class Store:
                     device=device,
                     fallback=fallback,
                     cancel_event=cancel_event,
+                    options_override=options_override,
                 )
                 record_outcome("OK")
                 return materialized, device_id
@@ -1314,16 +1361,28 @@ class Store:
     # Verb placeholders – wired up in later milestones.
     # ------------------------------------------------------------------
     def register(
-        self, tensors: TensorDict, *, key: str | None = None
+        self,
+        tensors: TensorDict,
+        *,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        ttl_ms: int | None = None,
     ) -> RegisteredArtifact:
         return self._perform_registration(
             tensors,
             key=key,
             plan=PlanType.VRAM_LEASED,
+            options_override=options,
+            ttl_override=ttl_ms,
         )
 
     def register_async(
-        self, tensors: TensorDict, *, key: str | None = None
+        self,
+        tensors: TensorDict,
+        *,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        ttl_ms: int | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
         cancel_event = threading.Event()
         handle_lock = threading.Lock()
@@ -1341,6 +1400,8 @@ class Store:
                     plan=PlanType.VRAM_LEASED,
                     cancel_event=cancel_event,
                     on_begin=_on_begin,
+                    options_override=options,
+                    ttl_override=ttl_ms,
                 )
             finally:
                 with handle_lock:
@@ -1362,15 +1423,29 @@ class Store:
 
         return ArtifactFuture(future, cancel_callback=_cancel)
 
-    def put(self, tensors: TensorDict, *, key: str | None = None) -> RegisteredArtifact:
+    def put(
+        self,
+        tensors: TensorDict,
+        *,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        device: int | torch.device | None = None,
+    ) -> RegisteredArtifact:
         return self._perform_registration(
             tensors,
             key=key,
             plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            device_override=device,
         )
 
     def put_async(
-        self, tensors: TensorDict, *, key: str | None = None
+        self,
+        tensors: TensorDict,
+        *,
+        key: str | None = None,
+        options: RegisterArtifactOptions | None = None,
+        device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
         cancel_event = threading.Event()
         handle_lock = threading.Lock()
@@ -1388,6 +1463,8 @@ class Store:
                     plan=PlanType.VRAM_COALESCED,
                     cancel_event=cancel_event,
                     on_begin=_on_begin,
+                    options_override=options,
+                    device_override=device,
                 )
             finally:
                 with handle_lock:
@@ -1416,6 +1493,7 @@ class Store:
         key: str | None = None,
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
+        options: GetArtifactOptions | None = None,
     ) -> dict[str, torch.Tensor]:
         materialized, _ = self._perform_get_with_retry(
             artifact_id=artifact_id,
@@ -1424,6 +1502,7 @@ class Store:
             fallback=fallback,
             method="get",
             cancel_event=None,
+            options_override=options,
         )
         return materialized.state_dict
 
@@ -1434,6 +1513,7 @@ class Store:
         key: str | None = None,
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
+        options: GetArtifactOptions | None = None,
     ) -> ArtifactFuture[dict[str, torch.Tensor]]:
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
@@ -1448,6 +1528,7 @@ class Store:
                     fallback=fallback,
                     method="get",
                     cancel_event=cancel_event,
+                    options_override=options,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized
@@ -1495,6 +1576,7 @@ class Store:
         key: str | None = None,
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
+        options: GetArtifactOptions | None = None,
     ) -> None:
         materialized, device_id = self._perform_get_with_retry(
             artifact_id=artifact_id,
@@ -1503,6 +1585,7 @@ class Store:
             fallback=fallback,
             method="get_into",
             cancel_event=None,
+            options_override=options,
         )
         canonical_index = self._canonical_index_from_bytes(
             materialized.canonical_index_bytes
@@ -1524,6 +1607,7 @@ class Store:
         key: str | None = None,
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
+        options: GetArtifactOptions | None = None,
     ) -> ArtifactFuture[None]:
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
@@ -1538,6 +1622,7 @@ class Store:
                     fallback=fallback,
                     method="get_into",
                     cancel_event=cancel_event,
+                    options_override=options,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized

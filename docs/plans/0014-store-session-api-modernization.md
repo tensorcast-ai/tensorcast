@@ -83,7 +83,8 @@ for attempt in range(max_retries):
   - [x] Milestone 3.3: Implement `Store.get_into`/`get_into_async`, including strict tensor layout validation and zero-copy CUDA IPC path selection
   - [x] Milestone 3.4: Wire fallback options (disk, P2P) and verification toggles through the Store API; emit telemetry for fallback decisions
 - [ ] Phase 4: Legacy API Shims & Observability
-  - [ ] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
+  - [x] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
+    - Notes: `tensorcast/api/__init__.py` now instantiates a cached `Store`, emits deprecation warnings, and falls back to legacy helpers on `ArtifactError` while preserving return types.
   - [ ] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md`
   - [ ] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle
   - [ ] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims
@@ -103,7 +104,7 @@ for attempt in range(max_retries):
 - [x] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
 - [x] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [x] Wire cancellation propagation for `Store.get_async`/`get_into_async` using daemon unload hooks
-- [ ] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
+- [x] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
 - [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path
 - [ ] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
 - [ ] Refresh examples under `examples/` to instantiate `Store`
