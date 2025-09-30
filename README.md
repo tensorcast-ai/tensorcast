@@ -145,10 +145,29 @@ ctx = init(address="127.0.0.1:50052")
 # Call tensorcast.startup.shutdown() to close early if needed.
 ```
 
-All APIs under `tensorcast.api` require this initialization. Call `tensorcast.init(...)` once per
-process before using helpers such as `register_artifact`, `load_dict_sync`, or `load_dict_async`.
-They automatically reuse the daemon session and gRPC client established during `init()`, and will
-raise a `RuntimeError` if invoked prior to initialization.
+Call `tensorcast.init(...)` once per process before constructing client sessions. The preferred
+entry point for artifact registration and loading is the `Store` session API:
+
+```python
+from tensorcast.api import FallbackOptions, Store
+
+# Derive the daemon endpoint from init() or supply one explicitly.
+store = Store("127.0.0.1:50052")
+
+# Register tensors without copying when they already live on the requested device.
+registered = store.register(state_dict, key="demo:model:001")
+
+# Materialise tensors by key or artifact id. Fallback policies can be expressed declaratively.
+state = store.get(key="demo:model:001", fallback=FallbackOptions(prefer_disk=True))
+
+# In-place materialisation fills user-provided tensors directly.
+store.get_into(target_buffers, artifact_id=registered.artifact_id)
+```
+
+The legacy module-level helpers (`register_artifact`, `get_artifact_sync`, `load_dict_sync`, …)
+remain available for compatibility, but they now delegate to a process-scoped `Store` and emit a
+`DeprecationWarning`. New integrations should instantiate `Store` directly to access type-safe
+sync/async verbs and observability hooks (OpenTelemetry spans + `tc_store_*` metrics).
 
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.
@@ -164,13 +183,16 @@ CLI duplicate protection: `tensorcast start` refuses to start a new local daemon
 
 ## Advanced SDK: RegisteredArtifact with Context Manager
 
-For advanced in-memory registration workflows (explicit CPU VA feed via UMA/VS, TTL keepalive, manual revoke/abort), use the SDK handle API with a Python context manager. When `ttl_ms` is provided, a background keepalive thread refreshes TTL every TTL/2 until commit/close.
+For advanced in-memory registration workflows (explicit CPU VA feed via UMA/VS, TTL keepalive,
+manual revoke/abort), use the `Store.register_async` path or the low-level SDK handle API with a
+Python context manager. When `ttl_ms` is provided, the Store’s lease manager refreshes TTL every
+TTL/2 until commit/close.
 
 Note: SDK examples have been aligned to UMA V3 final naming; CPU streaming uses the VirtualAddressSpace (VS) path with UMA-managed leases and commit. Refer to tensorcast.api helpers for current usage.
 
 Notes:
 - For VRAM lease (FDML), begin with `LeasePlan(kind="lease", ...)` and feed `LeaseSegment` items using IPC handles exported from unique CUDA storage blocks. Each `LeaseSegment` includes `dst_offset` so segment order is irrelevant; the daemon zero-fills PAD and places bytes at the specified destination offsets.
-- Coalesced VRAM remains the simplest one-shot path; the high-level `register_artifact(...)` helper handles copy + commit automatically.
+- Coalesced VRAM remains the simplest one-shot path; `Store.put(...)` performs the copy + commit and surfaces the resulting `RegisteredArtifact`.
 - Without GPUs, build and run with the Fake CUDA backend (see AGENTS.md).
 
 ## Run test

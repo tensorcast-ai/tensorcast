@@ -85,7 +85,7 @@ for attempt in range(max_retries):
 - [ ] Phase 4: Legacy API Shims & Observability
   - [x] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
     - Notes: `tensorcast/api/__init__.py` now instantiates a cached `Store`, emits deprecation warnings, and falls back to legacy helpers on `ArtifactError` while preserving return types.
-  - [ ] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md`
+  - [x] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md` *(2025-10-01 – README + internals docs now emphasize `Store` usage, migration notes added, examples refreshed to instantiate Store sessions)*
   - [x] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle *(2025-10-01 – `tensorcast/api/store.py` emits `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, `tc_store_operation_retries_total`; spans annotate retry outcomes; docs/architecture updated with signal catalog)*
   - [ ] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims
 - [ ] Phase 5: Validation, Rollout, & Backout Readiness
@@ -106,8 +106,8 @@ for attempt in range(max_retries):
 - [x] Wire cancellation propagation for `Store.get_async`/`get_into_async` using daemon unload hooks
 - [x] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
 - [ ] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path
-- [ ] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
-- [ ] Refresh examples under `examples/` to instantiate `Store`
+- [x] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
+- [x] Refresh examples under `examples/` to instantiate `Store`
 
 ## Daemon / Core / Global Store (verification + compatibility)
 

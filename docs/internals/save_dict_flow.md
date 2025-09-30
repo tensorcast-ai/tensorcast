@@ -6,7 +6,11 @@ sidebar_position: 2
 
 # `save_dict` Workflow
 
-This document explains how **tensorcast** persists a PyTorch `state_dict` using the Python helper `save_dict` and the underlying C++ Checkpoint subsystem.
+This document explains how **tensorcast** persists a PyTorch `state_dict` using the Python helper
+`save_dict` and the underlying C++ Checkpoint subsystem. Registration into the distributed Store is
+handled by the session API (`Store.put` / `Store.register`); `save_dict` remains the path for
+materialising disk checkpoints that the Store can subsequently ingest when disk fallback is
+requested.
 
 ---
 
