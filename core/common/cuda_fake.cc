@@ -2,7 +2,6 @@
 
 #include "core/common/cuda_api.h"
 
-#include <algorithm>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -925,6 +924,9 @@ absl::Status close_ipc_mem_handle(void* dev_ptr) {
 }
 
 absl::Status host_register(void* ptr, size_t size, unsigned int flags) {
+  if (size == 0) {
+    return absl::InvalidArgumentError("fake cuda host_register: size must be > 0");
+  }
   // In fake backend, host memory registration is a no-op
   return absl::OkStatus();
 }

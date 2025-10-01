@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
@@ -192,6 +193,10 @@ class Communicator {
   void process_mtcp_read_task(MtcpReadTask task);
   static void fail_mtcp_read_task(const MtcpReadTask& task, absl::Status status);
 
+  struct GpuChannelLease;
+  absl::StatusOr<std::shared_ptr<void>> acquire_gpu_channel_slot();
+  void release_gpu_channel_slot();
+
   struct HandshakeRetryTask {
     absl::Time resume_at;
     std::weak_ptr<Channel> channel;
@@ -264,6 +269,9 @@ class Communicator {
 
   misc::Queue<MtcpReadTask> mtcp_staging_queue_;
   std::thread mtcp_staging_thread_;
+  std::atomic<int> active_gpu_channels_{0};
+  int max_gpu_channels_ = 0;
+  bool enforce_gpu_channel_limit_ = false;
 };
 
 } // namespace tensorcast::communicator::engine

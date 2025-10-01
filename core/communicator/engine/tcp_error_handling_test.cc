@@ -17,13 +17,13 @@ using namespace tensorcast;
 ;
 using namespace tensorcast::communicator;
 using namespace tensorcast::testing;
+using StageMode = tensorcast::communicator::engine::MemoryStager::StageMode;
 
 TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SKIP_IF_NO_CUDA();
 
   SECTION("Invalid tensor registration") {
-    communicator::v1::CommunicatorConfig cfg;
-    cfg.set_enable_rdma(false); /* disable RDMA */
+    auto cfg = tensorcast::testing::make_tcp_communicator_config();
     auto engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
@@ -71,13 +71,13 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
     // Stage once with RAII - should succeed
     {
-      auto ptr1_or = stager.stage(tensor, 0, 512 * 1024);
+      auto ptr1_or = stager.stage(tensor, 0, 512 * 1024, StageMode::kBlocking);
       REQUIRE(ptr1_or.ok());
       void* staged1 = *ptr1_or;
       REQUIRE(staged1 != nullptr);
 
       staging_thread = std::thread([&]() {
-        staged2_ptr = stager.stage(tensor, 512 * 1024, 512 * 1024);
+        staged2_ptr = stager.stage(tensor, 512 * 1024, 512 * 1024, StageMode::kBlocking);
         staging_completed = true;
       });
 
@@ -103,8 +103,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   }
 
   SECTION("Zero-size transfer handling") {
-    communicator::v1::CommunicatorConfig cfg;
-    cfg.set_enable_rdma(false); /* disable RDMA */
+    auto cfg = tensorcast::testing::make_tcp_communicator_config();
     auto engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg);
     REQUIRE(engine->init("127.0.0.1", 0).ok());
 
@@ -150,7 +149,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
     tensor->set_device_id(0);
 
     // Try to stage beyond tensor bounds
-    auto result = stager.stage(tensor, tensor_size - 100, 200); // 100 bytes past end
+    auto result = stager.stage(tensor, tensor_size - 100, 200, StageMode::kBlocking); // 100 bytes past end
     INFO(
         "Expected staging to fail when accessing beyond tensor bounds (offset "
         << (tensor_size - 100) << " + size 200 > tensor_size " << tensor_size << "), but it succeeded");

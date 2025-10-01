@@ -423,6 +423,7 @@ cc_test(
     deps = [
         ":engine_lib",
         "//core/testing:catch_main",
+        "//core/testing:test_helpers",
     ],
 )
 
