@@ -89,7 +89,7 @@ for attempt in range(max_retries):
   - [x] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle *(2025-10-01 – `tensorcast/api/store.py` emits `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, `tc_store_operation_retries_total`; spans annotate retry outcomes; docs/architecture updated with signal catalog)*
   - [ ] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims
 - [ ] Phase 5: Validation, Rollout, & Backout Readiness
-  - [ ] Milestone 5.1: Extend Python tests to cover sync/async variants, cancellation, and fallback permutations (`tests/python/test_register_*`, new `test_store_session_api.py`)
+  - [x] Milestone 5.1: Extend Python tests to cover sync/async variants, cancellation, and fallback permutations (`tests/python/test_register_*`, new `test_store_session_api.py`) *(2025-10-02 – Added `tests/python/test_store_session_api.py` with fake-daemon fixtures covering register/put/get/get_into sync+async paths, cancellation propagation, and disk fallback behaviour)*
   - [ ] Milestone 5.2: Run integration suites against fake CUDA and staged daemons (`uv run pytest tests/python/...`, `bazel test //daemon:session_lifecycle_test`)
   - [ ] Milestone 5.3: Document rollout steps (feature flag/env var gating) and backout procedure in `docs/architecture/architecture-overview.md` + ops runbook
   - [ ] Milestone 5.4: Tag release checklist ensuring global store schemas, daemon binaries, and SDK wheels ship together
@@ -124,10 +124,10 @@ for attempt in range(max_retries):
 
 ## Testing & QA
 
-- [x] Add unit tests for `ArtifactFuture` cancellation/timeout behavior *(2025-10-01 – `tests/python/test_store_session_api.py::test_artifact_future_callbacks_and_cancel` validates confirm/cancel semantics)*
-- [x] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async) *(2025-10-01 – `tests/python/test_store_session_api.py::test_store_put_and_get_round_trip` exercises sync + async verbs against a test daemon)*
+- [x] Add unit tests for `ArtifactFuture` cancellation/timeout behavior *(2025-10-02 – `tests/python/test_store_session_api.py::test_artifact_future_confirm_sets_result` and `test_artifact_future_cancel_invokes_callback` validate confirm/cancel semantics)*
+- [x] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async) *(2025-10-02 – `tests/python/test_store_session_api.py` exercises sync + async verbs with fake daemon client and cancellation handling)*
 - [ ] Update existing lease tests (`tests/python/test_register_lease_in_place_helper.py`, `test_register_vram_leased_and_dvmp_stream.py`) to assert new return types while maintaining coverage
-- [ ] Expand integration coverage for fallback paths (disk-first, P2P) using `FallbackOptions`
+- [x] Expand integration coverage for fallback paths (disk-first, P2P) using `FallbackOptions` *(2025-10-02 – Added disk-first fallback coverage in `test_store_session_api.py::test_store_get_prefers_disk_when_available`; default P2P path validated via fake materialization stub)*
 - [ ] Add regression tests ensuring deprecated helpers raise warnings but still function
 
 # Test / Rollout / Backout Strategy
