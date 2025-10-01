@@ -126,7 +126,7 @@ for attempt in range(max_retries):
 
 - [x] Add unit tests for `ArtifactFuture` cancellation/timeout behavior *(2025-10-02 – `tests/python/test_store_session_api.py::test_artifact_future_confirm_sets_result` and `test_artifact_future_cancel_invokes_callback` validate confirm/cancel semantics)*
 - [x] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async) *(2025-10-02 – `tests/python/test_store_session_api.py` exercises sync + async verbs with fake daemon client and cancellation handling)*
-- [ ] Update existing lease tests (`tests/python/test_register_lease_in_place_helper.py`, `test_register_vram_leased_and_dvmp_stream.py`) to assert new return types while maintaining coverage
+- [x] Update existing lease tests (`tests/python/test_register_lease_in_place_helper.py`, `test_register_vram_leased_and_dvmp_stream.py`) to assert new return types while maintaining coverage *(2025-10-01 – tests now exercise `Store.register` and validate `RegisteredArtifact` leases/descriptors)*
 - [x] Expand integration coverage for fallback paths (disk-first, P2P) using `FallbackOptions` *(2025-10-02 – Added disk-first fallback coverage in `test_store_session_api.py::test_store_get_prefers_disk_when_available`; default P2P path validated via fake materialization stub)*
 - [ ] Add regression tests ensuring deprecated helpers raise warnings but still function
 
