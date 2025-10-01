@@ -124,8 +124,8 @@ for attempt in range(max_retries):
 
 ## Testing & QA
 
-- [ ] Add unit tests for `ArtifactFuture` cancellation/timeout behavior
-- [ ] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async)
+- [x] Add unit tests for `ArtifactFuture` cancellation/timeout behavior *(2025-10-01 – `tests/python/test_store_session_api.py::test_artifact_future_callbacks_and_cancel` validates confirm/cancel semantics)*
+- [x] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async) *(2025-10-01 – `tests/python/test_store_session_api.py::test_store_put_and_get_round_trip` exercises sync + async verbs against a test daemon)*
 - [ ] Update existing lease tests (`tests/python/test_register_lease_in_place_helper.py`, `test_register_vram_leased_and_dvmp_stream.py`) to assert new return types while maintaining coverage
 - [ ] Expand integration coverage for fallback paths (disk-first, P2P) using `FallbackOptions`
 - [ ] Add regression tests ensuring deprecated helpers raise warnings but still function
