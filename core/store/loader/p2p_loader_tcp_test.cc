@@ -40,8 +40,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0);
 
     // Set up source engine with GPU tensor
-    CommunicatorConfig cfg1;
-    cfg1.set_enable_rdma(false); /* disable RDMA */
+    auto cfg1 = make_tcp_communicator_config();
     auto source_engine = std::make_shared<Communicator>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -69,8 +68,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
                 .ok());
 
     // Create target engine for loader
-    CommunicatorConfig cfg2;
-    cfg2.set_enable_rdma(false); /* disable RDMA */
+    auto cfg2 = make_tcp_communicator_config();
     auto target_engine = std::make_shared<Communicator>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
@@ -134,8 +132,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(target_port > 0); // "Failed to find available port for GPU-to-CPU P2P target engine"
 
     // Similar test but with CPU target
-    CommunicatorConfig cfg3;
-    cfg3.set_enable_rdma(false); /* disable RDMA */
+    auto cfg3 = make_tcp_communicator_config();
     auto source_engine = std::make_shared<Communicator>(cfg3);
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
@@ -167,8 +164,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     CAPTURE(register_status.message());
     REQUIRE(register_status.ok());
 
-    CommunicatorConfig cfg4;
-    cfg4.set_enable_rdma(false); /* disable RDMA */
+    auto cfg4 = make_tcp_communicator_config();
     auto target_engine = std::make_shared<Communicator>(cfg4);
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
@@ -240,21 +236,23 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     int target_port = find_available_port(source_port + 1);
     REQUIRE(target_port > 0);
 
-    CommunicatorConfig src_cfg;
-    src_cfg.set_enable_rdma(false);
+    auto src_cfg = make_tcp_communicator_config(
+        /*enable_rdma=*/false,
+        /*gpu_chunk_mb=*/16,
+        /*cpu_chunk_mb=*/4,
+        /*buffers_per_flow=*/4);
     src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-    src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-    src_cfg.mutable_stager()->set_buffers_per_flow(4);
     src_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
     src_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
     auto source_engine = std::make_shared<Communicator>(src_cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    CommunicatorConfig dst_cfg;
-    dst_cfg.set_enable_rdma(false);
+    auto dst_cfg = make_tcp_communicator_config(
+        /*enable_rdma=*/false,
+        /*gpu_chunk_mb=*/16,
+        /*cpu_chunk_mb=*/4,
+        /*buffers_per_flow=*/4);
     dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-    dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-    dst_cfg.mutable_stager()->set_buffers_per_flow(4);
     dst_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
     dst_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
     auto target_engine = std::make_shared<Communicator>(dst_cfg);
@@ -353,6 +351,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     SECTION("Remote GPU to Local GPU via TCP with limited staging credit") {
       const int tcp_conn_count = 8;
       const std::size_t stage_chunk_bytes = 16ull * 1024 * 1024; // 16 MiB
+      const uint32_t stage_chunk_mb = static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024));
       const std::size_t artifact_size = stage_chunk_bytes * 6; // Requires >1 window when buffers_per_flow=2
 
       int source_port = find_available_port();
@@ -360,11 +359,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       int target_port = find_available_port(source_port + 1);
       REQUIRE(target_port > 0);
 
-      CommunicatorConfig src_cfg;
-      src_cfg.set_enable_rdma(false);
+      auto src_cfg = make_tcp_communicator_config(
+          /*enable_rdma=*/false,
+          /*gpu_chunk_mb=*/stage_chunk_mb,
+          /*cpu_chunk_mb=*/4,
+          /*buffers_per_flow=*/2);
       src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024)));
-      src_cfg.mutable_stager()->set_buffers_per_flow(2);
       src_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
       src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto source_engine = std::make_shared<Communicator>(src_cfg);
@@ -394,11 +394,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       CAPTURE(reg_status.message());
       REQUIRE(reg_status.ok());
 
-      CommunicatorConfig dst_cfg;
-      dst_cfg.set_enable_rdma(false);
+      auto dst_cfg = make_tcp_communicator_config(
+          /*enable_rdma=*/false,
+          /*gpu_chunk_mb=*/stage_chunk_mb,
+          /*cpu_chunk_mb=*/4,
+          /*buffers_per_flow=*/2);
       dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024)));
-      dst_cfg.mutable_stager()->set_buffers_per_flow(2);
       dst_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
       dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto target_engine = std::make_shared<Communicator>(dst_cfg);
@@ -469,11 +470,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       int target_port = find_available_port(source_port + 1);
       REQUIRE(target_port > 0);
 
-      CommunicatorConfig src_cfg;
-      src_cfg.set_enable_rdma(false);
+      auto src_cfg = make_tcp_communicator_config(
+          /*enable_rdma=*/false,
+          /*gpu_chunk_mb=*/16,
+          /*cpu_chunk_mb=*/4,
+          /*buffers_per_flow=*/buffers_per_flow);
       src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      src_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-      src_cfg.mutable_stager()->set_buffers_per_flow(buffers_per_flow);
       src_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
       src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto source_engine = std::make_shared<Communicator>(src_cfg);
@@ -509,11 +511,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
                       reg_opts)
                   .ok());
 
-      CommunicatorConfig dst_cfg;
-      dst_cfg.set_enable_rdma(false);
+      auto dst_cfg = make_tcp_communicator_config(
+          /*enable_rdma=*/false,
+          /*gpu_chunk_mb=*/16,
+          /*cpu_chunk_mb=*/4,
+          /*buffers_per_flow=*/buffers_per_flow);
       dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      dst_cfg.mutable_stager()->set_stage_chunk_mb_gpu(16);
-      dst_cfg.mutable_stager()->set_buffers_per_flow(buffers_per_flow);
       dst_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
       dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
       auto target_engine = std::make_shared<Communicator>(dst_cfg);

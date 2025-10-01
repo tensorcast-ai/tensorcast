@@ -21,6 +21,10 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
 
   communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(enable_rdma);
+  auto* stager = cfg.mutable_stager();
+  stager->set_stage_chunk_mb_gpu(16);
+  stager->set_stage_chunk_mb_cpu(4);
+  stager->set_buffers_per_flow(4);
   comm_engine_ = std::make_shared<communicator::engine::Communicator>(cfg);
 
   auto status = comm_engine_->init(listen_addr, listen_port);

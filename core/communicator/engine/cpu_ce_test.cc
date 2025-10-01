@@ -5,6 +5,7 @@
 #include "common.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/utils.h"
+#include "core/testing/test_helpers.h"
 
 using tensorcast::testing::g_actor;
 using tensorcast::testing::g_chunk;
@@ -15,8 +16,7 @@ using tensorcast::testing::g_port;
 using tensorcast::testing::parse_options;
 
 int run_server() {
-  tensorcast::communicator::v1::CommunicatorConfig cfg;
-  cfg.set_enable_rdma(g_rdma);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
   tensorcast::communicator::engine::Communicator engine(cfg);
   engine.init(g_ip, g_port);
   uint8_t* addr = reinterpret_cast<uint8_t*>(malloc(g_count));
@@ -33,8 +33,7 @@ int run_server() {
 }
 
 int run_client() {
-  tensorcast::communicator::v1::CommunicatorConfig cfg;
-  cfg.set_enable_rdma(g_rdma);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
   tensorcast::communicator::engine::Communicator engine(cfg, 10);
   engine.init("0.0.0.0", g_port + 1);
   auto addr = reinterpret_cast<uint8_t*>(malloc(g_count));

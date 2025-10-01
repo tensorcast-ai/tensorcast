@@ -33,8 +33,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    communicator::v1::CommunicatorConfig cfg1;
-    cfg1.set_enable_rdma(false); /* disable RDMA */
+    auto cfg1 = make_tcp_communicator_config();
     auto source_engine = std::make_shared<Communicator>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -69,8 +68,7 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
       REQUIRE(target_port > 0);
       target_ports.push_back(target_port);
 
-      communicator::v1::CommunicatorConfig cfg;
-      cfg.set_enable_rdma(false); /* disable RDMA */
+      auto cfg = make_tcp_communicator_config();
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
@@ -115,10 +113,11 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    communicator::v1::CommunicatorConfig cfg;
-    cfg.set_enable_rdma(false); /* disable RDMA */
-    cfg.mutable_stager()->set_buffers_per_flow(2); /* reduce staging footprint for concurrent cycling */
-    cfg.mutable_stager()->set_buffers_per_flow(2); /* reduce staging footprint for concurrent cycling */
+    auto cfg = make_tcp_communicator_config(
+        /*enable_rdma=*/false,
+        /*gpu_chunk_mb=*/16,
+        /*cpu_chunk_mb=*/4,
+        /*buffers_per_flow=*/2);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -146,6 +145,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg2;
     cfg2.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg2);
     auto target_engine = std::make_shared<Communicator>(cfg2);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
@@ -195,6 +196,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(source_port > 0);
     communicator::v1::CommunicatorConfig cfg3;
     cfg3.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg3);
     auto source_engine = std::make_shared<Communicator>(cfg3);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -202,6 +205,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     REQUIRE(target_port > 0);
     communicator::v1::CommunicatorConfig cfg4;
     cfg4.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg4);
     auto target_engine = std::make_shared<Communicator>(cfg4);
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
@@ -289,6 +294,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg5;
     cfg5.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg5);
     auto source_engine = std::make_shared<Communicator>(cfg5);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -324,6 +331,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
       communicator::v1::CommunicatorConfig cfg;
       cfg.set_enable_rdma(false); /* disable RDMA */
+
+      configure_tcp_stager_defaults(&cfg);
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       target_engines.push_back(engine);
@@ -424,6 +433,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     cfg.mutable_stager()->set_buffers_per_flow(2); /* keep per-flow staging buffers bounded */
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
@@ -472,6 +483,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
       communicator::v1::CommunicatorConfig cfg;
       cfg.set_enable_rdma(false); /* disable RDMA */
+
+      configure_tcp_stager_defaults(&cfg);
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       engines.push_back(engine);
@@ -549,6 +562,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     cfg.mutable_stager()->set_buffers_per_flow(2);
     cfg.mutable_stager()->set_expected_gpu_channels(num_cycles);
     const size_t chunk_bytes =
@@ -596,6 +611,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         // Create new engine for each cycle
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg);
         cfg.mutable_stager()->set_buffers_per_flow(2); /* keep per-flow staging buffers bounded */
         cfg.mutable_stager()->set_expected_gpu_channels(num_cycles); /* share same limit as source */
         cfg.mutable_pool()->set_pool_size_bytes(required_slices * chunk_bytes);
@@ -666,6 +683,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false);
+
+    configure_tcp_stager_defaults(&cfg);
     cfg.mutable_stager()->set_buffers_per_flow(2);
     cfg.mutable_stager()->set_expected_gpu_channels(1);
     auto source_engine = std::make_shared<Communicator>(cfg);
@@ -690,6 +709,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     auto make_target_engine = [&](const std::string& label) {
       communicator::v1::CommunicatorConfig target_cfg;
       target_cfg.set_enable_rdma(false);
+
+      configure_tcp_stager_defaults(&target_cfg);
       target_cfg.mutable_stager()->set_buffers_per_flow(2);
       auto engine = std::make_shared<Communicator>(target_cfg);
       int port = find_available_port(source_port + 100);
@@ -761,6 +782,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -818,6 +841,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg);
         auto engine = std::make_shared<Communicator>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
@@ -905,6 +930,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -956,6 +983,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg);
         auto engine = std::make_shared<Communicator>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
@@ -1030,6 +1059,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -1071,6 +1102,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
       communicator::v1::CommunicatorConfig cfg;
       cfg.set_enable_rdma(false); /* disable RDMA */
+
+      configure_tcp_stager_defaults(&cfg);
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       holder_engines.push_back(engine);
@@ -1109,6 +1142,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
       communicator::v1::CommunicatorConfig cfg;
       cfg.set_enable_rdma(false); /* disable RDMA */
+
+      configure_tcp_stager_defaults(&cfg);
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", target_port).ok());
       waiter_engines.push_back(engine);
@@ -1193,6 +1228,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -1257,6 +1294,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg);
         auto engine = std::make_shared<Communicator>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
@@ -1329,6 +1368,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg;
     cfg.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg);
     auto source_engine = std::make_shared<Communicator>(cfg);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -1376,6 +1417,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg;
         cfg.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg);
         auto engine = std::make_shared<Communicator>(cfg);
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
@@ -1493,6 +1536,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     communicator::v1::CommunicatorConfig cfg15;
     cfg15.set_enable_rdma(false); /* disable RDMA */
+
+    configure_tcp_stager_defaults(&cfg15);
     cfg15.mutable_stager()->set_buffers_per_flow(2);
     cfg15.mutable_stager()->set_expected_gpu_channels(num_iterations);
     const size_t raii_chunk_bytes =
@@ -1541,6 +1586,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
         communicator::v1::CommunicatorConfig cfg16;
         cfg16.set_enable_rdma(false); /* disable RDMA */
+
+        configure_tcp_stager_defaults(&cfg16);
         cfg16.mutable_stager()->set_buffers_per_flow(2);
         cfg16.mutable_stager()->set_expected_gpu_channels(num_iterations);
         cfg16.mutable_pool()->set_pool_size_bytes(raii_required_slices * raii_chunk_bytes);
@@ -1630,6 +1677,8 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
       communicator::v1::CommunicatorConfig cfg;
       cfg.set_enable_rdma(false); /* disable RDMA */
+
+      configure_tcp_stager_defaults(&cfg);
       auto engine = std::make_shared<Communicator>(cfg);
       REQUIRE(engine->init("127.0.0.1", final_port).ok());
 

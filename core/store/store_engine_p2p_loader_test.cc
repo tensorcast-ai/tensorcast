@@ -53,8 +53,7 @@ TEST_CASE("StoreEngine P2P Loader TCP end-to-end", "[store_engine][p2p][tcp][gpu
   int src_port = find_available_port(51000);
   REQUIRE(src_port > 0);
 
-  CommunicatorConfig cfg;
-  cfg.set_enable_rdma(false); /* disable RDMA */
+  auto cfg = make_tcp_communicator_config();
   auto src_engine = std::make_shared<Communicator>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
 

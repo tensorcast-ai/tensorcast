@@ -52,8 +52,7 @@ TEST_CASE("P2P receiver verification fails with mismatched verification_json", "
   int src_port = tensorcast::testing::find_available_port(52000);
   REQUIRE(src_port > 0);
 
-  CommunicatorConfig cfg;
-  cfg.set_enable_rdma(false);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config();
   auto src_engine = std::make_shared<Communicator>(cfg);
   REQUIRE(src_engine->init("127.0.0.1", static_cast<uint16_t>(src_port)).ok());
 

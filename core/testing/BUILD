@@ -33,6 +33,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/communicator:engine_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
         "@catch2//:catch2_main",
     ],
 )

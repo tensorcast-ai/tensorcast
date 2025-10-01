@@ -39,3 +39,4 @@ StoreEngine (Main API)
 - Wraps the communication engine for P2P transfers
 - Handles memory registration for RDMA
 - Manages remote transfer setup
+- `initialize()` primes the staged TCP defaults (16 MiB GPU slices, 4 MiB CPU slices, 4 buffers/flow) so tests and toy setups meet `Communicator` invariants without bespoke config.
