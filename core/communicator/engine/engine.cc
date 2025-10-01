@@ -17,7 +17,6 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-// absl string utilities no longer needed in typed-config engine
 
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
