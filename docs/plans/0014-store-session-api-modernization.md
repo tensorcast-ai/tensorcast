@@ -120,7 +120,7 @@ for attempt in range(max_retries):
 
 - [x] Add OTEL spans and Prometheus counters for Store verbs (`tensorcast/observability/otel.py`, metrics exporters)
 - [x] Update CLI tooling (`tensorcast/cli_utils`) to print Store session status for debugging *(2025-10-03 – `tensorcast/cli_utils/status.py` now surfaces active Store sessions with lease/future counts and session metadata scraped from the client registry)*
-- [ ] Provide Grafana dashboard snippets capturing Store client metrics (attach to ops runbook)
+- [x] Provide Grafana dashboard snippets capturing Store client metrics (attach to ops runbook) *(2025-10-03 – Added Grafana JSON example under docs/deployment/store-daemon.md covering latency/error time series with daemon filter)*
 
 ## Testing & QA
 

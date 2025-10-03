@@ -74,6 +74,45 @@ uv run -q python -m tensorcast.cli stop
 
 Metrics are exposed via the unified system; the daemon no longer provides an HTTP metrics endpoint.
 
+### Store Client Sessions
+
+- `uv run tensorcast status` now prints a *Store Sessions* section after the daemon health report. Data is sourced from `~/.tensorcast/store_sessions/<session_id>.json`, which the Python SDK refreshes whenever a Store verb completes. Use this view to spot clients that still hold leases or in-flight futures before forcing revocation.
+- Each session entry includes daemon endpoint, client PID, timestamps, active lease count, pending futures, and any capabilities reported by `Store.__init__` (pool size, transfer slice, lease support).
+
+### Store Client Metrics (Grafana Example)
+
+```json
+{
+  "title": "Store Operation Latency",
+  "type": "timeseries",
+  "fieldConfig": {
+    "defaults": {
+      "unit": "ms",
+      "transformations": []
+    },
+    "overrides": []
+  },
+  "targets": [
+    {
+      "expr": "histogram_quantile(0.95, sum by (le, verb) (rate(tc_store_operation_latency_seconds_bucket{daemon="$daemon"}[5m])))",
+      "legendFormat": "{{verb}} p95"
+    },
+    {
+      "expr": "sum by (verb) (rate(tc_store_operation_errors_total{daemon="$daemon"}[5m]))",
+      "legendFormat": "{{verb}} errors/s",
+      "yaxis": 2
+    }
+  ],
+  "options": {
+    "tooltip": {
+      "mode": "single"
+    }
+  }
+}
+```
+
+Pair this panel with a counter visualization for `tc_store_operation_retries_total` to highlight retry-heavy verbs. Filter on the `daemon` label to compare multiple Store sessions in the same dashboard.
+
 ### Logging
 
 - `observability.logging.level` drives the daemon's stderr threshold and minimum log level (DEBUG is routed through VLOG).

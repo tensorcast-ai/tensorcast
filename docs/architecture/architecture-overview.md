@@ -152,3 +152,33 @@ The Store client (Python SDK) follows [Design 0010](../designs/0010-opentelemetr
 - **Cardinality guardrails**: High-cardinality attributes (replica UUIDs, disk paths, request UUIDs) are filtered by default to keep backend cost predictable. Enable `TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS=1` locally to debug with full attribute sets.
 
 Keepalive activity and cancellation outcomes are captured inside the same spans so operators can correlate lease churn, fallback causes, and daemon retries on a single trace.
+
+### Store Session Registry
+
+The Python SDK persists lightweight session manifests under `~/.tensorcast/store_sessions/<session_id>.json`. Each file records the daemon endpoint, client PID, capabilities summary (`mem_pool_bytes`, `tx_slice_bytes`, transfer slice size), plus rolling counts of active leases and pending futures. Entries are refreshed whenever a verb executes, ensuring operators can audit abandoned leases or hung futures even if the client process exits unexpectedly.
+
+Running `uv run tensorcast status` now prints this registry after the daemon health report:
+
+```
+$ uv run tensorcast status
+...
+==============================
+Store Sessions
+==============================
+Session ID: 20251001-abcd
+  Daemon Endpoint: 127.0.0.1:50052
+  PID: 42281
+  Status: ACTIVE
+  Created: 2025-10-03 09:12:14
+  Last Activity: 2025-10-03 09:15:41
+  Active Leases: 2
+  Pending Futures: 0
+  Capabilities:
+    mem_pool_bytes: 4294967296
+    tx_slice_bytes: 67108864
+    supports_coalesced: True
+    supports_lease: True
+```
+
+Operators can prune stale entries manually or rely on the CLI output to identify orphaned sessions before triggering lease revocation from the daemon.
+
