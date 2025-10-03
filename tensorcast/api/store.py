@@ -1709,6 +1709,7 @@ class Store:
         mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
 
         def _task() -> dict[str, torch.Tensor]:
+            materialized: MaterializedArtifact | None = None
             try:
                 materialized, _ = self._perform_get_with_retry(
                     artifact_id=artifact_id,
@@ -1725,6 +1726,7 @@ class Store:
                     with mat_lock:
                         mat_ref["value"] = None
                     self._release_materialized(materialized, self._ensure_client())
+                    materialized = None
                     raise CancelledError
                 return materialized.state_dict
             except CancelledError as exc:
@@ -1742,6 +1744,7 @@ class Store:
                     mat_ref["value"] = None
                 if materialized is not None:
                     self._release_materialized(materialized, self._ensure_client())
+                    materialized = None
 
         future = self._executor.submit(_task)
         self._track_future(cast(concurrent.futures.Future[object], future))
