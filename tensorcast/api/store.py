@@ -1740,6 +1740,8 @@ class Store:
             finally:
                 with mat_lock:
                     mat_ref["value"] = None
+                if materialized is not None:
+                    self._release_materialized(materialized, self._ensure_client())
 
         future = self._executor.submit(_task)
         self._track_future(cast(concurrent.futures.Future[object], future))
@@ -1776,17 +1778,20 @@ class Store:
             cancel_event=None,
             options_override=options,
         )
-        canonical_index = self._canonical_index_from_bytes(
-            materialized.canonical_index_bytes
-        )
-        pairs = self._validate_targets(
-            canonical_index=canonical_index,
-            target=target,
-            source=materialized.state_dict,
-            device_id=device_id,
-        )
-        for tgt, src in pairs:
-            tgt.copy_(src)
+        try:
+            canonical_index = self._canonical_index_from_bytes(
+                materialized.canonical_index_bytes
+            )
+            pairs = self._validate_targets(
+                canonical_index=canonical_index,
+                target=target,
+                source=materialized.state_dict,
+                device_id=device_id,
+            )
+            for tgt, src in pairs:
+                tgt.copy_(src)
+        finally:
+            self._release_materialized(materialized, self._ensure_client())
 
     def get_into_async(
         self,
@@ -1803,6 +1808,7 @@ class Store:
         mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
 
         def _task() -> None:
+            materialized: MaterializedArtifact | None = None
             try:
                 materialized, device_id = self._perform_get_with_retry(
                     artifact_id=artifact_id,
@@ -1819,20 +1825,26 @@ class Store:
                     with mat_lock:
                         mat_ref["value"] = None
                     self._release_materialized(materialized, self._ensure_client())
+                    materialized = None
                     raise CancelledError
-                canonical_index = self._canonical_index_from_bytes(
-                    materialized.canonical_index_bytes
-                )
-                pairs = self._validate_targets(
-                    canonical_index=canonical_index,
-                    target=target,
-                    source=materialized.state_dict,
-                    device_id=device_id,
-                )
-                for tgt, src in pairs:
-                    if cancel_event.is_set():
-                        raise CancelledError
-                    tgt.copy_(src)
+                try:
+                    canonical_index = self._canonical_index_from_bytes(
+                        materialized.canonical_index_bytes
+                    )
+                    pairs = self._validate_targets(
+                        canonical_index=canonical_index,
+                        target=target,
+                        source=materialized.state_dict,
+                        device_id=device_id,
+                    )
+                    for tgt, src in pairs:
+                        if cancel_event.is_set():
+                            raise CancelledError
+                        tgt.copy_(src)
+                finally:
+                    if materialized is not None:
+                        self._release_materialized(materialized, self._ensure_client())
+                        materialized = None
             except CancelledError as exc:
                 raise ArtifactError(
                     "Retrieval cancelled",
