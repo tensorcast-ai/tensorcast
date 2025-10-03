@@ -506,6 +506,8 @@ class Store:
         self._pending_futures = set()
         self._leases_lock = threading.RLock()
         self._active_leases = set()
+        self._metadata_lock = threading.RLock()
+        self._session_record = None
         self._session_id = uuid.uuid4().hex
         self._session_labels = {
             "daemon_endpoint": self._daemon_endpoint,
@@ -513,6 +515,7 @@ class Store:
         }
         self._capabilities = None
         self._retry_policies = self._build_retry_policies()
+        self._init_session_record()
 
     def _ensure_client(self) -> DaemonCtl:
         if self._closed:
@@ -536,6 +539,7 @@ class Store:
                 self._client = None
         self._release_all_leases()
         self._executor_handle.close()
+        self._update_session_record(activity=True, closed=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -969,6 +973,7 @@ class Store:
         name: str,
         attributes: Mapping[str, SpanAttributeValue] | None = None,
     ) -> Iterator[Span]:
+        self._update_session_record(activity=True)
         with self._tracer.start_as_current_span(name, kind=SpanKind.CLIENT) as span:
             if attributes:
                 for key, value in attributes.items():
