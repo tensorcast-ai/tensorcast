@@ -93,7 +93,7 @@ for attempt in range(max_retries):
 - [ ] Phase 5: Validation, Rollout, & Backout Readiness
   - [x] Milestone 5.1: Extend Python tests to cover sync/async variants, cancellation, and fallback permutations (`tests/python/test_register_*`, new `test_store_session_api.py`) *(2025-10-02 – Added `tests/python/test_store_session_api.py` with fake-daemon fixtures covering register/put/get/get_into sync+async paths, cancellation propagation, and disk fallback behaviour)*
   - [x] Milestone 5.2: Run integration suites against fake CUDA and staged daemons (`uv run pytest tests/python/...`, `bazel test //daemon:session_lifecycle_test`) *(2025-10-03 – Executed lease helper suites with `uv run pytest` and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`; all skipped/passed as expected)*
-  - [ ] Milestone 5.3: Document rollout steps (feature flag/env var gating) and backout procedure in `docs/architecture/architecture-overview.md` + ops runbook
+  - [x] Milestone 5.3: Document rollout steps (feature flag/env var gating) and backout procedure in `docs/architecture/architecture-overview.md` + ops runbook *(2025-10-03 – Added Store session rollout/backout procedures to `docs/architecture/architecture-overview.md` and `docs/deployment/store-daemon.md` with OTEL metric guidance)*
   - [ ] Milestone 5.4: Tag release checklist ensuring global store schemas, daemon binaries, and SDK wheels ship together
 
 # Task Breakdown

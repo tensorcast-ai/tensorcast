@@ -68,7 +68,7 @@ graph TD
 ### 3. User Process Worker
 **Role**: PyTorch client process accessing artifacts
 
-- **Interface**: Uses `tensorcast.api.Store` verbs (`get`, `get_into`) to request artifacts via daemon `MaterializeByKey` (RFC‑0017); legacy helpers forward to a cached Store instance during the migration window.
+- **Interface**: Uses `tensorcast.api.Store` verbs (`get`, `get_into`) to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 
@@ -182,3 +182,17 @@ Session ID: 20251001-abcd
 
 Operators can prune stale entries manually or rely on the CLI output to identify orphaned sessions before triggering lease revocation from the daemon.
 
+## Store Session Rollout & Backout
+
+### Rollout procedure
+
+1. **Stage the release**: Deploy the aligned Global Store migration, Store Daemon binary, and Python SDK wheel to staging. Check the triplet by running `uv run tensorcast --version` and confirm the staged daemon advertises the expected build in `uv run tensorcast status`.
+2. **Run integration validation**: Execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` against the staged environment. These suites cover lease timers, LIP flows, and daemon session lifecycle with the Store-centric API.
+3. **Observe telemetry**: Monitor the OpenTelemetry metrics from [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md) while gradually shifting traffic. Track `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total` per verb in Grafana to ensure latency, error, and retry rates stay within historical limits.
+4. **Promote to production**: Roll the SDK wheel to production workers and restart clients. Use `uv run tensorcast status` to verify Store sessions register with accurate lease counts before decommissioning any remaining legacy helper usage.
+
+### Backout procedure
+
+- **Immediate revert**: If regressions appear, redeploy the previous SDK wheel and daemon binary from before the Store-session rollout. The persisted session manifests under `~/.tensorcast/store_sessions` are backward compatible and will be ignored by older clients.
+- **Post-revert validation**: Re-run the integration suites above to confirm behaviour is restored, and watch `tc_store_operation_errors_total` to verify failure rates return to steady state.
+- **Communication loop**: Notify downstream teams when rollout halts, capture the blocking issues, and resume after fixes pass staging validation.

@@ -113,6 +113,21 @@ Metrics are exposed via the unified system; the daemon no longer provides an HTT
 
 Pair this panel with a counter visualization for `tc_store_operation_retries_total` to highlight retry-heavy verbs. Filter on the `daemon` label to compare multiple Store sessions in the same dashboard.
 
+## Store Session API Rollout & Backout
+
+### Rollout checklist
+
+1. **Version alignment**: Ensure the staged Global Store schema, Store Daemon binary, and Python SDK wheel come from the same release. Run `uv run tensorcast --version` and `uv run tensorcast status` to confirm the daemon reports the expected build metadata.
+2. **Pre-traffic validation**: Against staging, execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`. These suites cover lease renewal, VRAM leased-in-place flows, and daemon session lifecycle.
+3. **Metrics watch**: Monitor the OpenTelemetry metrics defined in [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md)—`tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total`—while introducing production traffic. Alert thresholds should track the historical p95 latency and error envelopes before legacy helpers are disabled.
+4. **Session audit**: Use `uv run tensorcast status` to inspect the *Store Sessions* section and verify the session registry under `~/.tensorcast/store_sessions` reflects active clients with the expected lease/future counts.
+
+### Backout checklist
+
+- **Binary rollback**: Redeploy the previous Store Daemon binary and Python SDK wheel (pre-Store-session release). Older clients ignore the `.tensorcast/store_sessions` manifests, so no cleanup is required beyond optional file pruning.
+- **Verification**: Re-run the validation suites above and confirm observability indicators (`tc_store_operation_errors_total`, `tc_store_operation_retries_total`) return to baseline values.
+- **Communication**: Notify on-call and consumer teams when rollback occurs, document the failure mode, and schedule a postmortem before attempting another rollout.
+
 ### Logging
 
 - `observability.logging.level` drives the daemon's stderr threshold and minimum log level (DEBUG is routed through VLOG).
