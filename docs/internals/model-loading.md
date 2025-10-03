@@ -11,7 +11,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT
-  - Entrypoint: `tensorcast/api/store.py::Store.get` / `Store.get_into` (legacy shims in `_loader.py` remain for migration)
+- Entrypoint: `tensorcast/api/store.py::Store.get` / `Store.get_into`
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
@@ -192,23 +192,19 @@ These disk fallbacks reuse the existing `_io_disk` helpers to avoid duplicating 
 - The underlying client enables gRPC keepalive and performs a light retry with channel refresh on transient errors (`UNAVAILABLE`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`).
 - In registration flows, `RegisteredArtifact` holds a cached client for its lifetime (keepalive thread, commit/abort/revoke, and feed helpers reuse the same channel).
 
-### Migration Notes (Legacy Helpers → Store)
+### Migration Notes
 
-- `register_artifact`, `get_artifact_sync`, and `load_dict_sync` now delegate to a lazily
-  constructed `Store`. They will continue to function during the migration window but emit a
-  `DeprecationWarning` advising callers to instantiate `Store` directly.
-- Feature compatibility:
+- Module-level helpers such as `register_artifact`, `get_artifact_sync`, and `get_artifact_async`
+  have been removed. All registration and retrieval flows must use a `Store` instance directly.
+- Alignment guidance for existing codebases:
   - `register_artifact(state_dict, options=...)` → `Store.register(state_dict, options=...)`
   - `register_artifact(..., plan="vram_coalesced")` → `Store.put(...)`
   - `get_artifact_sync(key=..., device_id=...)` → `Store.get(key=..., device=...)`
   - `get_artifact_async(...)` → `Store.get_async(...)`
-- Observability moved to the Store layer. Applications that previously attached tracing around the
-  module-level helpers should now wrap the Store verbs; they provide richer spans and emit
-  `tc_store_*` metrics automatically when OpenTelemetry is enabled.
+- Observability lives on the Store verbs. Attach tracing or metrics around `Store.register`/
+  `Store.get` instead of the removed helpers to benefit from OpenTelemetry span fields and
+  `tc_store_*` counters.
 - The Store constructor accepts the same daemon endpoints as `tensorcast.startup.init()` (e.g.,
   `"127.0.0.1:50052"`, `"unix:///tmp/tensorcastd.sock"`). Code that previously relied on global
   state should accept a `Store` instance explicitly or construct one using the daemon address that
   `tensorcast.startup.init()` exposes.
-- Set `TENSORCAST_STORE_SESSION_REQUIRED=1` in the environment to turn these legacy helpers into
-  hard errors, which helps downstream applications confirm they are no longer depending on shimmed
-  paths before the helpers are removed entirely.

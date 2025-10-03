@@ -447,7 +447,7 @@ Error semantics
 # Compatibility & Acceptance Criteria
 
 Compatibility
-- Existing `register_artifact`/`get_artifact_sync`/`get_artifact_async` functions become thin shims that instantiate a per-process default Store and forward to the new methods, emitting deprecation warnings.
+- Module-level helpers such as `register_artifact`, `get_artifact_sync`, and `get_artifact_async` have been removed; the session-oriented Store API is the sole public entry point.
 - No daemon or Global Store RPC changes are required; wire compatibility is preserved.
 
 Acceptance Criteria
@@ -467,7 +467,7 @@ This roadmap executes the modernization incrementally while holding current prod
 - Align stakeholders (SDK, daemon, global_store) on sequencing, publish the migration schedule, and verify no pending protocol changes compete with this work.
 
 ## Phase 1 – Session Infrastructure
-- Introduce `tensorcast/api/store.py` exporting the type surface defined above and wire it into `tensorcast/api/__init__.py` without yet mutating legacy helpers.
+- Introduce `tensorcast/api/store.py` exporting the type surface defined above and update `tensorcast/api/__init__.py` to expose the Store-based API surface.
 - Implement `ArtifactFuture` backed by `concurrent.futures.Future`, integrate cancellation propagation with `tensorcast.daemon_ctl.DaemonCtl.abort_registered_artifact` / `revoke_registered_artifact`, and reuse the async-copy manager executor where available.
 - Build `Store.__init__` to materialize a daemon client via `tensorcast.daemon_ctl.get_daemon_client`, preload daemon capability metadata, and register OTEL/Prometheus labels for the session.
 - Factor a private lease manager inside `store.py` that wraps the existing keepalive threads from `_register.RegisteredArtifact` to guarantee deterministic shutdown on context exit.
@@ -484,17 +484,16 @@ This roadmap executes the modernization incrementally while holding current prod
 - Thread `FallbackOptions` through disk (`tensorcast/api/_io_disk.py`) and P2P materializers, logging fallback decisions with structured context for diagnostics.
 - Add cache of key→artifact-id resolutions inside the Store using TTL hints from the Global Store to minimize redundant RPCs.
 
-## Phase 4 – Legacy Bridge, Observability, and Docs
-- Wrap `register_artifact`, `get_artifact_sync`, `get_artifact_async`, and `load_dict_*` to lazily instantiate a module-level `Store`, emit `DeprecationWarning`, and forward arguments without altering call signatures.
+## Phase 4 – Observability, Documentation, and Migration Support
+- Finalize removal of module-level helpers (`register_artifact`, `get_artifact_sync`, `get_artifact_async`) so that the Store object is the only public entry point; keep `load_dict_*` utilities for disk-path workflows.
 - Update `README.md`, `docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, and relevant examples to highlight the session-first usage pattern and describe migration steps.
 - Expand SDK metrics/OTEL exporters to report Store verb latency, retry counts, cancellation, and fallback decisions; ensure dashboards in `docs/architecture/architecture-overview.md` reflect the new signals.
 - Remove temporary tracing added in Phase 0 once dashboards confirm parity, keeping only steady-state telemetry.
 
 ## Phase 5 – Validation, Rollout, and Backout Readiness
-- Add `tests/python/test_store_session_api.py` covering sync/async verbs, cancellation, fallback permutations, and legacy shim parity; update existing fixtures to use the Store where practical.
+- Add `tests/python/test_store_session_api.py` covering sync/async verbs, cancellation, fallback permutations, and Store-only flows; update existing fixtures to use the Store where practical.
 - Exercise fake-CUDA and staged daemon flows via `uv run pytest tests/python/...` and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` before enabling the new API in integration environments.
-- Gate rollout behind a feature flag in `tensorcast/api/_config.py` (default off) so production can toggle back to legacy helpers instantly; document the toggle in operator runbooks.
-- Once telemetry confirms parity, flip the flag to default-on, announce migration completion, and schedule eventual removal of legacy helpers after downstream adoption.
+- Publish a removal timeline to downstream teams, update operator runbooks, and monitor telemetry as Store-first releases are promoted.
 
 ## Risk Mitigation & Cross-Team Dependencies
 - Coordinate with `daemon` owners to monitor lease traffic and ensure keepalive consolidation does not starve existing sessions; add synthetic load testing if congestion appears.
