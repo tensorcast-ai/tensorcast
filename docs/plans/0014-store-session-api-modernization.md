@@ -7,7 +7,7 @@ links:
 
 # Objective
 
-Deliver the Store-centric artifact session API described in Design 0014: ship a reusable `Store` session object with synchronous/async verbs (`register`, `put`, `get`, `get_into`), centralize lease/keepalive policy, and preserve compatibility by shimming the legacy module-level helpers until consumers migrate.
+Deliver the Store-centric artifact session API described in Design 0014: ship a reusable `Store` session object with synchronous/async verbs (`register`, `put`, `get`, `get_into`), centralize lease/keepalive policy, and complete the migration by removing the legacy module-level helpers.
 
 # Draft Execution Insights
 
@@ -15,6 +15,7 @@ Deliver the Store-centric artifact session API described in Design 0014: ship a 
 - Asynchronous paths (`get_artifact_async`, `load_dict_async`) currently return bespoke `LoadHandle` objects. Converging on a shared `ArtifactFuture` backed by `concurrent.futures.Future` simplifies cancellation semantics but requires a lightweight executor scoped per `Store`.
 - Lease keepalive threads in `RegisteredArtifact` / `RegisteredLease` rely on ad hoc threading; encapsulating them inside the Store with lifecycle hooks avoids per-call duplication and lets us guarantee clean cancellation on future completion.
 - Global Store lookups (canonical index fetch) currently deserialize JSON; we can reuse that logic but cache results inside the Store using a TTL keyed by artifact id to minimize repeated RPCs.
+- Legacy helper shims in `tensorcast/api/__init__.py` have been removed; the Store surface is now the only public registration/loading API.
 
 # Clarifications & Additions (Review)
 
@@ -84,13 +85,14 @@ for attempt in range(max_retries):
   - [x] Milestone 3.4: Wire fallback options (disk, P2P) and verification toggles through the Store API; emit telemetry for fallback decisions
 - [ ] Phase 4: Legacy API Shims & Observability
   - [x] Milestone 4.1: Introduce a lazily constructed process-level Store used by `register_artifact`, `get_artifact_sync`, etc., with `DeprecationWarning` emission
-    - Notes: `tensorcast/api/__init__.py` now instantiates a cached `Store`, emits deprecation warnings, and falls back to legacy helpers on `ArtifactError` while preserving return types.
+    - Notes: Initial shim landed via `tensorcast/api/__init__.py`, delegating legacy helpers to a cached Store instance while parity testing completed.
   - [x] Milestone 4.2: Update examples, docs, and quickstarts to promote the new `Store` entry point; provide a migration section in `docs/internals/model-loading.md` *(2025-10-01 – README + internals docs now emphasize `Store` usage, migration notes added, examples refreshed to instantiate Store sessions)*
   - [x] Milestone 4.3: Add user-facing metrics/traces (Prometheus + OTEL) for Store verbs and keepalive lifecycle *(2025-10-01 – `tensorcast/api/store.py` emits `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, `tc_store_operation_retries_total`; spans annotate retry outcomes; docs/architecture updated with signal catalog)*
-  - [ ] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims
+  - [x] Milestone 4.4: Remove temporary tracing from Phase 0 and ensure legacy helpers rely solely on Store shims *(2025-10-03 – Store module now emits only steady-state metrics/logs; legacy helpers delegate exclusively to the Store implementation without extra tracing)*
+  - [x] Milestone 4.5: Retire legacy helper shims and remove `TENSORCAST_STORE_SESSION_REQUIRED` *(2025-10-04 – `tensorcast/api/__init__.py` now exports only Store-based verbs; `_loader.get_artifact_*` helpers deleted; docs/tests updated to reflect mandatory Store usage)*
 - [ ] Phase 5: Validation, Rollout, & Backout Readiness
   - [x] Milestone 5.1: Extend Python tests to cover sync/async variants, cancellation, and fallback permutations (`tests/python/test_register_*`, new `test_store_session_api.py`) *(2025-10-02 – Added `tests/python/test_store_session_api.py` with fake-daemon fixtures covering register/put/get/get_into sync+async paths, cancellation propagation, and disk fallback behaviour)*
-  - [ ] Milestone 5.2: Run integration suites against fake CUDA and staged daemons (`uv run pytest tests/python/...`, `bazel test //daemon:session_lifecycle_test`)
+  - [x] Milestone 5.2: Run integration suites against fake CUDA and staged daemons (`uv run pytest tests/python/...`, `bazel test //daemon:session_lifecycle_test`) *(2025-10-03 – Executed lease helper suites with `uv run pytest` and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`; all skipped/passed as expected)*
   - [ ] Milestone 5.3: Document rollout steps (feature flag/env var gating) and backout procedure in `docs/architecture/architecture-overview.md` + ops runbook
   - [ ] Milestone 5.4: Tag release checklist ensuring global store schemas, daemon binaries, and SDK wheels ship together
 
@@ -104,8 +106,8 @@ for attempt in range(max_retries):
 - [x] Refactor `_loader.py` to expose reusable replica-materialization helpers invoked by `Store.get`/`get_into`
 - [x] Implement `ArtifactFuture` using `concurrent.futures.Future` + Store executor; add cancellation propagation to daemon RPCs (Abort/Revoke)
 - [x] Wire cancellation propagation for `Store.get_async`/`get_into_async` using daemon unload hooks
-- [x] Update `tensorcast/api/__init__.py` to export `Store` and route legacy helpers through a cached Store instance (respect `tensorcast.client_runtime.daemon_target_default()`)
-- [x] Introduce env/config knob to opt into immediate Store usage in downstream apps; default legacy helpers to shim path *(2025-10-01 – honoring `TENSORCAST_STORE_SESSION_REQUIRED` disables legacy helpers and forces direct Store usage)*
+- [x] Update `tensorcast/api/__init__.py` to expose only the Store-based API surface, removing legacy helper functions *(2025-10-04 – `register_artifact`/`get_artifact_*` exports dropped in favour of Store dataclasses and futures)*
+- [x] Retire the env/config knob that forced Store usage once migration completed *(2025-10-04 – `TENSORCAST_STORE_SESSION_REQUIRED` deleted; shim path removed entirely)*
 - [x] Update module docs (`docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, repository `README.md`) to describe Store object workflows and migration timeline
 - [x] Refresh examples under `examples/` to instantiate `Store`
 
@@ -128,15 +130,15 @@ for attempt in range(max_retries):
 - [x] Add Store-level tests using fake daemon fixtures covering register/put/get/get_into flows (sync + async) *(2025-10-02 – `tests/python/test_store_session_api.py` exercises sync + async verbs with fake daemon client and cancellation handling)*
 - [x] Update existing lease tests (`tests/python/test_register_lease_in_place_helper.py`, `test_register_vram_leased_and_dvmp_stream.py`) to assert new return types while maintaining coverage *(2025-10-01 – tests now exercise `Store.register` and validate `RegisteredArtifact` leases/descriptors)*
 - [x] Expand integration coverage for fallback paths (disk-first, P2P) using `FallbackOptions` *(2025-10-02 – Added disk-first fallback coverage in `test_store_session_api.py::test_store_get_prefers_disk_when_available`; default P2P path validated via fake materialization stub)*
-- [x] Add regression tests ensuring deprecated helpers raise warnings but still function *(2025-10-02 – `tests/python/test_store_session_api.py::test_legacy_helpers_emit_warning_and_forward` asserts warning emission and Store delegation)*
+- [x] Remove deprecated-helper regression coverage once shims are gone *(2025-10-04 – dropped `tests/python/test_store_session_api.py::test_legacy_helpers_emit_warning_and_forward`; suite now validates Store-only flows)*
 
 # Test / Rollout / Backout Strategy
 
 - Unit tests: `uv run pytest tests/python/test_store_session_api.py`, existing registration/materialization suites, new cancellation tests
 - Integration: `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, `uv run pytest tests/python/test_register_lease_in_place_helper.py`, gRPC contract checks via `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`
 - Performance smoke: run current throughput benchmarks with Store shims enabled to validate ≤2% regression (baseline captured in Phase 0)
-- Rollout: ship SDK with both Store object and legacy shims; gate warning enforcement behind env var `TENSORCAST_STORE_SESSION_REQUIRED=1` toggled per release; communicate migration plan to downstream teams
-- Backout: retain branch with legacy helpers untouched; if regressions surface, disable Store shim via env flag and re-enable in hotfix once addressed; no schema migrations required
+- Rollout: communicate removal timeline to downstream teams, update release notes to highlight Store-only surface, and validate key integrations against the new API before publishing the SDK.
+- Backout: revert the compatibility-removal changeset if blockers arise; no schema migrations are involved, but the old helpers can be restored from the pre-removal branch snapshot.
 
 # Dependencies & Coordination
 
