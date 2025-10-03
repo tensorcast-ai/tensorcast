@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <memory>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "gsl/pointers"
@@ -21,13 +22,23 @@ namespace tensorcast::communicator::engine {
 class GpuNetStager : public MemoryStager {
  public:
   GpuNetStager(size_t chunk_size, size_t num_buffers, std::shared_ptr<common::memory::PinnedBufferPool> pool)
-      : chunk_size_(chunk_size), num_buffers_(num_buffers), pool_(std::move(pool)) {}
+      : chunk_size_(chunk_size), num_buffers_(num_buffers), pool_(std::move(pool)) {
+    if (chunk_size_ == 0) {
+      LOG(FATAL) << "GpuNetStager chunk_size must be > 0";
+    }
+    if (num_buffers_ == 0) {
+      LOG(FATAL) << "GpuNetStager num_buffers must be > 0";
+    }
+    if (!pool_) {
+      LOG(FATAL) << "GpuNetStager pool must not be null";
+    }
+  }
 
   absl::StatusOr<void*> stage(
       const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
       uint64_t offset,
       uint64_t bytes,
-      StageMode mode = StageMode::kBlocking) override {
+      StageMode mode) override {
     if (bytes == 0)
       return absl::InvalidArgumentError("GpuNetStager: zero bytes");
     if (offset + bytes > tensor->get_bytes()) {

@@ -78,6 +78,10 @@ void Channel::set_transport(communicator::transport::mtcp_transport_t t) {
   mtcp_ = std::move(t);
 }
 
+void Channel::set_gpu_slot_handle(std::shared_ptr<void> handle) {
+  gpu_slot_handle_ = std::move(handle);
+}
+
 void Channel::del_transport(const std::string& local_dev_name, const std::string& remote_dev_name) {
   misc::ASSERT(type_ == base::CHANNEL_RDMA, "cannot set rdma transport for tcp channel");
   std::stringstream key;
@@ -111,6 +115,7 @@ misc::result_t Channel::close() {
     control_.reset();
   }
   mtcp_active_requests_.store(0, std::memory_order_relaxed);
+  gpu_slot_handle_.reset();
   if (mtcp_ != nullptr) {
     mtcp_->release_receive_resources();
     mtcp_.reset();

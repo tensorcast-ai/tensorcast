@@ -25,8 +25,7 @@ struct TcpTestFixture {
   uint32_t client_buf_[BUF_SIZE];
 
   TcpTestFixture() {
-    communicator::v1::CommunicatorConfig srv_cfg;
-    srv_cfg.set_enable_rdma(false);
+    auto srv_cfg = tensorcast::testing::make_tcp_communicator_config();
     server_ = nullptr;
     {
       const int sp = tensorcast::testing::find_available_port();
@@ -38,8 +37,7 @@ struct TcpTestFixture {
         server_init_status_ = server_->init("127.0.0.1", sp, 8);
       }
     }
-    communicator::v1::CommunicatorConfig cli_cfg;
-    cli_cfg.set_enable_rdma(false);
+    auto cli_cfg = tensorcast::testing::make_tcp_communicator_config();
     cli_cfg.mutable_transport()->set_tcp_conn_count(2);
     client_ = nullptr;
     {

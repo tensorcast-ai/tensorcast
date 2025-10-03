@@ -24,6 +24,12 @@
 namespace tensorcast::common::memory {
 
 PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size) : chunk_size_(chunk_size) {
+  if (chunk_size_ == 0) {
+    LOG(FATAL) << "PinnedBufferPool: chunk_size must be > 0";
+  }
+  if (total_size == 0) {
+    LOG(FATAL) << "PinnedBufferPool: total_size must be > 0";
+  }
   // Ensure chunk_size is aligned for DIRECT_IO support
   if (chunk_size_ % kDirectIOAlignment != 0) {
     size_t aligned_chunk_size = ((chunk_size_ + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
@@ -147,6 +153,11 @@ int PinnedBufferPool::deallocate(std::vector<char*>& buffers) {
 
 size_t PinnedBufferPool::get_available_size() const {
   return free_list_.size() * chunk_size_;
+}
+
+size_t PinnedBufferPool::capacity_slices() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return pool_.size();
 }
 
 std::vector<gsl::not_null<char*>> PinnedBufferPool::list_buffers() const {

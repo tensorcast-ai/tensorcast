@@ -68,4 +68,29 @@ int find_available_port(int base_port, int max_attempts) {
   return -1;
 }
 
+void configure_tcp_stager_defaults(
+    tensorcast::communicator::v1::CommunicatorConfig* cfg,
+    uint32_t gpu_chunk_mb,
+    uint32_t cpu_chunk_mb,
+    uint32_t buffers_per_flow) {
+  if (cfg == nullptr) {
+    return;
+  }
+  auto* st = cfg->mutable_stager();
+  st->set_stage_chunk_mb_gpu(gpu_chunk_mb);
+  st->set_stage_chunk_mb_cpu(cpu_chunk_mb);
+  st->set_buffers_per_flow(buffers_per_flow);
+}
+
+tensorcast::communicator::v1::CommunicatorConfig make_tcp_communicator_config(
+    bool enable_rdma,
+    uint32_t gpu_chunk_mb,
+    uint32_t cpu_chunk_mb,
+    uint32_t buffers_per_flow) {
+  tensorcast::communicator::v1::CommunicatorConfig cfg;
+  cfg.set_enable_rdma(enable_rdma);
+  configure_tcp_stager_defaults(&cfg, gpu_chunk_mb, cpu_chunk_mb, buffers_per_flow);
+  return cfg;
+}
+
 } // namespace tensorcast::testing

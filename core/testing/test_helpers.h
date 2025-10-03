@@ -8,6 +8,7 @@
 
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::testing {
 
@@ -20,6 +21,22 @@ bool verify_pattern(const void* data, std::size_t size, uint8_t seed);
 // Helper to find an available port starting from base_port
 // Returns the first available port, or -1 if none found
 int find_available_port(int base_port = 50000, int max_attempts = 1000);
+
+// Configure TCP communicator staging defaults for tests. Ensures the GPU/CPU
+// stagers and buffer pipeline satisfy Communicator constructor invariants.
+void configure_tcp_stager_defaults(
+    tensorcast::communicator::v1::CommunicatorConfig* cfg,
+    uint32_t gpu_chunk_mb = 16,
+    uint32_t cpu_chunk_mb = 4,
+    uint32_t buffers_per_flow = 4);
+
+// Create a CommunicatorConfig with RDMA disabled and staging defaults applied.
+// Callers can further mutate the returned proto (transport params, pool sizes).
+tensorcast::communicator::v1::CommunicatorConfig make_tcp_communicator_config(
+    bool enable_rdma = false,
+    uint32_t gpu_chunk_mb = 16,
+    uint32_t cpu_chunk_mb = 4,
+    uint32_t buffers_per_flow = 4);
 
 // Check if CUDA is available and skip test if not
 #define SKIP_IF_NO_CUDA()                                                    \

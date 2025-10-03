@@ -289,7 +289,7 @@ Key characteristics:
 - Pool reuse: a single `PinnedBufferPool` services both staging paths (NUMA-specific pools are created when `simple_numa` is enabled).
 - Explicit release: MTCP senders free staged buffers once their socket writes complete, while RDMA paths rely on `RDMA_READ_DONE_EX` to release the corresponding `StageLease` entries in the registry.
 - Unified flow control: `FlowCreditLedger` grants staging credit per channel, `StagingWindow` slices responses into credit-bounded windows, and `stager.max_window_segments` (0 → auto) optionally caps the number of segments emitted per window.
-- Lane alignment on receive: MTCP derives the lane from each staged segment’s absolute offset (`offset + sub_offset_in_chunk`) so GPU reads that span multiple sockets enqueue work to the same lane ordering used by the sender, avoiding deadlocks when staging windows interleave connections.
+- Lane alignment on send/receive: MTCP now derives the active lane budget from the tensor’s total bytes and staging chunk size before assigning sockets on either side. Both sender and receiver use the same `offset + sub_offset_in_chunk` formula so GPU reads that span multiple sockets enqueue work to identical lane ordering, avoiding deadlocks when staging windows interleave connections.
 - Receive buffer lifecycle: MTCP channels now track in-flight read requests and, once the last staging window completes, release the per-transport `StreamingPinnedBuffer` slices back to the shared `PinnedBufferPool`. Subsequent reads re-initialize buffers on demand, so short-lived transports no longer monopolize pinned memory until the GC sweeps the channel.
 - Credit back-pressure: when MTCP exhausts staging credit, the engine now emits a warning and retries with backoff until credit returns (up to 30 s) instead of failing the transfer immediately.
 
@@ -371,6 +371,7 @@ Use `CommunicatorConfig` fields instead of env vars:
 - stager.stage_chunk_mb_gpu: size of each staging chunk (MB). Default: 16.
 - stager.stage_chunk_mb_cpu: CPU chunk size (MB). Default: 4.
 - stager.buffers_per_flow: number of buffers per flow. Default: 4.
+- stager.expected_gpu_channels: optional cap on concurrent GPU MTCP transports. Default: 0 (auto).
 - pool.pool_size_bytes: total pinned memory reserved for staging. Default: 8 GiB (shared across GPU/CPU stagers).
 - pool.preregister_mr: when true (default), RDMA contexts pre-register all pool slices on startup.
 
@@ -380,6 +381,7 @@ Use `CommunicatorConfig` fields instead of env vars:
 2. **Pipelining**: Multiple buffers per flow allow GPU copies to overlap with socket I/O.
 3. **CPU Path**: MTCP can stream CPU tensors without staging, while RDMA stages CPU slices through `DRAMStager` and reuses cached MRs.
 4. **Explicit release**: `MemoryStager::release_staged_buffer` is invoked after MTCP send completion or upon `RDMA_READ_DONE_EX` to recycle pinned chunks.
+5. **Concurrency guard**: Set `stager.expected_gpu_channels` when sizing the pinned pool so `Communicator::init()` validates capacity up front; at runtime the communicator rejects MTCP GPU channels once this limit is reached instead of blocking on staging buffers indefinitely.
 
 ### 3.8 RDMA
 
@@ -670,7 +672,7 @@ sequenceDiagram
 #### RDMA Path Details
 - **Client request:** `do_read_request_loop()` sets `ProtoReadRequest.transport_type = ENGINE_TRANSPORT_RDMA` whenever `enable_rdma_` is true and records the `ReadRequest` in `pending_requests_` before the message is sent, preventing a fast response from beating the registration.
 - **Server staging:** `on_receive_request()` schedules staging sessions via `resume_rdma_reads()` instead of blocking. `StagingWindow` pulls non-blocking credit from the ledger with `try_acquire()`, stages whatever segments fit that grant (partial windows included), registers them via `MrCache::get_or_register()` or `NetDev::reg_mr()`, and records each as a `StageLease` in the channel’s registry; when staging succeeds the header flag `ProtoReadResponseExHeader.staged` is set to `1` so the client knows to ACK.
-- **Server failures:** If staging or MR registration fails, the session is removed from the pending queue, the server returns `ENGINE_OP_READ_FAILED` with reason `TENSORCAST_READ_FAILED_MEM_MISMATCH`, and any staged buffers are released before the control loop continues.
+- **Server failures:** If staging or MR registration fails, the session is removed from the pending queue, the server returns `ENGINE_OP_READ_FAILED` (reason `TENSORCAST_READ_FAILED_MEM_MISMATCH` for generic staging errors or `TENSORCAST_READ_FAILED_RESOURCE_EXHAUSTED` when GPU staging capacity is exhausted), and any staged buffers are released before the control loop continues.
 - **Client handshake:** On the client side `on_receive_response()` locates the local NIC from `tensor->get_dev()`. The first RDMA response ensures the endpoint transitions from `Idle → ConnectRequested`, queues the `ReadRequest`, and emits `ENGINE_OP_RDMA_CONNECT_REQUEST`. While in `ConnectRequested` additional reads are enqueued; explicit failures (`ENGINE_OP_RDMA_CONNECT_FAILED` or QP setup errors) transition the endpoint to `Failed`, flush the queue with `REMOTE_RDMA_CONNECT_FAILED`, and schedule an exponential backoff before retrying.
 - **Posting READs:** When the endpoint reaches `Ready`, the client builds `RdmaReadSeg` entries (remote `addr`/`rkey`, local destination based on `remote_offset_`) and invokes `transport->read_multi()`. The transport refuses to post READ WRs while `ready() == false`, so only the handshake path can transition the QP to RTS. Failures update the request status and drop it from `pending_requests_`.
 - **ACK and cleanup:** For staged responses the client installs an `ack_action` that batches all segment offsets into `ENGINE_OP_RDMA_READ_DONE_EX`. Once all RDMA completions fire, this ACK releases staged buffers, deregisters MRs when needed, and removes the corresponding `StageLease` entries from the registry so the channel credit ledger can refill.

@@ -49,6 +49,7 @@ class PinnedBufferPool {
   }
 
   size_t get_available_size() const;
+  size_t capacity_slices() const;
 
   // Expose current pool buffers for registration/warmup purposes.
   // Returns a snapshot copy of buffer base pointers.

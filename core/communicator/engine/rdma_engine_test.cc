@@ -13,6 +13,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/common/cuda_api.h"
 #include "core/communicator/misc/utils.h"
+#include "core/testing/test_helpers.h"
 
 namespace tensorcast::communicator::engine {
 
@@ -64,12 +65,10 @@ struct RdmaTestFixture {
   size_t tensor_bytes_ = sizeof(uint32_t) * BUF_SIZE;
 
   RdmaTestFixture() {
-    communicator::v1::CommunicatorConfig srv_cfg;
-    srv_cfg.set_enable_rdma(true);
+    auto srv_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
     server_ = new communicator::engine::Communicator(srv_cfg, 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
-    communicator::v1::CommunicatorConfig cli_cfg;
-    cli_cfg.set_enable_rdma(true);
+    auto cli_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
     client_ = new communicator::engine::Communicator(cli_cfg, 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
@@ -311,8 +310,7 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
   using tensorcast::communicator::misc::STRNCPY;
   using tensorcast::communicator::misc::SUCCESS;
 
-  tensorcast::communicator::v1::CommunicatorConfig cfg;
-  cfg.set_enable_rdma(true);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
   Communicator client(cfg, /*channel_expire_sec=*/0);
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
@@ -448,8 +446,7 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
   using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
   using tensorcast::communicator::misc::STRNCPY;
 
-  tensorcast::communicator::v1::CommunicatorConfig cfg;
-  cfg.set_enable_rdma(true);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
   Communicator client(cfg, /*channel_expire_sec=*/0);
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);

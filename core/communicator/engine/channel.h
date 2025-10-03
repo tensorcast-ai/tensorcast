@@ -65,6 +65,12 @@ class Channel {
       const std::string& local_dev_name,
       const std::string& remote_dev_name);
 
+  bool has_gpu_slot() const {
+    return gpu_slot_handle_ != nullptr;
+  }
+
+  void set_gpu_slot_handle(std::shared_ptr<void> handle);
+
   void set_channel_type(int type);
 
   void set_transport(
@@ -110,6 +116,7 @@ class Channel {
   std::atomic<int> mtcp_active_requests_{0};
   uint64_t expired_time_;
   std::shared_ptr<FlowState> flow_state_;
+  std::shared_ptr<void> gpu_slot_handle_;
 };
 
 using channel_t = std::shared_ptr<Channel>;
