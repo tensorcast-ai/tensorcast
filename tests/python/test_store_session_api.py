@@ -15,14 +15,14 @@ import torch
 
 from tensorcast.api import store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
+from tensorcast.api._loader import MaterializedArtifact
+from tensorcast.api._register import RegistrationResult
 from tensorcast.api.store import (
     ArtifactError,
     ArtifactFuture,
     FallbackOptions,
     Store,
 )
-from tensorcast.api._loader import MaterializedArtifact
-from tensorcast.api._register import RegistrationResult
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 
 
@@ -285,6 +285,58 @@ def test_store_get_into_copies_tensors(
     assert torch.allclose(target["bias"], state["bias"])
 
 
+def test_store_get_into_unloads_replica(
+    store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, env = store_env
+    state = {"bias": torch.arange(3, dtype=torch.float32)}
+    env.add_materialized("artifact-release", state, replica_uuid="rep-unload-1")
+    target = {"bias": torch.zeros(3, dtype=torch.float32)}
+
+    def fake_validate(
+        self: Store,
+        *,
+        canonical_index: Any,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        return [(target["bias"], source["bias"])]
+
+    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+
+    store.get_into(target, artifact_id="artifact-release", device=torch.device("cuda", 0))
+
+    assert torch.allclose(target["bias"], state["bias"])
+    assert env.client.unload_calls == [("rep-unload-1", "")]
+
+
+def test_store_get_into_unloads_on_validation_error(
+    store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, env = store_env
+    state = {"bias": torch.arange(3, dtype=torch.float32)}
+    env.add_materialized("artifact-invalid", state, replica_uuid="rep-unload-2")
+    target = {"bias": torch.zeros(3, dtype=torch.float32)}
+
+    def failing_validate(
+        self: Store,
+        *,
+        canonical_index: Any,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
+
+    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+
+    with pytest.raises(ArtifactError):
+        store.get_into(target, artifact_id="artifact-invalid", device=torch.device("cuda", 0))
+
+    assert env.client.unload_calls == [("rep-unload-2", "")]
+
+
 def test_store_get_into_enforces_device(store_env: tuple[Store, FakeEnvironment]) -> None:
     store, env = store_env
     state = {"bias": torch.arange(3, dtype=torch.float32)}
@@ -331,6 +383,69 @@ def test_store_get_async_cancel_unloads_replica(
     assert ("rep-100", "") in env.client.unload_calls
 
 
+def test_store_get_into_async_unloads_replica(
+    store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, env = store_env
+    state = {"bias": torch.arange(3, dtype=torch.float32)}
+    env.add_materialized("artifact-async", state, replica_uuid="rep-unload-3")
+    target = {"bias": torch.zeros(3, dtype=torch.float32)}
+
+    def fake_validate(
+        self: Store,
+        *,
+        canonical_index: Any,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        return [(target["bias"], source["bias"])]
+
+    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+
+    future = store.get_into_async(
+        target,
+        artifact_id="artifact-async",
+        device=torch.device("cuda", 0),
+    )
+
+    assert future.result(timeout=1.0) is None
+    assert torch.allclose(target["bias"], state["bias"])
+    assert env.client.unload_calls == [("rep-unload-3", "")]
+
+
+def test_store_get_into_async_unloads_on_validation_error(
+    store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, env = store_env
+    state = {"bias": torch.arange(3, dtype=torch.float32)}
+    env.add_materialized("artifact-async-invalid", state, replica_uuid="rep-unload-4")
+    target = {"bias": torch.zeros(3, dtype=torch.float32)}
+
+    def failing_validate(
+        self: Store,
+        *,
+        canonical_index: Any,
+        target: dict[str, torch.Tensor],
+        source: dict[str, torch.Tensor],
+        device_id: int,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
+
+    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+
+    future = store.get_into_async(
+        target,
+        artifact_id="artifact-async-invalid",
+        device=torch.device("cuda", 0),
+    )
+
+    with pytest.raises(ArtifactError):
+        future.result(timeout=1.0)
+
+    assert env.client.unload_calls == [("rep-unload-4", "")]
+
+
 def test_store_get_prefers_disk_when_available(
     store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -375,3 +490,70 @@ def test_store_get_prefers_disk_when_available(
     )
     assert disk_called["path"] == "/tmp/artifact"
     assert "t" in result
+
+
+def test_legacy_helpers_emit_warning_and_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tensorcast.api as api
+
+    calls: dict[str, Any] = {}
+
+    class DummyStore:
+        def register(self, tensors: dict[str, torch.Tensor], **kwargs: object) -> object:
+            calls["register"] = (tensors, kwargs)
+            descriptor = ArtifactDescriptor(
+                artifact_id="mi2:test",
+                index_multihash="index",
+                data_multihash="data",
+                schema_version="v2",
+                encoding="json",
+                total_size=4,
+            )
+            registration = RegistrationResult(
+                state_dict={},
+                descriptor=descriptor,
+                lease=None,
+                build=SimpleNamespace(device_id=0),
+                layout=SimpleNamespace(total_size=4),
+                index_bytes=b"{}",
+                plan=PlanType.VRAM_COALESCED,
+            )
+            return SimpleNamespace(registration_result=registration)
+
+        def put(self, tensors: dict[str, torch.Tensor], **kwargs: object) -> object:
+            calls["put"] = (tensors, kwargs)
+            return self.register(tensors, **kwargs)
+
+        def get(
+            self,
+            *,
+            key: str | None = None,
+            artifact_id: str | None = None,
+            device: object | None = None,
+            fallback: object | None = None,
+            options: object | None = None,
+        ) -> dict[str, torch.Tensor]:
+            calls["get_key"] = key
+            return {"x": torch.ones(1)}
+
+    dummy_store = DummyStore()
+    monkeypatch.setattr(api, "_get_or_create_store", lambda: dummy_store)
+
+    def _legacy_register(*args: object, **kwargs: object) -> object:
+        raise AssertionError("legacy register should not execute")
+
+    def _legacy_get(*args: object, **kwargs: object) -> dict[str, torch.Tensor]:
+        raise AssertionError("legacy get should not execute")
+
+    monkeypatch.setattr(api, "_legacy_register_artifact", _legacy_register)
+    monkeypatch.setattr(api, "_legacy_get_artifact_sync", _legacy_get)
+
+    tensors = {"w": torch.zeros(1)}
+    with pytest.warns(DeprecationWarning):
+        result = api.register_artifact(tensors, options=RegisterArtifactOptions())
+    assert result.descriptor.artifact_id == "mi2:test"
+    assert "register" in calls
+
+    with pytest.warns(DeprecationWarning):
+        loaded = api.get_artifact_sync(key="demo-key")
+    assert torch.equal(loaded["x"], torch.ones(1))
+    assert calls.get("get_key") == "demo-key"

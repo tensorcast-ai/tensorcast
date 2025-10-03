@@ -126,8 +126,10 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
   retry-aware fallback handling. `Store.get_async(...)` exposes an `ArtifactFuture` that supports
   `result()`, cancellation, and completion callbacks.
 - `Store.get_into(...)` populates caller-provided tensors in-place. The Store validates shapes,
-  strides, and device placement before mutating buffers, and zero-fills PAD segments to keep tensors
-  consistent on failure or cancellation.
+  strides, and device placement before mutating buffers, zero-fills PAD segments to keep tensors
+  consistent on failure or cancellation, and unloads any daemon-backed VRAM replica as soon as the
+  copy (or validation error) completes. The asynchronous variant mirrors this behaviour so temporary
+  replicas never linger beyond the transfer lifecycle.
 - `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
   policy flags across call sites.
 - Low-level workflows remain available via
