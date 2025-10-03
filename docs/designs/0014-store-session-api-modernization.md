@@ -397,6 +397,11 @@ disk_only = store.get(
 )
 ```
 
+## Key mapping cache
+
+- `Store` caches key→artifact-id resolutions (including `disk_path` hints) for 30 seconds by default to avoid hammering Global Store during repeated disk fallbacks. Set `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS` to tune the expiry; values ≤ 0 disable the cache entirely.
+- Cache entries are refreshed after successful materialization so future lookups reuse the latest daemon-provided hints even when the disk path is not exercised.
+
 # Async Coordination Model
 
 All asynchronous methods return an `ArtifactFuture[T]` that resolves when the daemon signals Commit or when materialization completes. Synchronous methods delegate to the async implementation and call `.result()` internally, ensuring identical code paths and error propagation. Futures carry structured status codes (`FAILED_PRECONDITION`, `NOT_FOUND`, etc.), emit metrics tagged with the originating verb, and coordinate background keepalive timers for lease-backed replicas. Cancellation requests propagate to the daemon via `AbortRegisteredArtifact` (pre-Commit) or `RevokeRegisteredArtifact` (post-Commit) using the policies defined in Design 0003.

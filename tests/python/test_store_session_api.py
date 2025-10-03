@@ -44,11 +44,13 @@ class FakeDaemonCtl:
         self.closed = False
         self.keepalive_calls: list[tuple[str, int, int]] = []
         self.server_address = "fake://daemon"
+        self.resolve_calls: list[str] = []
 
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
 
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
+        self.resolve_calls.append(key)
         return self.resolves.get(key, (None, None))
 
     def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:  # noqa: D401
@@ -491,3 +493,58 @@ def test_store_get_prefers_disk_when_available(
     assert disk_called["path"] == "/tmp/artifact"
     assert "t" in result
 
+
+def test_store_key_resolution_cache_reuses_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS", "3600")
+
+    client = FakeDaemonCtl(resolves={})
+    env = FakeEnvironment(
+        client=client,
+        futures=[],
+        block_registration=False,
+        register_started=threading.Event(),
+        materialized_by_id={},
+    )
+
+    key = "artifact-key"
+    artifact_id_value = "mi2:test:cached"
+    disk_path_value = "/tmp/cached-artifact"
+    client.resolves[key] = (artifact_id_value, disk_path_value)
+
+    tensor = torch.ones(2, dtype=torch.float32)
+    env.add_materialized(artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache")
+
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
+    monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
+
+    def fake_materialize_from_disk(
+        self: Store,
+        *,
+        disk_path: str,
+        artifact_id: str | None,
+        device_id: int,
+        verify_checksums: bool,
+    ) -> MaterializedArtifact:
+        assert disk_path == disk_path_value
+        target_id = artifact_id or artifact_id_value
+        return env.materialized_by_id[target_id]
+
+    monkeypatch.setattr(
+        store_mod.Store,
+        "_materialize_from_disk",
+        fake_materialize_from_disk,
+    )
+
+    store = store_mod.Store("fake://daemon")
+    fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
+
+    first = store.get(key=key, fallback=fallback, device=torch.device("cuda", 0))
+    second = store.get(key=key, fallback=fallback, device=torch.device("cuda", 0))
+
+    assert torch.allclose(first["weight"], tensor)
+    assert torch.allclose(second["weight"], tensor)
+    assert client.resolve_calls.count(key) == 1
+
+    store.close()

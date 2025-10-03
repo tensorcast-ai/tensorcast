@@ -166,6 +166,13 @@ class RegisteredArtifact:
     registration_result: RegistrationResult | None = None
 
 
+@dataclass
+class _KeyCacheEntry:
+    artifact_id: str | None
+    disk_path: str | None
+    expires_at: float
+
+
 @dataclass(frozen=True)
 class StoreCapabilities:
     mem_pool_bytes: int
@@ -270,6 +277,9 @@ class Store:
         self._active_leases: set[RegisteredLease] = set()
         self._metadata_lock = threading.RLock()
         self._session_record: StoreSessionRecord | None = None
+        self._key_cache_lock = threading.RLock()
+        self._key_cache: dict[str, _KeyCacheEntry] = {}
+        self._key_cache_ttl_seconds = self._configure_key_cache_ttl()
         self._closed = False
 
         self._init_session_record()
@@ -309,6 +319,22 @@ class Store:
             supports_lease=supports_lease,
             server_config=config,
         )
+
+    def _configure_key_cache_ttl(self) -> float:
+        raw = os.getenv("TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS")
+        if not raw:
+            return 30.0
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "store.key_cache_ttl.invalid",
+                extra={"tc.store.daemon": self._daemon_endpoint, "ttl": raw},
+            )
+            return 30.0
+        if value <= 0:
+            return 0.0
+        return value
 
     def _active_lease_count(self) -> int:
         with self._leases_lock:
@@ -377,6 +403,43 @@ class Store:
                 closed=closed,
                 capabilities=capabilities,
             )
+
+    def _cache_key_mapping(
+        self,
+        key: str,
+        *,
+        artifact_id: str | None,
+        disk_path: str | None,
+        ttl_override: float | None = None,
+    ) -> None:
+        if not key:
+            return
+        ttl = self._key_cache_ttl_seconds if ttl_override is None else ttl_override
+        if ttl <= 0:
+            return
+        expires_at = time.monotonic() + ttl
+        with self._key_cache_lock:
+            self._key_cache[key] = _KeyCacheEntry(
+                artifact_id=artifact_id,
+                disk_path=disk_path,
+                expires_at=expires_at,
+            )
+
+    def _resolve_key_mapping_cached(
+        self, *, key: str, client: DaemonCtl
+    ) -> tuple[str | None, str | None]:
+        now = time.monotonic()
+        with self._key_cache_lock:
+            cached = self._key_cache.get(key)
+            if cached and cached.expires_at > now:
+                return cached.artifact_id, cached.disk_path
+            if cached is not None:
+                del self._key_cache[key]
+        artifact_id, disk_path = client.resolve_key_mapping(key)
+        resolved_id = artifact_id or None
+        resolved_path = disk_path or None
+        self._cache_key_mapping(key, artifact_id=resolved_id, disk_path=resolved_path)
+        return resolved_id, resolved_path
 
     def _build_retry_policies(self) -> dict[str, RetryPolicy]:
         defaults: dict[str, RetryPolicy] = {
@@ -515,6 +578,9 @@ class Store:
         }
         self._capabilities = None
         self._retry_policies = self._build_retry_policies()
+        self._key_cache_lock = threading.RLock()
+        self._key_cache = {}
+        self._key_cache_ttl_seconds = self._configure_key_cache_ttl()
         self._init_session_record()
 
     def _ensure_client(self) -> DaemonCtl:
@@ -539,6 +605,8 @@ class Store:
                 self._client = None
         self._release_all_leases()
         self._executor_handle.close()
+        with self._key_cache_lock:
+            self._key_cache.clear()
         self._update_session_record(activity=True, closed=True)
 
     # ------------------------------------------------------------------
@@ -1105,6 +1173,12 @@ class Store:
                     device_id=device_id,
                     verify_checksums=fallback_opts.verify_checksums,
                 )
+                if key:
+                    self._cache_key_mapping(
+                        key,
+                        artifact_id=resolved_artifact_id,
+                        disk_path=disk_path,
+                    )
                 if cancel_event and cancel_event.is_set():
                     raise CancelledError
                 return result
@@ -1140,6 +1214,13 @@ class Store:
                 "allow_p2p": bool(fallback is None or fallback.allow_p2p),
             },
         )
+        if key:
+            resolved_id = result.artifact_id or resolved_artifact_id or artifact_id
+            self._cache_key_mapping(
+                key,
+                artifact_id=resolved_id,
+                disk_path=result.disk_path,
+            )
         if span is not None:
             span.add_event(
                 "store.materialize.p2p",
@@ -1169,7 +1250,9 @@ class Store:
         if key is None:
             return None, resolved_artifact_id, None
         try:
-            resolved_id, mapped_path = client.resolve_key_mapping(key)
+            resolved_id, mapped_path = self._resolve_key_mapping_cached(
+                key=key, client=client
+            )
         except Exception as exc:  # noqa: BLE001
             return None, resolved_artifact_id, exc
         if mapped_path:

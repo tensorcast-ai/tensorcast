@@ -115,7 +115,7 @@ for attempt in range(max_retries):
 
 - [x] Confirm existing daemon RPCs satisfy capability probe needs; add `GetCapabilities` RPC if missing and update client stubs (Bazel `bazel test //proto/...` after regen) *(2025-10-04 – `Store._initialize_session_metadata` now relies on existing `DaemonCtl.get_server_config()` gRPC, providing mem_pool/tx_slice/artifact_chunk fields so no new RPC required)*
 - [x] Validate lease TTL and keepalive expectations against daemon (`//daemon:session_lifecycle_test`) with new Store-managed timers *(2025-10-04 – Ran `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` alongside Store integration validation; lease keepalive assertions pass)*
-- [ ] Ensure Global Store canonical index fetch path handles increased caching (adjust TTL hints if needed)
+- [x] Ensure Global Store canonical index fetch path handles increased caching (adjust TTL hints if needed) *(2025-10-04 – Added Store-side key→artifact-id cache with configurable TTL via `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS`; disk fallback paths reuse cached `disk_path` hints and new tests cover reuse without repeated daemon lookups)*
 - [ ] Update daemon observability to consume new client-provided metadata (e.g., fallback reasons in headers) if the SDK emits them
 
 ## Tooling & Telemetry
