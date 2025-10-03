@@ -46,9 +46,10 @@ from tensorcast.api._register import (
     RegistrationResult,
     _register_artifact_core,
 )
-from tensorcast.api._utils import compose_artifact_dir, validate_disk_index_matches
+from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
+from tensorcast.store_session_registry import StoreSessionRecord, write_record
 from tensorcast.types import ServerConfig
 
 T = TypeVar("T")
@@ -267,7 +268,11 @@ class Store:
         self._pending_futures: set[concurrent.futures.Future[object]] = set()
         self._leases_lock = threading.RLock()
         self._active_leases: set[RegisteredLease] = set()
+        self._metadata_lock = threading.RLock()
+        self._session_record: StoreSessionRecord | None = None
         self._closed = False
+
+        self._init_session_record()
 
         self._install_at_fork()
         self._client = self._create_client()
@@ -304,6 +309,74 @@ class Store:
             supports_lease=supports_lease,
             server_config=config,
         )
+
+    def _active_lease_count(self) -> int:
+        with self._leases_lock:
+            return len(self._active_leases)
+
+    @staticmethod
+    def _capabilities_to_dict(capabilities: StoreCapabilities) -> dict[str, object]:
+        data: dict[str, object] = {
+            "mem_pool_bytes": int(capabilities.mem_pool_bytes),
+            "tx_slice_bytes": int(capabilities.tx_slice_bytes),
+            "artifact_chunk_bytes": int(capabilities.artifact_chunk_bytes),
+            "supports_coalesced": bool(capabilities.supports_coalesced),
+            "supports_lease": bool(capabilities.supports_lease),
+        }
+        if capabilities.server_config is not None:
+            data["server_config"] = capabilities.server_config.model_dump()
+        return data
+
+    def _init_session_record(self) -> None:
+        now = time.time()
+        record = StoreSessionRecord(
+            session_id=self._session_id,
+            pid=os.getpid(),
+            daemon_endpoint=self._daemon_endpoint,
+            created_at=now,
+            last_activity_at=now,
+        )
+        with self._metadata_lock:
+            self._session_record = record
+            self._persist_session_record_locked(record=record)
+
+    def _persist_session_record_locked(
+        self,
+        *,
+        record: StoreSessionRecord | None = None,
+        activity: bool = False,
+        closed: bool = False,
+        capabilities: StoreCapabilities | None = None,
+    ) -> None:
+        target = record if record is not None else self._session_record
+        if target is None:
+            return
+        if capabilities is not None:
+            target.capabilities = self._capabilities_to_dict(capabilities)
+        if activity:
+            target.mark_activity()
+        if closed:
+            target.mark_closed()
+        target.active_leases = self._active_lease_count()
+        target.pending_futures = len(self._pending_futures)
+        try:
+            write_record(target)
+        except Exception:  # noqa: BLE001
+            logger.debug("store.session_metadata_write_failed", exc_info=True)
+
+    def _update_session_record(
+        self,
+        *,
+        activity: bool = False,
+        closed: bool = False,
+        capabilities: StoreCapabilities | None = None,
+    ) -> None:
+        with self._metadata_lock:
+            self._persist_session_record_locked(
+                activity=activity,
+                closed=closed,
+                capabilities=capabilities,
+            )
 
     def _build_retry_policies(self) -> dict[str, RetryPolicy]:
         defaults: dict[str, RetryPolicy] = {
@@ -389,6 +462,7 @@ class Store:
         else:
             capabilities = self._capabilities_from_config(config)
         self._capabilities = capabilities
+        self._update_session_record(capabilities=capabilities, activity=True)
         self._record_session_start(capabilities)
         self._session_labels.update(
             {
@@ -566,6 +640,7 @@ class Store:
         lease.__enter__()
         with self._leases_lock:
             self._active_leases.add(lease)
+        self._update_session_record(activity=False)
 
     def _release_all_leases(self) -> None:
         with self._leases_lock:
@@ -574,6 +649,7 @@ class Store:
         for lease in leases:
             with contextlib.suppress(Exception):
                 lease.__exit__(None, None, None)
+        self._update_session_record(activity=False)
 
     @staticmethod
     def _select_device_for_put(tensors: TensorDict) -> int:
@@ -876,10 +952,14 @@ class Store:
         )
 
     def _track_future(self, future: concurrent.futures.Future[object]) -> None:
-        self._pending_futures.add(future)
+        with self._metadata_lock:
+            self._pending_futures.add(future)
+            self._persist_session_record_locked(activity=False)
 
         def _cleanup(_future: concurrent.futures.Future[object]) -> None:
-            self._pending_futures.discard(_future)
+            with self._metadata_lock:
+                self._pending_futures.discard(_future)
+                self._persist_session_record_locked(activity=False)
 
         future.add_done_callback(_cleanup)
 
@@ -1101,7 +1181,7 @@ class Store:
         device_id: int,
         verify_checksums: bool,
     ) -> MaterializedArtifact:
-        raw_path = compose_artifact_dir(Path(str(disk_path)), None)
+        raw_path = Path(str(disk_path))
         if not raw_path.exists():
             raise ArtifactError(
                 f"Disk path '{disk_path}' not found",
@@ -1121,16 +1201,15 @@ class Store:
         if verify_checksums:
             validate_disk_index_matches(canonical_index, str(raw_path))
         state_dict = load_dict_from_disk(
-            disk_path,
+            raw_path,
             device_id=device_id,
-            storage_path=None,
         )
         return MaterializedArtifact(
             artifact_id=artifact_id or "",
             state_dict=state_dict,
             canonical_index_bytes=canonical_index,
             replica_uuid="",
-            disk_path=disk_path,
+            disk_path=str(raw_path),
         )
 
     def _record_fallback_event(

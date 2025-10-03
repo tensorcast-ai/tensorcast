@@ -11,7 +11,6 @@ from tensorcast._C import restore_tensors_from_disk, save_model_to_disk
 
 from ._device import resolve_device
 from ._indices import calculate_tensor_device_offsets, load_tensor_indices_from_dir
-from ._utils import compose_artifact_dir
 
 
 def save_dict(
@@ -55,12 +54,9 @@ def load_dict_from_disk(
     disk_path: str | os.PathLike,
     *,
     device_id: int | torch.device = 0,
-    storage_path: str | os.PathLike | None = None,
 ) -> dict[str, torch.Tensor]:
     raw_disk_path = Path(str(disk_path))
-    artifact_dir = compose_artifact_dir(
-        raw_disk_path, str(storage_path) if storage_path is not None else None
-    )
+    artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)
 
     device_id_int: int = resolve_device(device_id)

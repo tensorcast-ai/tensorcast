@@ -40,7 +40,7 @@ from ._indices import (
     load_tensor_indices_from_dir,
 )
 from ._io_disk import load_dict_from_disk
-from ._utils import compose_artifact_dir, ensure_artifact_descriptor_safe, new_uuid
+from ._utils import ensure_artifact_descriptor_safe, new_uuid
 
 
 class LoadHandle:
@@ -114,9 +114,7 @@ class DiskLoader:
         self._device_id = device_id
 
     def load(self) -> dict[str, torch.Tensor]:
-        return load_dict_from_disk(
-            self._artifact_dir, device_id=self._device_id, storage_path=""
-        )
+        return load_dict_from_disk(self._artifact_dir, device_id=self._device_id)
 
 
 class DaemonLoader:
@@ -426,25 +424,14 @@ def load_dict_sync(
     runtime_ctx = startup.require_initialized()
     client = runtime_ctx.client
 
-    if storage_path is None:
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            cfg_root = storage_root_default()
-        except Exception:
-            cfg_root = None
-        if cfg_root is None:
-            raise ValueError(
-                "storage_path must be provided or set via ClientConfig.storage.default_root"
-            )
-        storage_path = cfg_root
+    # Unified path semantics: user-provided disk_path is the artifact root.
 
     device_id_int: int = resolve_device(device_id)
-    if disk_path is None or storage_path is None:
-        raise ValueError("disk_path and storage_path must be provided")
+    if disk_path is None:
+        raise ValueError("disk_path must be provided")
 
     raw_disk_path = Path(str(disk_path))
-    artifact_dir = compose_artifact_dir(raw_disk_path, str(storage_path))
+    artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)
 
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
@@ -455,9 +442,7 @@ def load_dict_sync(
     replica_uuid = new_uuid()
     # Use torch cuda check
     if not torch.cuda.is_available():
-        return load_dict_from_disk(
-            artifact_dir, device_id=device_id_int, storage_path=""
-        )
+        return load_dict_from_disk(artifact_dir, device_id=device_id_int)
 
     (
         pinned_allocation_timeout_ms,
@@ -491,9 +476,7 @@ def load_dict_sync(
         return result
     except RuntimeError as e:
         if "Local StoreDaemon" in str(e) or "not available" in str(e):
-            return load_dict_from_disk(
-                artifact_dir, device_id=device_id_int, storage_path=""
-            )
+            return load_dict_from_disk(artifact_dir, device_id=device_id_int)
         raise DaemonUnavailable(str(e)) from e
 
 
@@ -567,25 +550,14 @@ def load_dict_async(
     runtime_ctx = startup.require_initialized()
     client = runtime_ctx.client
 
-    if storage_path is None:
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            cfg_root = storage_root_default()
-        except Exception:
-            cfg_root = None
-        if cfg_root is None:
-            raise ValueError(
-                "storage_path must be provided or set via ClientConfig.storage.default_root"
-            )
-        storage_path = cfg_root
+    # Unified path semantics: user-provided disk_path is the artifact root.
 
     device_id_int: int = resolve_device(device_id)
-    if disk_path is None or storage_path is None:
-        raise ValueError("disk_path and storage_path must be provided")
+    if disk_path is None:
+        raise ValueError("disk_path must be provided")
 
     raw_disk_path = Path(str(disk_path))
-    artifact_dir = compose_artifact_dir(raw_disk_path, str(storage_path))
+    artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
         tensor_data_index, device_id_int
@@ -593,9 +565,7 @@ def load_dict_async(
     device_uuid = device_uuid_for(device_id_int)
     replica_uuid = new_uuid()
     if not torch.cuda.is_available():
-        state = load_dict_from_disk(
-            artifact_dir, device_id=device_id_int, storage_path=""
-        )
+        state = load_dict_from_disk(artifact_dir, device_id=device_id_int)
 
         def _confirm() -> bool:
             return True
