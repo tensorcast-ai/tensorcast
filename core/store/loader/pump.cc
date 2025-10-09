@@ -102,23 +102,33 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
 
   std::vector<InFlight> inflight;
   auto* async = dynamic_cast<AsyncPositionedSink*>(&dst);
+  auto finalize_inflight = [&](InFlight& entry, const absl::Status& st) {
+    const bool failed = !st.ok();
+    if (failed) {
+      record_copy_failure_("gpu");
+      {
+        absl::MutexLock lock(&state.status_mutex);
+        if (state.consumer_status.ok()) {
+          state.consumer_status = st;
+        }
+      }
+      state.should_stop.store(true, std::memory_order_release);
+    }
+    pool.return_chunk(entry.slot_id);
+    if (failed) {
+      pool.shutdown();
+      draining = true;
+    }
+    VLOG(2) << "pump_async_completion slot=" << entry.slot_id << " chunk_id=" << entry.global_chunk_id
+            << " dest_offset=" << entry.dest_offset << " bytes=" << entry.bytes << " status=" << st;
+  };
   auto flush_inflight = [&]() {
     if (inflight.empty()) {
       return;
     }
     for (auto& entry : inflight) {
-      auto st = entry.handle.wait();
-      if (!st.ok()) {
-        record_copy_failure_("gpu");
-        {
-          absl::MutexLock lock(&state.status_mutex);
-          if (state.consumer_status.ok()) {
-            state.consumer_status = st;
-          }
-        }
-        state.should_stop.store(true, std::memory_order_release);
-        pool.shutdown();
-      }
+      absl::Status st = entry.handle.wait();
+      finalize_inflight(entry, st);
     }
     inflight.clear();
   };
@@ -170,22 +180,6 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       const int slot_id = chunk.slot_id;
       const uint64_t chunk_id = chunk.global_chunk_id;
       const size_t chunk_bytes = chunk.bytes_in_chunk;
-      copy_opts.callbacks.on_copy_done = [slot_id, chunk_id, chunk_bytes, dest_offset, &pool, &state](absl::Status st) {
-        if (!st.ok()) {
-          record_copy_failure_("gpu");
-          {
-            absl::MutexLock lock(&state.status_mutex);
-            if (state.consumer_status.ok()) {
-              state.consumer_status = st;
-            }
-          }
-          state.should_stop.store(true, std::memory_order_release);
-          pool.shutdown();
-        }
-        pool.return_chunk(slot_id);
-        VLOG(2) << "pump_async_completion slot=" << slot_id << " chunk_id=" << chunk_id
-                << " dest_offset=" << dest_offset << " bytes=" << chunk_bytes << " status=" << st;
-      };
       write_opts.copy_options = copy_opts;
       auto hdl_or = async->write_at_async(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk, write_opts);
       if (!hdl_or.ok()) {
@@ -226,41 +220,22 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
     // Sweep completed in-flight operations and return their slots.
     // Drop completed handles whose wait() already succeeded via callback.
     if (!inflight.empty()) {
-      std::vector<size_t> done_idx;
-      done_idx.reserve(inflight.size());
-      for (size_t i = 0; i < inflight.size(); ++i) {
-        auto st = inflight[i].handle.wait(absl::ZeroDuration());
+      for (size_t i = 0; i < inflight.size();) {
+        absl::Status st = inflight[i].handle.wait(absl::ZeroDuration());
         if (absl::IsDeadlineExceeded(st)) {
+          ++i;
           continue;
         }
-        if (!st.ok()) {
-          record_copy_failure_("gpu");
-          absl::MutexLock lock(&state.status_mutex);
-          if (state.consumer_status.ok()) {
-            state.consumer_status = st;
-          }
-          state.should_stop.store(true, std::memory_order_release);
-          pool.shutdown();
-          draining = true;
-        }
-        done_idx.push_back(i);
-      }
-      for (size_t k = 0; k < done_idx.size(); ++k) {
-        size_t idx = done_idx[done_idx.size() - 1 - k];
-        inflight.erase(inflight.begin() + idx);
+        finalize_inflight(inflight[i], st);
+        inflight.erase(inflight.begin() + i);
       }
     }
   }
 
   // Drain any remaining in-flight operations at shutdown
   for (auto& item : inflight) {
-    auto st = item.handle.wait();
-    if (!st.ok()) {
-      absl::MutexLock lock(&state.status_mutex);
-      if (state.consumer_status.ok()) {
-        state.consumer_status = st;
-      }
-    }
+    absl::Status st = item.handle.wait();
+    finalize_inflight(item, st);
   }
 }
 

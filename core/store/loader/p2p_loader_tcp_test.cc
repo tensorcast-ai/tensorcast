@@ -1,6 +1,8 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include <algorithm>
 #include <cstring>
+#include <random>
 #include <vector>
 #include "core/common/cuda_api.h"
 
@@ -28,6 +30,26 @@ using tensorcast::store::replica::ReplicaLoadController;
 using namespace tensorcast::store;
 using namespace tensorcast::testing;
 
+namespace {
+
+int randomized_port_hint(int canonical_base) {
+  constexpr int kMinPort = 1024;
+  constexpr int kMaxPort = 65000;
+  if (canonical_base <= 0) {
+    canonical_base = 50000;
+  }
+  thread_local std::mt19937 rng([]() {
+    std::random_device rd;
+    return std::mt19937(rd());
+  }());
+  std::uniform_int_distribution<int> dist(-4096, 4096);
+  int hint = canonical_base + dist(rng);
+  hint = std::clamp(hint, kMinPort, kMaxPort);
+  return hint;
+}
+
+} // namespace
+
 TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader]") {
   SKIP_IF_NO_CUDA();
 
@@ -37,10 +59,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::string tensor_key = "artifact_key_gpu_gpu";
 
     // Find available ports for GPU to GPU P2P communication
-    int source_port = find_available_port(kGpuGpuPortBase);
+    const int gpu_gpu_base = randomized_port_hint(kGpuGpuPortBase);
+    int source_port = find_available_port(gpu_gpu_base);
     REQUIRE(source_port > 0);
 
-    int target_port = find_available_port(source_port + 1);
+    int target_port = find_available_port(randomized_port_hint(gpu_gpu_base + 1));
     REQUIRE(target_port > 0);
 
     // Set up source engine with GPU tensor
@@ -133,10 +156,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::string tensor_key = "artifact_key_gpu_cpu";
 
     // Find available ports for GPU to CPU P2P communication
-    int source_port = find_available_port(kGpuCpuPortBase);
+    const int gpu_cpu_base = randomized_port_hint(kGpuCpuPortBase);
+    int source_port = find_available_port(gpu_cpu_base);
     REQUIRE(source_port > 0); // "Failed to find available port for GPU-to-CPU P2P source engine"
 
-    int target_port = find_available_port(source_port + 1);
+    int target_port = find_available_port(randomized_port_hint(gpu_cpu_base + 1));
     REQUIRE(target_port > 0); // "Failed to find available port for GPU-to-CPU P2P target engine"
 
     // Similar test but with CPU target
@@ -239,9 +263,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t pool_chunk_size = 64 * 1024 * 1024; // 64 MiB slices
     const std::size_t artifact_size = pool_chunk_size * 9 + 32; // non-aligned tail chunk
 
-    int source_port = find_available_port();
+    const int gpu_gpu_subchunk_base = randomized_port_hint(50000);
+    int source_port = find_available_port(gpu_gpu_subchunk_base);
     REQUIRE(source_port > 0);
-    int target_port = find_available_port(source_port + 1);
+    int target_port = find_available_port(randomized_port_hint(gpu_gpu_subchunk_base + 1));
     REQUIRE(target_port > 0);
 
     auto src_cfg = make_tcp_communicator_config(
@@ -362,9 +387,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       const uint32_t stage_chunk_mb = static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024));
       const std::size_t artifact_size = stage_chunk_bytes * 6; // Requires >1 window when buffers_per_flow=2
 
-      int source_port = find_available_port();
+      const int credit_base = randomized_port_hint(50500);
+      int source_port = find_available_port(credit_base);
       REQUIRE(source_port > 0);
-      int target_port = find_available_port(source_port + 1);
+      int target_port = find_available_port(randomized_port_hint(credit_base + 1));
       REQUIRE(target_port > 0);
 
       auto src_cfg = make_tcp_communicator_config(
@@ -473,9 +499,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       const std::size_t communicator_pool_bytes =
           stage_chunk_bytes * buffers_per_flow * (static_cast<std::size_t>(tcp_conn_count) + 1);
 
-      int source_port = find_available_port();
+      const int small_pool_base = randomized_port_hint(51000);
+      int source_port = find_available_port(small_pool_base);
       REQUIRE(source_port > 0);
-      int target_port = find_available_port(source_port + 1);
+      int target_port = find_available_port(randomized_port_hint(small_pool_base + 1));
       REQUIRE(target_port > 0);
 
       auto src_cfg = make_tcp_communicator_config(

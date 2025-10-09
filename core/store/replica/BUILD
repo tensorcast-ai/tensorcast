@@ -84,6 +84,7 @@ sc_cc_library(
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:memory_location_lib",
+        "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:virtual_address_space_lib",
         "//core/store:device_types",

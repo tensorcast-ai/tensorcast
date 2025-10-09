@@ -25,6 +25,7 @@
 
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
+#include "core/common/memory/streaming_chunk_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
@@ -1156,16 +1157,16 @@ void MTcpTransport::recv_loop() {
             lane %= lanes_to_use;
           }
 
-          // Acquire a free staging buffer
-          auto slot_result = gpu_recv_buffer_->get_free_chunk();
-          if (!slot_result.ok()) {
-            LOG(ERROR) << "Failed to get free chunk from GPU receive buffer: " << slot_result.status();
+          auto slot_guard = std::make_shared<common::memory::StreamingChunkGuard>(gpu_recv_buffer_);
+          auto staged_ptr_or = slot_guard->acquire();
+          if (!staged_ptr_or.ok()) {
+            LOG(ERROR) << "Failed to get free chunk from GPU receive buffer: " << staged_ptr_or.status();
             processing_failed = true;
             break;
           }
 
-          int slot_id = *slot_result;
-          char* staged_ptr = gpu_recv_buffer_->get_chunk_ptr(slot_id);
+          char* staged_ptr = *staged_ptr_or;
+          const int slot_id = slot_guard->slot_id();
 
           VLOG(2) << "[MTcpTransport::recv_loop] Got buffer slot #" << slot_id << " for sub-chunk ("
                   << sub_offset_in_chunk << "/" << real_chunk_size << ") of lane #" << lane;
@@ -1185,6 +1186,7 @@ void MTcpTransport::recv_loop() {
           auto gpu_global_offset = offset + sub_offset_in_chunk;
           auto* gpu_ptr = tensor->get_addr<uint8_t>() + gpu_global_offset;
           auto recv_buffer = gpu_recv_buffer_.get(); // keep shared ownership for async copy
+          const size_t chunk_index = pool_chunk_size > 0 ? static_cast<size_t>(gpu_global_offset / pool_chunk_size) : 0;
 
           const int lane_for_async = lane;
           auto copy_future = std::async(
@@ -1196,8 +1198,10 @@ void MTcpTransport::recv_loop() {
                tensor,
                lane_for_async,
                slot_id,
+               slot_guard,
                recv_buffer,
-               gpu_global_offset]() mutable -> chunk_result_t {
+               gpu_global_offset,
+               chunk_index]() mutable -> chunk_result_t {
                 VLOG(2) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
                         << " waiting for sub-chunk recv to complete";
 
@@ -1205,7 +1209,6 @@ void MTcpTransport::recv_loop() {
                 if (result.status != misc::SUCCESS) {
                   LOG(ERROR) << "[MTcpTransport::recv_loop] Async task lane=" << lane_for_async
                              << " sub-chunk recv failed, returning buffer";
-                  CHECK_OK(recv_buffer->return_chunk(slot_id));
                   return result;
                 }
 
@@ -1229,9 +1232,16 @@ void MTcpTransport::recv_loop() {
                 tensorcast::common::DeviceGuard guard(device_id);
                 if (!guard.status().ok()) {
                   LOG(ERROR) << "Failed to set CUDA device: " << guard.status();
-                  CHECK_OK(recv_buffer->return_chunk(slot_id));
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
+
+                auto promote_status = slot_guard->promote_to_consumer(chunk_index, sub_chunk_size);
+                if (!promote_status.ok()) {
+                  LOG(ERROR) << "Failed to promote slot " << slot_guard->slot_id()
+                             << " for async copy: " << promote_status;
+                  return {misc::TRANSPORT_FAILED, result.cost};
+                }
+                const int promoted_slot = slot_guard->release_for_async();
 
                 // Schedule async H2D using AsyncCopyManager, wait for completion to respect semantics.
                 tensorcast::common::HostRegion h{
@@ -1240,19 +1250,23 @@ void MTcpTransport::recv_loop() {
                     .device_id = device_id, .dev_ptr = gpu_ptr, .length = static_cast<size_t>(sub_chunk_size)};
                 tensorcast::common::CopyOptions opts{
                     .tracing_stage = "H2D/Copy",
-                    .callbacks = {.on_copy_done = [recv_buffer, slot_id](absl::Status st) {
-                      absl::Status rc = recv_buffer->return_chunk(slot_id);
+                    .callbacks = {.on_copy_done = [recv_buffer, promoted_slot](absl::Status st) {
+                      absl::Status rc = recv_buffer->return_chunk(promoted_slot);
                       if (!rc.ok()) {
-                        LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << slot_id << ": " << rc;
+                        LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << promoted_slot << ": " << rc;
                       }
                       if (!st.ok()) {
-                        LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << slot_id << ": " << st;
+                        LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << promoted_slot << ": " << st;
                       }
                     }}};
                 auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
                 if (!hdl_or.ok()) {
                   LOG(ERROR) << "Failed to schedule H2D copy: " << hdl_or.status();
-                  CHECK_OK(recv_buffer->return_chunk(slot_id));
+                  absl::Status rc = recv_buffer->return_chunk(promoted_slot);
+                  if (!rc.ok()) {
+                    LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << promoted_slot
+                                 << " after submit error: " << rc;
+                  }
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
                 auto wait_st = hdl_or->wait();
@@ -1260,7 +1274,7 @@ void MTcpTransport::recv_loop() {
                   LOG(ERROR) << "H2D copy failed: " << wait_st;
                   return {misc::TRANSPORT_FAILED, result.cost};
                 }
-                VLOG(2) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << slot_id
+                VLOG(2) << "[MTcpTransport::recv_loop] H2D copy complete slot=" << promoted_slot
                         << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset;
                 return result;
               });

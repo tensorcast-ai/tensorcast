@@ -14,6 +14,8 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
 #include "core/store/loader/buffer_pool.h"
@@ -147,9 +149,9 @@ class TestBufferPool : public BufferPool {
   std::vector<int> returned_;
 };
 
-// Async sink that exercises the AsyncPositionedSink path. Uses ACM::submit_h2h
-// to avoid requiring CUDA; this returns a ready handle but still validates
-// the pump branch and handle-driven return logic.
+// Async sink that exercises the AsyncPositionedSink path. Uses
+// ACM::submit_h2h to avoid requiring CUDA while still driving the async pump
+// branch and slot return logic via CopyHandles.
 class TestAsyncSink : public PositionedSink, public AsyncPositionedSink {
  public:
   absl::Status write_at(uint64_t, const void*, size_t) override {
@@ -194,6 +196,62 @@ class TestAsyncSink : public PositionedSink, public AsyncPositionedSink {
   std::vector<char> tmp_;
 };
 
+class DelayedAsyncSink : public PositionedSink, public AsyncPositionedSink {
+ public:
+  explicit DelayedAsyncSink(absl::Duration delay) : delay_(delay) {}
+
+  absl::Status write_at(uint64_t, const void*, size_t) override {
+    return absl::UnimplementedError("DelayedAsyncSink expects async write");
+  }
+
+  absl::Status close() override {
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(
+      uint64_t,
+      const void* src,
+      size_t bytes,
+      const AsyncWriteOptions& options = AsyncWriteOptions{}) override {
+    tensorcast::common::HostRegion hsrc{.base = src, .length = bytes, .pinned = true};
+    if (scratch_.size() < bytes)
+      scratch_.resize(bytes);
+    tensorcast::common::HostRegion hdst{.base = scratch_.data(), .length = bytes, .pinned = true};
+    tensorcast::common::CopyOptions copy_opts = options.copy_options.value_or(tensorcast::common::CopyOptions{});
+    auto downstream = copy_opts.callbacks.on_copy_done;
+    copy_opts.callbacks.on_copy_done = [this, downstream](absl::Status st) {
+      const int now = inflight_.fetch_add(1, std::memory_order_acq_rel) + 1;
+      int observed = max_inflight_.load(std::memory_order_relaxed);
+      while (now > observed && !max_inflight_.compare_exchange_weak(observed, now, std::memory_order_relaxed)) {
+      }
+      if (delay_ > absl::ZeroDuration()) {
+        absl::SleepFor(delay_);
+      }
+      if (downstream) {
+        downstream(st);
+      }
+      inflight_.fetch_sub(1, std::memory_order_acq_rel);
+      callbacks_.fetch_add(1, std::memory_order_relaxed);
+    };
+    return tensorcast::common::AsyncCopyManager::instance().submit_h2h(hsrc, hdst, copy_opts);
+  }
+
+  int max_inflight() const {
+    return max_inflight_.load(std::memory_order_relaxed);
+  }
+
+  int callback_count() const {
+    return callbacks_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  absl::Duration delay_;
+  std::vector<char> scratch_;
+  std::atomic<int> inflight_{0};
+  std::atomic<int> max_inflight_{0};
+  std::atomic<int> callbacks_{0};
+};
+
 TEST_CASE("Pump uses AsyncPositionedSink path", "[pump][async]") {
   const size_t total = 32 * 1024;
   TestSeekableSource src(total);
@@ -230,4 +288,25 @@ TEST_CASE("Pump async path surfaces sink error", "[pump][async]") {
   auto st = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1);
   REQUIRE(!st.ok());
   REQUIRE(st.message().find("async sink failure") != std::string::npos);
+}
+
+TEST_CASE("Pump async tolerates delayed callbacks", "[pump][async][delay]") {
+  const size_t total = 64 * 1024;
+  TestSeekableSource src(total);
+  const absl::Duration delay = absl::Milliseconds(2);
+  DelayedAsyncSink sink(delay);
+  TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/2);
+  std::vector<Range> ranges{{0ULL, total}};
+
+  auto status = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/2);
+  REQUIRE(status.ok());
+  const int expected_chunks = static_cast<int>(total / pool.chunk_size());
+  const absl::Duration wait_step = absl::Milliseconds(1);
+  const absl::Time deadline = absl::Now() + absl::Milliseconds(50);
+  while (sink.callback_count() < expected_chunks && absl::Now() < deadline) {
+    absl::SleepFor(wait_step);
+  }
+  REQUIRE(sink.max_inflight() >= 1);
+  REQUIRE(pool.returned_slots().size() == total / pool.chunk_size());
+  REQUIRE(sink.callback_count() == expected_chunks);
 }

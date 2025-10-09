@@ -288,6 +288,7 @@ Key characteristics:
 - Chunk sizing: `stage_chunk_mb_gpu` and `stage_chunk_mb_cpu` define per-stager slice sizes; GPU defaults to 16 MiB, CPU to 4 MiB.
 - Pool reuse: a single `PinnedBufferPool` services both staging paths (NUMA-specific pools are created when `simple_numa` is enabled).
 - Explicit release: MTCP senders free staged buffers once their socket writes complete, while RDMA paths rely on `RDMA_READ_DONE_EX` to release the corresponding `StageLease` entries in the registry.
+- GPU staging slots now use `StreamingChunkGuard` to acquire, promote, and hand buffers to async consumers, ensuring `StreamingPinnedBuffer` state transitions stay consistent while still aborting to the free queue if staging or copy submission fails.
 - Unified flow control: `FlowCreditLedger` grants staging credit per channel, `StagingWindow` slices responses into credit-bounded windows, and `stager.max_window_segments` (0 → auto) optionally caps the number of segments emitted per window.
 - Lane alignment on send/receive: MTCP now derives the active lane budget from the tensor’s total bytes and staging chunk size before assigning sockets on either side. Both sender and receiver use the same `offset + sub_offset_in_chunk` formula so GPU reads that span multiple sockets enqueue work to identical lane ordering, avoiding deadlocks when staging windows interleave connections.
 - Receive buffer lifecycle: MTCP channels now track in-flight read requests and, once the last staging window completes, release the per-transport `StreamingPinnedBuffer` slices back to the shared `PinnedBufferPool`. Subsequent reads re-initialize buffers on demand, so short-lived transports no longer monopolize pinned memory until the GC sweeps the channel.
@@ -530,6 +531,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 
 - `enable_rdma`: enables RDMA transports and MR caching.
 - `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts. The engine now honors the configured TCP fan-out during both the server listener setup and client dial; values ≤1 are automatically raised to the default multi-socket budget so staging credit math stays consistent.
+- `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT`. Leave enabled in production multi-tenant deployments; tests disable it to force deterministic single-owner control sockets when running communicator suites in parallel.
 - `stager.stage_chunk_mb_{gpu,cpu}` & `stager.buffers_per_flow`: staging chunk size and pipeline depth.
 - `pool.pool_size_bytes` / `pool.preregister_mr`: pinned pool sizing and prereregistration policy.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.

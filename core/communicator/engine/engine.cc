@@ -239,6 +239,12 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   // Apply typed config to TCP contexts
   server_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
   client_context_->set_connect_timeout(config_.transport().connect_timeout_sec());
+  bool so_reuseport_enabled = true;
+  if (config_.transport().has_so_reuseport()) {
+    so_reuseport_enabled = config_.transport().so_reuseport();
+  }
+  server_context_->set_so_reuseport(so_reuseport_enabled);
+  client_context_->set_so_reuseport(so_reuseport_enabled);
 
   // No default residency provider required; staging policy no longer consults UMA bridges.
 

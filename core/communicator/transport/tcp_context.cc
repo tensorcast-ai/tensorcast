@@ -62,14 +62,16 @@ misc::result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_
     return misc::SYS_ERROR;
   }
 
-  // Enable address/port reuse to avoid EADDRINUSE due to TIME_WAIT and reduce bind conflicts
+  // Always enable address reuse to avoid TIME_WAIT collisions.
   int one = 1;
   if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0) {
     PLOG(WARNING) << "failed to set SO_REUSEADDR";
   }
 
-  if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) != 0) {
-    PLOG(WARNING) << "failed to set SO_REUSEPORT";
+  if (so_reuseport_enabled_) {
+    if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) != 0) {
+      PLOG(WARNING) << "failed to set SO_REUSEPORT";
+    }
   }
 
   misc::CLEAR(local_addr_);

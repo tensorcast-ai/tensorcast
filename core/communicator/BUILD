@@ -278,6 +278,7 @@ sc_cc_library(
         "//core/common:device_guard_lib",
         "//core/common:error_handling_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "@opentelemetry-cpp//api:api",
     ],
@@ -318,6 +319,7 @@ sc_header_only_library(
         ":memory_stager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
     ],
 )

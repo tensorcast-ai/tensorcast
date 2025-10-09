@@ -383,17 +383,24 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2h(
 
   CopyHandle handle;
   auto p = handle.p_;
-  // Synchronous memcpy followed by immediate callback and handle completion.
-  std::memcpy(const_cast<void*>(dst.base), src.base, src.length);
-  {
-    absl::MutexLock lock(&p->mu);
-    p->status = absl::OkStatus();
-    p->done = true;
-    p->cv.SignalAll();
-  }
-  if (opts.callbacks.on_copy_done) {
-    enqueue_callback_([cb = opts.callbacks.on_copy_done]() { cb(absl::OkStatus()); });
-  }
+  const void* src_ptr = src.base;
+  void* dst_ptr = const_cast<void*>(dst.base);
+  const size_t bytes = src.length;
+  auto on_done = opts.callbacks.on_copy_done;
+  enqueue_callback_([p, dst_ptr, src_ptr, bytes, on_done = std::move(on_done)]() mutable {
+    std::memcpy(dst_ptr, src_ptr, bytes);
+    {
+      absl::MutexLock lock(&p->mu);
+      p->status = absl::OkStatus();
+      p->device_id = -1;
+      p->needs_device_check = false;
+      p->done = true;
+      p->cv.SignalAll();
+    }
+    if (on_done) {
+      on_done(absl::OkStatus());
+    }
+  });
   return handle;
 }
 

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <queue>
 #include <vector>
@@ -22,6 +23,10 @@ namespace tensorcast::common::memory {
  * This class provides a producer-consumer pattern where:
  * - Producers can get free chunks, fill them with data, and mark them as ready
  * - Consumers can get ready chunks, use them, and return them to the free pool
+ *
+ * For single-threaded staging flows that immediately hand chunks to async
+ * callbacks (without enqueueing into the ready queue), prefer using
+ * `StreamingChunkGuard` to wrap slot acquisition, promotion, and cleanup.
  */
 class StreamingPinnedBuffer {
  public:
@@ -79,6 +84,22 @@ class StreamingPinnedBuffer {
    * @return Status indicating success or failure
    */
   absl::Status mark_chunk_ready(int slot_id, size_t global_chunk_id, size_t bytes_in_chunk) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
+   * @brief Promote a producer-owned chunk directly to consumer ownership without
+   *        enqueueing in the ready queue. Intended for synchronous staging flows.
+   * @param slot_id Slot previously acquired via get_free_chunk/try_get_free_chunk
+   * @param global_chunk_id Logical chunk identifier for diagnostics
+   * @param bytes_in_chunk Number of valid bytes produced in the chunk
+   */
+  absl::Status promote_producer_slot_to_consumer(int slot_id, size_t global_chunk_id, size_t bytes_in_chunk)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  /**
+   * @brief Abort production on a producer-owned chunk and return it to the free queue.
+   * @param slot_id Slot previously acquired via get_free_chunk/try_get_free_chunk
+   */
+  absl::Status abort_producer_slot(int slot_id) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Structure representing a ready chunk for consumption.
@@ -158,12 +179,22 @@ class StreamingPinnedBuffer {
   bool production_done() const ABSL_LOCKS_EXCLUDED(mutex_);
 
  private:
+  enum class SlotState : uint8_t { kFree = 0, kProducerOwned, kReady, kConsumerOwned };
+
+  void set_slot_state_unsafe(int slot_id, SlotState state) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  SlotState get_slot_state_unsafe(int slot_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  absl::Status validate_slot_id(int slot_id) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   const size_t num_chunks_;
   const size_t chunk_size_;
   std::shared_ptr<PinnedBufferPool> pool_;
 
   // Chunk buffers allocated from the pool
   std::vector<char*> chunk_buffers_;
+  std::vector<SlotState> slot_states_ ABSL_GUARDED_BY(mutex_);
+  std::vector<uint64_t> slot_chunk_ids_ ABSL_GUARDED_BY(mutex_);
+  std::vector<uint64_t> slot_epochs_ ABSL_GUARDED_BY(mutex_);
+  uint64_t next_epoch_ ABSL_GUARDED_BY(mutex_) = 0;
 
   // Free chunks available for producers
   std::queue<int> free_queue_ ABSL_GUARDED_BY(mutex_);

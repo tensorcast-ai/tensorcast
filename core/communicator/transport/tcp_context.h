@@ -28,6 +28,14 @@ class TcpContext {
   std::string get_local_ip() const;
   uint16_t listening_port() const;
 
+  void set_so_reuseport(bool enabled) {
+    so_reuseport_enabled_ = enabled;
+  }
+
+  bool so_reuseport() const {
+    return so_reuseport_enabled_;
+  }
+
   // Typed configuration injection
   void set_connect_timeout(int seconds) {
     connect_timeout_sec_ = seconds;
@@ -54,6 +62,7 @@ class TcpContext {
   struct sockaddr_in local_addr_{};
   on_accept_func_t on_accept_;
   int connect_timeout_sec_ = 10;
+  bool so_reuseport_enabled_ = true;
 
   friend class TcpTransport;
 };

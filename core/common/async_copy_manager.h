@@ -88,6 +88,8 @@ class AsyncCopyManager {
   // Minimal D2D support: same-device only for this phase.
   absl::StatusOr<CopyHandle> submit_d2d(const DeviceRegion& src, const DeviceRegion& dst, const CopyOptions& opts = {});
 
+  // Dispatches the memcpy on the callback worker so completion behaves like
+  // other async submissions, enabling CPU-only tests to exercise pump logic.
   absl::StatusOr<CopyHandle> submit_h2h(const HostRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
 
   // Destroy all lazily-created per-device streams. Safe to call multiple times.

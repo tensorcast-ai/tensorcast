@@ -240,13 +240,14 @@ stateDiagram-v2
 ### Async Copy Manager Integration
 
 - H2D/D2H transfers submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks and forwards completions onto a dedicated CPU worker to avoid making CUDA Runtime calls inside `cudaLaunchHostFunc`.
-- StreamingPinnedBuffer slots stay owned by the pump consumer until ACM completion; the completion callback is the only place that returns slots, preventing early reuse while the GPU DMA is still active.
+- StreamingPinnedBuffer slots stay owned by the pump consumer until ACM completion; the completion callback is the only place that returns slots, preventing early reuse while the GPU DMA is still active. Callers that need post-callback state (e.g., VS writes) must also block on the callback’s completion signal before reporting success.
+- Use `StreamingChunkGuard` (from `core/common/memory/streaming_chunk_guard.h`) when staging chunks for AsyncCopyManager. The guard acquires slots, promotes them to consumer ownership, and guarantees cleanup if submission fails, so callers cannot forget the `promote_producer_slot_to_consumer` transition.
 - For H2D, UMA state should advance from the completion callback (if the caller needs it) using the `absl::Status` argument as proof of success; per-chunk `stream_synchronize` remains unnecessary.
 - ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
 
 #### ACM Usage Quick Guide
 
-- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) inside the `on_copy_done` callback. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires.
+- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) inside the `on_copy_done` callback. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires. Pump consumers dealing with non-owning state (e.g., `pump_ranges`) instead poll handles and finalize completions inline so the callback does not outlive stack-owned context.
 - H2D example (return slot + optional UMA advancement in callback):
   ```cpp
   using common::AsyncCopyManager;
@@ -283,7 +284,7 @@ stateDiagram-v2
        }}} );
   ```
 - Same-device D2D: use `submit_d2d` and wait on handles as needed. Cross-device D2D remains under `ReplicaLoadController` (peer or staged fallback).
-- Tests and CPU-only flows can use `submit_h2h` to exercise the async pump path without CUDA.
+- Tests and CPU-only flows can use `submit_h2h` to exercise the async pump path without CUDA; the copy is dispatched on ACM’s callback worker so CopyHandles complete asynchronously.
 
 ### Chunk States (UMA Authority)
 
