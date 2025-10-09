@@ -60,12 +60,15 @@ class TestBufferPool : public BufferPool {
       free_.push_back(i);
     }
   }
+
   size_t chunk_size() const override {
     return chunk_size_;
   }
+
   int capacity() const override {
     return capacity_;
   }
+
   absl::StatusOr<int> get_free_chunk() override {
     std::unique_lock<std::mutex> lk(mu_);
     free_cv_.wait(lk, [&] { return !free_.empty() || stopped_; });
@@ -75,6 +78,7 @@ class TestBufferPool : public BufferPool {
     free_.pop_front();
     return id;
   }
+
   void return_chunk(int slot_id) override {
     {
       std::lock_guard<std::mutex> lk(mu_);
@@ -84,6 +88,7 @@ class TestBufferPool : public BufferPool {
     free_cv_.notify_one();
     ready_cv_.notify_one();
   }
+
   absl::Status mark_chunk_ready(int slot_id, uint64_t gid, size_t bytes) override {
     void* p = get_chunk_data_ptr(slot_id);
     if (!p)
@@ -95,6 +100,7 @@ class TestBufferPool : public BufferPool {
     ready_cv_.notify_one();
     return absl::OkStatus();
   }
+
   absl::StatusOr<ReadyChunk> get_ready_chunk() override {
     std::unique_lock<std::mutex> lk(mu_);
     ready_cv_.wait(lk, [&] { return !ready_.empty() || stopped_; });
@@ -104,15 +110,18 @@ class TestBufferPool : public BufferPool {
     ready_.pop();
     return c;
   }
+
   void signal_production_complete() override {
     std::lock_guard<std::mutex> lk(mu_);
     stopped_ = true;
     ready_cv_.notify_all();
     free_cv_.notify_all();
   }
+
   void shutdown() override {
     signal_production_complete();
   }
+
   void* get_chunk_data_ptr(int slot_id) override {
     if (slot_id < 0 || slot_id >= capacity_)
       return nullptr;
@@ -148,25 +157,33 @@ class TestAsyncSink : public PositionedSink, public AsyncPositionedSink {
     sync_called_++;
     return absl::OkStatus();
   }
+
   absl::Status close() override {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(uint64_t, const void* src, size_t bytes) override {
+  absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(
+      uint64_t,
+      const void* src,
+      size_t bytes,
+      const AsyncWriteOptions& options = AsyncWriteOptions{}) override {
     async_called_++;
     // Use H2H copy for a ready handle; this still goes through ACM and traces.
     tensorcast::common::HostRegion hsrc{.base = src, .length = bytes, .pinned = true};
     if (tmp_.size() < bytes)
       tmp_.resize(bytes);
     tensorcast::common::HostRegion hdst{.base = tmp_.data(), .length = bytes, .pinned = true};
-    auto hdl_or =
-        tensorcast::common::AsyncCopyManager::instance().submit_h2h(hsrc, hdst, {.tracing_stage = "H2H/Copy"});
+    tensorcast::common::CopyOptions copts = options.copy_options.value_or(tensorcast::common::CopyOptions{});
+    if (copts.tracing_stage == nullptr)
+      copts.tracing_stage = "H2H/Copy";
+    auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2h(hsrc, hdst, copts);
     return hdl_or;
   }
 
   int async_called() const {
     return async_called_.load();
   }
+
   int sync_called() const {
     return sync_called_.load();
   }
@@ -189,7 +206,7 @@ TEST_CASE("Pump uses AsyncPositionedSink path", "[pump][async]") {
   REQUIRE(sink.async_called() > 0);
   REQUIRE(sink.sync_called() == 0);
   // Ensure slots have been returned at least once
-  REQUIRE(pool.returned_slots().size() > 0);
+  REQUIRE(!pool.returned_slots().empty());
 }
 
 TEST_CASE("Pump async path surfaces sink error", "[pump][async]") {
@@ -199,7 +216,11 @@ TEST_CASE("Pump async path surfaces sink error", "[pump][async]") {
   // Sink that fails on first async call
   class FailingAsyncSink : public TestAsyncSink {
    public:
-    absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(uint64_t, const void*, size_t) override {
+    absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(
+        uint64_t,
+        const void*,
+        size_t,
+        const AsyncWriteOptions& = AsyncWriteOptions{}) override {
       return absl::InternalError("async sink failure");
     }
   } sink;

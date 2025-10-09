@@ -1239,13 +1239,16 @@ void MTcpTransport::recv_loop() {
                 tensorcast::common::DeviceRegion d{
                     .device_id = device_id, .dev_ptr = gpu_ptr, .length = static_cast<size_t>(sub_chunk_size)};
                 tensorcast::common::CopyOptions opts{
-                    .tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = [recv_buffer, slot_id]() {
-                                                   absl::Status rc = recv_buffer->return_chunk(slot_id);
-                                                   if (!rc.ok()) {
-                                                     LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << slot_id
-                                                                  << ": " << rc;
-                                                   }
-                                                 }}};
+                    .tracing_stage = "H2D/Copy",
+                    .callbacks = {.on_copy_done = [recv_buffer, slot_id](absl::Status st) {
+                      absl::Status rc = recv_buffer->return_chunk(slot_id);
+                      if (!rc.ok()) {
+                        LOG(WARNING) << "recv_buffer->return_chunk failed slot=" << slot_id << ": " << rc;
+                      }
+                      if (!st.ok()) {
+                        LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << slot_id << ": " << st;
+                      }
+                    }}};
                 auto hdl_or = tensorcast::common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
                 if (!hdl_or.ok()) {
                   LOG(ERROR) << "Failed to schedule H2D copy: " << hdl_or.status();

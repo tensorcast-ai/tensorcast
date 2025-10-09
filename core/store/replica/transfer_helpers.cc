@@ -100,14 +100,17 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
       common::DeviceRegion d{.device_id = static_cast<int>(device_id), .dev_ptr = dst_device, .length = step};
       common::CopyOptions opts{
-          .tracing_stage = "H2D/Copy", .callbacks = {.on_copy_done = [streaming_buf, slot_id, remaining]() {
-                                         absl::Status rc = streaming_buf->return_chunk(slot_id);
-                                         if (!rc.ok()) {
-                                           LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id
-                                                        << ": " << rc;
-                                         }
-                                         (void)remaining->fetch_sub(1, std::memory_order_acq_rel);
-                                       }}};
+          .tracing_stage = "H2D/Copy",
+          .callbacks = {.on_copy_done = [streaming_buf, slot_id, remaining](absl::Status st) {
+            absl::Status rc = streaming_buf->return_chunk(slot_id);
+            if (!rc.ok()) {
+              LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
+            }
+            if (!st.ok()) {
+              LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << slot_id << ": " << st;
+            }
+            (void)remaining->fetch_sub(1, std::memory_order_acq_rel);
+          }}};
       auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
       if (!hdl_or.ok()) {
         // Return the slot immediately on submission failure
@@ -187,20 +190,24 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
                              chunk_offset,
                              current_chunk_size,
                              first_error,
-                             first_error_mu]() {
-              // Write to VS then return slot; record first VS error if any
-              absl::Status st = virtual_addr_space->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
-              if (!st.ok()) {
+                             first_error_mu](absl::Status copy_status) {
+              if (copy_status.ok()) {
+                absl::Status st = virtual_addr_space->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
+                if (!st.ok()) {
+                  absl::MutexLock lk(first_error_mu.get());
+                  if (first_error->ok()) {
+                    *first_error = st;
+                  }
+                }
+              } else {
                 absl::MutexLock lk(first_error_mu.get());
                 if (first_error->ok()) {
-                  *first_error = st;
+                  *first_error = copy_status;
                 }
               }
-              {
-                absl::Status rc = streaming_buf->return_chunk(slot_id);
-                if (!rc.ok()) {
-                  LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
-                }
+              absl::Status rc = streaming_buf->return_chunk(slot_id);
+              if (!rc.ok()) {
+                LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
               }
             }}};
     auto hdl_or = common::AsyncCopyManager::instance().submit_d2h(s, h, opts);

@@ -30,7 +30,11 @@ class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositioned
   // Positioned write into GPU base + offset
   absl::Status write_at(uint64_t offset, const void* src, size_t bytes) override;
 
-  absl::StatusOr<common::CopyHandle> write_at_async(uint64_t offset, const void* src, size_t bytes) override;
+  absl::StatusOr<common::CopyHandle> write_at_async(
+      uint64_t offset,
+      const void* src,
+      size_t bytes,
+      const AsyncWriteOptions& options = AsyncWriteOptions{}) override;
 
   absl::Status close() override;
 

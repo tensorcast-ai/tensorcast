@@ -8,6 +8,7 @@
 #include <cstring>
 #include <numeric>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 #include "absl/log/log.h"
@@ -27,6 +28,18 @@ static constexpr uint64_t kPrimE642 = 14029467366897019727ULL;
 static constexpr uint64_t kPrimE643 = 1609587929392839161ULL;
 static constexpr uint64_t kPrimE644 = 9650029242287828579ULL;
 static constexpr uint64_t kPrimE645 = 2870177450012600261ULL;
+
+std::string bytes_to_hex(absl::Span<const uint8_t> bytes) {
+  std::string out;
+  out.reserve(bytes.size() * 3);
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    if (i != 0) {
+      out.push_back(' ');
+    }
+    absl::StrAppendFormat(&out, "%02x", bytes[i]);
+  }
+  return out;
+}
 
 // JSON serialization using nlohmann/json
 std::string ArtifactVerificationInfo::to_json() const {
@@ -547,6 +560,38 @@ absl::Status ArtifactVerifier::verify_artifact_data(
       }
 
       if (seg_hash != expected_info.segment_hashes.at(seg)) {
+        const size_t segment_len = seg_end - seg_start;
+        const size_t sample_len = std::min<size_t>(64, segment_len);
+        std::vector<uint8_t> head_sample(sample_len);
+        absl::Status head_status =
+            read_data_chunk(head_sample.data(), data_ptrs, data_sizes, seg_start, sample_len, device_id);
+        std::vector<uint8_t> tail_sample;
+        absl::Status tail_status = absl::OkStatus();
+        if (segment_len > sample_len) {
+          const size_t tail_len = std::min<size_t>(64, segment_len);
+          tail_sample.resize(tail_len);
+          tail_status =
+              read_data_chunk(tail_sample.data(), data_ptrs, data_sizes, seg_end - tail_len, tail_len, device_id);
+        }
+        LOG(ERROR) << "ArtifactVerifier: Segment hash mismatch (segment=" << seg << ", device=" << device_id
+                   << ", offset=" << seg_start << ", length=" << segment_len << ")"
+                   << " actual_hash=" << seg_hash << " expected_hash=" << expected_info.segment_hashes.at(seg);
+        if (head_status.ok()) {
+          LOG(ERROR) << "ArtifactVerifier: segment head bytes [" << bytes_to_hex(absl::MakeConstSpan(head_sample))
+                     << "]";
+        } else {
+          LOG(ERROR) << "ArtifactVerifier: failed to sample segment head (segment=" << seg
+                     << ") status=" << head_status;
+        }
+        if (!tail_sample.empty()) {
+          if (tail_status.ok()) {
+            LOG(ERROR) << "ArtifactVerifier: segment tail bytes [" << bytes_to_hex(absl::MakeConstSpan(tail_sample))
+                       << "]";
+          } else {
+            LOG(ERROR) << "ArtifactVerifier: failed to sample segment tail (segment=" << seg
+                       << ") status=" << tail_status;
+          }
+        }
         return absl::DataLossError(absl::StrCat("Segment ", seg, " hash mismatch"));
       }
     }

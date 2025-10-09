@@ -239,34 +239,48 @@ stateDiagram-v2
 
 ### Async Copy Manager Integration
 
-- H2D/D2H transfers now submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks.
-- SPB slots are returned in the ACM completion callback; per-chunk `stream_synchronize` calls have been removed.
-- For H2D, UMA state is advanced per CPU-block after a single barrier on the device stream (temporary behavior; will move into ACM callbacks).
+- H2D/D2H transfers submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks and forwards completions onto a dedicated CPU worker to avoid making CUDA Runtime calls inside `cudaLaunchHostFunc`.
+- StreamingPinnedBuffer slots stay owned by the pump consumer until ACM completion; the completion callback is the only place that returns slots, preventing early reuse while the GPU DMA is still active.
+- For H2D, UMA state should advance from the completion callback (if the caller needs it) using the `absl::Status` argument as proof of success; per-chunk `stream_synchronize` remains unnecessary.
 - ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
 
 #### ACM Usage Quick Guide
 
-- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots inside the host callback. Do not `stream_synchronize()` per chunk.
+- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) inside the `on_copy_done` callback. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires.
 - H2D example (return slot + optional UMA advancement in callback):
   ```cpp
   using common::AsyncCopyManager;
   common::HostRegion h{.base = host_ptr, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = device_id, .dev_ptr = dst_dev, .length = bytes};
   auto hdl_or = AsyncCopyManager::instance().submit_h2d(
-      h, d, {.tracing_stage = "H2D/Copy",
-             .callbacks = {.on_copy_done = [spb, slot_id, maybe_uma]() {
-               (void)spb->return_chunk(slot_id);
-               if (maybe_uma) maybe_uma();
-             }}});
+      h,
+      d,
+      {.tracing_stage = "H2D/Copy",
+       .callbacks = {.on_copy_done = [spb, slot_id, maybe_uma](absl::Status st) {
+         if (st.ok()) {
+           (void)spb->return_chunk(slot_id);
+           if (maybe_uma) {
+             maybe_uma();
+           }
+         } else {
+           LOG(ERROR) << "async copy failed, slot=" << slot_id << ": " << st;
+         }
+       }}} );
   RETURN_IF_ERROR(hdl_or.status());
   ```
 - D2H example (stage into SPB, mark ready in callback for writer thread):
   ```cpp
   auto hdl_or = AsyncCopyManager::instance().submit_d2h(
-      src_dev, dst_host, {.tracing_stage = "D2H/Copy",
-                          .callbacks = {.on_copy_done = [spb, slot_id, gid, bytes]() {
-                            (void)spb->mark_chunk_ready(slot_id, gid, bytes);
-                          }}});
+      src_dev,
+      dst_host,
+      {.tracing_stage = "D2H/Copy",
+       .callbacks = {.on_copy_done = [spb, slot_id, gid, bytes](absl::Status st) {
+         if (!st.ok()) {
+           LOG(ERROR) << "async copy failed, gid=" << gid << ": " << st;
+           return;
+         }
+         (void)spb->mark_chunk_ready(slot_id, gid, bytes);
+       }}} );
   ```
 - Same-device D2D: use `submit_d2d` and wait on handles as needed. Cross-device D2D remains under `ReplicaLoadController` (peer or staged fallback).
 - Tests and CPU-only flows can use `submit_h2h` to exercise the async pump path without CUDA.
