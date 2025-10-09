@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/communicator/misc/utils.h"
@@ -276,7 +277,7 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
   if (wc->opcode == IBV_WC_RDMA_READ) {
     auto req = inflight_queue_.pop(true);
     if (req == nullptr) {
-      misc::ASSERT(false, "abnormal queue state");
+      LOG(FATAL) << "abnormal queue state";
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {

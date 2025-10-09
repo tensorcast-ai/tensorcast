@@ -1,6 +1,8 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/communicator/transport/net_dev.h"
+#include "absl/log/absl_check.h"
+#include "absl/log/log.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/partition_tensor.h"
@@ -108,8 +110,8 @@ int NetDev::get_best_gid_index() {
 }
 
 misc::result_t NetDev::get_best_gid(ibv_gid* gid, int* gid_idx) {
-  misc::ASSERT(gid != nullptr, "gid cannot be nullptr");
-  misc::ASSERT(gid_idx != nullptr, "gid index cannot be nullptr");
+  ABSL_CHECK(gid != nullptr) << "gid cannot be nullptr";
+  ABSL_CHECK(gid_idx != nullptr) << "gid index cannot be nullptr";
   if (gid_idx_ > 0) {
     *gid_idx = gid_idx_;
     memcpy(gid, &gid_, sizeof(gid_));

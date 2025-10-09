@@ -11,6 +11,7 @@ extern "C" {
 #include <cstring>
 #include <string>
 
+#include "absl/log/absl_check.h"
 #include "core/communicator/misc/common.h"
 
 namespace tensorcast::communicator::misc {
@@ -25,20 +26,6 @@ inline void FREE_PTR(T*& ptr) {
   if (ptr != nullptr) {
     free(ptr);
     ptr = nullptr;
-  }
-}
-
-inline void ASSERT(bool condition, const char* msg) {
-  if (!condition) {
-    LOG(ERROR) << msg;
-    assert(condition);
-  }
-}
-
-inline void ASSERT_SUCCESS(result_t ret, const char* msg) {
-  if (ret != SUCCESS) {
-    LOG(ERROR) << msg;
-    assert(ret == SUCCESS);
   }
 }
 
@@ -77,14 +64,14 @@ void CALLOC(T** t, uint64_t size) {
 template <class T>
 void CALLOC_ALIGN(T** t) {
   int ret = posix_memalign(reinterpret_cast<void**>(t), 4096, sizeof(T));
-  ASSERT(ret == 0, "posix_memalign failed");
+  ABSL_CHECK(ret == 0) << "posix_memalign failed";
   CLEAR_PTR(*t);
 }
 
 template <class T>
 void CALLOC_ALIGN(T** t, uint64_t size) {
   int ret = posix_memalign(reinterpret_cast<void**>(t), 4096, size);
-  ASSERT(ret == 0, "posix_memalign failed");
+  ABSL_CHECK(ret == 0) << "posix_memalign failed";
   CLEAR_PTR(*t);
 }
 

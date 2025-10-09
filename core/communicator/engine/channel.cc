@@ -3,6 +3,7 @@
 #include <sstream>
 #include <utility>
 
+#include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/misc/utils.h"
@@ -54,7 +55,7 @@ void Channel::set_transport(
     const std::string& remote_dev_name,
     transport::rdma_transport_t t,
     HandshakeState initial_state) {
-  misc::ASSERT(type_ == base::CHANNEL_RDMA, "cannot set rdma transport for tcp channel");
+  ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
   auto endpoint = ensure_rdma_endpoint(local_dev_name, remote_dev_name);
@@ -73,8 +74,8 @@ void Channel::set_transport(
 }
 
 void Channel::set_transport(communicator::transport::mtcp_transport_t t) {
-  misc::ASSERT(type_ == base::CHANNEL_MTCP, "cannot set rdma transport for tcp channel");
-  misc::ASSERT(mtcp_ == nullptr, "cannot set rdma transport for tcp channel");
+  ABSL_CHECK(type_ == base::CHANNEL_MTCP) << "cannot set rdma transport for tcp channel";
+  ABSL_CHECK(mtcp_ == nullptr) << "cannot set rdma transport for tcp channel";
   mtcp_ = std::move(t);
 }
 
@@ -83,7 +84,7 @@ void Channel::set_gpu_slot_handle(std::shared_ptr<void> handle) {
 }
 
 void Channel::del_transport(const std::string& local_dev_name, const std::string& remote_dev_name) {
-  misc::ASSERT(type_ == base::CHANNEL_RDMA, "cannot set rdma transport for tcp channel");
+  ABSL_CHECK(type_ == base::CHANNEL_RDMA) << "cannot set rdma transport for tcp channel";
   std::stringstream key;
   key << local_dev_name << ":" << remote_dev_name;
   absl::MutexLock lock(&rdma_mu_);

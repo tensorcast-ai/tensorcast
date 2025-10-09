@@ -3,12 +3,14 @@
 #include "core/communicator/transport/transport_message.h"
 #include "core/communicator/misc/utils.h"
 
+#include "absl/log/absl_check.h"
+
 namespace tensorcast::communicator::transport {
 
 TransportMessage::TransportMessage(uint32_t header_size, uint32_t payload_size)
     : header_size_(header_size), payload_size_(payload_size) {
-  misc::ASSERT(payload_size_ > 0, "illegal payload size");
-  misc::ASSERT(header_size_ > 0, "illegal header size");
+  ABSL_CHECK(payload_size_ > 0) << "illegal payload size";
+  ABSL_CHECK(header_size_ > 0) << "illegal header size";
   misc::ALLOC(&payload_buf_, payload_size_);
   bzero(payload_buf_, payload_size_);
 }

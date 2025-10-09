@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <mutex>
 
+#include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 
 #include "core/communicator/misc/epoll_wrap.h" // IWYU pragma: keep
@@ -58,7 +59,7 @@ static std::string decode_epoll_events(uint32_t events) {
 
 TcpTransport::TcpTransport(TcpContext* context, int fd, struct sockaddr_in remote_addr)
     : context_(context), fd_(fd), local_addr_(), remote_addr_(remote_addr), recv_func_(nullptr) {
-  misc::ASSERT(fd_ != 0, "failed to init tcp transport");
+  ABSL_CHECK(fd_ != 0) << "failed to init tcp transport";
   misc::CLEAR(local_addr_);
   socklen_t len = sizeof(local_addr_);
   if (getsockname(fd_, reinterpret_cast<struct sockaddr*>(&local_addr_), &len) < 0) {

@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "core/communicator/misc/utils.h"
+#include "absl/log/absl_check.h"
 
 namespace tensorcast::communicator::transport {
 
@@ -25,7 +25,7 @@ class TransportMessage {
 
   template <class T>
   T* get_payload() {
-    misc::ASSERT(sizeof(T) <= payload_size_, "failed to get payload due to illegal size");
+    ABSL_CHECK(sizeof(T) <= payload_size_) << "failed to get payload due to illegal size";
     return reinterpret_cast<T*>(payload_buf_);
   }
 
@@ -35,6 +35,7 @@ class TransportMessage {
   uint8_t* payload_buf_;
   uint32_t payload_size_;
 };
+
 typedef std::shared_ptr<TransportMessage> transport_message_t;
 
 } // namespace tensorcast::communicator::transport

@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/absl_check.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -273,8 +274,8 @@ MTcpTransport::MTcpTransport(
       gpu_init_retry_timeout_(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::minutes(1))),
       buffers_per_flow_limit_(buffers_per_flow_limit),
       memory_stager_(std::move(memory_stager)) {
-  misc::ASSERT(conn_count > 1, "illegal conn count"); // mtcp only process
-  misc::ASSERT(conn_count <= base::kMaxTcpConns, "illegal conn count"); // mtcp only support 32 at max
+  ABSL_CHECK(conn_count > 1) << "illegal conn count"; // mtcp only process
+  ABSL_CHECK(conn_count <= base::kMaxTcpConns) << "illegal conn count"; // mtcp only support 32 at max
   bzero(sock_fds_, base::kMaxTcpConns * sizeof(int));
   bzero(&server_addr_, sizeof(struct sockaddr_in));
   bzero(client_addrs_, sizeof(struct sockaddr_in) * base::kMaxTcpConns);
@@ -500,7 +501,7 @@ void MTcpTransport::start_staged_thread() {
 }
 
 void MTcpTransport::set_conn_count(int conn_count) {
-  misc::ASSERT(!ready_.load(), "failed to set connection count");
+  ABSL_CHECK(!ready_.load()) << "failed to set connection count";
   conn_count_ = conn_count;
 }
 

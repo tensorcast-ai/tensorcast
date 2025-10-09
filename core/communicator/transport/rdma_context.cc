@@ -6,8 +6,9 @@
 #include <string>
 #include <utility>
 
+#include "absl/log/absl_check.h"
+#include "absl/log/log.h"
 #include "core/common/cuda_api.h"
-#include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/rdma_transport.h"
@@ -15,7 +16,7 @@
 namespace tensorcast::communicator::transport {
 
 RdmaContext::RdmaContext() {
-  misc::ASSERT(ibv_init() == misc::SUCCESS, "failed to init");
+  ABSL_CHECK(ibv_init() == misc::SUCCESS) << "failed to init";
   for (int i = 0; i < 16; i++) {
     dev_vector_[i] = nullptr;
   }
@@ -285,7 +286,7 @@ void RdmaThread::add_poll_transport(RdmaTransport* t) {
       return;
     }
   }
-  misc::ASSERT(false, "failed to allocate a valid poll status");
+  ABSL_CHECK(false) << "failed to allocate a valid poll status";
 }
 
 void RdmaThread::del_send_transport(RdmaTransport* t) {

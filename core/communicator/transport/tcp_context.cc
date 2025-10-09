@@ -13,6 +13,7 @@ extern "C" {
 #include <string>
 #include <utility>
 
+#include "absl/log/absl_check.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -54,7 +55,7 @@ TcpContext::~TcpContext() {
 }
 
 misc::result_t TcpContext::open(const std::string& ip, uint16_t port, on_accept_func_t func) {
-  misc::ASSERT(listen_fd_ == 0, "failed to open due to valid listen fd");
+  ABSL_CHECK(listen_fd_ == 0) << "failed to open due to valid listen fd";
   on_accept_ = std::move(func);
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ == -1) {
