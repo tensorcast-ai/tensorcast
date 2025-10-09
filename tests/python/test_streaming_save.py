@@ -76,7 +76,7 @@ def test_streaming_save_basic(tmp_path, has_cuda):
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
     assert os.path.exists(os.path.join(save_path, "tensor.data_0"))
 
-    loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
+    loaded_state_dict = load_dict_from_disk(save_path, device_id=0)
 
     for name, original_tensor in state_dict.items():
         loaded_tensor = loaded_state_dict[name]
@@ -100,8 +100,8 @@ def test_streaming_vs_traditional_equivalence(tmp_path, has_cuda):
     path_b = os.path.join(str(tmp_path), "save_b")
     save_dict(state_dict, path_b)
 
-    traditional_loaded = load_dict_from_disk(path_a, device_id=0, storage_path="")
-    streaming_loaded = load_dict_from_disk(path_b, device_id=0, storage_path="")
+    traditional_loaded = load_dict_from_disk(path_a, device_id=0)
+    streaming_loaded = load_dict_from_disk(path_b, device_id=0)
 
     for name in state_dict.keys():
         trad_tensor = traditional_loaded[name].cpu()
@@ -126,7 +126,7 @@ def test_streaming_custom_config(tmp_path, has_cuda):
 
     assert os.path.exists(os.path.join(save_path, "tensor_index.json"))
 
-    loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
+    loaded_state_dict = load_dict_from_disk(save_path, device_id=0)
     assert len(loaded_state_dict) == len(state_dict)
 
 
@@ -156,7 +156,7 @@ def test_mixed_tensor_sizes(tmp_path):
     save_path = os.path.join(str(tmp_path), "mixed_sizes")
     save_dict(state_dict, save_path)
 
-    loaded_state_dict = load_dict_from_disk(save_path, device_id=0, storage_path="")
+    loaded_state_dict = load_dict_from_disk(save_path, device_id=0)
 
     for name, original_tensor in state_dict.items():
         loaded_tensor = loaded_state_dict[name]

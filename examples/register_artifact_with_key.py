@@ -5,13 +5,14 @@ from pathlib import Path
 import torch
 
 from tensorcast import startup
-from tensorcast.api import register_artifact
+from tensorcast.api import Store
 from tensorcast.api._config import RegisterArtifactOptions
 
 
 def main() -> None:
     # Connect to the Store Daemon (assumes tensorcast.startup.init() env/config)
-    startup.init()
+    ctx = startup.init()
+    store = Store(ctx.address)
 
     # Create a tiny dummy state_dict
     state_dict: dict[str, torch.Tensor] = {
@@ -25,11 +26,16 @@ def main() -> None:
 
     opts = RegisterArtifactOptions(
         plan="vram_coalesced",
-        key="demo:model:001",
         disk_path=str(out_dir),  # validate/record disk source
     )
-    res = register_artifact(state_dict, options=opts, device_id=0)
-    desc = res.descriptor
+    device_arg = "cuda:0" if torch.cuda.is_available() else None
+    registered = store.put(
+        state_dict,
+        key="demo:model:001",
+        options=opts,
+        device=device_arg,
+    )
+    desc = registered.registration_result.descriptor
     print("Committed artifact_id:", desc.artifact_id)
 
 

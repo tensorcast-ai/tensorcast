@@ -68,7 +68,7 @@ graph TD
 ### 3. User Process Worker
 **Role**: PyTorch client process accessing artifacts
 
-- **Interface**: Uses `tensorcast.api.get_artifact_sync(key, ...)` to request artifacts via daemon `MaterializeByKey` (RFC‑0017)
+- **Interface**: Uses `tensorcast.api.Store` verbs (`get`, `get_into`) to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 
@@ -141,4 +141,59 @@ LIP adds a replica mode where a producer process exposes its existing GPU memory
 - Lifecycle: leases require KeepAlive at TTL/2 cadence post‑Commit; TTL expiry removes from selection; leases auto‑revoke when `owner_pid` exits.
 - Verification: lightweight KEY_POINTS metadata is generated and stored at Commit for later offer attachment.
 
-This preserves staged‑only safety and the zero‑copy invariant for daemon‑owned coalesced replicas while enabling low‑latency in‑place sharing and fast cross‑device replication.
+This preserves staged-only safety and the zero-copy invariant for daemon-owned coalesced replicas while enabling low-latency in-place sharing and fast cross-device replication.
+
+## Store Session Observability
+
+The Store client (Python SDK) follows [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md) and exports OpenTelemetry signals for every verb:
+
+- **Spans**: `Store/Register`, `Store/Put`, `Store/Get`, and `Store/GetInto` wrap daemon RPC sequences and carry low-cardinality attributes (`tc.store.daemon`, `tc.store.session_id`, `tc.store.status`, retry attempt counts, fallback decisions). Retry cycles add `store.retry` events so traces surface deadline churn without exploding span fanout.
+- **Metrics**: Histogram `tc_store_operation_latency_seconds` plus counters `tc_store_operation_errors_total` and `tc_store_operation_retries_total` record latency, failures, and retry attempts per verb with `verb` and `daemon` labels. Metrics emit only when OpenTelemetry is configured, keeping zero-cost semantics otherwise.
+- **Cardinality guardrails**: High-cardinality attributes (replica UUIDs, disk paths, request UUIDs) are filtered by default to keep backend cost predictable. Enable `TC_OTEL_ALLOW_HIGH_CARDINALITY_ATTRS=1` locally to debug with full attribute sets.
+
+Keepalive activity and cancellation outcomes are captured inside the same spans so operators can correlate lease churn, fallback causes, and daemon retries on a single trace.
+
+### Store Session Registry
+
+The Python SDK persists lightweight session manifests under `~/.tensorcast/store_sessions/<session_id>.json`. Each file records the daemon endpoint, client PID, capabilities summary (`mem_pool_bytes`, `tx_slice_bytes`, transfer slice size), plus rolling counts of active leases and pending futures. Entries are refreshed whenever a verb executes, ensuring operators can audit abandoned leases or hung futures even if the client process exits unexpectedly.
+
+Running `uv run tensorcast status` now prints this registry after the daemon health report:
+
+```
+$ uv run tensorcast status
+...
+==============================
+Store Sessions
+==============================
+Session ID: 20251001-abcd
+  Daemon Endpoint: 127.0.0.1:50052
+  PID: 42281
+  Status: ACTIVE
+  Created: 2025-10-03 09:12:14
+  Last Activity: 2025-10-03 09:15:41
+  Active Leases: 2
+  Pending Futures: 0
+  Capabilities:
+    mem_pool_bytes: 4294967296
+    tx_slice_bytes: 67108864
+    supports_coalesced: True
+    supports_lease: True
+```
+
+Operators can prune stale entries manually or rely on the CLI output to identify orphaned sessions before triggering lease revocation from the daemon.
+
+## Store Session Rollout & Backout
+
+### Rollout procedure
+
+1. **Stage the release**: Deploy the aligned Global Store migration, Store Daemon binary, and Python SDK wheel to staging. Check the triplet by running `uv run tensorcast --version` and confirm the staged daemon advertises the expected build in `uv run tensorcast status`.
+2. **Run integration validation**: Execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` against the staged environment. These suites cover lease timers, LIP flows, and daemon session lifecycle with the Store-centric API.
+3. **Observe telemetry**: Monitor the OpenTelemetry metrics from [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md) while gradually shifting traffic. Track `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total` per verb in Grafana to ensure latency, error, and retry rates stay within historical limits.
+4. **Promote to production**: Roll the SDK wheel to production workers and restart clients. Use `uv run tensorcast status` to verify Store sessions register with accurate lease counts before decommissioning any remaining legacy helper usage.
+5. **Reference the release checklist**: Follow the detailed steps in the [Store Session Release Checklist](../deployment/store-session-release-checklist.md) to coordinate broader launches and communications.
+
+### Backout procedure
+
+- **Immediate revert**: If regressions appear, redeploy the previous SDK wheel and daemon binary from before the Store-session rollout. The persisted session manifests under `~/.tensorcast/store_sessions` are backward compatible and will be ignored by older clients.
+- **Post-revert validation**: Re-run the integration suites above to confirm behaviour is restored, and watch `tc_store_operation_errors_total` to verify failure rates return to steady state.
+- **Communication loop**: Notify downstream teams when rollout halts, capture the blocking issues, and resume after fixes pass staging validation.

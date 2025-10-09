@@ -1,23 +1,23 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import os
+import json
+import random
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
-
 import torch
 
 from tensorcast import startup
-from tensorcast.api._config import RegisterArtifactOptions
-from tensorcast.api import register_artifact
-from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast._C import get_cuda_memory_handle
+from tensorcast.api import RegisterArtifactOptions, Store
+from tensorcast.api._register import begin_register_artifact_sdk
+from tensorcast.api.store import RegisteredArtifact as StoreRegisteredArtifact
+from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.types import LeasePlan, LeaseSegment
-import subprocess
-import time
-import grpc
 from tests.python.utils.daemon import start_daemon_binary
+
 
 def _start_daemon_binary(listen_addr: str, storage_path: Path) -> subprocess.Popen:
     return start_daemon_binary(listen_addr, storage_path, config_mode="yaml")
@@ -39,6 +39,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
         pytest.fail(str(e))
     try:
         startup.init(address=listen)
+        store = Store(listen)
         try:
             device = torch.device("cuda", 0)
             # Two tensors that share no storage (unique blocks)
@@ -49,11 +50,14 @@ def test_register_vram_leased_commit(tmp_path: Path):
 
             opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
             # For lease: do not pass device_id so SDK infers and uses CUDA path
-            res = register_artifact(state, options=opts)
-            desc = res.descriptor
+            res = store.register(state, options=opts)
+            assert isinstance(res, StoreRegisteredArtifact)
+            assert res.registration_result is not None
+            desc = res.registration_result.descriptor
             assert desc.artifact_id.startswith("mi2:")
             assert desc.total_size > 0
         finally:
+            store.close()
             startup.shutdown()
     finally:
         try:
@@ -75,7 +79,6 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
 
     try:
         startup.init(address=listen)
-        import json, random
         device = torch.device("cuda", 0)
         # Three tensors with disjoint storages
         a = torch.arange(0, 16, dtype=torch.uint8, device=device)
@@ -179,7 +182,8 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
         device = torch.device("cuda", 0)
         t = torch.full((64,), 0x5A, dtype=torch.uint8, device=device)
         storage = t.untyped_storage()
-        ptr = int(storage.data_ptr()); sz = int(storage.size())
+        ptr = int(storage.data_ptr())
+        sz = int(storage.size())
         tensor_index_v2 = {"x": [0, sz, [64], [1], "torch.uint8", 0]}
         index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
         handle2, _ = begin_register_artifact_sdk(

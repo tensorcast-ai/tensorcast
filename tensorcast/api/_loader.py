@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol, cast
 
@@ -40,7 +40,7 @@ from ._indices import (
     load_tensor_indices_from_dir,
 )
 from ._io_disk import load_dict_from_disk
-from ._utils import compose_artifact_dir, ensure_artifact_descriptor_safe, new_uuid
+from ._utils import ensure_artifact_descriptor_safe, new_uuid
 
 
 class LoadHandle:
@@ -114,9 +114,7 @@ class DiskLoader:
         self._device_id = device_id
 
     def load(self) -> dict[str, torch.Tensor]:
-        return load_dict_from_disk(
-            self._artifact_dir, device_id=self._device_id, storage_path=""
-        )
+        return load_dict_from_disk(self._artifact_dir, device_id=self._device_id)
 
 
 class DaemonLoader:
@@ -225,6 +223,139 @@ class DaemonLoader:
         return state_dict, confirm_load
 
 
+@dataclass(frozen=True)
+class MaterializedArtifact:
+    artifact_id: str
+    state_dict: dict[str, torch.Tensor]
+    canonical_index_bytes: bytes
+    replica_uuid: str
+    disk_path: str | None = None
+
+
+def materialize_artifact(
+    *,
+    client: DaemonCtl,
+    daemon_address: str,
+    device_id: int | torch.device,
+    artifact_id: str | None,
+    key: str | None,
+    options: GetArtifactOptions | None = None,
+) -> MaterializedArtifact:
+    if (artifact_id is None and key is None) or (artifact_id and key):
+        raise ValueError("Exactly one of artifact_id or key must be provided")
+
+    ensure_client_otel("tensorcast-client", role="client")
+    tracer = trace.get_tracer(__name__)
+
+    opts = options or GetArtifactOptions()
+    if not opts.wait_for_completion:
+        raise DaemonUnavailable(
+            "wait_for_completion=False is not supported for materialize_artifact"
+        )
+
+    dev_id = resolve_device(device_id)
+    (
+        pinned_ms,
+        enable_ver,
+        wait_for_completion,
+    ) = _apply_client_defaults_if_present(
+        opts.pinned_allocation_timeout_ms,
+        opts.enable_verification,
+        opts.wait_for_completion,
+        runtime_address=daemon_address,
+    )
+
+    opts = replace(
+        opts,
+        pinned_allocation_timeout_ms=pinned_ms,
+        enable_verification=enable_ver,
+        wait_for_completion=wait_for_completion,
+    )
+
+    replica_uuid = new_uuid()
+    disk_path: str | None = None
+
+    with tracer.start_as_current_span(
+        "Client/MaterializeArtifact", kind=SpanKind.INTERNAL
+    ):
+        if artifact_id is not None:
+            handle_bytes = client.materialize_by_artifact_id(
+                artifact_id,
+                replica_uuid,
+                device_uuid_for(dev_id),
+                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                wait_for_completion=opts.wait_for_completion,
+            )
+            resolved_artifact_id = artifact_id
+        else:
+            mat_result = client.materialize_by_key(
+                key or "",
+                replica_uuid,
+                dev_id,
+                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                wait_for_completion=opts.wait_for_completion,
+            )
+            handle_bytes, disk_path, resolved_artifact_id = cast(
+                tuple[bytes, str, str], mat_result
+            )
+
+    idx_bytes = client.get_artifact_index_by_id(resolved_artifact_id)
+    if not idx_bytes:
+        raise IndexParseError(
+            f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}"
+        )
+
+    try:
+        index_obj = json.loads(idx_bytes)
+    except Exception as exc:  # noqa: BLE001
+        raise IndexParseError("Invalid canonical index JSON from Global Store") from exc
+
+    tensor_meta_index: TensorMetaIndex = {}
+    tensor_data_index: TensorDataIndex = {}
+    for name, meta in index_obj.items():
+        if len(meta) != 6:
+            raise IndexParseError(
+                f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
+            )
+        offset, size, shape, stride, dtype, storage_offset = meta
+        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
+        tensor_data_index[name] = (int(offset), int(size))
+
+    tensor_device_offsets, _ = calculate_tensor_device_offsets(
+        tensor_data_index, dev_id
+    )
+
+    cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
+    state_dict = restore_tensors(
+        tensor_meta_index,
+        {dev_id: cuda_memory_ptr},
+        tensor_device_offsets,
+        True,
+    )
+
+    if opts.enable_verification:
+        verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
+        t = threading.Thread(
+            target=_monitor_verification,
+            args=(
+                client,
+                resolved_artifact_id,
+                replica_uuid,
+                verification_timeout_ms,
+            ),
+            daemon=True,
+        )
+        t.start()
+
+    return MaterializedArtifact(
+        artifact_id=resolved_artifact_id,
+        state_dict=state_dict,
+        canonical_index_bytes=idx_bytes,
+        replica_uuid=replica_uuid,
+        disk_path=disk_path,
+    )
+
+
 def _monitor_verification(
     ctl: DaemonCtl,
     identifier: str,
@@ -293,25 +424,14 @@ def load_dict_sync(
     runtime_ctx = startup.require_initialized()
     client = runtime_ctx.client
 
-    if storage_path is None:
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            cfg_root = storage_root_default()
-        except Exception:
-            cfg_root = None
-        if cfg_root is None:
-            raise ValueError(
-                "storage_path must be provided or set via ClientConfig.storage.default_root"
-            )
-        storage_path = cfg_root
+    # Unified path semantics: user-provided disk_path is the artifact root.
 
     device_id_int: int = resolve_device(device_id)
-    if disk_path is None or storage_path is None:
-        raise ValueError("disk_path and storage_path must be provided")
+    if disk_path is None:
+        raise ValueError("disk_path must be provided")
 
     raw_disk_path = Path(str(disk_path))
-    artifact_dir = compose_artifact_dir(raw_disk_path, str(storage_path))
+    artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)
 
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
@@ -322,9 +442,7 @@ def load_dict_sync(
     replica_uuid = new_uuid()
     # Use torch cuda check
     if not torch.cuda.is_available():
-        return load_dict_from_disk(
-            artifact_dir, device_id=device_id_int, storage_path=""
-        )
+        return load_dict_from_disk(artifact_dir, device_id=device_id_int)
 
     (
         pinned_allocation_timeout_ms,
@@ -358,122 +476,8 @@ def load_dict_sync(
         return result
     except RuntimeError as e:
         if "Local StoreDaemon" in str(e) or "not available" in str(e):
-            return load_dict_from_disk(
-                artifact_dir, device_id=device_id_int, storage_path=""
-            )
+            return load_dict_from_disk(artifact_dir, device_id=device_id_int)
         raise DaemonUnavailable(str(e)) from e
-
-
-def get_artifact_sync(
-    *,
-    key: str,
-    device_id: int | torch.device = 0,
-    options: GetArtifactOptions | None = None,
-) -> dict[str, torch.Tensor]:
-    if not key or not isinstance(key, str):
-        raise ValueError("key must be a non-empty string")
-
-    opts = options or GetArtifactOptions()
-    ensure_client_otel("tensorcast-client", role="client")
-    tracer = trace.get_tracer(__name__)
-    runtime_ctx = startup.require_initialized()
-    client = runtime_ctx.client
-
-    (
-        pinned_ms,
-        enable_ver,
-        wait_comp,
-    ) = _apply_client_defaults_if_present(
-        opts.pinned_allocation_timeout_ms,
-        opts.enable_verification,
-        opts.wait_for_completion,
-        runtime_address=runtime_ctx.address,
-    )
-    opts = replace(
-        opts,
-        pinned_allocation_timeout_ms=pinned_ms,
-        enable_verification=enable_ver,
-        wait_for_completion=wait_comp,
-    )
-
-    dev_id = resolve_device(device_id)
-    replica_uuid = os.urandom(8).hex()
-
-    if opts.prefer == "disk":
-        _artifact_id, resolved_disk = client.resolve_key_mapping(key)
-        if not resolved_disk:
-            raise DaemonUnavailable(
-                "Key resolved without disk_path; disk load not possible"
-            )
-        return load_dict_sync(
-            disk_path=resolved_disk,
-            device_id=dev_id,
-            storage_path=None,
-            enable_verification=opts.enable_verification,
-            pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-        )
-
-    try:
-        with tracer.start_as_current_span(
-            "Client/GetArtifactByKey.P2P", kind=SpanKind.INTERNAL
-        ):
-            _res_sync = client.materialize_by_key(
-                key,
-                replica_uuid,
-                dev_id,
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=True,
-            )
-            handle_bytes, _used_disk_path, artifact_id = cast(
-                tuple[bytes, str, str], _res_sync
-            )
-
-        idx_bytes = client.get_artifact_index_by_id(artifact_id)
-        if not idx_bytes:
-            raise DaemonUnavailable(
-                f"Failed to fetch canonical index for artifact_id={artifact_id}"
-            )
-        try:
-            index_obj = json.loads(idx_bytes)
-        except Exception as e:  # noqa: BLE001
-            raise IndexParseError(
-                "Invalid canonical index JSON from Global Store"
-            ) from e
-        tensor_meta_index: TensorMetaIndex = {}
-        tensor_data_index: TensorDataIndex = {}
-        for name, meta in index_obj.items():
-            if len(meta) != 6:
-                raise IndexParseError(
-                    f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
-                )
-            offset, size, shape, stride, dtype, storage_offset = meta
-            tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-            tensor_data_index[name] = (int(offset), int(size))
-        tensor_device_offsets, _ = calculate_tensor_device_offsets(
-            tensor_data_index, dev_id
-        )
-
-        cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
-        state_dict = restore_tensors(
-            tensor_meta_index,
-            {dev_id: cuda_memory_ptr},
-            tensor_device_offsets,
-            True,
-        )
-
-        if opts.enable_verification:
-            verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
-            t = threading.Thread(
-                target=_monitor_verification,
-                args=(client, artifact_id, replica_uuid, verification_timeout_ms),
-                daemon=True,
-            )
-            t.start()
-
-        return state_dict
-
-    except Exception:
-        raise
 
 
 def load_dict_async(
@@ -488,25 +492,14 @@ def load_dict_async(
     runtime_ctx = startup.require_initialized()
     client = runtime_ctx.client
 
-    if storage_path is None:
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            cfg_root = storage_root_default()
-        except Exception:
-            cfg_root = None
-        if cfg_root is None:
-            raise ValueError(
-                "storage_path must be provided or set via ClientConfig.storage.default_root"
-            )
-        storage_path = cfg_root
+    # Unified path semantics: user-provided disk_path is the artifact root.
 
     device_id_int: int = resolve_device(device_id)
-    if disk_path is None or storage_path is None:
-        raise ValueError("disk_path and storage_path must be provided")
+    if disk_path is None:
+        raise ValueError("disk_path must be provided")
 
     raw_disk_path = Path(str(disk_path))
-    artifact_dir = compose_artifact_dir(raw_disk_path, str(storage_path))
+    artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)
     tensor_device_offsets, _ = calculate_tensor_device_offsets(
         tensor_data_index, device_id_int
@@ -514,9 +507,7 @@ def load_dict_async(
     device_uuid = device_uuid_for(device_id_int)
     replica_uuid = new_uuid()
     if not torch.cuda.is_available():
-        state = load_dict_from_disk(
-            artifact_dir, device_id=device_id_int, storage_path=""
-        )
+        state = load_dict_from_disk(artifact_dir, device_id=device_id_int)
 
         def _confirm() -> bool:
             return True
@@ -552,81 +543,3 @@ def load_dict_async(
         tuple[dict[str, torch.Tensor], Callable[[], bool]], loader.load()
     )
     return LoadHandle(state, confirm)
-
-
-def get_artifact_async(
-    *,
-    key: str,
-    device_id: int | torch.device = 0,
-    options: GetArtifactOptions | None = None,
-) -> LoadHandle:
-    opts = options or GetArtifactOptions()
-    dev_id = resolve_device(device_id)
-    replica_uuid = new_uuid()
-    runtime_ctx = startup.require_initialized()
-    client = runtime_ctx.client
-    tracer = trace.get_tracer(__name__)
-    with tracer.start_as_current_span(
-        "Client/GetArtifactByKey.P2P", kind=SpanKind.INTERNAL
-    ):
-        _res_async = client.materialize_by_key(
-            key,
-            replica_uuid,
-            dev_id,
-            pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-            wait_for_completion=False,
-        )
-        handle_bytes, load_status, _used_disk_path, artifact_id = cast(
-            tuple[bytes, object, str, str], _res_async
-        )
-    idx_bytes = client.get_artifact_index_by_id(artifact_id)
-    if not idx_bytes:
-        raise DaemonUnavailable(
-            f"Failed to fetch canonical index for artifact_id={artifact_id}"
-        )
-    try:
-        index_obj = json.loads(idx_bytes)
-    except Exception as e:  # noqa: BLE001
-        raise IndexParseError("Invalid canonical index JSON from Global Store") from e
-    tensor_meta_index: TensorMetaIndex = {}
-    tensor_data_index: TensorDataIndex = {}
-    for name, meta in index_obj.items():
-        if len(meta) != 6:
-            raise IndexParseError(
-                f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
-            )
-        offset, size, shape, stride, dtype, storage_offset = meta
-        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-        tensor_data_index[name] = (int(offset), int(size))
-    tensor_device_offsets, _ = calculate_tensor_device_offsets(
-        tensor_data_index, dev_id
-    )
-    cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
-    state_dict = restore_tensors(
-        tensor_meta_index,
-        {dev_id: cuda_memory_ptr},
-        tensor_device_offsets,
-        True,
-    )
-    if opts.enable_verification:
-        verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
-        t = threading.Thread(
-            target=_monitor_verification,
-            args=(client, artifact_id, replica_uuid, verification_timeout_ms),
-            daemon=True,
-        )
-        t.start()
-
-    def _confirm() -> bool:
-        try:
-            if (
-                load_status
-                and load_status
-                == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
-            ):
-                return False
-            return client.confirm_replica_loaded("", replica_uuid)
-        except Exception:
-            return False
-
-    return LoadHandle(state_dict, _confirm)

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from typing import Any, Optional
@@ -14,6 +15,12 @@ import psutil
 
 from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.proto.daemon.v1 import store_daemon_pb2, store_daemon_pb2_grpc
+from tensorcast.store_session_registry import (
+    StoreSessionRecord,
+)
+from tensorcast.store_session_registry import (
+    iter_records as iter_store_sessions,
+)
 
 from .filesys import read_json_locked
 from .paths import session_paths
@@ -151,6 +158,45 @@ def _display_detailed_status(
     click.echo("")
 
 
+def _format_timestamp(epoch: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def _store_session_status(record: StoreSessionRecord, alive: bool) -> str:
+    if record.closed_at is not None:
+        return "CLOSED"
+    return "ACTIVE" if alive else "STALE"
+
+
+def _display_store_sessions() -> None:
+    sessions = list(iter_store_sessions())
+    if not sessions:
+        click.echo("\nNo Store sessions recorded yet.")
+        return
+    click.echo("\n" + "=" * 60)
+    click.echo("Store Sessions")
+    click.echo("=" * 60)
+    for record in sorted(sessions, key=lambda rec: rec.last_activity_at, reverse=True):
+        alive = False
+        with contextlib.suppress(Exception):
+            alive = psutil.pid_exists(record.pid)
+        click.echo(f"\nSession ID: {record.session_id}")
+        click.echo(f"  Daemon Endpoint: {record.daemon_endpoint}")
+        click.echo(f"  PID: {record.pid}")
+        click.echo(f"  Status: {_store_session_status(record, alive)}")
+        click.echo(f"  Created: {_format_timestamp(record.created_at)}")
+        click.echo(f"  Last Activity: {_format_timestamp(record.last_activity_at)}")
+        if record.closed_at is not None:
+            click.echo(f"  Closed: {_format_timestamp(record.closed_at)}")
+        click.echo(f"  Active Leases: {record.active_leases}")
+        click.echo(f"  Pending Futures: {record.pending_futures}")
+        if record.capabilities:
+            click.echo("  Capabilities:")
+            for key, value in sorted(record.capabilities.items()):
+                click.echo(f"    {key}: {value}")
+    click.echo("")
+
+
 def check_service_status(
     *,
     session_id: Optional[str] = None,
@@ -204,6 +250,7 @@ def check_service_status(
         except Exception:
             pass
         _display_detailed_status(pid, response)
+        _display_store_sessions()
     except Exception as e:  # noqa: BLE001
         click.echo(f"StoreDaemon is running with PID {pid}")
         click.echo(f"  (Unable to connect to gRPC service: {e})")
@@ -215,4 +262,5 @@ def check_service_status(
                 click.echo(f"  CPU: {info['cpu_percent']}%")
             if "memory_mb" in info:
                 click.echo(f"  Memory: {info['memory_mb']:.1f} MB")
+        _display_store_sessions()
     sys.exit(0)

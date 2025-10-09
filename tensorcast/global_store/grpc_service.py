@@ -254,16 +254,17 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             from contextlib import suppress
 
             with suppress(Exception):
-                set_span_attributes(
-                    {
-                        "tc.artifact.id": registered.artifact_id,
-                        "tc.replica.id": str(registered.replica_id),
-                        "tc.memory.type": str(replica.memory_type.value),
-                        "tc.memory.size": int(replica.memory_size),
-                        "tc.device.id": int(replica.device_id),
-                        "tc.worker.id": replica.worker_id,
-                    }
-                )
+                span_attrs: dict[str, bool | int | float | str] = {
+                    "tc.artifact.id": registered.artifact_id,
+                    "tc.replica.id": str(registered.replica_id),
+                    "tc.memory.type": str(replica.memory_type.value),
+                    "tc.memory.size": int(replica.memory_size),
+                    "tc.device.id": int(replica.device_id),
+                }
+                worker_id = replica.worker_id
+                if worker_id:
+                    span_attrs["tc.worker.id"] = worker_id
+                set_span_attributes(span_attrs)
 
             # RFC-0007: Persist content-addressed descriptor into `artifacts` table if possible.
             # Parse `mi2:` artifact_id and extract index/data multihash when present. If the
