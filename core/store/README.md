@@ -235,7 +235,7 @@ stateDiagram-v2
 
 
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
-  - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. TransferService tracks every in-flight H2D submission and waits for the outstanding `AsyncCopyManager` handles before completing so GPU residency is fully committed prior to verification.
 
 ### Async Copy Manager Integration
 

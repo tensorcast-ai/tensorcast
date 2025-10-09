@@ -361,6 +361,7 @@ cc_test(
 cc_test(
     name = "multi_gpu_test",
     srcs = ["multi_gpu_test.cc"],
+    shard_count = 3,
     tags = [
         "multi_gpu",
         "requires_cuda",

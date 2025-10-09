@@ -65,6 +65,9 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     }
   }
   const size_t num_va_chunks = (total_size + va_chunk - 1) / va_chunk;
+  const size_t total_copy_chunks = (total_size + copy_chunk - 1) / copy_chunk;
+  std::vector<common::CopyHandle> copy_handles;
+  copy_handles.reserve(total_copy_chunks); // Track every async H2D so we can wait for completion at the end.
   for (size_t va_idx = 0; va_idx < num_va_chunks; ++va_idx) {
     const size_t va_off = va_idx * va_chunk;
     const size_t this_len = std::min(va_chunk, total_size - va_off);
@@ -76,8 +79,6 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     const int num_subchunks = static_cast<int>((this_len + copy_chunk - 1) / copy_chunk);
     auto remaining = std::make_shared<std::atomic<int>>(num_subchunks);
     size_t copied = 0;
-    common::CopyHandle last_hdl;
-    bool last_set = false;
     while (copied < this_len) {
       size_t step = std::min(copy_chunk, this_len - copied);
       common::memory::StreamingChunkGuard guard(streaming_buf);
@@ -124,17 +125,16 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
         }
         return hdl_or.status();
       }
-      last_hdl = std::move(*hdl_or);
-      last_set = true;
+      copy_handles.emplace_back(std::move(*hdl_or));
 
       copied += step;
     }
-    // Ensure callbacks for the last submitted chunk are executed
-    if (last_set) {
-      auto wst = last_hdl.wait();
-      if (!wst.ok()) {
-        return wst;
-      }
+  }
+
+  for (auto& handle : copy_handles) {
+    auto wait_status = handle.wait();
+    if (!wait_status.ok()) {
+      return wait_status;
     }
   }
 
