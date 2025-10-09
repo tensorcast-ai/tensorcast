@@ -249,7 +249,6 @@ absl::Status ChunkAwareLoadingStrategy::execute_local_cpu_copy(
   // Copy plan ranges using ACM; UMA ledger is finalized via commit() below.
   size_t completed = 0;
   absl::Status copy_status = absl::OkStatus();
-  absl::Mutex first_err_mu;
   absl::Status first_err = absl::OkStatus();
   common::CopyHandle last_handle;
   bool last_set = false;

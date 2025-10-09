@@ -32,6 +32,7 @@ message TransportConfig {
   int32 tcp_conn_count = 1; // default: 8
   int32 tcp_tos = 2; // default: 0 (no change)
   int32 connect_timeout_sec = 3; // default: 10
+  optional bool so_reuseport = 4; // default: true (Communicator treats unset as true)
 }
 
 message AffinityConfig {

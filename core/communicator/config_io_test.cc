@@ -46,6 +46,7 @@ transport:
   REQUIRE(cfg.pool().pool_size_bytes() == 8ULL * 1024 * 1024 * 1024);
   REQUIRE(cfg.transport().tcp_conn_count() == 4);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
+  REQUIRE(cfg.transport().so_reuseport() == true);
 }
 
 TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
@@ -64,4 +65,5 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   // Defaults
   REQUIRE(cfg.pool().pool_size_bytes() == 8ULL * 1024 * 1024 * 1024);
   REQUIRE(cfg.transport().tcp_tos() == 0);
+  REQUIRE(cfg.transport().so_reuseport() == true);
 }

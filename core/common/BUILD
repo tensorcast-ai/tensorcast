@@ -212,6 +212,16 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "streaming_chunk_guard_lib",
+    srcs = ["memory/streaming_chunk_guard.cc"],
+    hdrs = ["memory/streaming_chunk_guard.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":streaming_pinned_buffer_lib",
+    ],
+)
+
 # Canonical granularity constants (artifact chunk, tx slice, hash leaf)
 sc_header_only_library(
     name = "const_granularity_lib",
@@ -378,6 +388,31 @@ cc_test(
         ":virtual_address_space_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "streaming_pinned_buffer_test",
+    srcs = ["memory/streaming_pinned_buffer_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        ":streaming_pinned_buffer_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "streaming_chunk_guard_test",
+    srcs = ["memory/streaming_chunk_guard_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        ":streaming_chunk_guard_lib",
+        ":streaming_pinned_buffer_lib",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

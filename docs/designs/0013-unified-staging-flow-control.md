@@ -144,6 +144,7 @@ sequenceDiagram
   ```
 - `StreamingPinnedBuffer::try_get_free_chunk()` is used when `StageMode::kTry` to avoid blocking the staging loop. If no buffer is available, the window parks until a lease returns.
 - `MemoryStager::stage()` gains an overload accepting `StageMode`; existing callers continue to pass `StageMode::kBlocking`, while implementations add a non-blocking fast path for `StageMode::kTry`.
+- `StreamingPinnedBuffer` tracks an explicit slot lifecycle (`Free → ProducerOwned → Ready → ConsumerOwned`) and rejects out-of-order transitions. This guards against premature slot recycling if async completions lag. The regression test `//core/common:streaming_pinned_buffer_test` exercises those invariants so pump/transport regressions surface quickly.
 
 ### ACK / Completion Handling
 

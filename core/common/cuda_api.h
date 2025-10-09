@@ -150,6 +150,10 @@ absl::Status stream_add_callback(
     void (*callback)(cudaStream_t, cudaError_t, void*),
     void* user_data,
     unsigned int flags);
+// Enqueue a host callback on a CUDA stream. The callback must never invoke CUDA
+// Runtime/Driver APIs or block on stream work; callers should bounce any
+// follow-up CUDA interactions onto a different worker thread to comply with
+// cudaLaunchHostFunc requirements.
 absl::Status launch_host_func(cudaStream_t stream, void (*func)(void*), void* user_data);
 
 // Event management

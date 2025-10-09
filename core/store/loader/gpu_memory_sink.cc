@@ -5,12 +5,15 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <utility>
+#include <vector>
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/log/vlog_is_on.h"
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
 #include "opentelemetry/metrics/meter.h"
@@ -72,6 +75,74 @@ inline void maybe_init_limits_(GpuSchedDev& dev) {
   // In V3 final state, use built-in defaults; no env overrides.
   (void)dev; // defaults already set in struct initializer
 }
+
+inline bool debug_copy_checks_enabled() {
+  static const bool enabled = []() {
+    const char* env = std::getenv("TENSORCAST_DEBUG_GPU_COPY");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+  }();
+  return enabled;
+}
+
+std::string bytes_to_hex(absl::Span<const uint8_t> bytes) {
+  std::string out;
+  out.reserve(bytes.size() * 3);
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    if (i != 0) {
+      out.push_back(' ');
+    }
+    absl::StrAppendFormat(&out, "%02x", bytes[i]);
+  }
+  return out;
+}
+
+struct DebugCopyPayload {
+  int device_id;
+  uint64_t gpu_offset;
+  size_t bytes;
+  char* gpu_ptr;
+  std::vector<uint8_t> host_head;
+  std::vector<uint8_t> host_tail;
+
+  void verify() const {
+    if (bytes == 0) {
+      return;
+    }
+    auto set_dev_status = tensorcast::cuda::set_device(device_id);
+    if (!set_dev_status.ok()) {
+      LOG(ERROR) << "GpuMemorySink debug: cudaSetDevice failed device=" << device_id << " status=" << set_dev_status;
+      return;
+    }
+    const size_t head_len = host_head.size();
+    if (head_len > 0) {
+      std::vector<uint8_t> gpu_head(head_len);
+      auto head_status = tensorcast::cuda::memcpy(gpu_head.data(), gpu_ptr, head_len, cudaMemcpyDeviceToHost);
+      if (!head_status.ok()) {
+        LOG(ERROR) << "GpuMemorySink debug: head sampling failed device=" << device_id << " offset=" << gpu_offset
+                   << " len=" << head_len << " status=" << head_status;
+      } else if (std::memcmp(gpu_head.data(), host_head.data(), head_len) != 0) {
+        LOG(ERROR) << "GpuMemorySink debug: head mismatch device=" << device_id << " offset=" << gpu_offset
+                   << " bytes=" << bytes << " host_head=[" << bytes_to_hex(absl::MakeConstSpan(host_head))
+                   << "] gpu_head=[" << bytes_to_hex(absl::MakeConstSpan(gpu_head)) << "]";
+      }
+    }
+    if (!host_tail.empty()) {
+      const size_t tail_len = host_tail.size();
+      std::vector<uint8_t> gpu_tail(tail_len);
+      auto tail_status =
+          tensorcast::cuda::memcpy(gpu_tail.data(), gpu_ptr + (bytes - tail_len), tail_len, cudaMemcpyDeviceToHost);
+      if (!tail_status.ok()) {
+        LOG(ERROR) << "GpuMemorySink debug: tail sampling failed device=" << device_id
+                   << " offset=" << (gpu_offset + bytes - tail_len) << " len=" << tail_len << " status=" << tail_status;
+      } else if (std::memcmp(gpu_tail.data(), host_tail.data(), tail_len) != 0) {
+        LOG(ERROR) << "GpuMemorySink debug: tail mismatch device=" << device_id
+                   << " offset=" << (gpu_offset + bytes - tail_len) << " bytes=" << bytes << " host_tail=["
+                   << bytes_to_hex(absl::MakeConstSpan(host_tail)) << "] gpu_tail=["
+                   << bytes_to_hex(absl::MakeConstSpan(gpu_tail)) << "]";
+      }
+    }
+  }
+};
 
 inline void sched_acquire(int device_id, size_t bytes) {
   if (!gpu_sched_enabled())
@@ -169,7 +240,11 @@ absl::Status GpuMemorySink::write_at(uint64_t offset, const void* src, size_t by
   return absl::OkStatus();
 }
 
-absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset, const void* src, size_t bytes) {
+absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
+    uint64_t offset,
+    const void* src,
+    size_t bytes,
+    const AsyncWriteOptions& options) {
   if (!overall_status_.ok()) {
     return overall_status_;
   }
@@ -190,9 +265,41 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset
   char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr.get()) + offset;
   common::HostRegion h{.base = src, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
-  common::CopyOptions copts;
-  copts.tracing_stage = "H2D/Copy";
-  copts.callbacks.on_copy_done = [dev_id = options_.device_id, bytes]() { sched_release(dev_id, bytes); };
+  common::CopyOptions effective_opts = options.copy_options.has_value() ? *options.copy_options : common::CopyOptions{};
+  if (effective_opts.tracing_stage == nullptr) {
+    effective_opts.tracing_stage = "H2D/Copy";
+  }
+  const bool debug_enabled = debug_copy_checks_enabled();
+  auto release_token = [dev_id = options_.device_id, bytes]() { sched_release(dev_id, bytes); };
+  std::shared_ptr<DebugCopyPayload> debug_payload;
+  if (debug_enabled && bytes > 0) {
+    const auto* host_ptr = static_cast<const uint8_t*>(src);
+    debug_payload = std::make_shared<DebugCopyPayload>();
+    debug_payload->device_id = options_.device_id;
+    debug_payload->gpu_offset = offset;
+    debug_payload->bytes = bytes;
+    debug_payload->gpu_ptr = gpu_dest;
+    const size_t head_len = std::min<size_t>(64, bytes);
+    debug_payload->host_head.assign(host_ptr, host_ptr + head_len);
+    if (bytes > head_len) {
+      const size_t tail_len = std::min<size_t>(64, bytes);
+      debug_payload->host_tail.assign(host_ptr + (bytes - tail_len), host_ptr + bytes);
+    }
+  }
+  auto user_cb = effective_opts.callbacks.on_copy_done;
+  effective_opts.callbacks.on_copy_done = [release_cb = std::move(release_token), debug_payload, user_cb](
+                                              absl::Status st) {
+    if (st.ok() && debug_payload) {
+      debug_payload->verify();
+    } else if (!st.ok() && debug_payload) {
+      LOG(ERROR) << "GpuMemorySink async copy failed before debug verify device=" << debug_payload->device_id
+                 << " offset=" << debug_payload->gpu_offset << " bytes=" << debug_payload->bytes << " status=" << st;
+    }
+    release_cb();
+    if (user_cb) {
+      user_cb(st);
+    }
+  };
 
   // Tail sampling guard – only emit when we are within the final 16 bytes of the allocation.
   constexpr size_t kTailProbeBytes = 16;
@@ -207,7 +314,7 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(uint64_t offset
     std::memcpy(host_tail.data(), src_bytes + bytes - host_tail_len, host_tail_len);
   }
 
-  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, copts);
+  auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, effective_opts);
   if (!hdl_or.ok()) {
     // Release budget on immediate failure path
     sched_release(options_.device_id, bytes);

@@ -1,11 +1,16 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/async_copy_manager.h"
+#include <utility>
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
 #include "core/common/trace/trace_cuda_async_fn.h"
 
 namespace tensorcast::common {
+
+AsyncCopyManager::AsyncCopyManager() {
+  callback_thread_ = std::thread([this]() { callback_loop_(); });
+}
 
 AsyncCopyManager& AsyncCopyManager::instance() {
   static AsyncCopyManager inst;
@@ -89,6 +94,17 @@ AsyncCopyManager::~AsyncCopyManager() {
 }
 
 void AsyncCopyManager::shutdown() {
+  {
+    absl::MutexLock lock(&callback_mu_);
+    if (!callback_shutdown_) {
+      callback_shutdown_ = true;
+      callback_cv_.SignalAll();
+    }
+  }
+  if (callback_thread_.joinable()) {
+    callback_thread_.join();
+  }
+
   absl::MutexLock lock(&mu_);
   auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
     for (auto& kv : m) {
@@ -195,16 +211,19 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
-        if (cb) {
-          cb();
+      // CUDA host callbacks must avoid CUDA APIs; defer user callback onto CPU worker.
+      [this, p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+        {
+          absl::MutexLock lock(&p->mu);
+          p->status = completion_status;
+          p->device_id = device_id;
+          p->needs_device_check = completion_status.ok() && device_id >= 0;
+          p->done = true;
+          p->cv.SignalAll();
         }
-        absl::MutexLock lock(&p->mu);
-        p->status = completion_status;
-        p->device_id = device_id;
-        p->needs_device_check = completion_status.ok() && device_id >= 0;
-        p->done = true;
-        p->cv.SignalAll();
+        if (cb) {
+          enqueue_callback_([cb, completion_status]() { cb(completion_status); });
+        }
       });
 
   if (!status.ok()) {
@@ -261,16 +280,18 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
-        if (cb) {
-          cb();
+      [this, p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+        {
+          absl::MutexLock lock(&p->mu);
+          p->status = completion_status;
+          p->device_id = device_id;
+          p->needs_device_check = completion_status.ok() && device_id >= 0;
+          p->done = true;
+          p->cv.SignalAll();
         }
-        absl::MutexLock lock(&p->mu);
-        p->status = completion_status;
-        p->device_id = device_id;
-        p->needs_device_check = completion_status.ok() && device_id >= 0;
-        p->done = true;
-        p->cv.SignalAll();
+        if (cb) {
+          enqueue_callback_([cb, completion_status]() { cb(completion_status); });
+        }
       });
 
   if (!status.ok()) {
@@ -322,16 +343,18 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream_to_use); },
-      [p, cb = opts.callbacks.on_copy_done, device_id = src.device_id](absl::Status completion_status) {
-        if (cb) {
-          cb();
+      [this, p, cb = opts.callbacks.on_copy_done, device_id = src.device_id](absl::Status completion_status) {
+        {
+          absl::MutexLock lock(&p->mu);
+          p->status = completion_status;
+          p->device_id = device_id;
+          p->needs_device_check = completion_status.ok() && device_id >= 0;
+          p->done = true;
+          p->cv.SignalAll();
         }
-        absl::MutexLock lock(&p->mu);
-        p->status = completion_status;
-        p->device_id = device_id;
-        p->needs_device_check = completion_status.ok() && device_id >= 0;
-        p->done = true;
-        p->cv.SignalAll();
+        if (cb) {
+          enqueue_callback_([cb, completion_status]() { cb(completion_status); });
+        }
       });
 
   if (!status.ok()) {
@@ -360,18 +383,56 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2h(
 
   CopyHandle handle;
   auto p = handle.p_;
-  // Synchronous memcpy followed by immediate callback and handle completion.
-  std::memcpy(const_cast<void*>(dst.base), src.base, src.length);
-  if (opts.callbacks.on_copy_done) {
-    opts.callbacks.on_copy_done();
+  const void* src_ptr = src.base;
+  void* dst_ptr = const_cast<void*>(dst.base);
+  const size_t bytes = src.length;
+  auto on_done = opts.callbacks.on_copy_done;
+  enqueue_callback_([p, dst_ptr, src_ptr, bytes, on_done = std::move(on_done)]() mutable {
+    std::memcpy(dst_ptr, src_ptr, bytes);
+    {
+      absl::MutexLock lock(&p->mu);
+      p->status = absl::OkStatus();
+      p->device_id = -1;
+      p->needs_device_check = false;
+      p->done = true;
+      p->cv.SignalAll();
+    }
+    if (on_done) {
+      on_done(absl::OkStatus());
+    }
+  });
+  return handle;
+}
+
+void AsyncCopyManager::enqueue_callback_(std::function<void()> cb) {
+  if (!cb) {
+    return;
   }
   {
-    absl::MutexLock lock(&p->mu);
-    p->status = absl::OkStatus();
-    p->done = true;
-    p->cv.SignalAll();
+    absl::MutexLock lock(&callback_mu_);
+    callback_queue_.push(std::move(cb));
   }
-  return handle;
+  callback_cv_.Signal();
+}
+
+void AsyncCopyManager::callback_loop_() {
+  while (true) {
+    std::function<void()> task;
+    {
+      absl::MutexLock lock(&callback_mu_);
+      while (!callback_shutdown_ && callback_queue_.empty()) {
+        callback_cv_.Wait(&callback_mu_);
+      }
+      if (callback_shutdown_ && callback_queue_.empty()) {
+        break;
+      }
+      task = std::move(callback_queue_.front());
+      callback_queue_.pop();
+    }
+    if (task) {
+      task();
+    }
+  }
 }
 
 } // namespace tensorcast::common

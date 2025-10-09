@@ -18,12 +18,15 @@ std::vector<uint8_t> create_test_pattern(std::size_t size, uint8_t seed);
 // Helper to verify data pattern
 bool verify_pattern(const void* data, std::size_t size, uint8_t seed);
 
-// Helper to find an available port starting from base_port
-// Returns the first available port, or -1 if none found
+// Helper to find an available TCP port. The search randomizes candidate order
+// even when a base_port hint is supplied, expanding into nearby ephemeral
+// ranges to reduce collisions across concurrent tests. Returns the first
+// available port, or -1 if none found.
 int find_available_port(int base_port = 50000, int max_attempts = 1000);
 
 // Configure TCP communicator staging defaults for tests. Ensures the GPU/CPU
-// stagers and buffer pipeline satisfy Communicator constructor invariants.
+// stagers and buffer pipeline satisfy Communicator constructor invariants and
+// forces TCP listeners to disable SO_REUSEPORT for deterministic binding.
 void configure_tcp_stager_defaults(
     tensorcast::communicator::v1::CommunicatorConfig* cfg,
     uint32_t gpu_chunk_mb = 16,

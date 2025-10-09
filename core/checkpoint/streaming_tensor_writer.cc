@@ -123,7 +123,16 @@ absl::StatusOr<uint64_t> StreamingTensorWriter::write_tensor(
       common::HostRegion dst{.base = buffer_ptr, .length = chunk_size, .pinned = true};
 
       // Use a callback that marks the chunk ready with the same global id.
-      auto on_done = [spb = streaming_buffer_.get(), slot_id, global_chunk_id, chunk_size]() {
+      auto on_done = [spb = streaming_buffer_.get(), slot_id, global_chunk_id, chunk_size](absl::Status st) {
+        if (!st.ok()) {
+          LOG(ERROR) << "AsyncCopyManager::submit_d2h failed for chunk_id=" << global_chunk_id << ": " << st;
+          absl::Status rc = spb->return_chunk(slot_id);
+          if (!rc.ok()) {
+            LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed after async error slot=" << slot_id << ": "
+                         << rc;
+          }
+          return;
+        }
         absl::Status rc = spb->mark_chunk_ready(slot_id, global_chunk_id, chunk_size);
         if (!rc.ok()) {
           LOG(WARNING) << "StreamingPinnedBuffer::mark_chunk_ready failed slot=" << slot_id << ": " << rc;

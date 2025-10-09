@@ -40,21 +40,29 @@ struct DeviceRegion { int device_id; void* dev_ptr; size_t length; };struct Copy
  public:
   static AsyncCopyManager& instance();  // Each submit wraps exactly one cudaMemcpyAsync on ACM’s internal stream
   // and attaches a lightweight host callback to finalize resources/state.
-  absl::StatusOr<CopyHandle> submit_h2d(const HostRegion& src,
-                                        const DeviceRegion& dst,
-                                        const CopyOptions& opts = {});  absl::StatusOr<CopyHandle> submit_d2h(const DeviceRegion& src,
-                                        const HostRegion& dst,
-                                        const CopyOptions& opts = {});  absl::StatusOr<CopyHandle> submit_d2d(const DeviceRegion& src,
-                                        const DeviceRegion& dst,
-                                        const CopyOptions& opts = {});  // H2H path is synchronous memcpy with immediate handle completion to
-  // exercise pipeline logic in environments without CUDA.
-  absl::StatusOr<CopyHandle> submit_h2h(const HostRegion& src,
-                                        const HostRegion& dst,
-                                        const CopyOptions& opts = {});  void shutdown();
+  absl::StatusOr<CopyHandle> submit_h2d(
+      const HostRegion& src,
+      const DeviceRegion& dst,
+      const CopyOptions& opts = {});
+  absl::StatusOr<CopyHandle> submit_d2h(
+      const DeviceRegion& src,
+      const HostRegion& dst,
+      const CopyOptions& opts = {});
+  absl::StatusOr<CopyHandle> submit_d2d(
+      const DeviceRegion& src,
+      const DeviceRegion& dst,
+      const CopyOptions& opts = {});  // H2H path enqueues its memcpy on the ACM callback worker so the handle
+  // completes asynchronously, mirroring other directions for CPU-only tests.
+  absl::StatusOr<CopyHandle> submit_h2h(
+      const HostRegion& src,
+      const HostRegion& dst,
+      const CopyOptions& opts = {});
+  void shutdown();
 };} // namespace tensorcast::common
 ```Submission semantics
 - Exactly one device copy per call; chunking is handled by planners before submission.
 - The host callback is attached via `cudaLaunchHostFunc` and is intentionally lightweight: return SPB slots, notify UMA/VS chunk completion, enqueue follow-on work. To comply with CUDA's restriction on host callbacks, it performs no CUDA runtime calls and simply records completion metadata. If `cudaLaunchHostFunc` is unavailable (older drivers, restricted runtimes), ACM falls back to a detached thread that `cudaStreamSynchronize`s before firing the callback, ensuring data is resident before slots recycle. Runtime errors surface through `CopyHandle::wait()`; submission-time errors surface via `StatusOr`.
+- Pure host (`submit_h2h`) copies are executed on the ACM callback worker so they honor the same asynchronous completion semantics (copy, status resolution, and callbacks) used for CUDA-backed directions.
 - Callbacks receive an `absl::Status` describing the stream completion result; `CopyHandle::wait()` (or `ok()`) runs the CUDA runtime checks (`cudaSetDevice`, `cudaGetLastError`) on the caller thread before returning, so asynchronous failures still surface even when host callbacks execute on restricted threads.
 - FAKE CUDA backend enqueues copies on a lightweight worker thread and fires callbacks asynchronously to mirror stream ordering while still running entirely on CPU memory. This keeps staging credit and slot recycling behaviour aligned with the real runtime.
 

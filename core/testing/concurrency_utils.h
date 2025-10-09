@@ -3,9 +3,13 @@
 // Shared utilities for StoreEngine concurrency tests.
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <latch>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -115,8 +119,7 @@ class ConcurrentLoadTracker {
 // Test fixture for creating temporary replica files
 class TempArtifactFixture {
  public:
-  explicit TempArtifactFixture(const std::string& test_name)
-      : root_path_(std::filesystem::temp_directory_path() / ("store_engine_" + test_name)) {
+  explicit TempArtifactFixture(const std::string& test_name) : root_path_(make_unique_root(test_name)) {
     std::filesystem::create_directories(root_path_);
   }
 
@@ -145,6 +148,17 @@ class TempArtifactFixture {
   }
 
  private:
+  static std::filesystem::path make_unique_root(const std::string& test_name) {
+    const auto base = std::filesystem::temp_directory_path();
+    // Isolate fixture directories per test run to avoid cross-test interference when running in parallel.
+    static std::atomic<uint64_t> fixture_counter{0};
+    const auto now_ticks = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto thread_hash = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::ostringstream oss;
+    oss << std::hex << now_ticks << "_" << fixture_counter.fetch_add(1) << "_" << thread_hash;
+    return base / ("store_engine_" + test_name + "_" + oss.str());
+  }
+
   std::filesystem::path root_path_;
 };
 

@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <queue>
+#include <thread>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -31,7 +33,12 @@ struct DeviceRegion {
 };
 
 struct CopyCallbacks {
-  std::function<void()> on_copy_done; // Fired on host callback when copy completes
+  // Fired asynchronously on a CPU worker thread after the CUDA work for this
+  // handle has completed. The callback runs outside of cudaLaunchHostFunc so it
+  // must still avoid invoking CUDA APIs directly; use AsyncCopyManager helpers
+  // (e.g., submit another copy) instead of calling CUDA Runtime/Driver calls.
+  // Status conveys the completion state reported by CUDA.
+  std::function<void(absl::Status)> on_copy_done;
 };
 
 struct CopyOptions {
@@ -81,24 +88,34 @@ class AsyncCopyManager {
   // Minimal D2D support: same-device only for this phase.
   absl::StatusOr<CopyHandle> submit_d2d(const DeviceRegion& src, const DeviceRegion& dst, const CopyOptions& opts = {});
 
+  // Dispatches the memcpy on the callback worker so completion behaves like
+  // other async submissions, enabling CPU-only tests to exercise pump logic.
   absl::StatusOr<CopyHandle> submit_h2h(const HostRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
 
   // Destroy all lazily-created per-device streams. Safe to call multiple times.
   void shutdown();
 
  private:
-  AsyncCopyManager() = default;
+  AsyncCopyManager();
   ~AsyncCopyManager();
 
   // Internal helpers to lazily create and cache per-device non-blocking streams
   absl::StatusOr<cudaStream_t> get_h2d_stream_(int device_id);
   absl::StatusOr<cudaStream_t> get_d2h_stream_(int device_id);
   absl::StatusOr<cudaStream_t> get_d2d_stream_(int device_id);
+  void enqueue_callback_(std::function<void()> cb);
+  void callback_loop_();
 
   absl::Mutex mu_;
   absl::flat_hash_map<int, cudaStream_t> h2d_streams_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<int, cudaStream_t> d2h_streams_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<int, cudaStream_t> d2d_streams_ ABSL_GUARDED_BY(mu_);
+
+  absl::Mutex callback_mu_;
+  absl::CondVar callback_cv_;
+  std::queue<std::function<void()>> callback_queue_ ABSL_GUARDED_BY(callback_mu_);
+  bool callback_shutdown_ ABSL_GUARDED_BY(callback_mu_) = false;
+  std::thread callback_thread_;
 };
 
 } // namespace tensorcast::common

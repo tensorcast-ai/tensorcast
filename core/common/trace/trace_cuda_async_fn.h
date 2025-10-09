@@ -69,9 +69,14 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
 // ---------------------------------------------------------------------------
 // Helper that executes a CUDA asynchronous operation (op) on the given stream,
 // starts a Trace span (stage) when called, and automatically ends the span once
-// the operation and all prior work in the stream completes.  An optional
-// on_complete callback is run inside the same host callback right after the
-// span ends, typically for resource cleanup.
+// the operation and all prior work in the stream completes.  The on_complete
+// callback ultimately runs as part of a cudaLaunchHostFunc callback before
+// being forwarded (if needed) to higher-level CPU workers. Per CUDA contract
+// the host callback must **never** invoke CUDA Runtime/Driver APIs or perform
+// stream synchronization that could wait on unfinished GPU work; violating
+// this can surface cudaErrorNotPermitted. Clients that need follow-up CUDA
+// work should enqueue that work onto their own worker thread or stream instead
+// of calling CUDA from on_complete.
 //
 // Usage:
 //   SC_RETURN_IF_ERROR(trace_cuda_async("h2d_copy", stream,

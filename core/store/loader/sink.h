@@ -4,6 +4,8 @@
 
 #include <cstddef>
 
+#include <optional>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -47,11 +49,21 @@ class AsyncPositionedSink {
  public:
   virtual ~AsyncPositionedSink() = default;
 
+  struct AsyncWriteOptions {
+    // Optional async copy tuning propagated into AsyncCopyManager. When unset,
+    // sink implementations will synthesize defaults (e.g., tracing stage).
+    std::optional<common::CopyOptions> copy_options;
+  };
+
   // Asynchronously write bytes at destination-global offset. The returned
   // handle becomes ready when the sink-side transfer has completed (e.g.,
   // after an H2D cudaMemcpyAsync finishes). Implementations should schedule
   // copies via AsyncCopyManager to ensure unified tracing and stream usage.
-  virtual absl::StatusOr<common::CopyHandle> write_at_async(uint64_t offset, const void* src, size_t bytes) = 0;
+  virtual absl::StatusOr<common::CopyHandle> write_at_async(
+      uint64_t offset,
+      const void* src,
+      size_t bytes,
+      const AsyncWriteOptions& options = AsyncWriteOptions{}) = 0;
 };
 
 // Optional capability: destination can plan direct writes into its VA ranges.

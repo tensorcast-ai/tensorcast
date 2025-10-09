@@ -16,6 +16,9 @@ StreamingPinnedBuffer::StreamingPinnedBuffer(
     std::shared_ptr<PinnedBufferPool> pool)
     : num_chunks_(num_chunks), chunk_size_(chunk_size), pool_(std::move(pool)) {
   chunk_buffers_.reserve(num_chunks_);
+  slot_states_.assign(num_chunks_, SlotState::kFree);
+  slot_chunk_ids_.assign(num_chunks_, 0);
+  slot_epochs_.assign(num_chunks_, 0);
 
   // Verify that chunk_size from pool is aligned for DIRECT_IO
   if (pool_ && pool_->slice_bytes() % PinnedBufferPool::kDirectIOAlignment != 0) {
@@ -62,7 +65,11 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
   // Initialize all chunks as free
   for (size_t i = 0; i < num_chunks_; ++i) {
     free_queue_.push(static_cast<int>(i));
+    slot_states_[i] = SlotState::kFree;
+    slot_chunk_ids_[i] = 0;
+    slot_epochs_[i] = 0;
   }
+  next_epoch_ = 0;
 
   initialized_ = true;
   VLOG(1) << "Initialized streaming buffer with " << num_chunks_ << " chunks of " << chunk_size_ << " bytes each"
@@ -105,6 +112,12 @@ absl::Status StreamingPinnedBuffer::release() {
   while (!free_queue_.empty()) {
     free_queue_.pop();
   }
+  for (size_t i = 0; i < slot_states_.size(); ++i) {
+    slot_states_[i] = SlotState::kFree;
+    slot_chunk_ids_[i] = 0;
+    slot_epochs_[i] = 0;
+  }
+  next_epoch_ = 0;
   while (!ready_queue_.empty()) {
     ready_queue_.pop();
   }
@@ -140,6 +153,8 @@ absl::Status StreamingPinnedBuffer::reset_for_new_production() {
     auto rc = ready_queue_.front();
     ready_queue_.pop();
     free_queue_.push(rc.slot_id);
+    slot_states_[rc.slot_id] = SlotState::kFree;
+    slot_chunk_ids_[rc.slot_id] = 0;
   }
 
   // Ensure all slots are present in free_queue_. If some were lost due to
@@ -149,8 +164,12 @@ absl::Status StreamingPinnedBuffer::reset_for_new_production() {
     std::swap(free_queue_, empty);
     for (size_t i = 0; i < num_chunks_; ++i) {
       free_queue_.push(static_cast<int>(i));
+      slot_states_[i] = SlotState::kFree;
+      slot_chunk_ids_[i] = 0;
+      slot_epochs_[i] = 0;
     }
   }
+  next_epoch_ = 0;
 
   // Wake up any potential waiters
   ready_cv_.SignalAll();
@@ -196,6 +215,9 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
 
   int slot_id = free_queue_.front();
   free_queue_.pop();
+  slot_chunk_ids_[slot_id] = 0;
+  slot_epochs_[slot_id] = ++next_epoch_;
+  set_slot_state_unsafe(slot_id, SlotState::kProducerOwned);
 
   if (waiting_logged) {
     LOG(INFO) << "StreamingPinnedBuffer wait resolved after " << absl::FormatDuration(absl::Now() - wait_start)
@@ -205,6 +227,68 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
   return slot_id;
 }
 
+absl::Status StreamingPinnedBuffer::promote_producer_slot_to_consumer(
+    int slot_id,
+    size_t global_chunk_id,
+    size_t bytes_in_chunk) {
+  absl::MutexLock lock(&mutex_);
+
+  if (!initialized_) {
+    return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
+  }
+
+  if (const auto status = validate_slot_id(slot_id); !status.ok()) {
+    return status;
+  }
+
+  if (bytes_in_chunk == 0 || bytes_in_chunk > chunk_size_) {
+    return absl::InvalidArgumentError("bytes_in_chunk must be within (0, chunk_size]");
+  }
+
+  if (get_slot_state_unsafe(slot_id) != SlotState::kProducerOwned) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "promote_producer_slot_to_consumer requires producer-owned slot; slot=",
+            slot_id,
+            " state=",
+            static_cast<int>(get_slot_state_unsafe(slot_id))));
+  }
+
+  slot_chunk_ids_[slot_id] = global_chunk_id;
+  slot_epochs_[slot_id] = ++next_epoch_;
+  set_slot_state_unsafe(slot_id, SlotState::kConsumerOwned);
+  chunks_produced_++;
+
+  return absl::OkStatus();
+}
+
+absl::Status StreamingPinnedBuffer::abort_producer_slot(int slot_id) {
+  absl::MutexLock lock(&mutex_);
+
+  if (!initialized_) {
+    return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
+  }
+
+  if (const auto status = validate_slot_id(slot_id); !status.ok()) {
+    return status;
+  }
+
+  if (get_slot_state_unsafe(slot_id) != SlotState::kProducerOwned) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "abort_producer_slot expects producer-owned slot; slot=",
+            slot_id,
+            " state=",
+            static_cast<int>(get_slot_state_unsafe(slot_id))));
+  }
+
+  set_slot_state_unsafe(slot_id, SlotState::kFree);
+  slot_chunk_ids_[slot_id] = 0;
+  free_queue_.push(slot_id);
+  free_cv_.Signal();
+  return absl::OkStatus();
+}
+
 absl::Status StreamingPinnedBuffer::mark_chunk_ready(int slot_id, size_t global_chunk_id, size_t bytes_in_chunk) {
   absl::MutexLock lock(&mutex_);
 
@@ -212,8 +296,17 @@ absl::Status StreamingPinnedBuffer::mark_chunk_ready(int slot_id, size_t global_
     return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
   }
 
-  if (slot_id < 0 || slot_id >= static_cast<int>(num_chunks_)) {
-    return absl::InvalidArgumentError("Invalid slot_id");
+  if (const auto status = validate_slot_id(slot_id); !status.ok()) {
+    return status;
+  }
+
+  if (get_slot_state_unsafe(slot_id) != SlotState::kProducerOwned) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "mark_chunk_ready expects producer-owned slot; slot=",
+            slot_id,
+            " state=",
+            static_cast<int>(get_slot_state_unsafe(slot_id))));
   }
 
   ReadyChunk chunk{
@@ -223,6 +316,8 @@ absl::Status StreamingPinnedBuffer::mark_chunk_ready(int slot_id, size_t global_
       .data_ptr = chunk_buffers_[slot_id]};
 
   ready_queue_.push(chunk);
+  slot_chunk_ids_[slot_id] = global_chunk_id;
+  set_slot_state_unsafe(slot_id, SlotState::kReady);
   chunks_produced_++;
   ready_cv_.Signal();
 
@@ -247,6 +342,19 @@ absl::StatusOr<StreamingPinnedBuffer::ReadyChunk> StreamingPinnedBuffer::get_rea
 
   ReadyChunk chunk = ready_queue_.front();
   ready_queue_.pop();
+  if (const auto status = validate_slot_id(chunk.slot_id); !status.ok()) {
+    return status;
+  }
+  if (get_slot_state_unsafe(chunk.slot_id) != SlotState::kReady) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "get_ready_chunk found slot in unexpected state=",
+            static_cast<int>(get_slot_state_unsafe(chunk.slot_id)),
+            " slot=",
+            chunk.slot_id));
+  }
+  set_slot_state_unsafe(chunk.slot_id, SlotState::kConsumerOwned);
+  slot_chunk_ids_[chunk.slot_id] = chunk.global_chunk_id;
 
   return chunk;
 }
@@ -258,10 +366,21 @@ absl::Status StreamingPinnedBuffer::return_chunk(int slot_id) {
     return absl::FailedPreconditionError("StreamingPinnedBuffer not initialized");
   }
 
-  if (slot_id < 0 || slot_id >= static_cast<int>(num_chunks_)) {
-    return absl::InvalidArgumentError("Invalid slot_id");
+  if (const auto status = validate_slot_id(slot_id); !status.ok()) {
+    return status;
   }
 
+  if (get_slot_state_unsafe(slot_id) != SlotState::kConsumerOwned) {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "return_chunk expects consumer-owned slot; slot=",
+            slot_id,
+            " state=",
+            static_cast<int>(get_slot_state_unsafe(slot_id))));
+  }
+
+  set_slot_state_unsafe(slot_id, SlotState::kFree);
+  slot_chunk_ids_[slot_id] = 0;
   free_queue_.push(slot_id);
   chunks_consumed_++;
   free_cv_.Signal();
@@ -303,6 +422,9 @@ absl::StatusOr<int> StreamingPinnedBuffer::try_get_free_chunk() {
 
   int slot_id = free_queue_.front();
   free_queue_.pop();
+  set_slot_state_unsafe(slot_id, SlotState::kProducerOwned);
+  slot_chunk_ids_[slot_id] = 0;
+  slot_epochs_[slot_id] = ++next_epoch_;
 
   return slot_id;
 }
@@ -318,6 +440,21 @@ size_t StreamingPinnedBuffer::inflight() const {
 bool StreamingPinnedBuffer::production_done() const {
   absl::MutexLock lock(&mutex_);
   return production_complete_;
+}
+
+void StreamingPinnedBuffer::set_slot_state_unsafe(int slot_id, SlotState state) {
+  slot_states_[slot_id] = state;
+}
+
+StreamingPinnedBuffer::SlotState StreamingPinnedBuffer::get_slot_state_unsafe(int slot_id) const {
+  return slot_states_[slot_id];
+}
+
+absl::Status StreamingPinnedBuffer::validate_slot_id(int slot_id) const {
+  if (slot_id < 0 || slot_id >= static_cast<int>(num_chunks_)) {
+    return absl::InvalidArgumentError("Invalid slot_id");
+  }
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::common::memory
