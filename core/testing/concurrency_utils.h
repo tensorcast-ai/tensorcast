@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
 #include "core/store/loading/loading_spec.h"
@@ -160,7 +161,13 @@ inline std::unique_ptr<store::StoreEngine> make_test_store(
   opts.num_thread = io_threads;
   opts.pinned_memory_timeout = std::chrono::milliseconds(30000);
   // P2P is configured via p2p_port (already has default)
-  return std::make_unique<store::StoreEngine>(opts);
+  auto store = std::make_unique<store::StoreEngine>(opts);
+  auto comm_mgr = store->get_shared_comm_manager();
+  if (!comm_mgr->is_enabled()) {
+    absl::Status init_status = comm_mgr->initialize("127.0.0.1", /*listen_port=*/0, /*enable_rdma=*/false);
+    ABSL_CHECK(init_status.ok()) << "Failed to initialize CommunicationManager for test store: " << init_status;
+  }
+  return store;
 }
 
 // Device key helpers

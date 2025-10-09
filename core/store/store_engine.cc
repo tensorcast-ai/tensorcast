@@ -447,6 +447,15 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     return wait_status;
   }
 
+  // Ensure async load (TransferService + pump) fully completed before accessing GPU memory for verification.
+  if (load_future.valid()) {
+    load_future.wait();
+    const absl::Status& load_status = load_future.get();
+    if (!load_status.ok()) {
+      return load_status;
+    }
+  }
+
   // RFC-0007: After loading, compute/verify content-addressed identity when possible.
   // Only perform strong verification when the replica is resident in GPU memory (fast path).
   std::optional<std::string> computed_data_mh;

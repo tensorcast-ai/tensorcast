@@ -323,6 +323,8 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
   auto handle1 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
+  LOG(INFO) << "handle0: " << handle0.status().message();
+  LOG(INFO) << "handle1: " << handle1.status().message();
   REQUIRE(handle0.ok());
   REQUIRE(handle1.ok());
 
@@ -371,15 +373,11 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
 
   // Test remote access registration per device
   auto reg_info = store->enable_remote_replica_access(instance1, MemoryLocation::GPU);
-  if (!reg_info.ok()) {
-    WARN("Remote access not available; skipping remote access checks.");
-  } else {
-    REQUIRE(reg_info.ok());
-    // Try to enable on already unloaded instance
-    auto reg_fail = store->enable_remote_replica_access(instance0, MemoryLocation::GPU);
-    REQUIRE(!reg_fail.ok());
-    // Disable remote access
-    auto disable_status = store->disable_remote_replica_access(instance1, MemoryLocation::GPU);
-    REQUIRE(disable_status.ok());
-  }
+  REQUIRE(reg_info.ok());
+  // Try to enable on already unloaded instance
+  auto reg_fail = store->enable_remote_replica_access(instance0, MemoryLocation::GPU);
+  REQUIRE(!reg_fail.ok());
+  // Disable remote access
+  auto disable_status = store->disable_remote_replica_access(instance1, MemoryLocation::GPU);
+  REQUIRE(disable_status.ok());
 }

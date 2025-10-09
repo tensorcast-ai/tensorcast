@@ -32,8 +32,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
   SKIP_IF_NO_CUDA();
 
   SECTION("Remote GPU to Local GPU via TCP") {
+    // Use dedicated tensor key and port range to avoid crosstalk with other sections.
+    constexpr int kGpuGpuPortBase = 50000;
+    const std::string tensor_key = "artifact_key_gpu_gpu";
+
     // Find available ports for GPU to GPU P2P communication
-    int source_port = find_available_port();
+    int source_port = find_available_port(kGpuGpuPortBase);
     REQUIRE(source_port > 0);
 
     int target_port = find_available_port(source_port + 1);
@@ -59,7 +63,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     reg_opts.async = false;
     REQUIRE(source_engine
                 ->register_tensor_ex(
-                    "artifact_key",
+                    tensor_key,
                     reinterpret_cast<uint64_t>(source_gpu_ptr),
                     artifact_size,
                     COMMUNICATE_ENGINE_DEV_GPU,
@@ -77,7 +81,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.size_bytes = artifact_size;
     source_config.ip = "127.0.0.1";
     source_config.port = source_port;
-    source_config.memory_keys = {"artifact_key"};
+    source_config.memory_keys = {tensor_key};
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU;
     source_config.location.device_id = 0;
@@ -124,8 +128,12 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
   }
 
   SECTION("Remote GPU to Local CPU via TCP") {
+    // Use separate tensor key and port range to avoid reuse of GPU->GPU resources.
+    constexpr int kGpuCpuPortBase = 52000;
+    const std::string tensor_key = "artifact_key_gpu_cpu";
+
     // Find available ports for GPU to CPU P2P communication
-    int source_port = find_available_port();
+    int source_port = find_available_port(kGpuCpuPortBase);
     REQUIRE(source_port > 0); // "Failed to find available port for GPU-to-CPU P2P source engine"
 
     int target_port = find_available_port(source_port + 1);
@@ -155,7 +163,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     reg_opts2.needs_staging = true;
     reg_opts2.async = false;
     auto register_status = source_engine->register_tensor_ex(
-        "artifact_key",
+        tensor_key,
         reinterpret_cast<uint64_t>(source_gpu_ptr),
         artifact_size,
         COMMUNICATE_ENGINE_DEV_GPU,
@@ -174,7 +182,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     source_config.size_bytes = artifact_size;
     source_config.ip = "127.0.0.1";
     source_config.port = source_port;
-    source_config.memory_keys = {"artifact_key"};
+    source_config.memory_keys = {tensor_key};
     source_config.buf_sizes = {artifact_size};
     source_config.location.type = MemoryLocation::GPU; // Remote data on GPU
     source_config.location.device_id = 0;
