@@ -105,29 +105,6 @@ class FakeEnvironment:
             disk_path=None,
         )
 
-
-def _make_registered_artifact(
-    artifact_id: str = "registered",
-) -> store_mod.RegisteredArtifact:
-    replica = store_mod.ReplicaInfo(
-        replica_id="replica",
-        replica_type="VRAM_LEASED",
-        device=torch.device("cpu"),
-        plan=PlanType.VRAM_LEASED,
-        size_bytes=0,
-    )
-    canonical_index = store_mod.CanonicalIndex(
-        entries=(),
-        total_size_bytes=0,
-        avbs_hash="",
-    )
-    return store_mod.RegisteredArtifact(
-        artifact_id=artifact_id,
-        replica=replica,
-        canonical_index=canonical_index,
-        lease=None,
-    )
-
     def make_registration_result(
         self,
         plan: PlanType,
@@ -227,6 +204,29 @@ def _make_registered_artifact(
             if resolved_id and resolved_id in self.materialized_by_id:
                 return self.materialized_by_id[resolved_id]
         raise RuntimeError("artifact not found")
+
+
+def _make_registered_artifact(
+    artifact_id: str = "registered",
+) -> store_mod.RegisteredArtifact:
+    replica = store_mod.ReplicaInfo(
+        replica_id="replica",
+        replica_type="VRAM_LEASED",
+        device=torch.device("cpu"),
+        plan=PlanType.VRAM_LEASED,
+        size_bytes=0,
+    )
+    canonical_index = store_mod.CanonicalIndex(
+        entries=(),
+        total_size_bytes=0,
+        avbs_hash="",
+    )
+    return store_mod.RegisteredArtifact(
+        artifact_id=artifact_id,
+        replica=replica,
+        canonical_index=canonical_index,
+        lease=None,
+    )
 
 
 @pytest.fixture
