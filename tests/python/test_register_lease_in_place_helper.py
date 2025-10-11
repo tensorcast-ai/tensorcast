@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tensorcast import startup
-from tensorcast.api import RegisterArtifactOptions, Store
+from tensorcast.api import PlanType, RegisterArtifactOptions, Store
 from tensorcast.api.store import RegisteredArtifact as StoreRegisteredArtifact
 from tests.python.utils.daemon import start_daemon_binary
 
@@ -37,11 +37,12 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
             a = torch.arange(0, 32, dtype=torch.uint8, device=dev)
             b = torch.full((64,), 0x77, dtype=torch.uint8, device=dev)
             state = {"a": a, "b": b}
-            opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
+            opts = RegisterArtifactOptions(plan=PlanType.VRAM_LEASED, lease_in_place=True)
             res = store.register(state, options=opts, ttl_ms=2000)
             assert isinstance(res, StoreRegisteredArtifact)
             assert res.registration_result is not None
-            desc, lease = res.registration_result.descriptor, res.lease
+            desc = res.registration_result.descriptor
+            lease = res.registration_result.lease
             assert desc.artifact_id.startswith("mi2:")
             # Keepalive thread should be running; sleep to allow a keepalive tick
             time.sleep(0.5)

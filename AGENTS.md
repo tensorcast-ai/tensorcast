@@ -349,7 +349,7 @@ if (fd < 0) {
 - Keep functions small and focused
 - Use explicit, named imports for utilities
 - Use `dataclasses` or Pydantic models for complex data structures
-- Use absolute imports for in-repo modules: `from tensorcast.xxx.yyy import Z`; avoid relative imports like `from .xxx import Z`
+- Binding: Use absolute imports for all in-repo modules: `from tensorcast.xxx.yyy import Z`. NEVER use relative imports (`from .xxx import Z`, `from ..yyy import Z`).
 
 
 ### Commenting & Self-Documentation

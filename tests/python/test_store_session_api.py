@@ -8,15 +8,15 @@ import threading
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import pytest
 import torch
 
 from tensorcast.api import store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
-from tensorcast.api._loader import MaterializedArtifact
-from tensorcast.api._register import RegistrationResult
+from tensorcast.api._materialize import MaterializedArtifact
+from tensorcast.api._register import BuildContext, CoalescedLayout, RegistrationResult
 from tensorcast.api.store import (
     ArtifactError,
     ArtifactFuture,
@@ -135,8 +135,21 @@ class FakeEnvironment:
         )
         index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
         device = 0 if device_id is None else int(device_id)
-        build = SimpleNamespace(device_id=device)
-        layout = SimpleNamespace(total_size=offset)
+        build_ns = SimpleNamespace(
+            device_id=device,
+            input_mode="cuda" if device_id is None else "cpu",
+            tensor_meta_index={},
+            tensor_source_index={},
+        )
+        build = cast(BuildContext, build_ns)
+        layout_ns = SimpleNamespace(
+            total_size=offset,
+            device_id=device,
+            offsets={},
+            unique_chunks=[],
+        )
+        layout = cast(CoalescedLayout, layout_ns)
+        plan_enum = PlanType.parse(plan)
         return RegistrationResult(
             state_dict=dict(artifact),
             descriptor=descriptor,
@@ -144,7 +157,7 @@ class FakeEnvironment:
             build=build,
             layout=layout,
             index_bytes=index_bytes,
-            plan=plan,
+            plan=plan_enum,
         )
 
     def fake_register(

@@ -11,7 +11,7 @@ import torch
 
 from tensorcast import startup
 from tensorcast._C import get_cuda_memory_handle
-from tensorcast.api import RegisterArtifactOptions, Store
+from tensorcast.api import PlanType, RegisterArtifactOptions, Store
 from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast.api.store import RegisteredArtifact as StoreRegisteredArtifact
 from tensorcast.daemon_ctl import DaemonCtl
@@ -48,7 +48,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
             t2 = torch.zeros((8, 8), dtype=torch.float32, device=device)
             state = {"t1": t1, "t2": t2}
 
-            opts = RegisterArtifactOptions(plan="vram_leased", lease_in_place=True)
+            opts = RegisterArtifactOptions(plan=PlanType.VRAM_LEASED, lease_in_place=True)
             # For lease: do not pass device_id so SDK infers and uses CUDA path
             res = store.register(state, options=opts)
             assert isinstance(res, StoreRegisteredArtifact)

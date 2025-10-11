@@ -2,9 +2,11 @@
 
 """Tests for Global Store domain models."""
 
+from uuid import uuid4
+
 import pytest
 
-from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
+from tensorcast.global_store.models import MemoryType, Replica, Transport, Worker
 
 
 class TestModels:
@@ -139,8 +141,8 @@ class TestModels:
     def test_transport_creation(self):
         """Test Transport creation."""
         transport = Transport(
-            transport_id="transport_1",
-            replica_id="replica_1",
+            transport_id=uuid4(),
+            replica_id=uuid4(),
             artifact_id="test_artifact",
             source_node_id="source_node",
             source_address="192.168.1.2",

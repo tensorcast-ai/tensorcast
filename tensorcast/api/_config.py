@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 
-from ._errors import InvalidPlan
+from tensorcast.api._errors import InvalidPlan
 
 # Module-level constants
 DEFAULT_ALIGN: int = 8
@@ -74,7 +74,7 @@ class PlanType(Enum):
 
 @dataclass(slots=True, frozen=True)
 class RegisterArtifactOptions:
-    plan: PlanType | str = PlanType.VRAM_COALESCED
+    plan: PlanType = PlanType.VRAM_COALESCED
     p2p_prefer: str = "vram"
     max_inflight_bytes: int = 512 * 1024 * 1024
     release_on_tensor_commit: bool = True
@@ -88,7 +88,9 @@ class RegisterArtifactOptions:
     disk_path: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "plan", PlanType.parse(self.plan))
+        # Ensure plan is a PlanType; callers must pass PlanType per API contract.
+        if not isinstance(self.plan, PlanType):
+            raise TypeError("RegisterArtifactOptions.plan must be a PlanType")
 
 
 @dataclass(slots=True, frozen=True)

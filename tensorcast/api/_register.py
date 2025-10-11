@@ -11,13 +11,12 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast import startup
 from tensorcast._C import (
     get_cuda_memory_handle,
     get_cuda_memory_ptr,
@@ -42,6 +41,7 @@ from tensorcast.api._indices import (
     build_v2_index_bytes,
 )
 from tensorcast.api._io_disk import save_dict
+from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.types import (
@@ -271,9 +271,9 @@ def begin_register_artifact_sdk(
     daemon_address: str | None = None,
 ) -> tuple[RegisteredArtifact, Handshake]:
     if client is None:
-        runtime_ctx = startup.require_initialized()
-        ctl = runtime_ctx.client
-        daemon_addr = runtime_ctx.address
+        runtime = require_runtime()
+        ctl = runtime.client
+        daemon_addr = runtime.address
     else:
         ctl = client
         resolved_addr = daemon_address or client.server_address
@@ -502,7 +502,7 @@ def _prepare_build(
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
 ) -> CoalescedPlan | LeasePlan:
-    plan_type = cast(PlanType, options.plan)
+    plan_type = options.plan
     if plan_type is PlanType.VRAM_COALESCED:
         return CoalescedPlan(
             kind="coalesced",
@@ -633,9 +633,9 @@ def _register_artifact_core(
     on_begin: Callable[[RegisteredArtifact], None] | None = None,
 ) -> RegistrationResult:
     if client is None:
-        runtime_ctx = startup.require_initialized()
-        ctl = runtime_ctx.client
-        addr = runtime_ctx.address
+        runtime = require_runtime()
+        ctl = runtime.client
+        addr = runtime.address
     else:
         ctl = client
         resolved_addr = daemon_address or client.server_address
@@ -668,7 +668,7 @@ def _register_artifact_core(
             in_place=True,
         )
     else:
-        plan_type = cast(PlanType, options.plan)
+        plan_type = options.plan
         plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints

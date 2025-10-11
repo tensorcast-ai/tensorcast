@@ -4,10 +4,11 @@
 
 from typing import List, Optional
 
+from tensorcast.global_store.repositories.chunk_directory_repository import (
+    ChunkDirectoryRepository,
+)
 from tensorcast.logger import init_logger
 from tensorcast.proto.global_store.v1 import global_store_pb2
-
-from ..repositories.chunk_directory_repository import ChunkDirectoryRepository
 
 logger = init_logger(__name__)
 

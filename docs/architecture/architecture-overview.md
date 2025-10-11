@@ -68,7 +68,7 @@ graph TD
 ### 3. User Process Worker
 **Role**: PyTorch client process accessing artifacts
 
-- **Interface**: Uses `tensorcast.api.Store` verbs (`get`, `get_into`) to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
+- **Interface**: Uses the functional facade (`tensorcast.get`, `tensorcast.get_into`) backed by the shared Store to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 
