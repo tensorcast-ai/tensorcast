@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-# NOTE: The Store session API is under active development.  This module
-# scaffolds the type surface and lifecycle primitives described in
-# design 0014 so registration/loading flows can be incrementally
-# migrated without rewriting daemon plumbing in one step.  Follow-up
-# changes in subsequent milestones will plug in the concrete implementations.
 import concurrent.futures
 import contextlib
 import json
@@ -49,6 +44,7 @@ from tensorcast.api._register import (
     RegistrationResult,
     _register_artifact_core,
 )
+from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
@@ -1053,7 +1049,9 @@ class Store:
 
     @staticmethod
     def _resolve_identifiers(
-        artifact_id: str | None, key: str | None
+        artifact_id: str | None,
+        key: str | None,
+        fallback: FallbackOptions | None,
     ) -> tuple[str | None, str | None]:
         if artifact_id and key:
             raise ArtifactError(
@@ -1062,6 +1060,14 @@ class Store:
                 retryable=False,
             )
         if not artifact_id and not key:
+            disk_path: str | None = None
+            if fallback:
+                if isinstance(fallback.disk_path, str):
+                    disk_path = fallback.disk_path.strip()
+                else:
+                    disk_path = fallback.disk_path
+            if disk_path:
+                return None, None
             raise ArtifactError(
                 "Either artifact_id or key is required",
                 status_code="INVALID_ARGUMENT",
@@ -1070,9 +1076,22 @@ class Store:
         return artifact_id, key
 
     @staticmethod
-    def _resolve_device_selector(selector: torch.device | str | None) -> int:
+    def _resolve_device_selector(
+        selector: torch.device | str | None,
+        fallback: FallbackOptions | None,
+    ) -> int:
+        def _has_disk_fallback() -> bool:
+            if not fallback:
+                return False
+            disk = fallback.disk_path
+            if isinstance(disk, str):
+                return disk.strip() != ""
+            return disk is not None
+
         if selector is None:
             if not torch.cuda.is_available():
+                if _has_disk_fallback():
+                    return 0
                 raise ArtifactError(
                     "CUDA device required for retrieval",
                     status_code="FAILED_PRECONDITION",
@@ -1081,6 +1100,8 @@ class Store:
             return int(torch.cuda.current_device())
         if isinstance(selector, torch.device):
             if selector.type != "cuda":
+                if selector.type == "cpu" and _has_disk_fallback():
+                    return 0
                 raise ArtifactError(
                     f"Unsupported device selector {selector}",
                     status_code="INVALID_ARGUMENT",
@@ -1090,6 +1111,8 @@ class Store:
         if isinstance(selector, str):
             device = torch.device(selector)
             if device.type != "cuda":
+                if device.type == "cpu" and _has_disk_fallback():
+                    return 0
                 raise ArtifactError(
                     f"Unsupported device selector {selector}",
                     status_code="INVALID_ARGUMENT",
@@ -1406,10 +1429,12 @@ class Store:
         options_override: GetArtifactOptions | None,
         span: Span | None = None,
     ) -> tuple[MaterializedArtifact, int]:
-        artifact_id, key = self._resolve_identifiers(artifact_id, key)
         resolved_fallback = fallback or self._opts.fallback
+        artifact_id, key = self._resolve_identifiers(
+            artifact_id, key, resolved_fallback
+        )
         self._ensure_fallback_supported(resolved_fallback)
-        device_id = self._resolve_device_selector(device)
+        device_id = self._resolve_device_selector(device, resolved_fallback)
         options = self._build_get_options(resolved_fallback, options_override)
         try:
             materialized = self._materialize(
@@ -1965,6 +1990,229 @@ class Store:
         return ArtifactFuture(future, cancel_callback=_cancel)
 
 
+_GLOBAL_STORE_LOCK = threading.RLock()
+_GLOBAL_STORE: Store | None = None
+_GLOBAL_STORE_ADDRESS: str | None = None
+_GLOBAL_STORE_OPTIONS: StoreOptions | None = None
+
+
+def _ensure_process_store(
+    *,
+    opts: StoreOptions | None = None,
+    force_recreate: bool = False,
+) -> Store:
+    """Return the process-wide Store, creating or refreshing it as needed."""
+
+    try:
+        runtime = require_runtime()
+    except RuntimeError:
+        from tensorcast import startup  # Local import to avoid cycles
+
+        if not startup.is_initialized():
+            startup.init()
+            runtime = require_runtime()
+        else:
+            raise
+    address = runtime.address
+    prior_store: Store | None = None
+
+    with _GLOBAL_STORE_LOCK:
+        global _GLOBAL_STORE, _GLOBAL_STORE_ADDRESS, _GLOBAL_STORE_OPTIONS
+
+        current = _GLOBAL_STORE
+        current_closed = bool(getattr(current, "_closed", False)) if current else False
+        same_address = (_GLOBAL_STORE_ADDRESS == address) if current else False
+
+        if current is not None and not force_recreate:
+            if current_closed or not same_address:
+                prior_store = current
+                _GLOBAL_STORE = None
+                _GLOBAL_STORE_ADDRESS = None
+                _GLOBAL_STORE_OPTIONS = None
+            else:
+                if (
+                    opts is not None
+                    and _GLOBAL_STORE_OPTIONS is not None
+                    and opts != _GLOBAL_STORE_OPTIONS
+                ):
+                    raise RuntimeError(
+                        "Store already initialized with different options. "
+                        "Pass force_recreate=True to replace the process Store."
+                    )
+                return current
+        elif current is not None and force_recreate:
+            prior_store = current
+            _GLOBAL_STORE = None
+            _GLOBAL_STORE_ADDRESS = None
+            _GLOBAL_STORE_OPTIONS = None
+
+        effective_opts = opts or _GLOBAL_STORE_OPTIONS or StoreOptions()
+        new_store = Store(address, opts=effective_opts)
+        _GLOBAL_STORE = new_store
+        _GLOBAL_STORE_ADDRESS = address
+        _GLOBAL_STORE_OPTIONS = effective_opts
+
+    if prior_store is not None:
+        with contextlib.suppress(Exception):
+            prior_store.close()
+
+    return new_store
+
+
+def store(
+    *,
+    opts: StoreOptions | None = None,
+    force_recreate: bool = False,
+) -> Store:
+    """Return the process-wide Store session, creating it lazily as needed."""
+
+    return _ensure_process_store(opts=opts, force_recreate=force_recreate)
+
+
+def shutdown_process_store() -> None:
+    """Close and clear the process-wide Store if it exists."""
+
+    with _GLOBAL_STORE_LOCK:
+        global _GLOBAL_STORE, _GLOBAL_STORE_ADDRESS, _GLOBAL_STORE_OPTIONS
+        current = _GLOBAL_STORE
+        _GLOBAL_STORE = None
+        _GLOBAL_STORE_ADDRESS = None
+        _GLOBAL_STORE_OPTIONS = None
+
+    if current is not None:
+        with contextlib.suppress(Exception):
+            current.close()
+
+
+def _coerce_store() -> Store:
+    current = _GLOBAL_STORE
+    if current is not None and not getattr(current, "_closed", False):
+        return current
+    return store()
+
+
+def register(
+    tensors: TensorDict,
+    *,
+    key: str | None = None,
+    options: RegisterArtifactOptions | None = None,
+    ttl_ms: int | None = None,
+) -> RegisteredArtifact:
+    return _coerce_store().register(tensors, key=key, options=options, ttl_ms=ttl_ms)
+
+
+def register_async(
+    tensors: TensorDict,
+    *,
+    key: str | None = None,
+    options: RegisterArtifactOptions | None = None,
+    ttl_ms: int | None = None,
+) -> ArtifactFuture[RegisteredArtifact]:
+    return _coerce_store().register_async(
+        tensors,
+        key=key,
+        options=options,
+        ttl_ms=ttl_ms,
+    )
+
+
+def put(
+    tensors: TensorDict,
+    *,
+    key: str | None = None,
+    options: RegisterArtifactOptions | None = None,
+    device: int | torch.device | None = None,
+) -> RegisteredArtifact:
+    return _coerce_store().put(tensors, key=key, options=options, device=device)
+
+
+def put_async(
+    tensors: TensorDict,
+    *,
+    key: str | None = None,
+    options: RegisterArtifactOptions | None = None,
+    device: int | torch.device | None = None,
+) -> ArtifactFuture[RegisteredArtifact]:
+    return _coerce_store().put_async(
+        tensors,
+        key=key,
+        options=options,
+        device=device,
+    )
+
+
+def get(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    device: torch.device | str | None = None,
+    fallback: FallbackOptions | None = None,
+    options: GetArtifactOptions | None = None,
+) -> dict[str, torch.Tensor]:
+    return _coerce_store().get(
+        artifact_id=artifact_id,
+        key=key,
+        device=device,
+        fallback=fallback,
+        options=options,
+    )
+
+
+def get_async(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    device: torch.device | str | None = None,
+    fallback: FallbackOptions | None = None,
+    options: GetArtifactOptions | None = None,
+) -> ArtifactFuture[dict[str, torch.Tensor]]:
+    return _coerce_store().get_async(
+        artifact_id=artifact_id,
+        key=key,
+        device=device,
+        fallback=fallback,
+        options=options,
+    )
+
+
+def get_into(
+    target: dict[str, torch.Tensor],
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    device: torch.device | str | None = None,
+    fallback: FallbackOptions | None = None,
+    options: GetArtifactOptions | None = None,
+) -> None:
+    _coerce_store().get_into(
+        target,
+        artifact_id=artifact_id,
+        key=key,
+        device=device,
+        fallback=fallback,
+        options=options,
+    )
+
+
+def get_into_async(
+    target: dict[str, torch.Tensor],
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    device: torch.device | str | None = None,
+    fallback: FallbackOptions | None = None,
+    options: GetArtifactOptions | None = None,
+) -> ArtifactFuture[None]:
+    return _coerce_store().get_into_async(
+        target,
+        artifact_id=artifact_id,
+        key=key,
+        device=device,
+        fallback=fallback,
+        options=options,
+    )
+
+
 __all__ = [
     "ArtifactError",
     "ArtifactFuture",
@@ -1980,4 +2228,14 @@ __all__ = [
     "Store",
     "StoreOptions",
     "TensorDict",
+    "store",
+    "shutdown_process_store",
+    "register",
+    "register_async",
+    "put",
+    "put_async",
+    "get",
+    "get_async",
+    "get_into",
+    "get_into_async",
 ]

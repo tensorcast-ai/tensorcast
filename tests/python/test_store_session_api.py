@@ -13,7 +13,7 @@ from typing import Any, Callable, cast
 import pytest
 import torch
 
-from tensorcast.api import store as store_mod
+import tensorcast.api.store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._materialize import MaterializedArtifact
 from tensorcast.api._register import BuildContext, CoalescedLayout, RegistrationResult
@@ -22,6 +22,7 @@ from tensorcast.api.store import (
     ArtifactFuture,
     FallbackOptions,
     Store,
+    StoreOptions,
 )
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 
@@ -103,6 +104,29 @@ class FakeEnvironment:
             replica_uuid=replica_uuid,
             disk_path=None,
         )
+
+
+def _make_registered_artifact(
+    artifact_id: str = "registered",
+) -> store_mod.RegisteredArtifact:
+    replica = store_mod.ReplicaInfo(
+        replica_id="replica",
+        replica_type="VRAM_LEASED",
+        device=torch.device("cpu"),
+        plan=PlanType.VRAM_LEASED,
+        size_bytes=0,
+    )
+    canonical_index = store_mod.CanonicalIndex(
+        entries=(),
+        total_size_bytes=0,
+        avbs_hash="",
+    )
+    return store_mod.RegisteredArtifact(
+        artifact_id=artifact_id,
+        replica=replica,
+        canonical_index=canonical_index,
+        lease=None,
+    )
 
     def make_registration_result(
         self,
@@ -561,3 +585,236 @@ def test_store_key_resolution_cache_reuses_mapping(
     assert client.resolve_calls.count(key) == 1
 
     store.close()
+
+
+def test_register_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor = torch.zeros(1)
+
+    class DummyStore:
+        def __init__(self) -> None:
+            self.calls: list[tuple[store_mod.TensorDict, dict[str, object]]] = []
+            self.result = _make_registered_artifact()
+
+        def register(
+            self,
+            tensors: store_mod.TensorDict,
+            *,
+            key: str | None = None,
+            options: RegisterArtifactOptions | None = None,
+            ttl_ms: int | None = None,
+        ) -> store_mod.RegisteredArtifact:
+            self.calls.append(
+                (
+                    tensors,
+                    {
+                        "key": key,
+                        "options": options,
+                        "ttl_ms": ttl_ms,
+                    },
+                )
+            )
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    payload = {"w": tensor}
+    result = store_mod.register(payload, key="demo", ttl_ms=1234)
+
+    assert result is session.result
+    assert session.calls[0][0] is payload
+    assert session.calls[0][1]["key"] == "demo"
+    assert session.calls[0][1]["ttl_ms"] == 1234
+
+
+def test_put_async_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor = torch.zeros(1)
+
+    class DummyStore:
+        def __init__(self) -> None:
+            self.calls: list[tuple[store_mod.TensorDict, dict[str, object]]] = []
+            self.future = object()
+
+        def put_async(
+            self,
+            tensors: store_mod.TensorDict,
+            *,
+            key: str | None = None,
+            options: RegisterArtifactOptions | None = None,
+            device: int | torch.device | None = None,
+        ) -> object:
+            self.calls.append(
+                (
+                    tensors,
+                    {
+                        "key": key,
+                        "options": options,
+                        "device": device,
+                    },
+                )
+            )
+            return self.future
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    payload = {"w": tensor}
+    result = store_mod.put_async(
+        payload, key="demo", device=torch.device("cuda", 0)
+    )
+
+    assert result is session.future
+    assert session.calls[0][0] is payload
+    assert session.calls[0][1]["key"] == "demo"
+    assert session.calls[0][1]["device"] == torch.device("cuda", 0)
+
+
+def test_get_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.result = {"value": torch.ones(1)}
+
+        def get(
+            self,
+            *,
+            artifact_id: str | None = None,
+            key: str | None = None,
+            device: torch.device | str | None = None,
+            fallback: FallbackOptions | None = None,
+            options: GetArtifactOptions | None = None,
+        ) -> dict[str, torch.Tensor]:
+            self.kwargs = {
+                "artifact_id": artifact_id,
+                "key": key,
+                "device": device,
+                "fallback": fallback,
+                "options": options,
+            }
+            return self.result
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    outcome = store_mod.get(
+        key="demo",
+        device="cuda:0",
+        fallback=FallbackOptions(prefer_disk=True),
+    )
+
+    assert outcome is session.result
+    assert session.kwargs is not None
+    assert session.kwargs["key"] == "demo"
+    assert session.kwargs["device"] == "cuda:0"
+
+
+def test_get_into_async_function_delegates_to_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor = torch.zeros(1)
+
+    class DummyStore:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] | None = None
+            self.target: dict[str, torch.Tensor] | None = None
+            self.future = object()
+
+        def get_into_async(
+            self,
+            target: dict[str, torch.Tensor],
+            *,
+            artifact_id: str | None = None,
+            key: str | None = None,
+            device: torch.device | str | None = None,
+            fallback: FallbackOptions | None = None,
+            options: GetArtifactOptions | None = None,
+        ) -> object:
+            self.target = target
+            self.kwargs = {
+                "artifact_id": artifact_id,
+                "key": key,
+                "device": device,
+                "fallback": fallback,
+                "options": options,
+            }
+            return self.future
+
+    session = DummyStore()
+    monkeypatch.setattr(store_mod, "store", lambda: session)
+    buffers = {"w": tensor}
+    result = store_mod.get_into_async(buffers, key="demo", device="cuda:0")
+
+    assert result is session.future
+    assert session.target is buffers
+    assert session.kwargs is not None
+    assert session.kwargs["key"] == "demo"
+    assert session.kwargs["device"] == "cuda:0"
+
+
+def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyStore:
+        def __init__(
+            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None
+        ) -> None:
+            self.daemon_endpoint = daemon_endpoint
+            self.opts = opts
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime_handle = SimpleNamespace(address="fake://daemon")
+    monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "Store", DummyStore)
+
+    store_mod.shutdown_process_store()
+
+    first = store_mod.store()
+    second = store_mod.store()
+
+    assert isinstance(first, DummyStore)
+    assert first is second
+    assert first.daemon_endpoint == "fake://daemon"
+
+    store_mod.shutdown_process_store()
+    assert first.closed
+
+
+def test_store_force_recreate_and_option_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyStore:
+        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None) -> None:
+            self.daemon_endpoint = daemon_endpoint
+            self.opts = opts
+            self.closed = False
+            created.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    created: list[DummyStore] = []
+
+    runtime_handle = SimpleNamespace(address="fake://daemon")
+    monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "Store", DummyStore)
+
+    store_mod.shutdown_process_store()
+
+    initial_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=False))
+    first = cast(DummyStore, store_mod.store(opts=initial_opts))
+
+    mismatch_opts = store_mod.StoreOptions(fallback=FallbackOptions(prefer_disk=True))
+    with pytest.raises(RuntimeError):
+        store_mod.store(opts=mismatch_opts)
+
+    refreshed = cast(DummyStore, store_mod.store(opts=mismatch_opts, force_recreate=True))
+
+    assert created == [first, refreshed]
+    assert first.closed
+    assert refreshed.opts == mismatch_opts
+
+    store_mod.shutdown_process_store()

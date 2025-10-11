@@ -6,8 +6,13 @@ from typing import Sequence, cast
 
 import torch
 
-from tensorcast import startup
-from tensorcast.api import save_dict, load_dict_sync
+from tensorcast import (
+    FallbackOptions,
+    GetArtifactOptions,
+    get,
+    save_dict,
+    startup,
+)
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
 
@@ -48,18 +53,26 @@ def test_shared_storage_roundtrip(tmp_path):
 
     save_path = tmp_path / "artifact"
     # Save using the unified writer
-    save_dict(state_dict, str(save_path))
+    descriptor = save_dict(state_dict, str(save_path))
 
     listen = f"127.0.0.1:{get_free_port()}"
     daemon_proc = start_daemon_binary(listen, tmp_path / "daemon-storage")
     try:
         startup.init(address=listen)
         try:
-            loaded_state_dict = load_dict_sync(
+            fallback = FallbackOptions(
                 disk_path=str(save_path),
-                device_id=0,
-                storage_path="",
-                enable_verification=False,
+                prefer_disk=True,
+                allow_p2p=False,
+                verify_checksums=False,
+            )
+            options = GetArtifactOptions(enable_verification=False)
+            device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
+            loaded_state_dict = get(
+                artifact_id=descriptor["artifact_id"],
+                device=device_selector,
+                fallback=fallback,
+                options=options,
             )
         finally:
             startup.shutdown()

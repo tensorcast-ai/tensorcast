@@ -71,6 +71,11 @@ class Context:
     def close(self) -> None:
         if self._closed:
             return
+
+        with contextlib.suppress(Exception):
+            from tensorcast.api.store import shutdown_process_store
+
+            shutdown_process_store()
         if not self._client_released:
             with contextlib.suppress(Exception):
                 release_daemon_client(self.address)

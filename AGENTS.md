@@ -45,7 +45,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; exposes gRPC APIs and Prometheus metrics.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
-- **User Process Worker**: Client process consuming artifacts via `tensorcast.api` (e.g., `load_dict_sync()`), mapping CUDA IPC handles for zero‑copy GPU access.
+- **User Process Worker**: Client process consuming artifacts via `tensorcast` APIs (e.g., `tensorcast.get()`), mapping CUDA IPC handles for zero‑copy GPU access.
 
 ### Build Systems
 - **Primary**: Bazel (Bzlmod) for C++ Core and Daemon

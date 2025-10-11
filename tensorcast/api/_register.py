@@ -260,40 +260,6 @@ class RegisteredLease:
         return self._addr
 
 
-def begin_register_artifact_sdk(
-    *,
-    device_id: int,
-    total_size_bytes: int,
-    ttl_ms: int | None,
-    tensor_index_data: bytes,
-    plan: CoalescedPlan | LeasePlan,
-    client: DaemonCtl | None = None,
-    daemon_address: str | None = None,
-) -> tuple[RegisteredArtifact, Handshake]:
-    if client is None:
-        runtime = require_runtime()
-        ctl = runtime.client
-        daemon_addr = runtime.address
-    else:
-        ctl = client
-        resolved_addr = daemon_address or client.server_address
-        daemon_addr = str(resolved_addr)
-    out = ctl.begin_register_artifact(
-        device_id=device_id,
-        total_size_bytes=total_size_bytes,
-        ttl_ms=ttl_ms,
-        tensor_index_data=tensor_index_data,
-        encoding="json",
-        schema_version="v2",
-        plan=plan,
-        timeout_s=60.0,
-    )
-    handle = RegisteredArtifact(
-        out.registration_id, daemon_addr, ttl_ms=ttl_ms or 0, client=ctl
-    )
-    return handle, out.handshake
-
-
 def _upsert_key_mapping_if_needed(
     *,
     key: str | None,
@@ -683,15 +649,23 @@ def _register_artifact_core(
     }
 
     with tracer.start_as_current_span(span_names[plan_type], kind=SpanKind.INTERNAL):
-        handle, hs = begin_register_artifact_sdk(
+        begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
             total_size_bytes=layout.total_size,
             ttl_ms=ttl_ms,
             tensor_index_data=index_bytes,
+            encoding="json",
+            schema_version="v2",
             plan=plan_model,
-            client=ctl,
-            daemon_address=addr,
+            timeout_s=60.0,
         )
+        handle = RegisteredArtifact(
+            begin_response.registration_id,
+            addr,
+            ttl_ms=ttl_ms or 0,
+            client=ctl,
+        )
+        hs = begin_response.handshake
         if on_begin is not None:
             on_begin(handle)
         if cancel_event and cancel_event.is_set():

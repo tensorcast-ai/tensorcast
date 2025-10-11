@@ -29,7 +29,7 @@ model = AutoModelForCausalLM.from_pretrained(
 
 state_dict = model.state_dict()
 
-tc.init(address="127.0.0.1:50052")
+# tc.init(address="127.0.0.1:50052")
 opts = RegisterArtifactOptions(plan=PlanType.VRAM_COALESCED, key="test:model:001")
 res = tc.register(state_dict, options=opts)
 saved_dict = res.state_dict

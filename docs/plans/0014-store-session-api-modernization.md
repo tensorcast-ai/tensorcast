@@ -12,7 +12,7 @@ Deliver the Store-centric artifact session API described in Design 0014: ship a 
 # Draft Execution Insights
 
 - Existing helpers in `tensorcast/api/_register.py` and `_loader.py` already implement most daemon/Global Store flows but now reuse the process-scoped Store (`tensorcast.store()`). We can refactor these flows into composable primitives consumed by the new `Store` without rewriting RPC wiring.
-- Asynchronous paths (`get_artifact_async`, `load_dict_async`) currently return bespoke `LoadHandle` objects. Converging on a shared `ArtifactFuture` backed by `concurrent.futures.Future` simplifies cancellation semantics but requires a lightweight executor scoped per `Store`.
+- Legacy asynchronous helpers relied on bespoke `LoadHandle` objects. The Store now returns `ArtifactFuture` for all verbs, replacing `_loader.py` and unifying cancellation semantics behind a single executor.
 - Lease keepalive threads in `RegisteredArtifact` / `RegisteredLease` rely on ad hoc threading; encapsulating them inside the Store with lifecycle hooks avoids per-call duplication and lets us guarantee clean cancellation on future completion.
 - Global Store lookups (canonical index fetch) currently deserialize JSON; we can reuse that logic but cache results inside the Store using a TTL keyed by artifact id to minimize repeated RPCs.
 - Legacy helper shims in `tensorcast/api/__init__.py` have been removed; the Store surface is now the only public registration/loading API.

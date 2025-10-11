@@ -3,8 +3,12 @@
 import torch
 from typing import Any
 
-from tensorcast import startup
-from tensorcast.api import load_dict_sync as load_dict
+from tensorcast import (
+    FallbackOptions,
+    GetArtifactOptions,
+    get,
+    startup,
+)
 
 
 def compare_tensor_dicts(
@@ -93,11 +97,18 @@ if __name__ == "__main__":
         torch_state_dict = torch.load(path_to_torch_state_dict)
         startup.init(address="127.0.0.1:8073")
         try:
-            sc_state_dict = load_dict(
+            fallback = FallbackOptions(
                 disk_path=path_to_sc_model_dir,
-                device_id=0,
-                storage_path="",
-                enable_verification=False,
+                prefer_disk=True,
+                allow_p2p=False,
+                verify_checksums=False,
+            )
+            options = GetArtifactOptions(enable_verification=False)
+            device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
+            sc_state_dict = get(
+                device=device_selector,
+                fallback=fallback,
+                options=options,
             )
         finally:
             startup.shutdown()

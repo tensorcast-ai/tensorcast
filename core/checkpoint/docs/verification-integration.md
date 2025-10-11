@@ -57,7 +57,7 @@ with open(verification_path, "w") as f:
 - Support multi-partition file format (`tensor.data_0`, `tensor.data_1`, ...)
 - Save verification information to `verification.json`
 
-### 2. Replica Loading Phase (`tensorcast/api/services/materialize.py` + `Store.load_dict_*`)
+### 2. Replica Loading Phase (`tensorcast/api/services/materialize.py` + `Store.get`)
 
 ```python
 # In load_dict_non_blocking function
@@ -130,10 +130,12 @@ struct P2PModelSource {
 # Automatically generate verification information when saving
 save_dict(state_dict, "/path/to/replica")
 
-# Automatically verify when loading
-cuda_ptr, state_dict = load_dict_non_blocking(
-    disk_path="/path/to/replica",
-    enable_verification=True  # Enabled by default
+# Automatically verify when loading via the Store facade
+from tensorcast import FallbackOptions, GetArtifactOptions, get
+
+state_dict = get(
+    fallback=FallbackOptions(disk_path="/path/to/replica", prefer_disk=True),
+    options=GetArtifactOptions(enable_verification=True),
 )
 ```
 

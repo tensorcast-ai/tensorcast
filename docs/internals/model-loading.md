@@ -105,16 +105,11 @@ sequenceDiagram
   - SDK already computes a coalesced layout and sets `dst_offset` per unique storage block.
   - Ordering no longer matters, but the SDK still sorts for stable traces.
 
-Recommended: use `RegisteredArtifact` as a context manager to benefit from automatic keepalive when `ttl_ms` is provided, e.g.:
-
-```
-with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
-    # feed LeaseSegments here if needed
-    commit = handle.commit()
-    desc = commit.descriptor
-```
-- Commit returns RFC-0007 content-addressed descriptor (artifact_id = mi2:index_multihash:data_multihash).
-- Same-machine consumers always materialize to daemon-owned coalesced VRAM (CUDA IPC) for zero-copy use.
+Recommended: rely on `tensorcast.register(...)` (or `register_async`) with
+`RegisterArtifactOptions(lease_in_place=True)` and an explicit `ttl_ms`. The Store
+manages keepalives automatically and surfaces the committed descriptor through the
+returned `RegisteredArtifact`. Same-machine consumers materialize into daemon-owned
+coalesced VRAM (CUDA IPC) for zero-copy use.
 
 ### Client Facade & Store helpers
 
@@ -131,10 +126,8 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
   copy (or validation error) completes. Asynchronous flows are available via `tensorcast.store()`.
 - `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
   policy flags across call sites.
-- Low-level workflows remain available via
-  `tensorcast.api.begin_register_artifact_sdk(...)` for scenarios that need explicit control over
-  lease feeding, although most integrations should rely on the functional facade and the Store’s
-  cancellation hooks.
+- Low-level lease feeding and commit orchestration are handled internally by the Store,
+  so most integrations rely entirely on the functional facade and its cancellation hooks.
 
 ### Python SDK Updates
 
@@ -145,7 +138,6 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 - Loading helpers with fixed return types now forward to the Store session:
   - Synchronous: `tensorcast.get(...) -> dict[str, torch.Tensor]`
   - Asynchronous: `tensorcast.store().get_async(...) -> ArtifactFuture[dict[str, torch.Tensor]]`
-  - Utilities (`load_dict_sync`, etc.) call into the shared Store for compatibility.
 - `ArtifactFuture.done() / result(timeout) / cancel()` mirror the standard `concurrent.futures`
   contract. Cancellation propagates to daemon RPCs (`AbortRegisteredArtifact`, `RevokeRegisteredArtifact`)
   and records telemetry for observability.

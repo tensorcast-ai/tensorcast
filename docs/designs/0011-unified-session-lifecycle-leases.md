@@ -41,7 +41,7 @@ Scope: unify all ephemeral lifecycle into a single Lease/Guard/Finalizer system 
 
 # Terminology & Ownership Modes
 
-We standardize artifact replica lifecycle across two ownership modes and three reference classes created by different call paths (register/load/load_dict) so that a single abstraction can drive correct cleanup and eviction decisions.
+We standardize artifact replica lifecycle across two ownership modes and three reference classes created by different call paths (register/put/get) so that a single abstraction can drive correct cleanup and eviction decisions.
 
 - Ownership modes
   - Daemon‑owned (VRAM_COALESCED / CPU): daemon owns the VRAM allocation and exports CUDA IPC handles to clients. Clients only hold mappings; daemon decides placement and eviction.
@@ -52,7 +52,7 @@ We standardize artifact replica lifecycle across two ownership modes and three r
   - UseLease: protects an exported mapping while a process is actively using it (IPC mapping or in‑process handle); PID‑bound.
   - CommitLease: records client‑owned commit (VRAM_LEASED) on a device; PID‑bound and device‑unique per artifact.
 
-These three map 1:1 to Lease kinds composed from Guards and Finalizers; they unify behaviors from register/load/load_dict while allowing mode‑specific policies.
+These three map 1:1 to Lease kinds composed from Guards and Finalizers; they unify behaviors from register/put/get while allowing mode-specific policies.
 
 # Goals / Non‑Goals
 
@@ -93,8 +93,8 @@ Note: device_commit_key encodes (artifact_id, device_uuid|ordinal). The daemon e
 ## Daemon‑owned (VRAM_COALESCED / CPU)
 
 - Register/Load paths
-  - register_artifact: creates PlacementLease per target device, optionally with ManualGuard or TTL via DeadlineGuard.
-  - load or load_dict: creates UseLease(s) for the caller’s process and, if required, implicitly ensures a PlacementLease exists (create if absent) to back the mapping.
+  - register/put: creates PlacementLease per target device, optionally with ManualGuard or TTL via DeadlineGuard.
+  - get or get_into: creates UseLease(s) for the caller’s process and, if required, implicitly ensures a PlacementLease exists (create if absent) to back the mapping.
 
 - Eviction policy
   - A replica is eligible for reclamation when: UseCount == 0 AND PlacementPins == 0.
@@ -146,7 +146,7 @@ Derived invariants
 
 # Key Scenarios (Behavior)
 
-- load/load_dict → UseLease
+- get/get_into → UseLease
   - Successful materialization establishes a UseLease bound to the caller PID. While active, the replica remains mapped for that process. When the process exits or explicitly unmaps, the UseLease retires; if there is no placement pin, the replica becomes reclaimable.
 
 - register_artifact (daemon‑owned) → PlacementLease (+ optional UseLease)
@@ -164,7 +164,7 @@ Derived invariants
   - Create PlacementLease per device with ManualGuard or DeadlineGuard(ttl) if specified.
   - Optionally return immediate mapping which creates a UseLease for the caller’s PID.
 
-- load / load_dict (daemon‑owned)
+- get / get_into (daemon-owned)
   - Ensure PlacementLease for target device (create if needed, policy‑driven lifetime).
   - Create UseLease bound to PID; map IPC; refresh on keepalive; retire on unmap/PID exit.
 

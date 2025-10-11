@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, replace
 from typing import cast
@@ -20,11 +21,11 @@ from tensorcast.api._indices import (
     TensorMetaIndex,
     calculate_tensor_device_offsets,
 )
-from tensorcast.api._load_engine import _monitor_verification
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
+from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,29 @@ def materialize_artifact(
         replica_uuid=replica_uuid,
         disk_path=disk_path,
     )
+
+
+def _monitor_verification(
+    ctl: DaemonCtl,
+    identifier: str,
+    replica: str,
+    timeout: int,
+) -> None:  # pragma: no cover
+    try:
+        resp = ctl.wait_artifact_verification(
+            artifact_identifier=identifier,
+            replica_uuid=replica,
+            timeout_ms=timeout,
+        )
+        if resp is None:
+            return
+        if (
+            resp.status
+            == store_daemon_pb2.VerificationStatus.VERIFICATION_STATUS_FAILED
+        ):
+            os._exit(1)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 __all__ = ["MaterializedArtifact", "materialize_artifact"]

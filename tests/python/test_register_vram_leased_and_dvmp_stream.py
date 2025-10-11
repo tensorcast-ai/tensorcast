@@ -1,6 +1,5 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import json
 import random
 import subprocess
 import time
@@ -9,13 +8,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from tensorcast import startup
-from tensorcast._C import get_cuda_memory_handle
+from concurrent.futures import CancelledError
+
+from tensorcast import ArtifactError, startup
 from tensorcast.api import PlanType, RegisterArtifactOptions, Store
-from tensorcast.api._register import begin_register_artifact_sdk
 from tensorcast.api.store import RegisteredArtifact as StoreRegisteredArtifact
-from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.types import LeasePlan, LeaseSegment
+from tensorcast.types import LeaseSegment
 from tests.python.utils.daemon import start_daemon_binary
 
 
@@ -68,7 +66,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
 
 
 @pytest.mark.timeout(60)
-def test_register_vram_lease_shuffled_segments(tmp_path: Path):
+def test_register_vram_lease_shuffled_segments(tmp_path: Path, monkeypatch):
     _skip_if_no_cuda()
 
     listen = "127.0.0.1:50736"
@@ -79,82 +77,79 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
 
     try:
         startup.init(address=listen)
-        device = torch.device("cuda", 0)
-        # Three tensors with disjoint storages
-        a = torch.arange(0, 16, dtype=torch.uint8, device=device)
-        b = torch.arange(16, 64, dtype=torch.uint8, device=device)
-        c = torch.full((32,), 0xAA, dtype=torch.uint8, device=device)
-        state = {"a": a, "b": b, "c": c}
+        store = Store(listen)
+        try:
+            device = torch.device("cuda", 0)
+            state = {
+                "a": torch.arange(0, 16, dtype=torch.uint8, device=device),
+                "b": torch.arange(16, 64, dtype=torch.uint8, device=device),
+                "c": torch.full((32,), 0xAA, dtype=torch.uint8, device=device),
+            }
 
-        # Build meta and source index
-        tensor_meta_index: dict[str, tuple[list[int], list[int], str, int]] = {}
-        tensor_source_index: dict[str, tuple[int, int]] = {}
-        for name, t in state.items():
-            storage = t.untyped_storage()
-            tensor_source_index[name] = (int(storage.data_ptr()), int(storage.size()))
-            tensor_meta_index[name] = (
-                list(map(int, t.shape)),
-                list(map(int, t.stride())),
-                str(t.dtype),
-                int(t.storage_offset()),
-            )
+            from tensorcast.api import _register as register_mod
 
-        # Compute coalesced layout and total size
-        from tensorcast.api._indices import calculate_tensor_device_offsets
-        device_offsets, copy_chunks = calculate_tensor_device_offsets(
-            tensor_source_index, device
-        )
-        chunks = list(copy_chunks[device])  # (src_ptr, size, dst_off, stream)
-        total_size = max(dst + sz for _, sz, dst, _ in chunks)
+            original_upload = register_mod._LeaseUploader.upload
 
-        # Build canonical index JSON using destination offsets
-        tensor_index_v2: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
-        for name in sorted(tensor_meta_index.keys()):
-            shape, stride, dtype, storage_offset = tensor_meta_index[name]
-            _, storage_size = tensor_source_index[name]
-            dst_off = int(device_offsets[device][name])
-            tensor_index_v2[name] = (
-                dst_off,
-                int(storage_size),
-                list(shape),
-                list(stride),
-                dtype,
-                int(storage_offset),
-            )
-        index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            def shuffled_upload(
+                self,
+                *,
+                artifact,
+                ctx,
+                layout,
+                handle,
+                handshake,
+                cancel_event=None,
+            ):
+                def _export_cuda_ipc_handle(ptr: int) -> bytes:
+                    return register_mod.get_cuda_memory_handle(ctx.device_id, int(ptr))
 
-        # Begin lease registration via SDK helper (no device_id to force lease path)
-        from tensorcast.api._register import begin_register_artifact_sdk
-        handle, _hs = begin_register_artifact_sdk(
-            device_id=device.index,
-            total_size_bytes=total_size,
-            ttl_ms=500,
-            tensor_index_data=index_bytes,
-            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=16, lease_bytes_limit=0, in_place=True),
-        )
-
-        # Export CUDA IPC handles for each unique storage and build segments, then shuffle
-        def export_ipc(ptr: int) -> bytes:
-            return get_cuda_memory_handle(device.index, int(ptr))
-
-        segments: list[LeaseSegment] = []
-        for src_ptr, size, dst_off, _s in chunks:
-            segments.append(
-                LeaseSegment(
-                    device_id=device.index,
-                    cuda_ipc_handle=export_ipc(int(src_ptr)),
-                    base_addr=0,
-                    length=int(size),
-                    dst_offset=int(dst_off),
+                segments: list[LeaseSegment] = []
+                chunks = list(layout.unique_chunks)
+                random.shuffle(chunks)
+                for src_ptr, size, dst_off, _ in chunks:
+                    if cancel_event and cancel_event.is_set():
+                        raise CancelledError
+                    handle_bytes = _export_cuda_ipc_handle(int(src_ptr))
+                    segments.append(
+                        register_mod.LeaseSegment(
+                            device_id=int(ctx.device_id),
+                            cuda_ipc_handle=handle_bytes,
+                            base_addr=0,
+                            length=int(size),
+                            dst_offset=int(dst_off),
+                        )
+                    )
+                if cancel_event and cancel_event.is_set():
+                    raise CancelledError
+                ok = handle.client.feed_register_artifact_lease_segments(
+                    handle.registration_id, segments
                 )
-            )
-        random.shuffle(segments)
+                if not ok:
+                    raise register_mod.FeedFailed(
+                        "Lease segments feed failed (shuffled)"
+                    )
+                return artifact
 
-        ctl = DaemonCtl(listen)
-        ok = ctl.feed_register_artifact_lease_segments(handle.registration_id, segments)
-        assert ok
-        commit = handle.commit()
-        assert commit and commit.descriptor.artifact_id.startswith("mi2:")
+            monkeypatch.setattr(
+                register_mod._LeaseUploader,
+                "upload",
+                shuffled_upload,
+                raising=False,
+            )
+
+            opts = RegisterArtifactOptions(
+                plan=PlanType.VRAM_LEASED,
+                lease_in_place=True,
+                min_tensor_bytes=0,
+                max_tensor_count=16,
+                lease_bytes_limit=0,
+            )
+            res = store.register(state, options=opts)
+            assert isinstance(res, StoreRegisteredArtifact)
+            assert res.registration_result is not None
+            assert res.registration_result.descriptor.artifact_id.startswith("mi2:")
+        finally:
+            store.close()
     finally:
         startup.shutdown()
         try:
@@ -165,7 +160,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path):
 
 
 @pytest.mark.timeout(60)
-def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
+def test_ttl_expiry_on_lease_feed_path(tmp_path: Path, monkeypatch):
     """TTL expiry should fail fast in Lease feed."""
     _skip_if_no_cuda()
     # Start daemon
@@ -177,30 +172,57 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path):
 
     try:
         startup.init(address=listen)
-        # Lease path only
-        import json
-        device = torch.device("cuda", 0)
-        t = torch.full((64,), 0x5A, dtype=torch.uint8, device=device)
-        storage = t.untyped_storage()
-        ptr = int(storage.data_ptr())
-        sz = int(storage.size())
-        tensor_index_v2 = {"x": [0, sz, [64], [1], "torch.uint8", 0]}
-        index_bytes = json.dumps(tensor_index_v2, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        handle2, _ = begin_register_artifact_sdk(
-            device_id=device.index,
-            total_size_bytes=sz,
-            ttl_ms=50,
-            tensor_index_data=index_bytes,
-            plan=LeasePlan(kind="lease", min_tensor_bytes=0, max_tensor_count=8, lease_bytes_limit=0, in_place=True),
-        )
-        time.sleep(0.08)
-        ctl = DaemonCtl(listen)
-        # Export IPC and attempt feed
-        def export_ipc(p: int) -> bytes:
-            return get_cuda_memory_handle(device.index, int(p))
-        seg = LeaseSegment(device_id=device.index, cuda_ipc_handle=export_ipc(ptr), base_addr=0, length=sz, dst_offset=0)
-        ok = ctl.feed_register_artifact_lease_segments(handle2.registration_id, [seg])
-        assert not ok, "Lease feed should fail after TTL expiry"
+        store = Store(listen)
+        try:
+            device = torch.device("cuda", 0)
+            state = {
+                "x": torch.full((64,), 0x5A, dtype=torch.uint8, device=device),
+            }
+
+            from tensorcast.api import _register as register_mod
+
+            original_upload = register_mod._LeaseUploader.upload
+
+            def slow_upload(
+                self,
+                *,
+                artifact,
+                ctx,
+                layout,
+                handle,
+                handshake,
+                cancel_event=None,
+            ):
+                time.sleep(0.08)
+                return original_upload(
+                    self,
+                    artifact=artifact,
+                    ctx=ctx,
+                    layout=layout,
+                    handle=handle,
+                    handshake=handshake,
+                    cancel_event=cancel_event,
+                )
+
+            monkeypatch.setattr(
+                register_mod._LeaseUploader,
+                "upload",
+                slow_upload,
+                raising=False,
+            )
+
+            opts = RegisterArtifactOptions(
+                plan=PlanType.VRAM_LEASED,
+                lease_in_place=True,
+                min_tensor_bytes=0,
+                max_tensor_count=8,
+                lease_bytes_limit=0,
+            )
+            with pytest.raises(ArtifactError) as exc_info:
+                store.register(state, options=opts, ttl_ms=50)
+            assert exc_info.value.status_code == "FAILED_PRECONDITION"
+        finally:
+            store.close()
     finally:
         startup.shutdown()
         try:
