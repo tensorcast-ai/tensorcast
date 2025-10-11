@@ -15,6 +15,7 @@ Core elements:
 - Unified identity: `mi2:` IDs computed over canonical index and AVBS bytes (with PAD=0) that are invariant across plans.
 - One RPC family for Begin/Feed/KeepAlive/Commit/Abort/Revoke across all plans.
 - Clear plan behaviors: Coalesced VRAM, Lease (materialize‑on‑Commit), and Lease‑In‑Place (LIP, ephemeral, TTL‑bound).
+- Registration payloads mirror the disk persistence pipeline so shared storages deduplicate to a single CUDA IPC handle and alias metadata stays consistent with Canonical Index v2.
 
 ## Implementation status (current release)
 
@@ -49,6 +50,12 @@ Non‑Goals
   - COALESCED_VRAM: Daemon‑owned contiguous GPU memory (zero‑copy via CUDA IPC on the same machine).
   - VRAM_LEASED: Lease plan materialized to daemon VRAM at Commit (`in_place=false`).
   - VRAM_LEASE_IN_PLACE (LIP): Ephemeral, post‑Commit lease over producer VRAM; TTL‑bound, PID‑owned; same‑device consumption disallowed.
+
+### Shared Storage Unification
+
+Registration now treats shared PyTorch storages the same way as the disk persistence path. A single helper surfaces unique storage descriptors alongside tensor alias metadata, so both flows reuse the same canonical introspection of storage identity, placement, and logical tensor views. The registration RPC payload carries those structures directly, which allows the daemon to open each CUDA IPC handle exactly once while preserving the canonical index ordering already validated by `save_dict`.
+
+This alignment eliminates redundant handle traffic from registration, keeps RPC payloads compact, and makes the canonical index reconstruction identical across live registration and disk artifacts. It also provides a stable place to enforce guardrails (storage/tensor consistency checks, address hashing) before the daemon commits replicas.
 
 ## SDK API (Python)
 
@@ -90,6 +97,7 @@ Key fields and behaviors
 - Feed for Lease provides `lease_segments(dst_offset,len,...)` covering DATA ranges; PAD is implicit and zero‑filled by the daemon.
 - KeepAlive requires `owner_pid` matching Begin; extends registration or LIP lease.
 - Commit computes `mi2:` over AVBS with PAD=0 and registers the replica type.
+- Feed now includes deduplicated storage descriptors plus tensor alias metadata, mirroring the disk pipeline so the daemon can rebuild the canonical index without inferring alias groups from raw segments.
 
 ## Data Plane & Materialization
 
@@ -210,6 +218,7 @@ Observability
 - Counters/latency for Begin, Feed, Commit, Abort, KeepAlive, Revoke.
 - Staging metrics: staged bytes, pool occupancy, release queues.
 - Lease/LIP: export/unlock totals, verification failures, TTL expirations, PID auto‑revokes.
+- Registration vs. disk parity: metrics track the ratio of unique storages to logical tensors and expose IPC open counts so rollout can confirm deduplication is active.
 
 Security & policy
 - Same‑process CUDA IPC fallback is disabled.
