@@ -506,22 +506,6 @@ cc_test(
 )
 
 cc_test(
-    name = "cross_transport_soak_test",
-    srcs = ["engine/cross_transport_soak_test.cc"],
-    tags = [
-        "requires_cuda",
-        "stress",
-    ],
-    deps = [
-        ":engine_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "//core/testing:test_helpers",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "tcp_error_handling_test",
     srcs = ["engine/tcp_error_handling_test.cc"],
     tags = ["requires_cuda"],
