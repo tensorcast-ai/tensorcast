@@ -175,6 +175,7 @@ select = [
     "F",
     "SIM1",
     "W",
+    "TID252",
     # Not included in flake8
     "PERF",
     "PLE",

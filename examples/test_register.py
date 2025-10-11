@@ -6,7 +6,7 @@ import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
 import tensorcast as tc
-from tensorcast import RegisterArtifactOptions
+from tensorcast import PlanType, RegisterArtifactOptions
 from tensorcast.testing.dict import assert_state_dict_equal
 
 hf_model_name = "Qwen/Qwen3-0.6B"
@@ -30,7 +30,7 @@ model = AutoModelForCausalLM.from_pretrained(
 state_dict = model.state_dict()
 
 tc.init(address="127.0.0.1:50052")
-opts = RegisterArtifactOptions(plan="vram_coalesced", key="test:model:001")
+opts = RegisterArtifactOptions(plan=PlanType.VRAM_COALESCED, key="test:model:001")
 res = tc.register(state_dict, options=opts)
 saved_dict = res.state_dict
 assert saved_dict is not None

@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 import tensorcast as tc
-from tensorcast import RegisterArtifactOptions
+from tensorcast import PlanType, RegisterArtifactOptions
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     opts = RegisterArtifactOptions(
-        plan="vram_coalesced",
+        plan=PlanType.VRAM_COALESCED,
         disk_path=str(out_dir),  # validate/record disk source
     )
     registered = tc.put(
