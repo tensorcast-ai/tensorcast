@@ -57,7 +57,7 @@ with open(verification_path, "w") as f:
 - Support multi-partition file format (`tensor.data_0`, `tensor.data_1`, ...)
 - Save verification information to `verification.json`
 
-### 2. Replica Loading Phase (`tensorcast/api/_loader.py`)
+### 2. Replica Loading Phase (`tensorcast/api/services/materialize.py` + `Store.load_dict_*`)
 
 ```python
 # In load_dict_non_blocking function

@@ -11,6 +11,8 @@ related_code: ["tensorcast/api", "tensorcast/global_store", "daemon", "core/stor
 
 We evolve the TensorCast client API from a monolithic `register_artifact()` function into an explicit Store session object that owns the daemon connection and surfaces four verbs: `register`, `put`, `get`, and `get_into`. The first release keeps the public surface minimal: the `Store` constructor requires the daemon endpoint (`tcp://ip:port` or `unix://` socket) plus an optional `StoreOptions` bundle, and each verb exposes a concise signature with optional key-based addressing. All lease duration, keepalive cadence, caching, and device selection policies are centrally managed by the Store using repository defaults so that users do not supply per-call tuning parameters, while retrieval verbs can describe disk and P2P fallback behavior explicitly when VRAM replicas are unavailable.
 
+The shipping SDK exposes these capabilities through functional module-level helpers (`tensorcast.init`, `tensorcast.register`, `tensorcast.put`, `tensorcast.get`, `tensorcast.get_into`). Those helpers delegate to a single process-wide Store instance managed by the runtime; the Store remains an internal session holder that advanced users may access via `tensorcast.store()` for asynchronous verbs or diagnostics, but typical workflows never construct it directly.
+
 The API provides paired synchronous and asynchronous methods (e.g., `register` / `register_async`) backed by the same future infrastructure introduced in Design 0005, avoiding flag-based mode switches and improving type safety. The design reuses the AVBS/Canonical Index/lease semantics from Design 0003 while giving the SDK a clearer ownership boundary over daemon sessions and replica coordination.
 
 # Goals / Non-Goals
@@ -31,6 +33,21 @@ Non-Goals
 - Modeling Fake-CUDA specific behaviors; the fallback design assumes production CUDA hardware.
 
 # Architecture & Interfaces
+
+## Public facade
+
+```python
+import tensorcast as tc
+
+tc.init(address="auto")
+artifact = tc.register(tensors=model_state_dict, key="model/latest")
+latest = tc.get(key="model/latest", device="cuda:0")
+tc.get_into(buffers, artifact_id=artifact.artifact_id, device="cuda:0")
+```
+
+- `tc.init(...)` establishes the daemon session and creates the shared Store.
+- `tc.register`, `tc.put`, `tc.get`, and `tc.get_into` are thin wrappers that route to the Store while keeping the API surface functional and stateless for callers.
+- `tc.store()` exposes the underlying Store when advanced integrations need asynchronous verbs, telemetry, or direct lease management; routine code should not instantiate `Store` manually.
 
 ## Type aliases and helper classes
 
@@ -183,6 +200,8 @@ Responsibilities
 - `retry_overrides`: mapping from method name (`"register"`, `"get"`, etc.) to `RetryPolicy` to adjust deadlines/backoff without rewriting the built-in policy tables.
 
 The first-version Store treats all local CUDA devices as in-scope; explicit device scoping is deferred. When new GPUs appear, the Store refreshes device metadata lazily on demand.
+
+While the Store remains the canonical implementation of the session API, production callers acquire the shared instance through `tensorcast.init()` / `tensorcast.store()` rather than constructing it directly.
 
 ## Register (by-reference registration)
 
@@ -374,28 +393,22 @@ Default deadlines and SDK-managed retries:
 ## Usage example
 
 ```python
-store = Store(
-    daemon_endpoint="unix:///var/run/tensorcastd.sock",
-    opts=StoreOptions(
-        fallback=FallbackOptions(
-            disk_path="/var/lib/tensorcast/artifacts",
-            prefer_disk=False,
-        ),
-    ),
-)
+import tensorcast as tc
 
-registered = store.register(tensors=model_state_dict, key="model/latest")
+tc.init(address="auto")
+artifact = tc.register(tensors=model_state_dict, key="model/latest")
+restored = tc.get(key="model/latest", device="cuda:0")
+tc.get_into(buffers, artifact_id=artifact.artifact_id, device="cuda:1")
 
-future = store.get_async(artifact_id=registered.artifact_id, device="cuda:1")
+# Advanced: access async verbs through the shared Store when needed.
+store = tc.store()
+future = store.get_async(artifact_id=artifact.artifact_id, device="cuda:1")
 next_state = future.result()
-
-# Bypass P2P and force disk-backed materialization for a single request.
-disk_only = store.get(
-    key="model/snapshot-100",
-    device="cuda:0",
-    fallback=FallbackOptions(disk_path="/mnt/fast-cache", prefer_disk=True, allow_p2p=False),
-)
 ```
+
+These helpers reuse the single process-wide Store instance created by `tc.init()`. Advanced callers
+can drop down to `tc.store()` for asynchronous operations, telemetry, or fine-grained lease control,
+but the public contract exposed to applications is the functional interface shown above.
 
 ## Key mapping cache
 
@@ -452,7 +465,7 @@ Error semantics
 # Compatibility & Acceptance Criteria
 
 Compatibility
-- Module-level helpers such as `register_artifact`, `get_artifact_sync`, and `get_artifact_async` have been removed; the session-oriented Store API is the sole public entry point.
+- Module-level helpers such as `register_artifact`, `get_artifact_sync`, and `get_artifact_async` have been removed. The supported public surface is the functional facade (`tensorcast.init/register/put/get/get_into`), which delegates to the shared Store. Direct `Store` construction remains available for advanced scenarios but is no longer required.
 - No daemon or Global Store RPC changes are required; wire compatibility is preserved.
 
 Acceptance Criteria
@@ -466,7 +479,7 @@ Acceptance Criteria
 This roadmap executes the modernization incrementally while holding current production contracts.
 
 ## Phase 0 – Baseline & Contract Verification
-- Inventory public entry points in `tensorcast/api/__init__.py`, `_register.py`, `_loader.py`, examples, and docs to freeze current behavior and doc-sync surfaces.
+- Inventory public entry points in `tensorcast/api/__init__.py`, `_register.py`, `_runtime.py`, `_load_engine.py`, `_loader.py`, `_materialize.py`, examples, and docs to freeze current behavior and doc-sync surfaces.
 - Add short-lived structured tracing around `register_artifact`, `get_artifact_sync`, and `get_artifact_async` paths to capture daemon/global-store RPC envelopes and lease keepalive cadence.
 - Capture parity fixtures from `tests/python/test_register_vram_leased_and_dvmp_stream.py` and `tests/python/test_register_lease_in_place_helper.py` to guard against accidental regression during refactors.
 - Align stakeholders (SDK, daemon, global_store) on sequencing, publish the migration schedule, and verify no pending protocol changes compete with this work.
@@ -490,8 +503,8 @@ This roadmap executes the modernization incrementally while holding current prod
 - Add cache of key→artifact-id resolutions inside the Store using TTL hints from the Global Store to minimize redundant RPCs.
 
 ## Phase 4 – Observability, Documentation, and Migration Support
-- Finalize removal of module-level helpers (`register_artifact`, `get_artifact_sync`, `get_artifact_async`) so that the Store object is the only public entry point; keep `load_dict_*` utilities for disk-path workflows.
-- Update `README.md`, `docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, and relevant examples to highlight the session-first usage pattern and describe migration steps.
+- Finalize removal of legacy helpers (`register_artifact`, `get_artifact_sync`, `get_artifact_async`) and surface the functional facade (`tensorcast.register`, etc.) backed by the shared Store; keep `load_dict_*` utilities for disk-path workflows.
+- Update `README.md`, `docs/internals/model-loading.md`, `docs/internals/save_dict_flow.md`, and relevant examples to highlight the functional entry points while documenting how to obtain the `Store` for advanced scenarios.
 - Expand SDK metrics/OTEL exporters to report Store verb latency, retry counts, cancellation, and fallback decisions; ensure dashboards in `docs/architecture/architecture-overview.md` reflect the new signals.
 - Remove temporary tracing added in Phase 0 once dashboards confirm parity, keeping only steady-state telemetry.
 

@@ -11,7 +11,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT
-- Entrypoint: `tensorcast/api/store.py::Store.get` / `Store.get_into`
+- Entrypoint: `tensorcast.get` / `tensorcast.get_into` (facade over the process Store)
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
@@ -26,11 +26,10 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 
 ## Runtime Initialization
 
-All client processes must call `tensorcast.startup.init(...)` before constructing Store sessions.
-Initialization pins a daemon endpoint that the `tensorcast.api.Store` object reuses when opening its
-gRPC channel pool. The Store owns retry policy, lease keepalive, and fallback orchestration for the
-process. Legacy module-level helpers still work, but they create a hidden Store internally and emit
-deprecation warnings.
+All client processes call `tensorcast.init(...)` to establish the daemon session. Initialization pins
+the daemon endpoint and constructs the shared Store used by the module-level helpers. The Store owns
+retry policy, lease keepalive, and fallback orchestration for the process. Advanced integrations can
+access it via `tensorcast.store()`, but day-to-day usage goes through the functional helpers.
 
 ## Artifact Loading Sequence
 
@@ -117,24 +116,24 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 - Commit returns RFC-0007 content-addressed descriptor (artifact_id = mi2:index_multihash:data_multihash).
 - Same-machine consumers always materialize to daemon-owned coalesced VRAM (CUDA IPC) for zero-copy use.
 
-### Store Session Helpers
+### Client Facade & Store helpers
 
-- `Store.register(...)` (lease-in-place) and `Store.put(...)` (daemon-owned coalesced VRAM) return
-  a `RegisteredArtifact` describing the canonical index, replica metadata, and lease handle when
-  applicable. Both methods accept synchronous and asynchronous variants (e.g., `register_async`).
-- `Store.get(...)` returns a materialised `dict[str, torch.Tensor]` by artifact id or key with
-  retry-aware fallback handling. `Store.get_async(...)` exposes an `ArtifactFuture` that supports
-  `result()`, cancellation, and completion callbacks.
-- `Store.get_into(...)` populates caller-provided tensors in-place. The Store validates shapes,
+- `tensorcast.register(...)` (lease-in-place) and `tensorcast.put(...)` (daemon-owned coalesced VRAM)
+  return a `RegisteredArtifact` describing the canonical index, replica metadata, and lease handle
+  when applicable. Both functions call into the shared Store and offer async variants via
+  `tensorcast.store().register_async(...)`.
+- `tensorcast.get(...)` returns a materialised `dict[str, torch.Tensor]` by artifact id or key with
+  retry-aware fallback handling. `tensorcast.store().get_async(...)` exposes an `ArtifactFuture`
+  that supports `result()`, cancellation, and completion callbacks.
+- `tensorcast.get_into(...)` populates caller-provided tensors in-place. The Store validates shapes,
   strides, and device placement before mutating buffers, zero-fills PAD segments to keep tensors
   consistent on failure or cancellation, and unloads any daemon-backed VRAM replica as soon as the
-  copy (or validation error) completes. The asynchronous variant mirrors this behaviour so temporary
-  replicas never linger beyond the transfer lifecycle.
+  copy (or validation error) completes. Asynchronous flows are available via `tensorcast.store()`.
 - `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
   policy flags across call sites.
 - Low-level workflows remain available via
   `tensorcast.api.begin_register_artifact_sdk(...)` for scenarios that need explicit control over
-  lease feeding, although most integrations should rely on `Store.register_async` and its
+  lease feeding, although most integrations should rely on the functional facade and the Store’s
   cancellation hooks.
 
 ### Python SDK Updates
@@ -144,10 +143,9 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
   - `PlanType.VRAM_LEASED` (aliases: `"lease"`)
 - `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability.
 - Loading helpers with fixed return types now forward to the Store session:
-  - Synchronous: `Store.get(...) -> dict[str, torch.Tensor]`
-  - Asynchronous: `Store.get_async(...) -> ArtifactFuture[dict[str, torch.Tensor]]`
-  - Legacy shims (`load_dict_sync`, `get_artifact_sync`, etc.) call into a cached Store and should be
-    considered transitional.
+  - Synchronous: `tensorcast.get(...) -> dict[str, torch.Tensor]`
+  - Asynchronous: `tensorcast.store().get_async(...) -> ArtifactFuture[dict[str, torch.Tensor]]`
+  - Utilities (`load_dict_sync`, etc.) call into the shared Store for compatibility.
 - `ArtifactFuture.done() / result(timeout) / cancel()` mirror the standard `concurrent.futures`
   contract. Cancellation propagates to daemon RPCs (`AbortRegisteredArtifact`, `RevokeRegisteredArtifact`)
   and records telemetry for observability.
@@ -164,48 +162,11 @@ with begin_register_artifact_sdk(..., ttl_ms=5000) as handle:
 - Idempotent success on duplicates: if the same `mi2:` artifact already has a replica on the same device, the daemon reclaims the new allocation and returns `OK` with the existing descriptor plus `existed=true`.
 - Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and the unified `SessionLifecycleTask` drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.
 
-### SDK Module Layout
-
-The SDK is organized under `tensorcast/api`. New internal modules:
-
-- `tensorcast/api/_config.py` — constants, PlanType, options, global addresses
-- `tensorcast/api/_errors.py` — custom exceptions
-- `tensorcast/api/_otel.py` — observability helpers
-- `tensorcast/api/_device.py` — device resolution and UUID mapping
-- `tensorcast/api/_indices.py` — index build/parse helpers
-- `tensorcast/api/_io_disk.py` — disk save/load helpers
-- `tensorcast/api/_loader.py` — Loader strategy and LoadHandle
-- `tensorcast/api/_register.py` — RegisteredArtifact + plan registrars
-
-Public entry points are exported from `tensorcast/api/__init__.py` and should be imported via `tensorcast.api`.
-
-The Store session API consolidates retrieval verbs (`Store.get`, `Store.get_into`) so callers can express
-fallback policies declaratively. When `FallbackOptions.prefer_disk` is set—or when only disk access is
-permitted (`allow_p2p=False`)—the Store validates the on-disk canonical index before materializing tensors
-and emits telemetry indicating whether the request was served from disk or via the daemon’s P2P path.
-These disk fallbacks reuse the existing `_io_disk` helpers to avoid duplicating validation logic.
 
 ### Client Reuse & Resiliency
 
-- The Python SDK establishes a single gRPC client per process during `tensorcast.startup.init()` and
-  subsequent API calls access it through `tensorcast.startup.current_client()`. This guarantees that
-  all helpers interact with the same daemon session and prevents accidental cross-daemon usage.
+- The Python SDK establishes a single gRPC client per process during `tensorcast.init()`; all
+  subsequent API calls reuse the same Store session obtained via `tensorcast.store()`. This ensures
+  every helper targets the same daemon endpoint and prevents accidental cross-daemon usage.
 - The underlying client enables gRPC keepalive and performs a light retry with channel refresh on transient errors (`UNAVAILABLE`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`).
 - In registration flows, `RegisteredArtifact` holds a cached client for its lifetime (keepalive thread, commit/abort/revoke, and feed helpers reuse the same channel).
-
-### Migration Notes
-
-- Module-level helpers such as `register_artifact`, `get_artifact_sync`, and `get_artifact_async`
-  have been removed. All registration and retrieval flows must use a `Store` instance directly.
-- Alignment guidance for existing codebases:
-  - `register_artifact(state_dict, options=...)` → `Store.register(state_dict, options=...)`
-  - `register_artifact(..., plan="vram_coalesced")` → `Store.put(...)`
-  - `get_artifact_sync(key=..., device_id=...)` → `Store.get(key=..., device=...)`
-  - `get_artifact_async(...)` → `Store.get_async(...)`
-- Observability lives on the Store verbs. Attach tracing or metrics around `Store.register`/
-  `Store.get` instead of the removed helpers to benefit from OpenTelemetry span fields and
-  `tc_store_*` counters.
-- The Store constructor accepts the same daemon endpoints as `tensorcast.startup.init()` (e.g.,
-  `"127.0.0.1:50052"`, `"unix:///tmp/tensorcastd.sock"`). Code that previously relied on global
-  state should accept a `Store` instance explicitly or construct one using the daemon address that
-  `tensorcast.startup.init()` exposes.

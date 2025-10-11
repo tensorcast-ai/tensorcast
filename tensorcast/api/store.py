@@ -37,7 +37,10 @@ from tensorcast.api._indices import (
     load_tensor_indices_from_dir,
 )
 from tensorcast.api._io_disk import load_dict_from_disk
-from tensorcast.api._loader import MaterializedArtifact, materialize_artifact
+from tensorcast.api._materialize import (
+    MaterializedArtifact,
+    materialize_artifact,
+)
 from tensorcast.api._register import (
     RegisteredArtifact as _RegisterHandle,
 )

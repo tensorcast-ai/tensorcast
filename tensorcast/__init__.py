@@ -94,17 +94,53 @@ _install_c_extension_bootstrap()
 # -----------------------------------------------------------------------------
 
 from tensorcast._version import __version__  # noqa: E402
-
-# Import functions from the canonical startup module
-from tensorcast.startup import (  # noqa: E402
-    init,
-    is_initialized,
-    shutdown,
+from tensorcast.api import (  # noqa: E402
+    ArtifactDescriptor,
+    ArtifactError,
+    ArtifactFuture,
+    FallbackOptions,
+    GetArtifactOptions,
+    LoadHandle,
+    PlanType,
+    RegisterArtifactOptions,
+    RegisteredArtifact,
+    RegisteredLease,
+    RegistrationResult,
+    Store,
+    StoreOptions,
+    begin_register_artifact_sdk,
+    build_indices_from_safetensors,
+    calculate_tensor_device_offsets,
+    load_dict_async,
+    load_dict_from_disk,
+    load_dict_sync,
+    save_dict,
 )
+from tensorcast.startup import init, is_initialized, shutdown  # noqa: E402
 
 __all__ = [
     "__version__",
     "init",
     "is_initialized",
     "shutdown",
+    "Store",
+    "StoreOptions",
+    "RegisteredArtifact",
+    "ArtifactError",
+    "ArtifactFuture",
+    "FallbackOptions",
+    "LoadHandle",
+    "load_dict_sync",
+    "load_dict_async",
+    "save_dict",
+    "load_dict_from_disk",
+    "begin_register_artifact_sdk",
+    "RegisteredLease",
+    "RegistrationResult",
+    "PlanType",
+    "RegisterArtifactOptions",
+    "GetArtifactOptions",
+    "calculate_tensor_device_offsets",
+    "build_indices_from_safetensors",
+    "ArtifactDescriptor",
 ]

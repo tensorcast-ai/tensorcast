@@ -41,7 +41,8 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
             res = store.register(state, options=opts, ttl_ms=2000)
             assert isinstance(res, StoreRegisteredArtifact)
             assert res.registration_result is not None
-            desc, lease = res.registration_result.descriptor, res.lease
+            desc = res.registration_result.descriptor
+            lease = res.registration_result.lease
             assert desc.artifact_id.startswith("mi2:")
             # Keepalive thread should be running; sleep to allow a keepalive tick
             time.sleep(0.5)

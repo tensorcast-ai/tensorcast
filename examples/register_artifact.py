@@ -5,12 +5,10 @@ import gc
 import torch
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 
-from tensorcast import init
-from tensorcast.api import Store
+import tensorcast as tc
 from tensorcast.testing.dict import assert_state_dict_equal
-from tensorcast.types import ArtifactDescriptor
 
-ctx = init(address="127.0.0.1:50052")
+tc.init(address="127.0.0.1:50052")
 
 hf_model_name = "Qwen/Qwen3-0.6B"
 # Load a artifact from HuggingFace artifact hub.
@@ -20,14 +18,8 @@ artifact = AutoModelForCausalLM.from_pretrained(
 
 state_dict = artifact.state_dict()
 
-# Create a Store session scoped to this process
-store = Store(ctx.address)
-
-device_arg = "cuda:0" if torch.cuda.is_available() else None
-registered = store.put(state_dict, device=device_arg)
+registered = tc.put(state_dict, device=0)
 saved_dict = registered.state_dict
-commit_info = registered.registration_result.descriptor
-assert isinstance(commit_info, ArtifactDescriptor)
 assert saved_dict is not None
 
 # Validate equality between the original and registered dicts

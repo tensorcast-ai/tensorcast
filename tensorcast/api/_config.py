@@ -74,7 +74,7 @@ class PlanType(Enum):
 
 @dataclass(slots=True, frozen=True)
 class RegisterArtifactOptions:
-    plan: PlanType | str = PlanType.VRAM_COALESCED
+    plan: PlanType = PlanType.VRAM_COALESCED
     p2p_prefer: str = "vram"
     max_inflight_bytes: int = 512 * 1024 * 1024
     release_on_tensor_commit: bool = True

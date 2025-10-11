@@ -142,32 +142,32 @@ ctx = init(address="local", daemon_config_path="examples/config/store_daemon_con
 ctx = init(address="127.0.0.1:50052")
 
 # Context is process-scoped and is automatically closed at process exit (atexit).
-# Call tensorcast.startup.shutdown() to close early if needed.
+# Call tensorcast.shutdown() to close early if needed.
 ```
 
-Call `tensorcast.init(...)` once per process before constructing client sessions. The preferred
-entry point for artifact registration and loading is the `Store` session API:
+Call `tensorcast.init(...)` once per process before interacting with the daemon. The user-facing
+API is intentionally lightweight—operate through the top-level helpers and let TensorCast manage
+the session state for you:
 
 ```python
-from tensorcast.api import FallbackOptions, Store
+import tensorcast as tc
+import torch
 
-# Derive the daemon endpoint from init() or supply one explicitly.
-store = Store("127.0.0.1:50052")
+tc.init(address="auto")
 
-# Register tensors without copying when they already live on the requested device.
-registered = store.register(state_dict, key="demo:model:001")
+state_dict = {"layer.weight": torch.randn(8, 8, device="cuda")}
 
-# Materialise tensors by key or artifact id. Fallback policies can be expressed declaratively.
-state = store.get(key="demo:model:001", fallback=FallbackOptions(prefer_disk=True))
+registered = tc.register(state_dict, key="demo:model:001")
+latest = tc.get(key="demo:model:001", device="cuda:0")
 
-# In-place materialisation fills user-provided tensors directly.
-store.get_into(target_buffers, artifact_id=registered.artifact_id)
+buffers = {"layer.weight": torch.empty_like(state_dict["layer.weight"])}
+tc.get_into(buffers, artifact_id=registered.artifact_id, device="cuda:0")
 ```
 
-Legacy module-level helpers (`register_artifact`, `get_artifact_sync`, `get_artifact_async`, …)
-have been removed now that the Store session API is fully rolled out. All client integrations
-must instantiate `Store` directly to access registration and retrieval verbs along with
-observability hooks (OpenTelemetry spans + `tc_store_*` metrics).
+For advanced scenarios (async verbs, fine-grained inspection, or direct access to diagnostics) use
+`tc.store()` to obtain the underlying `Store` session object. That object exposes the complete
+surface described in [docs/designs/0014-store-session-api-modernization.md](docs/designs/0014-store-session-api-modernization.md),
+including async futures, retry telemetry, and session metadata.
 
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.

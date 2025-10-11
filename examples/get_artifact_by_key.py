@@ -2,18 +2,17 @@
 
 import torch
 
-from tensorcast import startup
-from tensorcast.api import FallbackOptions, Store
+import tensorcast as tc
+from tensorcast import FallbackOptions
 
 
 def main() -> None:
-    ctx = startup.init()
-    store = Store(ctx.address)
+    tc.init(address="127.0.0.1:50052")
 
     # Prefer daemon MaterializeByKey path (no client-side disk fallback)
     fallback = FallbackOptions(prefer_disk=False, allow_p2p=True)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    state_dict = store.get(key="demo:model:001", device=device, fallback=fallback)
+    state_dict = tc.get(key="demo:model:001", device=device, fallback=fallback)
 
     total_params = sum(int(t.numel()) for t in state_dict.values())
     print("Loaded params:", total_params)
