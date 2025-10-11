@@ -195,6 +195,7 @@ cursor.execute("""
 - **P2P path (synchronous in engine)**: `ingest_from_p2p_internal()` performs the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
 - **Disk path**: `ingest_from_disk_internal()` starts an async load and waits until the target memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
 - **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and registers the local replica via the StoreEngine helper.
+- **Lease-in-place payloads**: Registration feeds now include `storage_entries` and `tensor_aliases` so the daemon can rebuild the canonical tensor index without reopening CUDA IPC handles for every tensor. Metrics (`tc_register_storage_count`, `tc_register_tensor_count`) expose the number of unique storages and logical tensors processed per commit to validate deduplication.
 - **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
 
 

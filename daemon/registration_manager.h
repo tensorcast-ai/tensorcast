@@ -75,10 +75,40 @@ class RegistrationManager {
       v.push_back(std::move(s));
   }
 
+  void append_storage_entries(const std::string& reg_id, std::vector<RegisterStorageMeta>&& storages) {
+    absl::MutexLock l(&mu_);
+    auto& bucket = reg_storages_[reg_id];
+    for (auto& s : storages)
+      bucket.push_back(std::move(s));
+  }
+
+  void append_tensor_aliases(const std::string& reg_id, std::vector<RegisterTensorAliasMeta>&& aliases) {
+    absl::MutexLock l(&mu_);
+    auto& bucket = reg_aliases_[reg_id];
+    for (auto& a : aliases)
+      bucket.push_back(std::move(a));
+  }
+
   std::vector<LeaseSegMeta> get_lease_segments(const std::string& reg_id) const {
     absl::MutexLock l(&mu_);
     auto it = reg_leases_.find(reg_id);
     if (it == reg_leases_.end())
+      return {};
+    return it->second;
+  }
+
+  std::vector<RegisterStorageMeta> get_storage_entries(const std::string& reg_id) const {
+    absl::MutexLock l(&mu_);
+    auto it = reg_storages_.find(reg_id);
+    if (it == reg_storages_.end())
+      return {};
+    return it->second;
+  }
+
+  std::vector<RegisterTensorAliasMeta> get_tensor_aliases(const std::string& reg_id) const {
+    absl::MutexLock l(&mu_);
+    auto it = reg_aliases_.find(reg_id);
+    if (it == reg_aliases_.end())
       return {};
     return it->second;
   }
@@ -98,6 +128,8 @@ class RegistrationManager {
     if (it->second.expiry.time_since_epoch().count() > 0 && now > it->second.expiry) {
       reg_meta_.erase(it);
       reg_leases_.erase(reg_id);
+      reg_storages_.erase(reg_id);
+      reg_aliases_.erase(reg_id);
       return true;
     }
     return false;
@@ -152,6 +184,8 @@ class RegistrationManager {
     absl::MutexLock l(&mu_);
     reg_meta_.erase(reg_id);
     reg_leases_.erase(reg_id);
+    reg_storages_.erase(reg_id);
+    reg_aliases_.erase(reg_id);
   }
 
   // Enumerate registration ids (for TTL sweeping and tests)
@@ -168,6 +202,8 @@ class RegistrationManager {
   mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, RegMeta> reg_meta_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::vector<LeaseSegMeta>> reg_leases_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, std::vector<RegisterStorageMeta>> reg_storages_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, std::vector<RegisterTensorAliasMeta>> reg_aliases_ ABSL_GUARDED_BY(mu_);
 };
 
 // Stream operator for RegPlan to enable readable logging

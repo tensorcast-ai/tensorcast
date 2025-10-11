@@ -11,6 +11,7 @@ from tensorcast._C import restore_tensors_from_disk, save_model_to_disk
 
 from ._device import resolve_device
 from ._indices import calculate_tensor_device_offsets, load_tensor_indices_from_dir
+from ._tensor_graph import build_tensor_storage_graph
 
 
 def save_dict(
@@ -30,17 +31,19 @@ def save_dict(
         A descriptor dict with artifact_id, index_multihash, data_multihash,
         schema_version, encoding, and total_size.
     """
-    tensor_names = sorted(state_dict.keys())
-    tensor_data_index: dict[str, tuple[int, int]] = {}
+    graph = build_tensor_storage_graph(state_dict)
+    tensor_names = sorted(graph.aliases.keys())
+    tensor_data_index: dict[str, tuple[int, int]] = {
+        name: graph.tensor_source_index[name] for name in tensor_names
+    }
     meta_state_dict: dict[str, tuple[list[int], list[int], str, int]] = {}
-    for name, param in state_dict.items():
-        storage = param.untyped_storage()
-        tensor_data_index[name] = (int(storage.data_ptr()), int(storage.size()))
+    for name in tensor_names:
+        alias = graph.aliases[name]
         meta_state_dict[name] = (
-            list(map(int, param.shape)),
-            list(map(int, param.stride())),
-            str(param.dtype),
-            int(param.storage_offset()),
+            list(alias.shape),
+            list(alias.stride),
+            alias.dtype,
+            int(alias.storage_offset),
         )
 
     config = streaming_config or {}

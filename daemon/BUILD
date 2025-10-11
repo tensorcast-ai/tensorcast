@@ -96,13 +96,20 @@ sc_cc_library(
 
 sc_cc_library(
     name = "lip_manager_lib",
-    srcs = ["lip_manager.cc"],
-    hdrs = ["lip_manager.h"],
+    srcs = [
+        "lip_manager.cc",
+        "lip_metadata_utils.cc",
+    ],
+    hdrs = [
+        "lip_manager.h",
+        "lip_metadata_utils.h",
+    ],
     deps = [
         ":cuda_ipc_raii_hdr",
         ":types_hdr",
         "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
+        "//core/store/loader:canonical_index",
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -131,6 +138,15 @@ cc_binary(
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@gsl",
+    ],
+)
+
+cc_test(
+    name = "lip_metadata_utils_test",
+    srcs = ["lip_metadata_utils_test.cc"],
+    deps = [
+        ":lip_manager_lib",
+        "@catch2//:catch2_main",
     ],
 )
 

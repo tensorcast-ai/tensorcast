@@ -2,18 +2,24 @@
 
 #include "daemon/lip_manager.h"
 
+#include <cstdint>
 #include <optional>
 
 #include <unistd.h>
 #include <algorithm>
+#include <utility>
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/loader/canonical_index.h"
 #include "core/store/loader/segment_plan_source.h"
 #include "core/store/loader/source_hash.h"
 #include "daemon/cuda_ipc_raii.h"
+#include "daemon/lip_metadata_utils.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::daemon {
@@ -22,7 +28,30 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     int target_device_id,
     const std::string& canonical_index_json,
     uint64_t total_size,
-    absl::Span<const LeaseSegMeta> segments) {
+    absl::Span<const LeaseSegMeta> segments,
+    absl::Span<const RegisterStorageMeta> storages) {
+  if (storages.empty()) {
+    return absl::InvalidArgumentError("lip copy requires storage metadata");
+  }
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+  storage_by_handle.reserve(storages.size());
+  for (const auto& storage : storages) {
+    storage_by_handle.emplace(storage.handle_bytes, &storage);
+  }
+  for (const auto& seg : segments) {
+    auto it = storage_by_handle.find(seg.handle_bytes);
+    if (it == storage_by_handle.end()) {
+      return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+    }
+    if (seg.length != it->second->storage_length) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat(
+              "segment length (%llu) does not match storage_length (%llu) for storage_id=%s",
+              static_cast<uint64_t>(seg.length),
+              static_cast<uint64_t>(it->second->storage_length),
+              it->second->storage_id));
+    }
+  }
   // Begin destination allocation on target device
   store::StoreEngine::ArtifactRegistration areg;
   areg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()));
@@ -159,6 +188,28 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   const size_t chunk_size = engine.get_artifact_chunk_bytes();
   if (chunk_size == 0) {
     return absl::FailedPreconditionError("invalid chunk_size (0)");
+  }
+
+  if (!lip.storages.empty()) {
+    absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+    storage_by_handle.reserve(lip.storages.size());
+    for (const auto& storage : lip.storages) {
+      storage_by_handle.emplace(storage.handle_bytes, &storage);
+    }
+    for (const auto& seg : lip.segments) {
+      auto it = storage_by_handle.find(seg.handle_bytes);
+      if (it == storage_by_handle.end()) {
+        return absl::InvalidArgumentError("staged export missing storage metadata for a segment handle");
+      }
+      if (seg.length != it->second->storage_length) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat(
+                "segment length (%llu) does not match storage_length (%llu) for storage_id=%s",
+                static_cast<uint64_t>(seg.length),
+                static_cast<uint64_t>(it->second->storage_length),
+                it->second->storage_id));
+      }
+    }
   }
 
   struct OpenedSeg {
@@ -420,9 +471,30 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     uint64_t total_size,
     const std::string& index_data,
     const std::string& index_key_hex,
-    std::vector<LeaseSegMeta>&& segments) {
-  // Validate canonical index presence via one of the two inputs
-  if (index_data.empty() && index_key_hex.empty()) {
+    std::vector<LeaseSegMeta>&& segments,
+    std::vector<RegisterStorageMeta>&& storages,
+    std::vector<RegisterTensorAliasMeta>&& aliases) {
+  std::string canonical_index_json = index_data;
+  if (!storages.empty() && !aliases.empty()) {
+    auto rebuilt_or = build_canonical_index_from_metadata(
+        absl::MakeSpan(segments), absl::MakeSpan(storages), absl::MakeSpan(aliases), device_id);
+    if (!rebuilt_or.ok()) {
+      return rebuilt_or.status();
+    }
+    const std::string& rebuilt = *rebuilt_or;
+    if (canonical_index_json.empty()) {
+      canonical_index_json = rebuilt;
+    } else {
+      auto stable_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device_id);
+      if (stable_or.ok() && *stable_or != rebuilt) {
+        LOG(WARNING) << "Rebuilt canonical index differs from client-provided data; "
+                     << "preferring rebuilt version for registration_id=" << registration_id;
+      }
+      canonical_index_json = rebuilt;
+    }
+  }
+
+  if (canonical_index_json.empty() && index_key_hex.empty()) {
     return absl::FailedPreconditionError("canonical index is required for LIP commit");
   }
 
@@ -520,7 +592,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
 
   // Compute multihashes
   auto index_mh_or = common::compute_index_multihash(
-      index_data.empty() ? std::optional<std::string>() : std::optional<std::string>(index_data), index_key_hex);
+      canonical_index_json.empty() ? std::optional<std::string>() : std::optional<std::string>(canonical_index_json),
+      index_key_hex);
   if (!index_mh_or.ok())
     return index_mh_or.status();
   auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
@@ -582,8 +655,10 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(lease.ttl_ms);
   lease.epoch = epoch;
   lease.total_size = total_size;
-  lease.index_data = index_data;
+  lease.index_data = canonical_index_json;
   lease.segments = std::move(segments);
+  lease.storages = std::move(storages);
+  lease.aliases = std::move(aliases);
   lease.verification_json = out.verification_json;
 
   {

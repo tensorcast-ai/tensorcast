@@ -287,7 +287,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       int target_device_id,
       const std::string& canonical_index_json,
       uint64_t total_size,
-      absl::Span<const LeaseSegMeta> segments);
+      absl::Span<const LeaseSegMeta> segments,
+      absl::Span<const RegisterStorageMeta> storages);
 
   Options opts_;
 

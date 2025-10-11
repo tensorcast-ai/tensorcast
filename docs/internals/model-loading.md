@@ -105,6 +105,12 @@ sequenceDiagram
   - SDK already computes a coalesced layout and sets `dst_offset` per unique storage block.
   - Ordering no longer matters, but the SDK still sorts for stable traces.
 
+### Shared Storage Graph Helper
+
+- SDK registration flows call `tensorcast.api._tensor_graph.build_tensor_storage_graph()` before feeding lease segments.
+- The helper deduplicates `torch.Storage` objects and emits a `TensorStorageGraph` containing `StorageEntry` rows (unique storage id, device id, base pointer, storage length) plus `TensorAlias` metadata (tensor name, storage id, storage offset, logical byte length, shape, stride, dtype).
+- Clients transmit the deduplicated storage table via `storage_entries` and alias metadata via `tensor_aliases`. The daemon reconstructs canonical index JSON from these structures, producing byte-for-byte parity with disk persistence and opening each CUDA IPC handle only once per unique storage.
+
 Recommended: rely on `tensorcast.register(...)` (or `register_async`) with
 `RegisterArtifactOptions(lease_in_place=True)` and an explicit `ttl_ms`. The Store
 manages keepalives automatically and surfaces the committed descriptor through the

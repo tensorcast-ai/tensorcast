@@ -164,8 +164,45 @@ grpc::Status RegistrationController::feed_stream(
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
+    } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
+      // allow requests that only carry storage/alias metadata without segments
     } else {
       return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
+    }
+    if (!req.storage_entries().empty()) {
+      std::vector<RegisterStorageMeta> storages;
+      storages.reserve(req.storage_entries().size());
+      for (const auto& entry : req.storage_entries()) {
+        RegisterStorageMeta meta;
+        meta.storage_id = entry.storage_id();
+        meta.device_id = entry.device_id();
+        meta.handle_bytes = entry.cuda_ipc_handle();
+        meta.storage_length = entry.storage_length();
+        storages.push_back(std::move(meta));
+      }
+      if (!storages.empty())
+        d_.reg.append_storage_entries(reg_id, std::move(storages));
+    }
+    if (!req.tensor_aliases().empty()) {
+      std::vector<RegisterTensorAliasMeta> aliases;
+      aliases.reserve(req.tensor_aliases().size());
+      for (const auto& alias : req.tensor_aliases()) {
+        RegisterTensorAliasMeta meta;
+        meta.name = alias.name();
+        meta.storage_id = alias.storage_id();
+        meta.storage_offset = alias.storage_offset();
+        meta.logical_length = alias.logical_length();
+        meta.shape.reserve(alias.shape().size());
+        for (int64_t v : alias.shape())
+          meta.shape.push_back(v);
+        meta.stride.reserve(alias.stride().size());
+        for (int64_t v : alias.stride())
+          meta.stride.push_back(v);
+        meta.dtype = alias.dtype();
+        aliases.push_back(std::move(meta));
+      }
+      if (!aliases.empty())
+        d_.reg.append_tensor_aliases(reg_id, std::move(aliases));
     }
   }
   rctx.mark_success();
@@ -223,8 +260,45 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
+    } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
+      // allow metadata-only payloads
     } else {
       return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
+    }
+    if (!req.storage_entries().empty()) {
+      std::vector<RegisterStorageMeta> storages;
+      storages.reserve(req.storage_entries().size());
+      for (const auto& entry : req.storage_entries()) {
+        RegisterStorageMeta meta;
+        meta.storage_id = entry.storage_id();
+        meta.device_id = entry.device_id();
+        meta.handle_bytes = entry.cuda_ipc_handle();
+        meta.storage_length = entry.storage_length();
+        storages.push_back(std::move(meta));
+      }
+      if (!storages.empty())
+        d_.reg.append_storage_entries(reg_id, std::move(storages));
+    }
+    if (!req.tensor_aliases().empty()) {
+      std::vector<RegisterTensorAliasMeta> aliases;
+      aliases.reserve(req.tensor_aliases().size());
+      for (const auto& alias : req.tensor_aliases()) {
+        RegisterTensorAliasMeta meta;
+        meta.name = alias.name();
+        meta.storage_id = alias.storage_id();
+        meta.storage_offset = alias.storage_offset();
+        meta.logical_length = alias.logical_length();
+        meta.shape.reserve(alias.shape().size());
+        for (int64_t v : alias.shape())
+          meta.shape.push_back(v);
+        meta.stride.reserve(alias.stride().size());
+        for (int64_t v : alias.stride())
+          meta.stride.push_back(v);
+        meta.dtype = alias.dtype();
+        aliases.push_back(std::move(meta));
+      }
+      if (!aliases.empty())
+        d_.reg.append_tensor_aliases(reg_id, std::move(aliases));
     }
   }
   return Status::OK;
@@ -298,6 +372,24 @@ grpc::Status RegistrationController::commit(
       return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
     }
 
+    auto storage_entries = d_.reg.get_storage_entries(req.registration_id());
+    auto alias_vec = d_.reg.get_tensor_aliases(req.registration_id());
+    if (storage_entries.empty()) {
+      return {StatusCode::FAILED_PRECONDITION, "registration missing storage_entries payload"};
+    }
+    if (alias_vec.empty()) {
+      return {StatusCode::FAILED_PRECONDITION, "registration missing tensor_aliases payload"};
+    }
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto storage_counter = meter->CreateDoubleCounter("tc_register_storage_count");
+      static auto alias_counter = meter->CreateDoubleCounter("tc_register_tensor_count");
+      storage_counter->Add(static_cast<double>(storage_entries.size()));
+      alias_counter->Add(static_cast<double>(alias_vec.size()));
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_storage_count/tc_register_tensor_count unavailable";
+    }
+
     auto out_or = d_.lip.commit_lease_in_place(
         req.registration_id(),
         meta.device_id,
@@ -307,7 +399,9 @@ grpc::Status RegistrationController::commit(
         meta.total_size,
         meta.index_data,
         meta.index_key_hex,
-        std::move(lease_vec));
+        std::move(lease_vec),
+        std::move(storage_entries),
+        std::move(alias_vec));
     if (!out_or.ok()) {
       if (absl::IsAlreadyExists(out_or.status())) {
         try {

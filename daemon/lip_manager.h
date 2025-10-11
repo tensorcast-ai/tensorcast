@@ -29,7 +29,8 @@ class LipManager {
       int target_device_id,
       const std::string& canonical_index_json,
       uint64_t total_size,
-      absl::Span<const LeaseSegMeta> segments);
+      absl::Span<const LeaseSegMeta> segments,
+      absl::Span<const RegisterStorageMeta> storages);
 
   // Register staged export for the given LIP lease over specified chunk indices.
   // Returns an opaque lock token which can be used to release the export via
@@ -69,7 +70,9 @@ class LipManager {
       uint64_t total_size,
       const std::string& index_data, // canonical index JSON (may be empty)
       const std::string& index_key_hex, // precomputed index sha256 hex (may be empty)
-      std::vector<LeaseSegMeta>&& segments);
+      std::vector<LeaseSegMeta>&& segments,
+      std::vector<RegisterStorageMeta>&& storages,
+      std::vector<RegisterTensorAliasMeta>&& aliases);
 
  private:
   std::shared_ptr<store::StoreEngine> engine_;

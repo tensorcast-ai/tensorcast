@@ -78,6 +78,7 @@ Contract highlights:
 - Consistent deadlines: user timeouts are clamped to RPC deadlines.
 - Observability is best-effort and never changes control flow; high-cardinality fields are gated.
 - Idempotent unload and lock cleanup; expired tokens are unlocked automatically.
+- Lease-in-place commits rebuild the canonical tensor index from the fed `storage_entries` and `tensor_aliases`, emitting `tc_register_storage_count` / `tc_register_tensor_count` metrics so rollouts can confirm dedupe efficacy.
 
 ## Directory Layout (What lives here)
 

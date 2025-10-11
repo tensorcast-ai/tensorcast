@@ -23,6 +23,7 @@ from tensorcast._C import (
     restore_tensors,
 )
 from tensorcast.api._indices import calculate_tensor_device_offsets
+from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storage_graph
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
@@ -51,6 +52,8 @@ from tensorcast.types import (
     Handshake,
     LeasePlan,
     LeaseSegment,
+    RegisterStorage,
+    RegisterTensorAlias,
 )
 
 # Internal alignment hint for layout computation.
@@ -335,11 +338,13 @@ class BuildContext:
         input_mode: str,
         tensor_meta_index: TensorMetaIndex,
         tensor_source_index: TensorDataIndex,
+        storage_graph: TensorStorageGraph,
     ) -> None:
         self.device_id = int(device_id)
         self.input_mode = input_mode  # "cpu" or "cuda"
         self.tensor_meta_index = tensor_meta_index
         self.tensor_source_index = tensor_source_index
+        self.storage_graph = storage_graph
 
     @staticmethod
     def from_artifact(
@@ -374,23 +379,21 @@ class BuildContext:
                     )
             input_mode = "cpu"
 
-        tensor_meta_index: TensorMetaIndex = {}
-        tensor_source_index: TensorDataIndex = {}
-        for name, t in artifact.items():
-            storage = t.untyped_storage()
-            tensor_source_index[name] = (int(storage.data_ptr()), int(storage.size()))
-            tensor_meta_index[name] = (
-                list(map(int, t.shape)),
-                list(map(int, t.stride())),
-                str(t.dtype),
-                int(t.storage_offset()),
-            )
+        storage_graph = build_tensor_storage_graph(artifact)
+        if input_mode == "cuda":
+            for entry in storage_graph.storages.values():
+                if entry.device_id != target_device_id:
+                    raise DeviceMismatch(
+                        f"Tensor storage device mismatch: expected cuda:{target_device_id}, "
+                        f"got {entry.device_id}"
+                    )
 
         return BuildContext(
             device_id=target_device_id,
             input_mode=input_mode,
-            tensor_meta_index=tensor_meta_index,
-            tensor_source_index=tensor_source_index,
+            tensor_meta_index=storage_graph.tensor_meta_index,
+            tensor_source_index=storage_graph.tensor_source_index,
+            storage_graph=storage_graph,
         )
 
 
@@ -554,26 +557,84 @@ class _LeaseUploader:
         def _export_cuda_ipc_handle(ptr: int) -> bytes:
             return get_cuda_memory_handle(ctx.device_id, int(ptr))
 
-        segments: list[LeaseSegment] = []
-        chunks = list(layout.unique_chunks)
-        chunks.sort(key=lambda x: int(x[2]))
-        for src_off, size_bytes, dst_off, _stream in chunks:
+        graph = ctx.storage_graph
+        offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
+        if not offsets_for_device:
+            raise TensorCastError(
+                f"No layout offsets recorded for device {ctx.device_id} during lease registration"
+            )
+
+        storage_to_dst: dict[str, int] = {}
+        aliases_payload: list[RegisterTensorAlias] = []
+        for name in sorted(graph.aliases.keys()):
+            alias = graph.aliases[name]
             if cancel_event and cancel_event.is_set():
                 raise CancelledError
-            handle_bytes = _export_cuda_ipc_handle(int(src_off))
+            if name not in offsets_for_device:
+                raise TensorCastError(
+                    f"Missing layout offset for tensor '{name}' in lease plan"
+                )
+            dst_offset = int(offsets_for_device[name])
+            storage_to_dst.setdefault(alias.storage_id, dst_offset)
+            aliases_payload.append(
+                RegisterTensorAlias(
+                    name=alias.name,
+                    storage_id=alias.storage_id,
+                    storage_offset=int(alias.storage_offset),
+                    logical_length=int(alias.logical_length),
+                    shape=list(alias.shape),
+                    stride=list(alias.stride),
+                    dtype=alias.dtype,
+                )
+            )
+
+        segments: list[LeaseSegment] = []
+        storages_payload: list[RegisterStorage] = []
+        for storage_id in sorted(graph.storages.keys()):
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError
+            entry = graph.storages[storage_id]
+            if entry.device_id != int(ctx.device_id):
+                raise DeviceMismatch(
+                    f"Storage '{storage_id}' device mismatch: expected cuda:{ctx.device_id}, got {entry.device_id}"
+                )
+            dst_offset = storage_to_dst[storage_id]
+            handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
+            length_bytes = int(entry.size_bytes)
             segments.append(
                 LeaseSegment(
                     device_id=int(ctx.device_id),
                     cuda_ipc_handle=handle_bytes,
                     base_addr=0,
-                    length=int(size_bytes),
-                    dst_offset=int(dst_off),
+                    length=length_bytes,
+                    dst_offset=int(dst_offset),
                 )
+            )
+            storages_payload.append(
+                RegisterStorage(
+                    storage_id=storage_id,
+                    device_id=int(ctx.device_id),
+                    cuda_ipc_handle=handle_bytes,
+                    storage_length=length_bytes,
+                )
+            )
+        if not storages_payload:
+            raise TensorCastError(
+                "No storage entries resolved during lease registration; artifact tensors must supply shared storage metadata"
+            )
+        if not aliases_payload:
+            raise TensorCastError(
+                "No tensor aliases resolved during lease registration; artifact tensors must supply alias metadata"
             )
         if cancel_event and cancel_event.is_set():
             raise CancelledError
         ctl = handle.client
-        ok = ctl.feed_register_artifact_lease_segments(handle.registration_id, segments)
+        ok = ctl.feed_register_artifact_lease_segments(
+            handle.registration_id,
+            segments,
+            storages=storages_payload,
+            tensor_aliases=aliases_payload,
+        )
         if not ok:
             raise FeedFailed("Lease segments feed failed")
         return artifact
