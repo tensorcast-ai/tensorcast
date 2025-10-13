@@ -74,6 +74,7 @@ Contract highlights:
 
 - Thin service: only validation, orchestration, status mapping. No duplicated engine logic.
 - RAII for external resources (e.g., CUDA IPC) to prevent leaks and double-close.
+- Canonical index rebuild mirrors the SDK path: storage-level offsets and lengths are emitted for every alias so tensor views dedupe across disk, coalesced VRAM, and LIP flows.
 - TTL for every ephemeral map; all TTL updates and cleanup run under BackgroundScheduler.
 - Consistent deadlines: user timeouts are clamped to RPC deadlines.
 - Observability is best-effort and never changes control flow; high-cardinality fields are gated.

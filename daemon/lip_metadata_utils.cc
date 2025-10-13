@@ -46,8 +46,8 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
   ordered_names.reserve(aliases.size());
   std::unordered_map<std::string, uint64_t> offsets;
   offsets.reserve(aliases.size());
-  std::unordered_map<std::string, uint64_t> logical_sizes;
-  logical_sizes.reserve(aliases.size());
+  std::unordered_map<std::string, uint64_t> storage_sizes;
+  storage_sizes.reserve(aliases.size());
   std::unordered_map<std::string, store::loader::CanonicalTensorMeta> metas;
   metas.reserve(aliases.size());
 
@@ -79,8 +79,10 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
     }
 
     ordered_names.push_back(name);
-    offsets.emplace(name, base_dst + alias.storage_offset);
-    logical_sizes.emplace(name, alias.logical_length);
+    // Emit storage-level destination offset for every alias to keep canonical
+    // index bytes stable across LIP and disk registrations.
+    offsets.emplace(name, base_dst);
+    storage_sizes.emplace(name, storage_meta->storage_length);
     store::loader::CanonicalTensorMeta meta;
     meta.shape = alias.shape;
     meta.stride = alias.stride;
@@ -90,7 +92,7 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
   }
 
   std::sort(ordered_names.begin(), ordered_names.end());
-  return store::loader::build_canonical_index_json(ordered_names, offsets, logical_sizes, metas);
+  return store::loader::build_canonical_index_json(ordered_names, offsets, storage_sizes, metas);
 }
 
 } // namespace tensorcast::daemon
