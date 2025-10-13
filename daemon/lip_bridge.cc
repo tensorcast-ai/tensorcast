@@ -28,7 +28,11 @@ absl::StatusOr<bool> LipBridge::try_satisfy_from_lip(
     return absl::FailedPreconditionError("lease_in_place not supported for same device_id consumers");
   }
   auto hbytes_or = lip_.copy_to_new_coalesced(
-      target_device_id, lip_src->index_data, lip_src->total_size, absl::MakeSpan(lip_src->segments));
+      target_device_id,
+      lip_src->index_data,
+      lip_src->total_size,
+      absl::MakeSpan(lip_src->segments),
+      absl::MakeSpan(lip_src->storages));
   if (!hbytes_or.ok())
     return hbytes_or.status();
 

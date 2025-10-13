@@ -111,7 +111,13 @@ All three tensors share the same storage but have different shapes/strides/stora
 
 ---
 
-## 7. Related Documentation
+## 7. Registration Payload Parity
+
+- Lease-in-place registration reuses the same deduplicated storage metadata produced by `build_tensor_storage_graph()`.
+- Clients transmit `storage_entries` (unique storage handle + device + length) and `tensor_aliases` (tensor name, storage id, offset, logical length, shape, stride, dtype) alongside the canonical index bytes.
+- The daemon rebuilds canonical index JSON using this metadata, guaranteeing byte-for-byte parity with the disk writer and ensuring each CUDA IPC handle is opened once per storage.
+
+## 8. Related Documentation
 
 * Checkpoint architecture details – `core/checkpoint/docs/architecture.md`
 * Verification integration – `core/checkpoint/docs/verification-integration.md`

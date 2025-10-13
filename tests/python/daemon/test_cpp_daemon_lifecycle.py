@@ -1,7 +1,5 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-# Copyright (c) 2025, TensorCast Team.
-
 """
 Integration test for the C++ StoreDaemon lifecycle with Global Store.
 

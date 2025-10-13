@@ -34,6 +34,23 @@ struct LeaseSegMeta {
   uint64_t dst_offset{0}; // destination offset in coalesced buffer
 };
 
+struct RegisterStorageMeta {
+  std::string storage_id;
+  int device_id{0};
+  std::string handle_bytes;
+  uint64_t storage_length{0};
+};
+
+struct RegisterTensorAliasMeta {
+  std::string name;
+  std::string storage_id;
+  uint64_t storage_offset{0};
+  uint64_t logical_length{0};
+  std::vector<int64_t> shape;
+  std::vector<int64_t> stride;
+  std::string dtype;
+};
+
 // LIP Registry entry (post-Commit leases)
 struct LipLeaseEntry {
   std::string registration_id; // original registration id for keepalive/revoke
@@ -46,6 +63,8 @@ struct LipLeaseEntry {
   uint64_t total_size{0};
   std::string index_data; // canonical JSON (for verification hashing if needed)
   std::vector<LeaseSegMeta> segments; // mapped via cuda IPC when used
+  std::vector<RegisterStorageMeta> storages; // deduplicated storage entries
+  std::vector<RegisterTensorAliasMeta> aliases; // logical tensor metadata
   std::string verification_json; // optional stored verification metadata (JSON)
 };
 

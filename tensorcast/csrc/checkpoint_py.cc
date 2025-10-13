@@ -25,6 +25,9 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "core/common/artifact_verification.h"
 #include "core/store/loader/canonical_index.h"
 #include "core/store/loader/file_partition_source.h"
@@ -542,6 +545,100 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
   return result;
 }
 
+namespace {
+
+struct StorageAccumulator {
+  int device_id;
+  uint64_t base_ptr;
+  uint64_t size_bytes;
+};
+
+std::string make_storage_id(int device_id, uint64_t base_ptr, uint64_t size_bytes) {
+  return absl::StrFormat("%d:%016x:%016x", device_id, base_ptr, size_bytes);
+}
+
+} // namespace
+
+static py::dict collect_tensor_storage_graph(const py::dict& tensors) {
+  absl::flat_hash_map<std::string, StorageAccumulator> storage_map;
+  py::dict aliases;
+  py::dict tensor_meta_index;
+  py::dict tensor_source_index;
+
+  for (auto item : tensors) {
+    const std::string name = py::cast<std::string>(item.first);
+    py::handle tensor_obj = item.second;
+    at::Tensor tensor = tensor_obj.cast<at::Tensor>();
+    if (!tensor.defined()) {
+      PY_THROW_WITH_LOG(PyExc_ValueError, absl::StrCat("Tensor for '", name, "' is not defined"));
+    }
+
+    int device_id = -1;
+    if (tensor.is_cuda()) {
+      device_id = tensor.get_device();
+    } else if (!tensor.device().is_cpu()) {
+      PY_THROW_WITH_LOG(
+          PyExc_ValueError, absl::StrCat("Unsupported device for tensor '", name, "': ", tensor.device().str()));
+    }
+
+    const uint64_t storage_offset = static_cast<uint64_t>(tensor.storage_offset());
+    auto storage = tensor.storage();
+    auto* storage_impl = storage.unsafeGetStorageImpl();
+    if (storage_impl == nullptr) {
+      PY_THROW_WITH_LOG(PyExc_RuntimeError, absl::StrCat("Missing storage for tensor '", name, "'"));
+    }
+    const uint64_t base_ptr = reinterpret_cast<uint64_t>(storage_impl->data_ptr().get());
+    const uint64_t storage_size_bytes = static_cast<uint64_t>(storage_impl->nbytes());
+    const uint64_t logical_length = static_cast<uint64_t>(tensor.nbytes());
+    const std::string storage_id = make_storage_id(device_id, base_ptr, storage_size_bytes);
+
+    storage_map.try_emplace(
+        storage_id, StorageAccumulator{.device_id = device_id, .base_ptr = base_ptr, .size_bytes = storage_size_bytes});
+
+    std::vector<int64_t> shape_vec(tensor.sizes().begin(), tensor.sizes().end());
+    std::vector<int64_t> stride_vec(tensor.strides().begin(), tensor.strides().end());
+    py::list shape_py;
+    py::list stride_py;
+    for (auto v : shape_vec) {
+      shape_py.append(static_cast<int64_t>(v));
+    }
+    for (auto v : stride_vec) {
+      stride_py.append(static_cast<int64_t>(v));
+    }
+    std::string dtype_str = py::str(tensor_obj.attr("dtype")).cast<std::string>();
+
+    py::dict alias_entry;
+    alias_entry["name"] = name;
+    alias_entry["storage_id"] = storage_id;
+    alias_entry["storage_offset"] = storage_offset;
+    alias_entry["logical_length"] = logical_length;
+    alias_entry["shape"] = shape_py;
+    alias_entry["stride"] = stride_py;
+    alias_entry["dtype"] = dtype_str;
+    aliases[name.c_str()] = alias_entry;
+
+    tensor_meta_index[name.c_str()] = py::make_tuple(shape_py, stride_py, dtype_str, storage_offset);
+    tensor_source_index[name.c_str()] = py::make_tuple(static_cast<uint64_t>(base_ptr), storage_size_bytes);
+  }
+
+  py::dict storages;
+  for (const auto& [storage_id, entry] : storage_map) {
+    py::dict storage_entry;
+    storage_entry["storage_id"] = storage_id;
+    storage_entry["device_id"] = entry.device_id;
+    storage_entry["base_ptr"] = py::int_(entry.base_ptr);
+    storage_entry["size_bytes"] = py::int_(entry.size_bytes);
+    storages[storage_id.c_str()] = storage_entry;
+  }
+
+  py::dict result;
+  result["storages"] = storages;
+  result["aliases"] = aliases;
+  result["tensor_meta_index"] = tensor_meta_index;
+  result["tensor_source_index"] = tensor_source_index;
+  return result;
+}
+
 // ------------------------------------------------------------------
 // Expose canonical index builder for safetensors directories
 // ------------------------------------------------------------------
@@ -656,7 +753,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("memory_size"),
           py::arg("expected_verification"),
           py::arg("verification_level"),
-          "Verify artifact data integrity from GPU memory");
+          "Verify artifact data integrity from GPU memory")
+      .def(
+          "collect_tensor_storage_graph",
+          &collect_tensor_storage_graph,
+          py::arg("tensors"),
+          "Collect deduplicated storage metadata and tensor alias information");
 
   m.def(
       "inspect_or_generate_descriptor",

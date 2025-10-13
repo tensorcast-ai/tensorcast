@@ -31,6 +31,8 @@ from tensorcast.types import (
     LeaseHandshake,
     LeaseSegment,
     Plan,
+    RegisterStorage,
+    RegisterTensorAlias,
     ServerConfig,
 )
 
@@ -830,7 +832,12 @@ class DaemonCtl:
     # ------------------------------------------------------------------
 
     def feed_register_artifact_lease_segments(
-        self, registration_id: str, segments: list[LeaseSegment]
+        self,
+        registration_id: str,
+        segments: list[LeaseSegment],
+        *,
+        storages: list["RegisterStorage"] | None = None,
+        tensor_aliases: list["RegisterTensorAlias"] | None = None,
     ) -> bool:
         # Stream lease segments via FeedRegisterArtifactStream
         def _iter():
@@ -844,6 +851,23 @@ class DaemonCtl:
                 seg.base_addr = int(s.base_addr)
                 seg.length = int(s.length)
                 seg.dst_offset = int(s.dst_offset)
+            if storages:
+                for storage in storages:
+                    entry = req.storage_entries.add()
+                    entry.storage_id = storage.storage_id
+                    entry.device_id = int(storage.device_id)
+                    entry.cuda_ipc_handle = storage.cuda_ipc_handle
+                    entry.storage_length = int(storage.storage_length)
+            if tensor_aliases:
+                for alias in tensor_aliases:
+                    dst = req.tensor_aliases.add()
+                    dst.name = alias.name
+                    dst.storage_id = alias.storage_id
+                    dst.storage_offset = int(alias.storage_offset)
+                    dst.logical_length = int(alias.logical_length)
+                    dst.shape.extend(int(v) for v in alias.shape)
+                    dst.stride.extend(int(v) for v in alias.stride)
+                    dst.dtype = alias.dtype
             yield req
 
         try:

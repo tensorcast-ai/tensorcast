@@ -25,8 +25,9 @@ absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coa
     int target_device_id,
     const std::string& canonical_index_json,
     uint64_t total_size,
-    absl::Span<const LeaseSegMeta> segments) {
-  return lip_mgr_->copy_to_new_coalesced(target_device_id, canonical_index_json, total_size, segments);
+    absl::Span<const LeaseSegMeta> segments,
+    absl::Span<const RegisterStorageMeta> storages) {
+  return lip_mgr_->copy_to_new_coalesced(target_device_id, canonical_index_json, total_size, segments, storages);
 }
 
 Status StoreDaemonServiceImpl::MaterializeReplica(

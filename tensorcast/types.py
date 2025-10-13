@@ -159,6 +159,31 @@ class LeaseSegment(BaseModel):
     dst_offset: int
 
 
+class RegisterStorage(BaseModel):
+    """Deduplicated storage descriptor used during registration feeds."""
+
+    model_config = ConfigDict(frozen=True)
+
+    storage_id: str
+    device_id: int
+    cuda_ipc_handle: bytes
+    storage_length: int
+
+
+class RegisterTensorAlias(BaseModel):
+    """Logical tensor metadata referencing a deduplicated storage."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    storage_id: str
+    storage_offset: int
+    logical_length: int
+    shape: list[int]
+    stride: list[int]
+    dtype: str
+
+
 __all__ = [
     "ServerConfig",
     "CoalescedHandshake",
@@ -172,4 +197,6 @@ __all__ = [
     "LeasePlan",
     "Plan",
     "LeaseSegment",
+    "RegisterStorage",
+    "RegisterTensorAlias",
 ]

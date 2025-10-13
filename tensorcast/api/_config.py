@@ -99,3 +99,18 @@ class GetArtifactOptions:
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     wait_for_completion: bool = True
     enable_verification: bool = True
+
+
+__all__ = [
+    "DEFAULT_ALIGN",
+    "DEFAULT_PINNED_TIMEOUT_MS",
+    "GetArtifactOptions",
+    "PlanType",
+    "RegisterArtifactOptions",
+    "clear_daemon_address",
+    "get_daemon_address",
+    "get_global_store_address",
+    "has_daemon_address",
+    "set_daemon_address",
+    "set_global_store_address",
+]

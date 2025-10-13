@@ -192,3 +192,4 @@ external
 *_pb2.pyi
 
 tensorcast/schema.sql
+docs/drafts
