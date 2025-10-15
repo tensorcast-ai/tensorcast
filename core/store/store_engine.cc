@@ -15,6 +15,7 @@
 // For reading/writing descriptor and canonical index files
 #include <fstream>
 #include <limits>
+#include <system_error>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
@@ -449,6 +450,24 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   }
 
   std::filesystem::path artifact_path = resolved_source.path;
+  std::error_code fs_error;
+  const bool artifact_exists = std::filesystem::exists(artifact_path, fs_error);
+  if (fs_error) {
+    return absl::ErrnoToStatus(
+        fs_error.value(), absl::StrCat("Failed to access artifact directory '", artifact_path.string(), "'"));
+  }
+  if (!artifact_exists) {
+    return absl::NotFoundError(absl::StrCat("Artifact directory not found: ", artifact_path.string()));
+  }
+  const bool is_artifact_dir = std::filesystem::is_directory(artifact_path, fs_error);
+  if (fs_error) {
+    return absl::ErrnoToStatus(
+        fs_error.value(), absl::StrCat("Failed to stat artifact directory '", artifact_path.string(), "'"));
+  }
+  if (!is_artifact_dir) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Expected artifact path to be a directory: ", artifact_path.string()));
+  }
   std::optional<std::string> computed_data_mh;
   std::optional<std::string> computed_index_mh;
   std::optional<std::string> existing_index_mh;
