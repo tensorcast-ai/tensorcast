@@ -368,7 +368,6 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/loader:view_planner",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
-        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
     ],
