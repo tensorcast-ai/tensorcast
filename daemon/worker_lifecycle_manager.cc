@@ -455,7 +455,7 @@ void WorkerLifecycleManager::chunk_sync_loop() {
   const auto interval = std::chrono::milliseconds(opts_.chunk_sync_interval_ms);
   try {
     while (!stop_.load()) {
-      std::vector<store::components::GlobalStoreClient::ChunkStateUpdate> updates;
+      std::vector<store::components::ChunkStateUpdate> updates;
       for (const auto& info : engine_->get_all_replicas_info()) {
         if (info.gpu_state == common::memory::MemoryLocation::NONE)
           continue;
@@ -463,7 +463,7 @@ void WorkerLifecycleManager::chunk_sync_loop() {
         auto states = engine_->get_chunk_states_for_device(info.artifact_id, info.gpu_device_id);
         updates.reserve(updates.size() + states.size());
         for (size_t i = 0; i < states.size(); ++i) {
-          store::components::GlobalStoreClient::ChunkStateUpdate u;
+          store::components::ChunkStateUpdate u;
           u.artifact_id = info.artifact_id;
           u.chunk_idx = static_cast<uint32_t>(i);
           u.state = states[i];
