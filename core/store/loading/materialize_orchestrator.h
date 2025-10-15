@@ -18,7 +18,7 @@ namespace tensorcast::store::loading {
 // StoreEngine::materialize_replica() when mode == AUTO.
 class MaterializeOrchestrator {
  public:
-  MaterializeOrchestrator(gsl::not_null<StoreEngine*> store, gsl::not_null<components::GlobalStoreClient*> gs_client);
+  MaterializeOrchestrator(gsl::not_null<StoreEngine*> store, gsl::not_null<components::IGlobalStoreClient*> gs_client);
 
   // Execute the preparation logic.
   absl::StatusOr<ReplicaHandle> run(
@@ -28,7 +28,7 @@ class MaterializeOrchestrator {
 
  private:
   gsl::not_null<StoreEngine*> store_;
-  gsl::not_null<components::GlobalStoreClient*> gs_client_;
+  gsl::not_null<components::IGlobalStoreClient*> gs_client_;
 };
 
 } // namespace tensorcast::store::loading

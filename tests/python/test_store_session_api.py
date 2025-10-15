@@ -6,7 +6,7 @@ import concurrent.futures
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any, Callable, cast
 
@@ -25,6 +25,7 @@ from tensorcast.api.store import (
     StoreOptions,
 )
 from tensorcast.types import ArtifactDescriptor, ServerConfig
+from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 
 class FakeHandle:
@@ -130,7 +131,7 @@ class FakeEnvironment:
             artifact_id=artifact_id,
             index_multihash="hash-index",
             data_multihash="hash-data",
-            schema_version="v2",
+            schema_version="v3",
             encoding="raw",
             total_size=offset,
         )
@@ -196,14 +197,32 @@ class FakeEnvironment:
         artifact_id: str | None,
         key: str | None,
         options: GetArtifactOptions | None = None,
+        view: store_daemon_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        placement: int | None = None,
+        canonical_index_hint: bytes | None = None,
+        disk_path_hint: str | None = None,
     ) -> MaterializedArtifact:
+        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint
+        disk_hint = disk_path_hint
         if artifact_id is not None and artifact_id in self.materialized_by_id:
-            return self.materialized_by_id[artifact_id]
-        if key is not None:
-            resolved_id, _ = client.resolves.get(key, (None, None))
+            resolved = self.materialized_by_id[artifact_id]
+        elif key is not None:
+            resolved_id, mapped_disk = client.resolves.get(key, (None, None))
             if resolved_id and resolved_id in self.materialized_by_id:
-                return self.materialized_by_id[resolved_id]
-        raise RuntimeError("artifact not found")
+                resolved = self.materialized_by_id[resolved_id]
+                if disk_hint is None:
+                    disk_hint = mapped_disk
+            else:
+                resolved = None
+        else:
+            resolved = None
+        if resolved is None:
+            raise RuntimeError("artifact not found")
+        if disk_hint is not None and resolved.disk_path != disk_hint:
+            resolved = replace(resolved, disk_path=disk_hint)
+            self.materialized_by_id[resolved.artifact_id] = resolved
+        return resolved
 
 
 def _make_registered_artifact(
@@ -404,6 +423,7 @@ def test_store_get_async_cancel_unloads_replica(
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         span: Any = None,
+        **kwargs: Any,
     ) -> MaterializedArtifact:
         cancel_ready.set()
         assert cancel_event is not None

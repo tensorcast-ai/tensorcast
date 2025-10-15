@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 // OpenTelemetry Metrics API (types used in member declarations)
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -85,7 +87,8 @@ class MetricsCollector {
       const std::string& source,
       const std::string& device,
       const std::string& phase,
-      double duration_seconds);
+      double duration_seconds,
+      std::optional<std::string_view> view_id = std::nullopt);
 
   /**
    * @brief Update all metrics.

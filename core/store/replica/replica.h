@@ -194,6 +194,10 @@ class Replica {
       common::memory::MemoryLocation location,
       const common::ArtifactVerificationInfo& expected_info) const ABSL_LOCKS_EXCLUDED(mutex_);
 
+  [[nodiscard]] const std::optional<loader::ViewPlan>& view_plan() const {
+    return view_plan_;
+  }
+
  private:
   // Immutable identifier for multi-device binding.
   const loading::ReplicaKey key_{};
@@ -203,7 +207,9 @@ class Replica {
       loading::ReplicaKey key,
       std::unique_ptr<IArtifactLoader> loader,
       std::shared_ptr<ReplicaLoadController> memory_manager,
-      common::memory::MemoryLocation source_type);
+      common::memory::MemoryLocation source_type,
+      std::optional<loader::ViewPlan> view_plan,
+      loading::TransformPlacement transform_placement);
 
   // Helper to determine the optimal source location for loading `target_location`
   absl::StatusOr<common::memory::MemoryLocation> find_best_source_for_target(
@@ -216,6 +222,10 @@ class Replica {
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
   const common::memory::MemoryLocation original_source_type_;
+
+  // Optional view execution plan when this replica represents a variant byte space.
+  const std::optional<loader::ViewPlan> view_plan_;
+  const loading::TransformPlacement transform_placement_;
 
   // Futures tracking ongoing load/copy operations to prevent duplicate requests
   std::shared_future<absl::Status> cpu_load_future_ ABSL_GUARDED_BY(mutex_);

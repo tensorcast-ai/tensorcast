@@ -49,6 +49,9 @@ using tensorcast::common::VerificationLevel;
 // Helper function to convert ArtifactVerificationInfo to Python dictionary
 py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
   py::dict result;
+  if (!info.byte_space_id.empty()) {
+    result["byte_space_id"] = info.byte_space_id;
+  }
   result["artifact_size"] = info.artifact_size;
   result["full_hash"] = info.full_hash;
 
@@ -77,6 +80,9 @@ py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
 ArtifactVerificationInfo dict_to_verification_info(const py::dict& dict) {
   ArtifactVerificationInfo info;
 
+  if (dict.contains("byte_space_id")) {
+    info.byte_space_id = dict["byte_space_id"].cast<std::string>();
+  }
   if (dict.contains("artifact_size")) {
     info.artifact_size = dict["artifact_size"].cast<uint64_t>();
   }

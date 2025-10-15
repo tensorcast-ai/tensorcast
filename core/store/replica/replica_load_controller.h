@@ -3,6 +3,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <optional>
@@ -63,7 +64,8 @@ class ReplicaLoadController {
       const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
-      uint64_t artifact_size);
+      uint64_t artifact_size,
+      std::optional<std::string> view_id = std::nullopt);
 
   ~ReplicaLoadController() noexcept;
 
@@ -175,7 +177,8 @@ class ReplicaLoadController {
       std::unique_ptr<loader::SeekableSource> source,
       common::memory::MemoryLocation target_location,
       int concurrency,
-      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+      std::optional<absl::Span<const uint32_t>> chunk_indices = std::nullopt,
+      std::function<absl::Status()> post_load_fn = {}) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Waits for the memory at the specified location to reach the LOADED state.

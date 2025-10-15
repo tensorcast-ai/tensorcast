@@ -79,6 +79,7 @@ sc_header_only_library(
     deps = [
         ":communication_types",
         ":device_types",
+        "//core/store/loader:view_planner",
         "//core/store/replica:memory_state",
         "@abseil-cpp//absl/hash",
     ],
@@ -235,6 +236,8 @@ sc_cc_library(
         "//core/store/loader:p2p_loader",
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
+        "//core/store/loader:view_plan_source",
+        "//core/store/loader:view_planner",
         "//core/store/replica",
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
@@ -268,6 +271,22 @@ cc_test(
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "store_engine_view_test",
+    srcs = ["store_engine_view_test.cc"],
+    deps = [
+        ":store_engine",
+        "//core/common",
+        "//core/store/loader:source_hash",
+        "//core/store/loader:view_planner",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+        "@gsl",
+        "@nlohmann_json//:json",
     ],
 )
 

@@ -88,12 +88,22 @@ void MetricsCollector::record_artifact_load(
     const std::string& source,
     const std::string& device,
     const std::string& phase,
-    double duration_seconds) {
+    double duration_seconds,
+    std::optional<std::string_view> view_id) {
   // Record into unified histogram with low-cardinality labels
   std::map<std::string, opentelemetry::common::AttributeValue> attrs;
   attrs.emplace("source", opentelemetry::common::AttributeValue(source));
   attrs.emplace("device", opentelemetry::common::AttributeValue(device));
   attrs.emplace("phase", opentelemetry::common::AttributeValue(phase));
+  attrs.emplace("view_scope", opentelemetry::common::AttributeValue(view_id.has_value() ? "variant" : "canonical"));
+  if (view_id.has_value() && !view_id->empty()) {
+    std::string truncated{*view_id};
+    constexpr size_t kMaxLen = 24;
+    if (truncated.size() > kMaxLen) {
+      truncated.resize(kMaxLen);
+    }
+    attrs.emplace("view_id_prefix", opentelemetry::common::AttributeValue(truncated));
+  }
   artifact_load_seconds_->Record(
       duration_seconds, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
 }

@@ -16,6 +16,7 @@
 
 #include "core/store/communication_types.h"
 #include "core/store/device_types.h"
+#include "core/store/loader/view_planner.h"
 #include "core/store/replica/memory_state.h"
 
 namespace tensorcast::store::loading {
@@ -62,6 +63,21 @@ struct ReplicaTarget {
 };
 
 // ══════════════════════════════════════════════════════════════════════════
+// Variant identity – describes non-canonical byte spaces
+// ══════════════════════════════════════════════════════════════════════════
+
+enum class TransformPlacement : uint8_t { kServer = 0, kClient = 1 };
+
+struct VariantIdentity {
+  std::string canonical_artifact_id;
+  std::optional<std::string> view_id;
+  std::optional<loader::ViewSpec> view_spec;
+  TransformPlacement placement{TransformPlacement::kServer};
+  std::optional<std::string> canonical_index_json;
+  std::optional<loader::ViewPlan> cached_plan;
+};
+
+// ══════════════════════════════════════════════════════════════════════════
 // Loading Configuration
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -87,6 +103,9 @@ struct MaterializeHints {
 
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
   Verify verify = Verify::CHECKSUM; // Verification strategy
+
+  // Optional variant identity describing view-specific byte spaces
+  std::optional<VariantIdentity> variant;
 };
 
 /**
@@ -108,6 +127,7 @@ struct ReplicaLoadSpec {
  */
 struct ReplicaKey {
   std::string artifact_id; // e.g. "llama-7b"
+  std::optional<std::string> view_id; // Optional byte-space variant identifier
   DeviceKey device; // physical placement
   uint32_t replica{0}; // multiple replicas on the same device
 
@@ -117,7 +137,11 @@ struct ReplicaKey {
 // Stream operator for convenient logging: LOG(INFO) << replica_key;
 inline std::ostream& operator<<(std::ostream& os, const ReplicaKey& key) {
   os << "ReplicaKey{"
-     << "artifact_id=" << key.artifact_id << ", device=";
+     << "artifact_id=" << key.artifact_id;
+  if (key.view_id.has_value()) {
+    os << ", view_id=" << *key.view_id;
+  }
+  os << ", device=";
   switch (key.device.type) {
     case DeviceType::GPU:
       os << "GPU";
@@ -142,7 +166,8 @@ inline std::ostream& operator<<(std::ostream& os, const ReplicaKey& key) {
  */
 struct ReplicaKeyHash {
   size_t operator()(const ReplicaKey& k) const {
-    return absl::HashOf(k.artifact_id, static_cast<int>(k.device.type), k.device.ordinal, k.replica);
+    return absl::HashOf(
+        k.artifact_id, k.view_id, static_cast<int>(k.device.type), k.device.ordinal, k.device.uuid, k.replica);
   }
 };
 
@@ -156,6 +181,8 @@ struct ReplicaHandle {
   replica::MemoryState gpu_state{replica::MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
   CudaIpcHandle cuda_ipc_handle;
+  std::optional<std::string> view_index_json;
+  std::optional<std::string> view_data_hash;
 
   [[nodiscard]] const ReplicaKey& key() const {
     return replica_key;

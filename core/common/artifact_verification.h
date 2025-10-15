@@ -22,6 +22,9 @@ enum class VerificationLevel {
 
 // Verification metadata for a replica
 struct ArtifactVerificationInfo {
+  // Identifier of the ByteSpace this metadata applies to.
+  // Empty string denotes canonical ByteSpace (legacy files omit the field).
+  std::string byte_space_id;
   uint64_t artifact_size = 0;
   uint64_t full_hash = 0; // xxHash64 of entire replica
   std::array<uint64_t, 8> segment_hashes = {}; // Hashes of 8 equal segments

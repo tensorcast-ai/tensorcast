@@ -7,7 +7,7 @@
 namespace tensorcast::store::loading {
 
 absl::Status ReplicaRegistrationHelper::register_local_replica(
-    gsl::not_null<components::GlobalStoreClient*> gs_client,
+    gsl::not_null<components::IGlobalStoreClient*> gs_client,
     std::string_view worker_id,
     std::string_view artifact_id,
     const DeviceKey& device,

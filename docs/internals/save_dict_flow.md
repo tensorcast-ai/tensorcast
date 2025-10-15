@@ -74,7 +74,7 @@ sequenceDiagram
 2. **`tensor_index.json`** – Maps tensor name → `[offset, size, shape, stride, dtype, storage_offset]`.
    - **storage_offset** (v2+): Offset in elements within the storage, for tensor views/slices
    - Legacy checkpoints (v1) only have 5 elements without storage_offset
-3. **`verification.json`** *(optional)* – Hashes & sample values for integrity checks.
+3. **`verification.json`** *(optional)* – Hashes & sample values for integrity checks. Variant ByteSpaces write `verification.view_<sanitized_view_id>.json` alongside the canonical file; each JSON blob includes a `byte_space_id` field so loaders never reuse canonical hashes for view materialization.
 
 ---
 

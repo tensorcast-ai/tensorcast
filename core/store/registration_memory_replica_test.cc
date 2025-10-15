@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -88,7 +89,7 @@ TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine
   REQUIRE(commit.size_bytes == size_bytes);
 
   // Validate the instance exists and has a GPU pointer
-  ReplicaKey key{.artifact_id = artifact_id, .device = make_gpu_key(0), .replica = 0};
+  ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
   auto gpu_ptr_or = store.get_replica_gpu_ptr(key);
   REQUIRE(gpu_ptr_or.ok());
   REQUIRE(gpu_ptr_or.value() != 0);
@@ -141,7 +142,7 @@ TEST_CASE("Memory Artifact registration: abort releases allocation", "[store_eng
   REQUIRE(commit_or.status().code() == absl::StatusCode::kNotFound);
 
   // Instance should either be absent or have no GPU memory
-  ReplicaKey key{.artifact_id = artifact_id, .device = make_gpu_key(0), .replica = 0};
+  ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
   auto state = store.get_replica_state(key, DeviceType::GPU);
   const bool ok_state = (state == MemoryState::UNINITIALIZED) || (state == MemoryState::UNALLOCATED);
   REQUIRE(ok_state);
@@ -189,7 +190,7 @@ TEST_CASE("Memory Artifact registration: TTL expiry prevents commit", "[store_en
   REQUIRE(commit_or.status().code() == absl::StatusCode::kDeadlineExceeded);
 
   // After TTL cleanup, instance should not hold GPU memory
-  ReplicaKey key{.artifact_id = artifact_id, .device = make_gpu_key(0), .replica = 0};
+  ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
   auto state = store.get_replica_state(key, DeviceType::GPU);
   const bool ttl_state_ok = (state == MemoryState::UNINITIALIZED) || (state == MemoryState::UNALLOCATED);
   REQUIRE(ttl_state_ok);

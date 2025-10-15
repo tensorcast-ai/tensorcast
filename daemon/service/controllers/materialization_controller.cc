@@ -5,11 +5,14 @@
 #include "daemon/service/controllers/materialization_controller.h"
 
 #include <future>
+#include <optional>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
+#include "core/store/loader/view_planner.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
@@ -19,6 +22,76 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
+
+namespace {
+
+using store::loader::ViewOp;
+using store::loader::ViewSpec;
+
+absl::StatusOr<ViewSpec> ConvertViewSpec(const v1::ViewSpec& proto) {
+  ViewSpec spec;
+  for (const auto& [tensor_name, ops_proto] : proto.tensors()) {
+    store::loader::TensorViewOps ops;
+    for (const auto& op_proto : ops_proto.ops()) {
+      switch (op_proto.kind_case()) {
+        case v1::Op::kNarrow: {
+          const auto& narrow = op_proto.narrow();
+          store::loader::NarrowOp op{
+              .dim = static_cast<int32_t>(narrow.dim()),
+              .start = narrow.start(),
+              .length = narrow.length(),
+          };
+          ops.ops.push_back(ViewOp::Narrow(op));
+          break;
+        }
+        case v1::Op::kTranspose: {
+          const auto& transpose = op_proto.transpose();
+          store::loader::TransposeOp op{
+              .dim0 = static_cast<int32_t>(transpose.dim0()),
+              .dim1 = static_cast<int32_t>(transpose.dim1()),
+          };
+          ops.ops.push_back(ViewOp::Transpose(op));
+          break;
+        }
+        case v1::Op::KIND_NOT_SET:
+          return absl::InvalidArgumentError("view op kind not set");
+      }
+    }
+    spec.tensors.emplace(tensor_name, std::move(ops));
+  }
+  return spec;
+}
+
+bool SpecIncludesTranspose(const ViewSpec& spec) {
+  for (const auto& [_, ops] : spec.tensors) {
+    for (const auto& op : ops.ops) {
+      if (op.kind == ViewOp::Kind::kTranspose) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+store::loading::TransformPlacement ResolvePlacement(
+    const v1::MaterializeReplicaRequest& req,
+    const std::optional<ViewSpec>& spec) {
+  switch (req.placement()) {
+    case v1::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
+      return store::loading::TransformPlacement::kServer;
+    case v1::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
+      return store::loading::TransformPlacement::kClient;
+    case v1::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    default:
+      break;
+  }
+  if (spec.has_value() && SpecIncludesTranspose(*spec)) {
+    return store::loading::TransformPlacement::kClient;
+  }
+  return store::loading::TransformPlacement::kServer;
+}
+
+} // namespace
 
 grpc::Status MaterializationController::materialize_replica(
     RpcContext& rctx,
@@ -51,8 +124,60 @@ grpc::Status MaterializationController::materialize_replica(
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
 
+  // View identity handling
+  std::optional<ViewSpec> view_spec;
+  std::optional<store::loader::ViewPlan> view_plan;
+  std::optional<std::string> canonical_index_json;
+  std::optional<std::string> request_view_id;
+
+  switch (req.view_identity_case()) {
+    case v1::MaterializeReplicaRequest::kView: {
+      if (!has_artifact) {
+        return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id for canonical planning"};
+      }
+      auto spec_or = ConvertViewSpec(req.view());
+      if (!spec_or.ok()) {
+        return to_grpc_status(spec_or.status());
+      }
+      view_spec = std::move(*spec_or);
+      auto index_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
+      if (!index_or.ok()) {
+        return to_grpc_status(index_or.status());
+      }
+      canonical_index_json = std::move(*index_or);
+      auto plan_or = store::StoreEngine::compute_view_plan(*canonical_index_json, *view_spec);
+      if (!plan_or.ok()) {
+        return to_grpc_status(plan_or.status());
+      }
+      if (!plan_or->is_identity) {
+        view_plan = *plan_or;
+      } else {
+        // Identity view collapses to canonical path
+        view_spec.reset();
+        view_plan.reset();
+        canonical_index_json.reset();
+      }
+      break;
+    }
+    case v1::MaterializeReplicaRequest::kViewId: {
+      if (!req.view_id().empty()) {
+        if (!has_artifact) {
+          return {StatusCode::INVALID_ARGUMENT, "view_id requires artifact_id for routing"};
+        }
+        request_view_id = req.view_id();
+      }
+      break;
+    }
+    case v1::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
+      break;
+  }
+  if (request_view_id.has_value()) {
+    span->SetAttribute("tc.view.id", *request_view_id);
+  }
+
   // Artifact LIP fast path: try cross-device consumption
-  if (has_artifact) {
+  const bool view_requested = view_spec.has_value() || request_view_id.has_value();
+  if (has_artifact && !view_requested) {
     auto satisfied = d_.lip.try_satisfy_from_lip(
         req.artifact_id(),
         dev.ordinal,
@@ -105,6 +230,26 @@ grpc::Status MaterializationController::materialize_replica(
     hints.artifact_id = req.artifact_id();
   if (has_disk)
     hints.disk_path = req.disk_path();
+  if (view_spec.has_value() || request_view_id.has_value()) {
+    store::loading::VariantIdentity variant;
+    if (has_artifact) {
+      variant.canonical_artifact_id = req.artifact_id();
+    }
+    if (view_spec.has_value()) {
+      variant.view_spec = view_spec;
+    }
+    if (canonical_index_json.has_value()) {
+      variant.canonical_index_json = canonical_index_json;
+    }
+    if (view_plan.has_value()) {
+      variant.cached_plan = view_plan;
+    }
+    if (request_view_id.has_value()) {
+      variant.view_id = request_view_id;
+    }
+    variant.placement = ResolvePlacement(req, view_spec);
+    hints.variant = std::move(variant);
+  }
   const auto mode =
       has_disk ? store::StoreEngine::MaterializeMode::LOAD_ONLY : store::StoreEngine::MaterializeMode::AUTO;
 
@@ -142,6 +287,12 @@ grpc::Status MaterializationController::materialize_replica(
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.cuda_ipc_handle.is_valid()) {
     resp.mutable_mem_handle()->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
+  }
+  if (handle.view_index_json.has_value()) {
+    resp.set_view_index_json(*handle.view_index_json);
+  }
+  if (handle.view_data_hash.has_value()) {
+    resp.set_view_data_hash(*handle.view_data_hash);
   }
   rctx.mark_success();
   return Status::OK;

@@ -14,6 +14,8 @@
 #include "core/store/loader/inline_buffer_loader.h"
 #include "core/store/loader/loader.h"
 #include "core/store/loader/p2p_loader.h"
+#include "core/store/loader/view_plan_source.h"
+#include "core/store/loader/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
 
 namespace tensorcast::store::replica {
@@ -94,19 +96,32 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
                << "): Failed to get artifact size from loader: " << size_status.status();
     return size_status.status();
   }
-  uint64_t artifact_size = *size_status;
-  if (artifact_size == 0) {
+  const uint64_t loader_size = *size_status;
+  if (loader_size == 0) {
     return absl::FailedPreconditionError(absl::StrCat("Replica ", config.artifact_identifier, " resolved size is 0."));
   }
 
-  // Also check against optional expected size in config
-  if (config.expected_artifact_size.has_value() && config.expected_artifact_size.value() != artifact_size) {
-    LOG(ERROR) << "Replica(" << config.artifact_identifier << "): Loader size " << artifact_size
-               << " mismatches expected size " << config.expected_artifact_size.value();
+  // Optional view plan overrides the effective replica size.
+  std::optional<loader::ViewPlan> view_plan = std::move(config.view_plan);
+  uint64_t effective_size = loader_size;
+  if (view_plan.has_value()) {
+    effective_size = view_plan->view_size_bytes;
+    if (effective_size == 0) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Replica ", config.artifact_identifier, " view plan resolved size is 0."));
+    }
+  }
+
+  // Also check against optional expected size in config (after applying view overrides)
+  if (config.expected_artifact_size.has_value() && config.expected_artifact_size.value() != effective_size) {
+    LOG(ERROR) << "Replica(" << config.artifact_identifier << "): Expected size "
+               << config.expected_artifact_size.value() << " mismatches effective size " << effective_size;
     return absl::FailedPreconditionError("Artifact size mismatch between loader and config expectation.");
   }
 
   // --- Create ReplicaLoadController ---
+  auto view_id = config.view_id;
+
   auto memory_manager = std::make_shared<ReplicaLoadController>(
       config.artifact_identifier,
       config.local_device_id,
@@ -114,7 +129,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.virtual_addr_space,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
-      artifact_size);
+      effective_size,
+      view_id);
 
   // --- Create Replica Instance ---
   // Build ReplicaKey for this replica/device
@@ -129,11 +145,17 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
     dev_key.ordinal = -1;
   }
 
-  loading::ReplicaKey inst_key{.artifact_id = config.artifact_identifier, .device = dev_key, .replica = 0};
+  loading::ReplicaKey inst_key{
+      .artifact_id = config.artifact_identifier, .view_id = std::move(view_id), .device = dev_key, .replica = 0};
 
   // Use absl::WrapUnique to manage the private constructor call
-  auto replica_ptr =
-      absl::WrapUnique(new Replica(std::move(inst_key), std::move(loader), std::move(memory_manager), source_type));
+  auto replica_ptr = absl::WrapUnique(new Replica(
+      std::move(inst_key),
+      std::move(loader),
+      std::move(memory_manager),
+      source_type,
+      std::move(view_plan),
+      config.transform_placement));
   return replica_ptr;
 }
 
@@ -145,11 +167,15 @@ Replica::Replica(
     loading::ReplicaKey key,
     std::unique_ptr<IArtifactLoader> loader,
     std::shared_ptr<ReplicaLoadController> memory_manager,
-    common::memory::MemoryLocation source_type)
+    common::memory::MemoryLocation source_type,
+    std::optional<loader::ViewPlan> view_plan,
+    loading::TransformPlacement transform_placement)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
-      original_source_type_(source_type) {}
+      original_source_type_(source_type),
+      view_plan_(std::move(view_plan)),
+      transform_placement_(transform_placement) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -389,8 +415,29 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
     if (!src_or.ok()) {
       return make_ready_future(src_or.status());
     }
-    // Delegate orchestration to ReplicaLoadController using the provided source
-    new_future = memory_manager_->load_async_from_source(std::move(*src_or), target_location, concurrency).share();
+    std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
+    if (view_plan_.has_value() && !view_plan_->is_identity) {
+      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection);
+    }
+    std::function<absl::Status()> post_load_fn;
+    if (view_plan_.has_value() && !view_plan_->is_identity && view_plan_->transform.requires_materialization &&
+        transform_placement_ == loading::TransformPlacement::kServer) {
+      loader::TransformPlan transform_plan = view_plan_->transform;
+      auto mm_shared = memory_manager_;
+      post_load_fn = [mm = mm_shared, transform_plan, target_location]() -> absl::Status {
+        auto ptrs = mm->get_pointer(target_location);
+        if (ptrs.empty() || ptrs[0] == nullptr) {
+          return absl::FailedPreconditionError("View transform requires loaded memory, but no pointer is available");
+        }
+        const int device_id = (target_location == MemoryLocation::GPU) ? mm->get_local_device_id() : -1;
+        return loader::execute_transform(transform_plan, target_location, ptrs[0], device_id);
+      };
+    }
+    // Delegate orchestration to ReplicaLoadController using the (optionally adapted) source
+    new_future =
+        memory_manager_
+            ->load_async_from_source(std::move(source_ptr), target_location, concurrency, std::nullopt, post_load_fn)
+            .share();
   } else {
     return make_ready_future(absl::InternalError("Invalid source/target combination."));
   }

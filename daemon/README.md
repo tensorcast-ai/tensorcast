@@ -70,6 +70,12 @@ Contract highlights:
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 
+### Variant Views (v1)
+
+- `MaterializeReplicaRequest` accepts optional `view` (deterministic slice/transpose spec) or `view_id` along with a `placement` hint (`SERVER` for slice/min-byte, `CLIENT` for transpose). Requests using `view` require the canonical `artifact_id` so the daemon can normalise against canonical index v3.
+- When a non-identity view is requested, `MaterializeReplicaResponse` populates `view_index_json` (canonicalised layout for the requested ByteSpace) and `view_data_hash` when verification completes. Both fields are empty for canonical loads.
+- The controller collapses identity views to the canonical path, preserves LIP fast-path semantics, and forwards `VariantIdentity` into the StoreEngine so replica keys and telemetry track `(artifact_id, view_id)` tuples.
+
 ## Invariants and Guardrails
 
 - Thin service: only validation, orchestration, status mapping. No duplicated engine logic.

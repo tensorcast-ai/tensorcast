@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,          -- "mi2:<index_multihash>:<data_multihash>"
     index_multihash TEXT NOT NULL,         -- Multibase over multihash (sha2-256), base32
     data_multihash TEXT NOT NULL,          -- Multibase over multihash (sha2-256 root), base32
-    schema_version TEXT NOT NULL,          -- e.g., "v2"
+    schema_version TEXT NOT NULL DEFAULT 'v3',          -- canonical index schema version
     encoding TEXT NOT NULL,                -- e.g., "json" or future "cbor"
     hash_params_json TEXT NULL,            -- JSON string for hashing params (e.g., chunk_size, fanout)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -104,7 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_artifact_replicas_memory_replica ON artifact_repl
 -- Deduplicated tensor index storage
 CREATE TABLE IF NOT EXISTS artifact_indices (
     index_key TEXT PRIMARY KEY,            -- SHA-256 hex of canonical index bytes
-    schema_version TEXT NOT NULL,          -- e.g., "v2"
+    schema_version TEXT NOT NULL DEFAULT 'v3',          -- canonical index schema version
     encoding TEXT NOT NULL,                -- e.g., "json" or "cbor"
     size_bytes BIGINT NOT NULL,
     index_data BLOB NOT NULL,
@@ -169,5 +169,33 @@ CREATE TABLE IF NOT EXISTS key_mappings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
+
+-- Variant views anchored to canonical artifacts
+CREATE TABLE IF NOT EXISTS variants (
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NOT NULL,
+    view_spec_json TEXT NOT NULL,
+    view_size BIGINT NOT NULL,
+    view_data_hash TEXT,
+    verified_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id, view_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_variants_artifact ON variants(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_variants_verified_at ON variants(artifact_id, verified_at);
+CREATE INDEX IF NOT EXISTS idx_variants_view_id ON variants(view_id);
+
+-- Leaf digests anchored to canonical or variant ByteSpaces
+CREATE TABLE IF NOT EXISTS leaves (
+    artifact_id TEXT NOT NULL,
+    space_kind CHAR(1) NOT NULL,
+    space_id TEXT NOT NULL,
+    leaf_idx BIGINT NOT NULL,
+    digest BLOB NOT NULL,
+    PRIMARY KEY (artifact_id, space_kind, space_id, leaf_idx)
+);
+
+CREATE INDEX IF NOT EXISTS idx_leaves_space ON leaves(artifact_id, space_kind, space_id);
 
 -- ===================== End Global Store =====================

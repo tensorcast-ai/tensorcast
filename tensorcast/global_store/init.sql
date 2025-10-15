@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,             -- "mi2:<index_multihash>:<data_multihash>"
     index_multihash TEXT NOT NULL,         -- Multibase over multihash (sha2-256), base32
     data_multihash TEXT NOT NULL,          -- Multibase over multihash (sha2-256 root), base32
-    schema_version TEXT NOT NULL,          -- e.g., "v2"
+    schema_version TEXT NOT NULL DEFAULT 'v3',          -- canonical index schema version
     encoding TEXT NOT NULL,                -- e.g., "json" or future "cbor"
     hash_params_json TEXT NULL,            -- JSON string for hashing params (e.g., chunk_size, fanout)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -90,7 +90,7 @@ CREATE INDEX idx_artifact_replicas_memory_replica ON artifact_replicas(is_memory
 -- Table for storing deduplicated tensor indices
 CREATE TABLE IF NOT EXISTS artifact_indices (
     index_key TEXT PRIMARY KEY,            -- SHA-256 hash of canonical JSON index
-    schema_version TEXT NOT NULL,          -- Schema version (e.g., "v2")
+    schema_version TEXT NOT NULL DEFAULT 'v3',          -- canonical index schema version
     encoding TEXT NOT NULL,                -- Encoding format (e.g., "json")
     size_bytes BIGINT NOT NULL,            -- Size of the index data
     index_data BLOB NOT NULL,              -- Canonical JSON bytes

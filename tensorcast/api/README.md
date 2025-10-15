@@ -3,6 +3,13 @@
 The `tensorcast.api` package exposes the high-level registration and loading
 helpers that SDK integrations use during artifact lifecycle management.
 
+## View Retrieval
+
+`Store.get_view()` defaults to executing transforms on the daemon so that
+transpose views return buffers in the expected orientation. Client-side
+execution is intentionally disabled until a local transform engine exists; the
+API still accepts `placement="CLIENT"` explicitly for forward compatibility.
+
 ## Tensor Storage Graph Helper
 
 `build_tensor_storage_graph()` inspects a `dict[str, torch.Tensor]` and returns

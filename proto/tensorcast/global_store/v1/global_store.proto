@@ -4,6 +4,7 @@ package tensorcast.global_store.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
 import "tensorcast/common/v1/common.proto";
 
 service GlobalStoreService {
@@ -22,6 +23,9 @@ service GlobalStoreService {
 
   // Content-addressed query by artifact_id (mi2:...)
   rpc GetArtifactInfoById(GetArtifactInfoByIdRequest) returns (GetArtifactInfoByIdResponse) {}
+
+  // Upsert variant metadata and batched leaf digests
+  rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
 
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
@@ -217,11 +221,76 @@ message RequestFullStateSyncResponse {
 // Content-addressed artifact info
 message GetArtifactInfoByIdRequest {
   string artifact_id = 1; // "mi2:..."
+  google.protobuf.BoolValue include_replicas = 2;
+  bool include_leaves = 3;
+  oneof space {
+    bool canonical = 4;
+    string view_id = 5;
+  }
+  repeated uint64 leaf_idxs = 6;
+  bool include_view_meta = 7;
 }
 
 message GetArtifactInfoByIdResponse {
   Status status = 1;
   repeated tensorcast.common.v1.MemoryInfo replicas = 2; // All replicas under the content ID
+  repeated Leaf leaves = 3;
+  ViewMeta view_meta = 4;
+  repeated PartialCoverageDetail partial_coverage = 5;
+}
+
+message Leaf {
+  uint64 leaf_idx = 1;
+  bytes digest = 2;
+}
+
+message ViewMeta {
+  string view_spec_json = 1;
+  uint64 view_size = 2;
+  string view_data_hash = 3;
+  google.protobuf.Timestamp verified_at = 4;
+}
+
+message UpdateArtifactViewStateRequest {
+  string artifact_id = 1;
+  VariantUpsert variant = 2;
+  repeated LeafWrite leaf_writes = 3;
+}
+
+message UpdateArtifactViewStateResponse {
+  Status status = 1;
+}
+
+message VariantUpsert {
+  string view_id = 1;
+  string view_spec_json = 2;
+  uint64 view_size = 3;
+  string view_data_hash = 4;
+  google.protobuf.Timestamp verified_at = 5;
+}
+
+enum ByteSpaceKind {
+  BYTE_SPACE_KIND_UNSPECIFIED = 0;
+  BYTE_SPACE_KIND_CANONICAL = 1;
+  BYTE_SPACE_KIND_VARIANT = 2;
+}
+
+message LeafWrite {
+  ByteSpaceKind space_kind = 1;
+  string space_id = 2;
+  uint64 leaf_idx = 3;
+  bytes digest = 4;
+}
+
+message Range {
+  uint64 off = 1;
+  uint64 len = 2;
+}
+
+message PartialCoverageDetail {
+  ByteSpaceKind space_kind = 1;
+  string space_id = 2;
+  repeated Range missing_ranges = 3;
 }
 
 // Get artifact index request
@@ -234,7 +303,7 @@ message GetArtifactIndexResponse {
   Status status = 1;
   bytes tensor_index_data = 2; // Canonical JSON bytes
   string encoding = 3; // Encoding format (e.g., "json")
-  string schema_version = 4; // Schema version (e.g., "v2")
+  string schema_version = 4; // Schema version (e.g., "v3")
 }
 
 // Get canonical index by artifact_id
@@ -259,7 +328,7 @@ message RegisterReplicaRequest {
   // Optional tensor index data for UPSERT (if key not yet in artifact_indices)
   optional bytes tensor_index_data = 5; // Canonical JSON bytes (for UPSERT)
   optional string encoding = 6; // Encoding format (e.g., "json")
-  optional string schema_version = 7; // Schema version (e.g., "v2")
+  optional string schema_version = 7; // Schema version (e.g., "v3")
   // Legacy disk path for non-content-addressed cases
   optional string disk_path = 8;
 

@@ -78,7 +78,7 @@ sequenceDiagram
 ## Key Steps Explained
 
 1. **Memory Allocation**: InferenceInstance allocates CUDA memory for artifact storage
-2. **Artifact Request**: Request artifact by human key using CUDA IPC (`MaterializeByKey`)
+2. **Artifact Request**: Request artifact by human key using CUDA IPC (`MaterializeByKey`). Variant-aware callers may invoke `MaterializeReplica` directly with `view` / `view_id` and a placement hint; the daemon returns `view_index_json`/`view_data_hash` alongside the CUDA IPC handle for non-canonical ByteSpaces.
 3. **Key Resolution**: LocalStoreDaemon resolves key → artifact_id; the daemon orchestrator selects a source, falls back to disk when needed (based on published disk_path hints).
 4. **Replica Location**: Request remote replica location if artifact not available locally
 5. **Artifact Loading**: Load artifact via P2P from remote daemon or, when the key supplies a disk hint, from disk (fallback handled by daemon orchestrator, not the client)
@@ -158,6 +158,17 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   - `descriptor` (ArtifactDescriptor)
   - `existed` (bool) — true when the commit hit an existing replica and joined a reference
 - Idempotent success on duplicates: if the same `mi2:` artifact already has a replica on the same device, the daemon reclaims the new allocation and returns `OK` with the existing descriptor plus `existed=true`.
+
+## Variant-Aware Views (v1)
+
+- `core/store/loader/view_planner.{h,cc}` materializes a `ViewPlan` from canonical index JSON plus a `ViewSpec`. v1 supports single-dimension `narrow` (slice) operations and emits both the variant layout (`view_index_json`) and a `SelectionPlan` describing canonical byte ranges.
+- `core/store/loader/view_plan_source.{h,cc}` wraps any `SeekableSource` and executes the `SelectionPlan`, streaming minimal bytes (zero-filling PAD regions) to downstream consumers.
+- `StoreEngine` now exposes static helpers:
+  - `compute_view_plan(...)` → Loader-backed planning entry point surfaced to the daemon.
+  - `view_plan_allows_alias(plan)` → Returns `true` when the selection is contiguous and segment-aligned so the engine can hand out zero-copy aliases.
+  - `compute_view_data_hash_from_source(source, plan, leaf_bytes)` → Reuses the existing TreeHash pipeline to verify variant byte spaces by composing `ViewPlanSource` with canonical GPU/disk sources.
+
+These APIs keep view normalization, selection, and hashing anchored in the C++ core so the Python daemon and SDK share a single implementation.
 - Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and the unified `SessionLifecycleTask` drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.
 
 

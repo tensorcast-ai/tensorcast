@@ -58,8 +58,10 @@ class MemoryExportRegistry {
     size_t operator()(const ExportKey& k) const {
       return absl::HashOf(
           k.key.artifact_id,
+          k.key.view_id,
           static_cast<int>(k.key.device.type),
           k.key.device.ordinal,
+          k.key.device.uuid,
           k.key.replica,
           static_cast<int>(k.location));
     }

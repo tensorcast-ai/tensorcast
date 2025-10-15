@@ -7,6 +7,7 @@
 #include <catch2/matchers/catch_matchers_vector.hpp>
 
 #include <cstdlib>
+#include <optional>
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/common/memory/virtual_address_space.h"
@@ -65,7 +66,8 @@ TEST_CASE("UnifiedMemoryAuthority allocation", "[unified_memory]") {
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
   SECTION("successful allocation") {
-    ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+    ReplicaKey key{
+        .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
     size_t size = size_t(1024) * 1024 * 1024; // 1GB
 
     REQUIRE(unified_memory.allocate(key, size).ok());
@@ -82,7 +84,8 @@ TEST_CASE("UnifiedMemoryAuthority allocation", "[unified_memory]") {
   }
 
   SECTION("allocation failure") {
-    ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+    ReplicaKey key{
+        .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
     size_t size = size_t(1024) * 1024 * 1024;
 
     mock_vs->allocate_status_ = absl::ResourceExhaustedError("Out of memory");
@@ -97,7 +100,8 @@ TEST_CASE("UnifiedMemoryAuthority get missing chunks", "[unified_memory]") {
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(768) * 1024 * 1024; // 768MB = 3 chunks of 256MB
 
   REQUIRE(unified_memory.allocate(key, size).ok());
@@ -127,7 +131,8 @@ TEST_CASE("UnifiedMemoryAuthority lock chunks for transfer", "[unified_memory]")
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(512) * 1024 * 1024; // 512MB = 2 chunks
 
   REQUIRE(unified_memory.allocate(key, size).ok());
@@ -147,7 +152,8 @@ TEST_CASE("UnifiedMemoryAuthority update chunk states", "[unified_memory]") {
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(512) * 1024 * 1024;
   int device_id = 0;
 
@@ -183,7 +189,8 @@ TEST_CASE("UnifiedMemoryAuthority GPU allocation management", "[unified_memory]"
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(256) * 1024 * 1024;
 
   REQUIRE(unified_memory.allocate(key, size).ok());
@@ -212,7 +219,8 @@ TEST_CASE("UnifiedMemoryAuthority mark CPU chunks preemptible", "[unified_memory
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(1024) * 1024 * 1024; // 1GB = 4 chunks
 
   REQUIRE(unified_memory.allocate(key, size).ok());
@@ -272,7 +280,11 @@ TEST_CASE("UnifiedMemoryAuthority chunk calculations", "[unified_memory]") {
 
     for (const auto& tc : test_cases) {
       DYNAMIC_SECTION("size " << tc.artifact_size) {
-        ReplicaKey key{absl::StrCat("replica", tc.artifact_size), DeviceKey{DeviceType::GPU, 0, ""}, 0};
+        ReplicaKey key{
+            .artifact_id = absl::StrCat("replica", tc.artifact_size),
+            .view_id = std::nullopt,
+            .device = DeviceKey{DeviceType::GPU, 0, ""},
+            .replica = 0};
 
         // Reset mock for each test
         mock_vs->test_region_.bytes = 0;
@@ -293,7 +305,8 @@ TEST_CASE("UnifiedMemoryAuthority multi-GPU state tracking", "[unified_memory]")
   auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
   UnifiedMemoryAuthority unified_memory(mock_vs);
 
-  ReplicaKey key{"model1", DeviceKey{DeviceType::GPU, 0, ""}, 0};
+  ReplicaKey key{
+      .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
   size_t size = size_t(512) * 1024 * 1024;
 
   REQUIRE(unified_memory.allocate(key, size).ok());
