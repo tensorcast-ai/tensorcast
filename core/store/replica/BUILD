@@ -210,6 +210,8 @@ sc_cc_library(
         "//core/store/loader:disk_loader",
         "//core/store/loader:inline_buffer_loader",
         "//core/store/loader:p2p_loader",
+        "//core/store/loader:view_plan_source",
+        "//core/store/loader:view_transform_executor",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/functional:overload",

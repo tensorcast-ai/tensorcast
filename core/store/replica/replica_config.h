@@ -9,6 +9,7 @@
 #include "core/common/device_types.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/virtual_address_space.h"
+#include "core/store/loader/view_planner.h"
 #include "core/store/loading/loading_spec.h"
 #include "gsl/pointers"
 
@@ -58,6 +59,12 @@ struct ReplicaConfig {
   // (virtual_addr_space lock strictness is internal policy now)
 
   // Future runtime configurations can be added here:
+  // - Variant residency metadata (view identifiers)
+  std::optional<std::string> view_id;
+  // - View execution plan metadata for variant-aware replicas
+  std::optional<loader::ViewPlan> view_plan;
+  // - Transform placement preference (server/client)
+  loading::TransformPlacement transform_placement = loading::TransformPlacement::kServer;
   // - Tensor compression strategies
   // - Quantization settings
   // - Memory layout preferences

@@ -6,10 +6,12 @@ import base64
 import hashlib
 import uuid
 
+import grpc
+from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
+
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.common.v1 import common_pb2
-from google.protobuf import duration_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
 class TestGRPCService:
@@ -50,6 +52,23 @@ class TestGRPCService:
         response = servicer.UpdateReplica(request, test_context)
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+
+    def test_register_replica_rejects_non_v3_schema(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """schema_version must be v3 for replica registration."""
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:index:data",
+            mem_info=memory_info,
+            max_concurrency=5,
+            worker_id=registered_worker,
+            schema_version="v2",
+        )
+
+        response = servicer.RegisterReplica(request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
 
     def test_unregister_artifact_replica(
         self, servicer, test_context, memory_info, registered_worker
@@ -195,7 +214,7 @@ class TestGRPCService:
             worker_id=registered_worker,
             tensor_index_data=index_bytes,
             encoding="json",
-            schema_version="v2",
+            schema_version="v3",
         )
         register_response = servicer.RegisterReplica(register_request, test_context)
         assert register_response.status == global_store_pb2.Status.STATUS_OK
@@ -504,3 +523,201 @@ class TestGRPCService:
         info_response = servicer.GetArtifactInfoById(info_request, test_context)
 
         assert info_response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+
+    def test_update_artifact_view_state_roundtrip(self, servicer, test_context):
+        """Variant metadata and leaves round-trip through servicer."""
+        artifact_id = "mi2:index_hash:data_hash"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index_hash",
+            data_multihash="data_hash",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        ts = timestamp_pb2.Timestamp()
+        ts.GetCurrentTime()
+
+        update_request = global_store_pb2.UpdateArtifactViewStateRequest(
+            artifact_id=artifact_id,
+            variant=global_store_pb2.VariantUpsert(
+                view_id="view-1",
+                view_spec_json="{}",
+                view_size=4096,
+                view_data_hash="viewhash",
+                verified_at=ts,
+            ),
+            leaf_writes=[
+                global_store_pb2.LeafWrite(
+                    space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT,
+                    space_id="view-1",
+                    leaf_idx=0,
+                    digest=b"\x01" * 32,
+                ),
+                global_store_pb2.LeafWrite(
+                    space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
+                    space_id="index_hash",
+                    leaf_idx=2,
+                    digest=b"\x02" * 32,
+                ),
+            ],
+        )
+
+        update_response = servicer.UpdateArtifactViewState(
+            update_request, test_context
+        )
+        assert update_response.status == global_store_pb2.Status.STATUS_OK
+        assert test_context.code is None
+
+        test_context.code = None
+        view_request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id,
+            include_replicas=wrappers_pb2.BoolValue(value=False),
+            include_leaves=True,
+            include_view_meta=True,
+        )
+        view_request.view_id = "view-1"
+        view_response = servicer.GetArtifactInfoById(view_request, test_context)
+
+        assert view_response.status == global_store_pb2.Status.STATUS_OK
+        assert len(view_response.leaves) == 1
+        assert view_response.leaves[0].leaf_idx == 0
+        assert view_response.leaves[0].digest == b"\x01" * 32
+        assert view_response.view_meta.view_size == 4096
+        assert view_response.view_meta.view_data_hash == "viewhash"
+        assert view_response.view_meta.HasField("verified_at")
+        assert test_context.code is None
+
+        test_context.code = None
+        canonical_request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id,
+            include_replicas=wrappers_pb2.BoolValue(value=False),
+            include_leaves=True,
+            canonical=True,
+        )
+        canonical_response = servicer.GetArtifactInfoById(
+            canonical_request, test_context
+        )
+        assert canonical_response.status == global_store_pb2.Status.STATUS_OK
+        assert len(canonical_response.leaves) == 1
+        assert canonical_response.leaves[0].leaf_idx == 2
+        assert canonical_response.leaves[0].digest == b"\x02" * 32
+        assert test_context.code is None
+
+        test_context.code = None
+        partial_request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id,
+            include_replicas=wrappers_pb2.BoolValue(value=False),
+            include_leaves=True,
+            include_view_meta=True,
+        )
+        partial_request.view_id = "view-1"
+        partial_request.leaf_idxs.extend([0, 3])
+        partial_response = servicer.GetArtifactInfoById(partial_request, test_context)
+
+        assert partial_response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+        assert len(partial_response.leaves) == 1
+        assert partial_response.leaves[0].leaf_idx == 0
+        assert len(partial_response.partial_coverage) == 1
+        detail = partial_response.partial_coverage[0]
+        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
+        assert detail.space_id == "view-1"
+        assert len(detail.missing_ranges) == 1
+        assert detail.missing_ranges[0].off == 3
+        assert detail.missing_ranges[0].len == 1
+        assert test_context.code == grpc.StatusCode.NOT_FOUND
+
+    def test_get_artifact_view_info_not_found(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """Missing variant should respond with NOT_FOUND."""
+        artifact_id = "mi2:index:data"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index",
+            data_multihash="data",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+        )
+        servicer.RegisterReplica(register_request, test_context)
+        test_context.code = None
+
+        request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id,
+            include_leaves=True,
+            include_view_meta=True,
+        )
+        request.view_id = "missing-view"
+        request.leaf_idxs.extend([0, 1])
+        response = servicer.GetArtifactInfoById(request, test_context)
+        assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+        assert len(response.replicas) == 1
+        assert len(response.partial_coverage) == 1
+        detail = response.partial_coverage[0]
+        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
+        assert detail.space_id == "missing-view"
+        assert sorted(r.off for r in detail.missing_ranges) == [0, 1]
+        assert test_context.code == grpc.StatusCode.NOT_FOUND
+
+    def test_get_artifact_canonical_partial_coverage(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        """Canonical leaf queries return partial coverage detail when missing."""
+        artifact_id = "mi2:index:data"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index",
+            data_multihash="data",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+        )
+        servicer.RegisterReplica(register_request, test_context)
+
+        test_context.code = None
+        servicer.UpdateArtifactViewState(
+            global_store_pb2.UpdateArtifactViewStateRequest(
+                artifact_id=artifact_id,
+                leaf_writes=[
+                    global_store_pb2.LeafWrite(
+                        space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
+                        space_id="index",
+                        leaf_idx=0,
+                        digest=b"\xaa" * 32,
+                    )
+                ],
+            ),
+            test_context,
+        )
+
+        canonical_request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id,
+            include_leaves=True,
+            canonical=True,
+        )
+        canonical_request.leaf_idxs.extend([0, 2])
+        response = servicer.GetArtifactInfoById(canonical_request, test_context)
+
+        assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
+        assert len(response.leaves) == 1 and response.leaves[0].leaf_idx == 0
+        assert len(response.partial_coverage) == 1
+        detail = response.partial_coverage[0]
+        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_CANONICAL
+        assert detail.space_id == "index"
+        assert len(detail.missing_ranges) == 1
+        assert detail.missing_ranges[0].off == 2
+        assert detail.missing_ranges[0].len == 1
+        assert test_context.code == grpc.StatusCode.NOT_FOUND

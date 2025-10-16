@@ -1,0 +1,443 @@
+// Copyright (c) 2025, TensorCast Team.
+
+#include "core/store/loader/view_planner.h"
+
+#include <algorithm>
+#include <limits>
+#include <numeric>
+#include <optional>
+#include <unordered_map>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "core/store/loader/canonical_index.h"
+#include "nlohmann/json.hpp"
+
+namespace tensorcast::store::loader {
+
+namespace {
+
+constexpr uint64_t kAlignmentBytes = 8;
+
+struct CanonicalEntry {
+  uint64_t offset{0};
+  uint64_t size_bytes{0};
+  std::vector<int64_t> shape;
+  std::vector<int64_t> stride;
+  std::string dtype;
+  uint64_t storage_offset{0};
+};
+
+absl::Status validate_ops(const TensorViewOps& ops) {
+  enum class Mode : uint8_t { kNone, kNarrow, kTranspose };
+  Mode mode = Mode::kNone;
+  bool seen_narrow = false;
+  for (const auto& op : ops.ops) {
+    switch (op.kind) {
+      case ViewOp::Kind::kNarrow:
+        if (mode == Mode::kTranspose) {
+          return absl::InvalidArgumentError("mixing transpose and narrow in the same tensor is not supported");
+        }
+        if (seen_narrow) {
+          return absl::InvalidArgumentError("multiple narrow ops per tensor are not supported");
+        }
+        seen_narrow = true;
+        mode = Mode::kNarrow;
+        break;
+      case ViewOp::Kind::kTranspose:
+        if (mode == Mode::kNarrow) {
+          return absl::InvalidArgumentError("mixing transpose and narrow in the same tensor is not supported");
+        }
+        if (op.transpose.dim0 == op.transpose.dim1) {
+          return absl::InvalidArgumentError("transpose dims must be different");
+        }
+        mode = Mode::kTranspose;
+        break;
+      default:
+        return absl::InvalidArgumentError("unsupported view operation kind");
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status parse_canonical_index(
+    std::string_view canonical_index_json,
+    std::map<std::string, CanonicalEntry>* out_entries) {
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("canonical_index_json must not be empty");
+  }
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(canonical_index_json, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON: ", e.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("canonical index JSON must be an object");
+  }
+  std::map<std::string, CanonicalEntry> entries;
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    const auto& key = it.key();
+    if (!it.value().is_array() || it.value().size() < 6) {
+      return absl::InvalidArgumentError(
+          "canonical index entry must be array [offset,size,shape,stride,dtype,storage_offset]");
+    }
+    CanonicalEntry entry;
+    entry.offset = it.value()[0].get<uint64_t>();
+    entry.size_bytes = it.value()[1].get<uint64_t>();
+    entry.shape.clear();
+    for (const auto& dim : it.value()[2]) {
+      entry.shape.push_back(dim.get<int64_t>());
+    }
+    entry.stride.clear();
+    for (const auto& s : it.value()[3]) {
+      entry.stride.push_back(s.get<int64_t>());
+    }
+    entry.dtype = it.value()[4].get<std::string>();
+    entry.storage_offset = it.value()[5].get<uint64_t>();
+    entries.emplace(key, std::move(entry));
+  }
+  *out_entries = std::move(entries);
+  return absl::OkStatus();
+}
+
+absl::StatusOr<uint64_t> dtype_element_size(std::string_view dtype) {
+  static const absl::flat_hash_map<std::string_view, uint64_t> kSizeMap = {
+      {"torch.float16", 2},
+      {"torch.bfloat16", 2},
+      {"torch.float32", 4},
+      {"torch.float64", 8},
+      {"torch.int8", 1},
+      {"torch.uint8", 1},
+      {"torch.int16", 2},
+      {"torch.int32", 4},
+      {"torch.int64", 8},
+      {"torch.bool", 1},
+      {"torch.float", 4},
+      {"torch.double", 8},
+  };
+  auto it = kSizeMap.find(dtype);
+  if (it == kSizeMap.end()) {
+    return absl::InvalidArgumentError(absl::StrCat("unsupported dtype in canonical index: ", dtype));
+  }
+  return it->second;
+}
+
+uint64_t product(const std::vector<int64_t>& values, size_t begin, size_t end) {
+  if (begin >= end) {
+    return 1;
+  }
+  uint64_t acc = 1;
+  for (size_t i = begin; i < end; ++i) {
+    const int64_t v = values[i];
+    if (v <= 0) {
+      return 0;
+    }
+    acc *= static_cast<uint64_t>(v);
+  }
+  return acc;
+}
+
+std::vector<int64_t> compute_compact_stride(const std::vector<int64_t>& shape) {
+  if (shape.empty()) {
+    return {};
+  }
+  std::vector<int64_t> stride(shape.size());
+  int64_t acc = 1;
+  for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
+    stride[static_cast<size_t>(i)] = acc;
+    acc *= shape[static_cast<size_t>(i)];
+  }
+  return stride;
+}
+
+bool is_multiple_of(uint64_t value, uint64_t align) {
+  if (align == 0) {
+    return value == 0;
+  }
+  return (value % align) == 0;
+}
+
+SelectionPlan::Range make_data_range(uint64_t src, uint64_t dst, uint64_t len) {
+  SelectionPlan::Range r;
+  r.kind = SelectionPlan::Range::Kind::kData;
+  r.src_offset = src;
+  r.dst_offset = dst;
+  r.length = len;
+  return r;
+}
+
+SelectionPlan::Range make_pad_range(uint64_t dst, uint64_t len) {
+  SelectionPlan::Range r;
+  r.kind = SelectionPlan::Range::Kind::kPad;
+  r.src_offset = 0;
+  r.dst_offset = dst;
+  r.length = len;
+  return r;
+}
+
+void finalize_selection_plan(SelectionPlan* plan) {
+  plan->num_ranges = static_cast<uint32_t>(plan->ranges.size());
+  plan->total_bytes = 0;
+  bool contiguous = true;
+  bool segment_aligned = true;
+  uint64_t expected_dst = 0;
+  size_t data_ranges = 0;
+  for (const auto& r : plan->ranges) {
+    plan->total_bytes += r.length;
+    if (r.dst_offset != expected_dst) {
+      contiguous = false;
+    }
+    expected_dst = r.dst_offset + r.length;
+    if (r.kind == SelectionPlan::Range::Kind::kData) {
+      ++data_ranges;
+      if (!is_multiple_of(r.src_offset, kAlignmentBytes) || !is_multiple_of(r.length, kAlignmentBytes)) {
+        segment_aligned = false;
+      }
+    }
+  }
+  plan->is_contiguous = contiguous && data_ranges <= 1;
+  plan->is_segment_aligned = plan->is_contiguous && segment_aligned;
+}
+
+} // namespace
+
+absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonical_index_json, const ViewSpec& spec) {
+  std::map<std::string, CanonicalEntry> canonical_entries;
+  if (auto st = parse_canonical_index(canonical_index_json, &canonical_entries); !st.ok()) {
+    return st;
+  }
+
+  // Validate spec tensors exist and ops supported.
+  for (const auto& [tensor_name, ops] : spec.tensors) {
+    if (!canonical_entries.contains(tensor_name)) {
+      return absl::InvalidArgumentError(absl::StrCat("ViewSpec references unknown tensor: ", tensor_name));
+    }
+    auto st = validate_ops(ops);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  bool has_transform = false;
+  uint64_t view_cursor = 0;
+  SelectionPlan selection_plan;
+  selection_plan.requires_materialization = false;
+  bool any_requires_materialization = false;
+  TransformPlan transform_plan;
+  std::vector<std::string> ordered_names;
+  ordered_names.reserve(canonical_entries.size());
+  std::unordered_map<std::string, uint64_t> offsets;
+  std::unordered_map<std::string, uint64_t> sizes;
+  std::unordered_map<std::string, CanonicalTensorMeta> metas;
+
+  for (const auto& [name, entry] : canonical_entries) {
+    const uint64_t aligned_start = (view_cursor + (kAlignmentBytes - 1)) / kAlignmentBytes * kAlignmentBytes;
+    if (aligned_start > view_cursor) {
+      selection_plan.ranges.push_back(make_pad_range(view_cursor, aligned_start - view_cursor));
+      view_cursor = aligned_start;
+    }
+
+    ordered_names.push_back(name);
+    const auto spec_it = spec.tensors.find(name);
+    const TensorViewOps* ops = (spec_it == spec.tensors.end() ? nullptr : &spec_it->second);
+
+    CanonicalTensorMeta meta{
+        .shape = entry.shape, .stride = entry.stride, .dtype = entry.dtype, .storage_offset = entry.storage_offset};
+    uint64_t tensor_data_bytes = entry.size_bytes;
+    bool tensor_identity = true;
+
+    uint64_t element_size = 0;
+    if (auto size_or = dtype_element_size(entry.dtype); !size_or.ok()) {
+      return size_or.status();
+    } else {
+      element_size = *size_or;
+    }
+
+    const uint64_t tensor_dst_offset = view_cursor;
+
+    std::vector<int64_t> permutation(entry.shape.size());
+    std::iota(permutation.begin(), permutation.end(), 0);
+
+    if (ops && !ops->ops.empty()) {
+      const ViewOp& first = ops->ops.front();
+      if (first.kind == ViewOp::Kind::kNarrow) {
+        const NarrowOp& narrow = first.narrow;
+        if (narrow.length == 0) {
+          return absl::InvalidArgumentError(absl::StrCat("narrow length must be > 0 for tensor ", name));
+        }
+        if (narrow.dim < 0 || narrow.dim >= static_cast<int32_t>(entry.shape.size())) {
+          return absl::InvalidArgumentError(absl::StrCat("narrow dim out of range for tensor ", name));
+        }
+        if (ops->ops.size() > 1) {
+          return absl::InvalidArgumentError(absl::StrCat("multiple narrow ops per tensor are not supported: ", name));
+        }
+        const int32_t dim = narrow.dim;
+        const int64_t dim_extent = entry.shape[static_cast<size_t>(dim)];
+        if (dim_extent <= 0) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("invalid dimension extent in canonical index for tensor ", name));
+        }
+        if (narrow.length > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+          return absl::InvalidArgumentError("narrow length exceeds supported range");
+        }
+        int64_t normalized_start = narrow.start;
+        if (normalized_start < 0) {
+          normalized_start += dim_extent;
+        }
+        if (normalized_start < 0 || normalized_start >= dim_extent) {
+          return absl::InvalidArgumentError(absl::StrCat("narrow start out of range for tensor ", name));
+        }
+        const int64_t length_i64 = static_cast<int64_t>(narrow.length);
+        if (normalized_start + length_i64 > dim_extent) {
+          return absl::InvalidArgumentError(absl::StrCat("narrow length exceeds dimension for tensor ", name));
+        }
+
+        if (normalized_start == 0 && length_i64 == dim_extent) {
+          tensor_identity = true;
+        } else {
+          tensor_identity = false;
+          has_transform = true;
+
+          std::vector<int64_t> view_shape = entry.shape;
+          view_shape[static_cast<size_t>(dim)] = length_i64;
+          meta.shape = view_shape;
+          meta.stride = compute_compact_stride(view_shape);
+          meta.dtype = entry.dtype;
+          meta.storage_offset = 0;
+
+          const uint64_t inner = product(entry.shape, static_cast<size_t>(dim) + 1, entry.shape.size());
+          const uint64_t outer = product(entry.shape, 0, static_cast<size_t>(dim));
+          const uint64_t block_elements = static_cast<uint64_t>(length_i64) * inner;
+          const uint64_t block_bytes = block_elements * element_size;
+
+          const uint64_t stride_dim =
+              (entry.stride.size() > static_cast<size_t>(dim)
+                   ? static_cast<uint64_t>(entry.stride[static_cast<size_t>(dim)])
+                   : inner);
+
+          const uint64_t outer_count = std::max<uint64_t>(1, outer);
+
+          tensor_data_bytes = block_bytes * outer_count;
+
+          for (uint64_t outer_index = 0; outer_index < outer_count; ++outer_index) {
+            uint64_t prefix_elements = entry.storage_offset;
+            if (outer_count > 1) {
+              uint64_t tmp = outer_index;
+              for (int32_t i = dim - 1; i >= 0; --i) {
+                const uint64_t extent = static_cast<uint64_t>(entry.shape[static_cast<size_t>(i)]);
+                if (extent == 0) {
+                  continue;
+                }
+                const uint64_t idx = tmp % extent;
+                tmp /= extent;
+                if (entry.stride.size() <= static_cast<size_t>(i)) {
+                  return absl::InvalidArgumentError(absl::StrCat("stride missing for tensor ", name));
+                }
+                prefix_elements += static_cast<uint64_t>(entry.stride[static_cast<size_t>(i)]) * idx;
+              }
+            }
+            const uint64_t start_elements = prefix_elements + static_cast<uint64_t>(normalized_start) * stride_dim;
+            const uint64_t byte_offset = entry.offset + start_elements * element_size;
+            selection_plan.ranges.push_back(make_data_range(byte_offset, view_cursor, block_bytes));
+            view_cursor += block_bytes;
+          }
+        }
+      } else if (first.kind == ViewOp::Kind::kTranspose) {
+        tensor_identity = false;
+        has_transform = true;
+        for (const auto& view_op : ops->ops) {
+          if (view_op.kind != ViewOp::Kind::kTranspose) {
+            return absl::InvalidArgumentError("mixed operations per tensor are not supported");
+          }
+          const int32_t dim0 = view_op.transpose.dim0;
+          const int32_t dim1 = view_op.transpose.dim1;
+          if (dim0 < 0 || dim1 < 0 || dim0 >= static_cast<int32_t>(permutation.size()) ||
+              dim1 >= static_cast<int32_t>(permutation.size())) {
+            return absl::InvalidArgumentError(absl::StrCat("transpose dims out of range for tensor ", name));
+          }
+          std::swap(permutation[static_cast<size_t>(dim0)], permutation[static_cast<size_t>(dim1)]);
+        }
+        bool permutation_identity = true;
+        for (size_t idx = 0; idx < permutation.size(); ++idx) {
+          if (permutation[idx] != static_cast<int64_t>(idx)) {
+            permutation_identity = false;
+            break;
+          }
+        }
+        if (permutation_identity) {
+          tensor_identity = true;
+        } else {
+          std::vector<int64_t> view_shape(permutation.size());
+          for (size_t idx = 0; idx < permutation.size(); ++idx) {
+            view_shape[idx] = entry.shape[static_cast<size_t>(permutation[idx])];
+          }
+          const auto view_stride = compute_compact_stride(view_shape);
+          meta.shape = view_shape;
+          meta.stride = view_stride;
+          meta.storage_offset = 0;
+          tensor_data_bytes = entry.size_bytes;
+
+          selection_plan.ranges.push_back(make_data_range(entry.offset, view_cursor, entry.size_bytes));
+          view_cursor += entry.size_bytes;
+
+          TensorTransformPlan spec;
+          spec.tensor_name = name;
+          spec.dst_offset = tensor_dst_offset;
+          spec.storage_offset_elements = entry.storage_offset;
+          spec.canonical_shape = entry.shape;
+          spec.canonical_stride = entry.stride.empty() ? compute_compact_stride(entry.shape) : entry.stride;
+          spec.view_shape = view_shape;
+          spec.view_stride = view_stride;
+          spec.permutation.assign(permutation.begin(), permutation.end());
+          spec.dtype = entry.dtype;
+          spec.element_size_bytes = element_size;
+          transform_plan.tensors.push_back(std::move(spec));
+          any_requires_materialization = true;
+        }
+      } else {
+        return absl::InvalidArgumentError("unsupported view operation kind");
+      }
+    }
+
+    if (tensor_identity) {
+      selection_plan.ranges.push_back(make_data_range(entry.offset, view_cursor, entry.size_bytes));
+      view_cursor += entry.size_bytes;
+    }
+
+    offsets[name] = tensor_dst_offset;
+    sizes[name] = tensor_data_bytes;
+    metas[name] = meta;
+  }
+
+  finalize_selection_plan(&selection_plan);
+  selection_plan.requires_materialization = any_requires_materialization;
+  transform_plan.requires_materialization = any_requires_materialization;
+
+  ViewPlan plan;
+  plan.is_identity = !has_transform;
+  plan.view_size_bytes = view_cursor;
+  plan.selection = std::move(selection_plan);
+  plan.transform = std::move(transform_plan);
+
+  if (!has_transform) {
+    auto rebuilt_or = rebuild_stable_canonical_index(std::string(canonical_index_json), 0);
+    if (!rebuilt_or.ok()) {
+      return rebuilt_or.status();
+    }
+    plan.view_index_json = *rebuilt_or;
+    return plan;
+  }
+
+  absl::StatusOr<std::string> view_index_json_or = build_canonical_index_json(ordered_names, offsets, sizes, metas);
+  if (!view_index_json_or.ok()) {
+    return view_index_json_or.status();
+  }
+  plan.view_index_json = *view_index_json_or;
+  return plan;
+}
+
+} // namespace tensorcast::store::loader

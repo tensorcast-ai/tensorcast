@@ -37,13 +37,16 @@ tensorcast/global_store/
 │   ├── worker_repository.py    # workers
 │   ├── transport_repository.py # artifact_transports
 │   ├── artifact_repository.py  # artifacts (content-addressed descriptors)
-│   └── artifact_index_repository.py # artifact_indices (deduped tensor indices)
+│   ├── artifact_index_repository.py # artifact_indices (deduped tensor indices)
+│   ├── variant_repository.py   # variants (view metadata)
+│   └── leaf_repository.py      # leaves (TreeHash leaves for canonical/variant spaces)
 ├── services/                   # Business logic layer
 │   ├── artifact_service.py     # Register/List/Unregister replicas (+metrics)
 │   ├── transport_service.py    # Request/Complete transports (+cleanup)
 │   ├── worker_service.py       # Register/Heartbeat/List/Cleanup workers
 │   ├── recovery_service.py     # Startup recovery + state sync
-│   └── chunk_service.py        # Chunk directory (distributed memory pool)
+│   ├── chunk_service.py        # Chunk directory (distributed memory pool)
+│   └── view_state_service.py   # Variant metadata + leaf digest persistence
 ```
 
 ## Architecture
@@ -80,7 +83,10 @@ erDiagram
   artifact_replicas ||--o{ artifact_transports : used_by
   artifacts ||--o{ artifact_replicas : described_by
   artifact_indices }o--o{ artifacts : referenced_via_keys
+  artifacts ||--o{ variants : extended_by
+  artifacts ||--o{ leaves : anchors
   chunk_directory }o--|| workers : located_on
+  variants ||--o{ leaves : supplies
 
   workers {
     TEXT worker_id PK
@@ -151,6 +157,24 @@ erDiagram
     TIMESTAMP created_at
   }
 
+  variants {
+    TEXT artifact_id
+    TEXT view_id
+    TEXT view_spec_json
+    BIGINT view_size
+    TEXT view_data_hash
+    TIMESTAMP verified_at
+    TIMESTAMP created_at
+  }
+
+  leaves {
+    TEXT artifact_id
+    CHAR space_kind
+    TEXT space_id
+    BIGINT leaf_idx
+    BLOB digest
+  }
+
   chunk_directory {
     TEXT artifact_id
     INT chunk_idx
@@ -172,6 +196,10 @@ Note: `chunk_directory` has a composite primary key: `(artifact_id, device_uuid,
 
 Migration guidance
 - If you add or change tables/columns, update `schema.sql` and reference the change from the relevant design document under `docs/designs/`.
+- Variant-aware artifacts
+  - `variants` persists normalized view specifications (`view_spec_json`), computed size, and optional verification hash/timestamp keyed by `(artifact_id, view_id)`.
+  - `leaves` stores raw SHA-256 leaf digests for canonical (`space_kind='C'`) and variant (`space_kind='V'`) ByteSpaces to support fast integrity checks.
+  - Use `ViewStateService` when mutating view state to guarantee atomic updates across metadata and leaves.
 
 ## Repository Layer
 
@@ -214,6 +242,11 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - `batch_update_chunk_states()` uses `ON CONFLICT (artifact_id, device_uuid, replica, chunk_idx, node_id) DO UPDATE` to perform atomic upsert on composite PK and refresh `last_update_time`.
   - Helpers: stale cleanup and distribution statistics.
 
+- ViewStateService
+  - `update_view_state()` persists variant metadata (`variants`) and leaf digests (`leaves`) in a single transaction, leaving canonical `chunk_directory` entries untouched.
+  - Groups `LeafWritePayload` batches by ByteSpace (`space_kind`, `space_id`) and normalises case, guaranteeing idempotent upserts.
+  - Provides the business logic backing `UpdateArtifactViewState` so daemons have a single helper for publishing variant identities and verification leaves.
+
 ## gRPC Facade (GlobalStoreServicer)
 
 - Wires config, DB connection, repositories, and services; initializes schema from `schema.sql` and starts a maintenance thread (worker cleanup, transport cleanup, periodic `VACUUM`).
@@ -230,6 +263,20 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - Optional `tensor_index_data` is stored in `artifact_indices` (deduplicated by SHA-256 `index_key`).
   - New: `GetArtifactIndexById(artifact_id)` returns canonical tensor index bytes (`artifact_indices[index_key]`) using the descriptor in `artifacts` to resolve the index key.
 - Test helper: `GlobalStoreServicer.reset_state()` truncates mutable tables and rebuilds services for clean-slate integration tests.
+
+## Variant-Aware RPC Semantics
+
+- `GetArtifactInfoByIdRequest`
+  - `include_replicas` upgraded to `google.protobuf.BoolValue` (default `true`) so callers can intentionally suppress replica listings.
+  - ByteSpace selection uses the `space` oneof: set `canonical=true` for canonical leaves or `view_id="..."` for variant metadata.
+  - `include_leaves`, `include_view_meta`, and optional `leaf_idxs` scope the response to the selected ByteSpace.
+- `GetArtifactInfoByIdResponse`
+  - Adds `view_meta` (normalized JSON spec, size, hash, verification timestamp) and `leaves` (raw 32-byte digests).
+  - When a request cannot be fully satisfied, `partial_coverage` reports missing coverage via `PartialCoverageDetail` entries while still returning any retrieved replicas or leaves.
+  - Variant lookups fall back to canonical replicas: if the view is unknown the RPC returns canonical replicas with `status=STATUS_NOT_FOUND`, allowing daemons to continue routing requests.
+- `UpdateArtifactViewState`
+  - Upserts `(artifact_id, view_id)` metadata alongside canonical/variant leaf digests in one transaction.
+  - Intended for daemons after materialising a view so Global Store gains immediate visibility of variant identities without mutating canonical chunk routing structures.
 
 ## Key Flows (Sequence)
 

@@ -101,7 +101,7 @@ absl::Status write_descriptor_and_index(const std::filesystem::path& dir, uint64
   desc["artifact_id"] = std::string("mi2:") + *index_mh_or + ":" + *data_mh_or;
   desc["index_multihash"] = *index_mh_or;
   desc["data_multihash"] = *data_mh_or;
-  desc["schema_version"] = "v2";
+  desc["schema_version"] = "v3";
   desc["encoding"] = "json";
   desc["total_size"] = size_sum;
   json hp;

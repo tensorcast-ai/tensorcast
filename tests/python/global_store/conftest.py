@@ -17,13 +17,16 @@ from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
+    LeafRepository,
     ReplicaRepository,
     TransportRepository,
+    VariantRepository,
     WorkerRepository,
 )
 from tensorcast.global_store.services import (
     ArtifactService,
     TransportService,
+    ViewStateService,
     WorkerService,
 )
 from tensorcast.global_store.db_utils import init_db
@@ -180,6 +183,8 @@ def repositories(db_connection):
     return {
         "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
+        "variant": VariantRepository(db_connection),
+        "leaf": LeafRepository(db_connection),
         "worker": WorkerRepository(db_connection),
     }
 
@@ -217,6 +222,9 @@ observability:
             repositories["replica"], repositories["transport"]
         ),
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
+        "view_state": ViewStateService(
+            repositories["variant"], repositories["leaf"]
+        ),
     }
 
 

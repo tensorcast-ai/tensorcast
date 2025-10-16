@@ -395,14 +395,25 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
-    ):
+        view: store_daemon_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        return_response: bool = False,
+    ) -> store_daemon_pb2.MaterializeReplicaResponse | bytes | tuple[bytes, int]:
         """Materialize a replica by content-addressed artifact_id via daemon.
 
         Mirrors load_into_gpu but sets artifact_id instead of disk_path.
-        Returns CUDA IPC handle bytes (or (handle, status) when async).
+        Returns CUDA IPC handle bytes (or (handle, status) when async) unless
+        ``return_response`` is True, in which case the full gRPC response is returned.
         """
+        if view is not None and view_id is not None:
+            raise ValueError("Specify only one of view or view_id")
+
         logger.debug(
-            f"materialize_by_artifact_id: {artifact_id}, {replica_uuid}, wait_for_completion={wait_for_completion}"
+            "materialize_by_artifact_id: %s, %s, wait_for_completion=%s",
+            artifact_id,
+            replica_uuid,
+            wait_for_completion,
         )
 
         pid = self._get_effective_pid()
@@ -415,6 +426,12 @@ class DaemonCtl:
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
             )
+            if view is not None:
+                request.view.CopyFrom(view)
+            elif view_id:
+                request.view_id = view_id
+            if placement is not None:
+                request.placement = placement
             try:
                 response = self._unary_call(
                     self.stub.MaterializeReplica,
@@ -427,12 +444,11 @@ class DaemonCtl:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.CANCELLED:
                     raise RuntimeError(f"Artifact not loaded {e}") from e
-                elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
                     raise RuntimeError(
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
-                else:
-                    raise RuntimeError(f"Error: {e}") from e
+                raise RuntimeError(f"Error: {e}") from e
 
         load_status = response.status
         if (
@@ -443,12 +459,16 @@ class DaemonCtl:
 
         if not wait_for_completion:
             logger.info(
-                f"Artifact allocation initiated (async): {artifact_id}, {replica_uuid}"
+                "Artifact allocation initiated (async): %s, %s",
+                artifact_id,
+                replica_uuid,
             )
             assert response.mem_handle is not None
+            if return_response:
+                return response
             return response.mem_handle.cuda_ipc_handle, load_status
 
-        logger.info(f"Artifact loaded: {artifact_id}, {replica_uuid}")
+        logger.info("Artifact loaded: %s, %s", artifact_id, replica_uuid)
 
         if (
             response.status
@@ -460,6 +480,9 @@ class DaemonCtl:
                 raise RuntimeError(
                     f"Failed to confirm artifact loading for {artifact_id}"
                 )
+
+        if return_response:
+            return response
 
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle

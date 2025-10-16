@@ -41,7 +41,8 @@ ReplicaLoadController::ReplicaLoadController(
     const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
-    uint64_t artifact_size)
+    uint64_t artifact_size,
+    std::optional<std::string> view_id)
     : artifact_size_(artifact_size),
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
@@ -55,6 +56,7 @@ ReplicaLoadController::ReplicaLoadController(
               memory_coordinator_,
               ReplicaKey{
                   .artifact_id = artifact_identifier,
+                  .view_id = view_id,
                   .device = {.type = DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
                   .replica = 0},
               TransferService::Config{
@@ -66,6 +68,7 @@ ReplicaLoadController::ReplicaLoadController(
               va_space_)) {
   // Populate replica_key_ using constructor inputs
   replica_key_.artifact_id = std::move(artifact_identifier);
+  replica_key_.view_id = std::move(view_id);
   replica_key_.device.type = DeviceType::GPU;
   replica_key_.device.ordinal = local_device_id;
   // Initialize services already done in initializer list
@@ -1199,7 +1202,8 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
     std::unique_ptr<loader::SeekableSource> source,
     MemoryLocation target_location,
     int concurrency,
-    std::optional<absl::Span<const uint32_t>> chunk_indices) {
+    std::optional<absl::Span<const uint32_t>> chunk_indices,
+    std::function<absl::Status()> post_load_fn) {
   // Phase 1: capture state under lock and ensure allocation + LOADING
   bool need_allocate = false;
   {
@@ -1238,7 +1242,12 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
   // Phase 2: launch async pump task delegated to TransferService
   return std::async(
       std::launch::async,
-      [this, source = std::move(source), target_location, concurrency, chunk_indices]() mutable -> absl::Status {
+      [this,
+       source = std::move(source),
+       target_location,
+       concurrency,
+       chunk_indices,
+       post_load_fn = std::move(post_load_fn)]() mutable -> absl::Status {
         LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id
                   << "): async load start; target=" << static_cast<int>(target_location) << ", conc=" << concurrency;
         void* gpu_ptr = nullptr;
@@ -1298,6 +1307,15 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
             if (cpu_.state != MemoryState::FAILED) {
               (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
             }
+          }
+        }
+        // Optional post-load hook (e.g., view transforms)
+        if (post_load_fn) {
+          absl::Status hook_status = post_load_fn();
+          if (!hook_status.ok()) {
+            this->record_failure_and_fail_(
+                target_location, absl::Substitute("post-load transform failed: $0", hook_status.message()));
+            return hook_status;
           }
         }
         // Facade state LOADED

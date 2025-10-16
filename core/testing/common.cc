@@ -194,7 +194,7 @@ absl::Status write_rfc0007_descriptor_for_standard_artifact_dir(const std::files
   desc["artifact_id"] = std::string("mi2:") + *index_mh_or + ":" + *data_mh_or;
   desc["index_multihash"] = *index_mh_or;
   desc["data_multihash"] = *data_mh_or;
-  desc["schema_version"] = "v2";
+  desc["schema_version"] = "v3";
   desc["encoding"] = "json";
   desc["total_size"] = total_size;
   json hp;

@@ -92,8 +92,40 @@ enum DeviceType {
   DEVICE_TYPE_DISK = 3;
 }
 
+enum TransformPlacement {
+  TRANSFORM_PLACEMENT_UNSPECIFIED = 0;
+  TRANSFORM_PLACEMENT_SERVER = 1;
+  TRANSFORM_PLACEMENT_CLIENT = 2;
+}
+
 message MemCopyHandle {
   bytes cuda_ipc_handle = 1;
+}
+
+message NarrowOp {
+  uint32 dim = 1;
+  int64 start = 2;
+  uint64 length = 3;
+}
+
+message TransposeOp {
+  uint32 dim0 = 1;
+  uint32 dim1 = 2;
+}
+
+message Op {
+  oneof kind {
+    NarrowOp narrow = 1;
+    TransposeOp transpose = 2;
+  }
+}
+
+message TensorViewOps {
+  repeated Op ops = 1;
+}
+
+message ViewSpec {
+  map<string, TensorViewOps> tensors = 1;
 }
 
 message MaterializeReplicaRequest {
@@ -110,6 +142,13 @@ message MaterializeReplicaRequest {
   int32 pinned_allocation_timeout_ms = 5;
   int32 pid = 6; // Process ID for reference tracking
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
+
+  oneof view_identity {
+    ViewSpec view = 1001;
+    string view_id = 1002;
+  }
+
+  TransformPlacement placement = 1003;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -129,6 +168,9 @@ message MaterializeReplicaResponse {
   // but data transfer is still in progress. Client must call
   // ConfirmReplica to verify completion before using the artifact.
   MaterializeReplicaStatus status = 3;
+
+  bytes view_index_json = 1001;
+  string view_data_hash = 1002;
 }
 
 message ConfirmReplicaRequest {
@@ -362,7 +404,7 @@ message BeginRegisterArtifactRequest {
 // Tensor index data with metadata
 message TensorIndexData {
   bytes data = 1; // Canonical index bytes (CBOR preferred; strict canonical JSON allowed)
-  string schema_version = 2; // Schema version (e.g., "v2")
+  string schema_version = 2; // Schema version (must be "v3")
   string encoding = 3; // Encoding format ("cbor" or "json")
 }
 

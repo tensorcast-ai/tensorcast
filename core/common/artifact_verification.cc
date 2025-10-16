@@ -45,6 +45,9 @@ std::string bytes_to_hex(absl::Span<const uint8_t> bytes) {
 std::string ArtifactVerificationInfo::to_json() const {
   json j;
   j["version"] = "1.0";
+  if (!byte_space_id.empty()) {
+    j["byte_space_id"] = byte_space_id;
+  }
   j["artifact_size"] = artifact_size;
   j["full_hash"] = full_hash;
   j["segment_hashes"] = segment_hashes;
@@ -60,6 +63,10 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerificationInfo::from_json(con
     json j = json::parse(json_str);
 
     ArtifactVerificationInfo info;
+
+    if (j.contains("byte_space_id") && j["byte_space_id"].is_string()) {
+      info.byte_space_id = j["byte_space_id"].get<std::string>();
+    }
 
     // Parse artifact_size
     if (j.contains("artifact_size") && j["artifact_size"].is_number_unsigned()) {

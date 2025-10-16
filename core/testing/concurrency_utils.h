@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <latch>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -190,7 +191,8 @@ inline store::DeviceKey make_gpu_key(int ordinal, const std::string& uuid = "") 
 }
 
 inline store::loading::ReplicaKey make_replica_key(const std::string& artifact_id, int gpu_ordinal) {
-  return store::loading::ReplicaKey{artifact_id, make_gpu_key(gpu_ordinal), 0};
+  return store::loading::ReplicaKey{
+      .artifact_id = artifact_id, .view_id = std::nullopt, .device = make_gpu_key(gpu_ordinal), .replica = 0};
 }
 
 } // namespace tensorcast::testing

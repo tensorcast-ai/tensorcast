@@ -2,9 +2,11 @@
 
 """Tests for Global Store repository layer."""
 
+from datetime import datetime, timezone
+
 import pytest
 
-from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import MemoryType, Replica, Worker
 
 
 class TestRepositories:
@@ -343,3 +345,78 @@ class TestRepositories:
             replicas = replica_repo.find_by_artifact(f"worker_model_{i}")
             assert len(replicas) == 1
             assert replicas[0].is_available is False
+
+    def test_variant_repository_upsert_and_get(self, repositories):
+        """Variants are upserted and fetched by composite key."""
+        variant_repo = repositories["variant"]
+        now = datetime.now(timezone.utc)
+
+        variant_repo.upsert(
+            artifact_id="mi2:index:data",
+            view_id="view-123",
+            view_spec_json='{"ops":[]}',
+            view_size=1024,
+            view_data_hash="mhash123",
+            verified_at=now,
+        )
+
+        row = variant_repo.get(artifact_id="mi2:index:data", view_id="view-123")
+        assert row is not None
+        assert row["view_spec_json"] == '{"ops":[]}'
+        assert row["view_size"] == 1024
+        assert row["view_data_hash"] == "mhash123"
+        assert row["verified_at"] is not None
+
+        variant_repo.upsert(
+            artifact_id="mi2:index:data",
+            view_id="view-123",
+            view_spec_json='{"ops":[{"type":"narrow"}]}',
+            view_size=2048,
+            view_data_hash=None,
+            verified_at=None,
+        )
+
+        updated = variant_repo.get(artifact_id="mi2:index:data", view_id="view-123")
+        assert updated is not None
+        assert updated["view_spec_json"] == '{"ops":[{"type":"narrow"}]}'
+        assert updated["view_size"] == 2048
+        assert updated["view_data_hash"] is None
+        assert updated["verified_at"] is None
+
+    def test_leaf_repository_upsert_and_fetch(self, repositories):
+        """Leaf digests persist values per space and index."""
+        leaf_repo = repositories["leaf"]
+        artifact_id = "mi2:index:data"
+        space_kind = "C"
+        space_id = "indexmh"
+
+        leaf_repo.upsert_many(
+            artifact_id=artifact_id,
+            space_kind=space_kind,
+            space_id=space_id,
+            entries=[(0, b"\x00" * 32), (1, b"\x01" * 32)],
+        )
+
+        rows = leaf_repo.fetch(
+            artifact_id=artifact_id,
+            space_kind=space_kind,
+            space_id=space_id,
+        )
+        assert [row.leaf_idx for row in rows] == [0, 1]
+        assert rows[0].digest == b"\x00" * 32
+
+        leaf_repo.upsert_many(
+            artifact_id=artifact_id,
+            space_kind=space_kind,
+            space_id=space_id,
+            entries=[(1, b"\xff" * 32), (2, b"\x02" * 32)],
+        )
+
+        filtered = leaf_repo.fetch(
+            artifact_id=artifact_id,
+            space_kind=space_kind,
+            space_id=space_id,
+            leaf_idxs=[1, 2],
+        )
+        assert [row.leaf_idx for row in filtered] == [1, 2]
+        assert filtered[0].digest == b"\xff" * 32

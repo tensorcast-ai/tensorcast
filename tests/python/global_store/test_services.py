@@ -2,6 +2,8 @@
 
 """Tests for Global Store service layer."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from tensorcast.global_store.exceptions import (
@@ -10,6 +12,10 @@ from tensorcast.global_store.exceptions import (
     ValidationError,
 )
 from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.services.view_state_service import (
+    LeafWritePayload,
+    VariantUpsertPayload,
+)
 
 
 class TestServices:
@@ -599,3 +605,79 @@ class TestServices:
         assert selected.node_id == "node_1"
         assert selected.memory_type == MemoryType.GPU
         assert selected.current_requests == 3  # Incremented from 2 to 3
+
+    def test_view_state_service_update_and_fetch(self, services):
+        """Persist variant metadata and leaves atomically."""
+        view_state_service = services["view_state"]
+        now = datetime.now(timezone.utc)
+        variant_payload = VariantUpsertPayload(
+            artifact_id="mi2:index:data",
+            view_id="view-1",
+            view_spec_json="{}",
+            view_size=128,
+            view_data_hash="mhash",
+            verified_at=now,
+        )
+        leaf_payloads = [
+            LeafWritePayload(
+                artifact_id="mi2:index:data",
+                space_kind="V",
+                space_id="view-1",
+                leaf_idx=0,
+                digest=b"\x01" * 32,
+            ),
+            LeafWritePayload(
+                artifact_id="mi2:index:data",
+                space_kind="V",
+                space_id="view-1",
+                leaf_idx=1,
+                digest=b"\x02" * 32,
+            ),
+        ]
+
+        view_state_service.update_view_state(
+            variant=variant_payload,
+            leaf_writes=leaf_payloads,
+        )
+
+        stored_variant = view_state_service.get_variant(
+            artifact_id="mi2:index:data", view_id="view-1"
+        )
+        assert stored_variant is not None
+        assert stored_variant["view_size"] == 128
+        assert stored_variant["view_spec_json"] == "{}"
+
+        leaves = list(
+            view_state_service.get_leaves(
+                artifact_id="mi2:index:data",
+                space_kind="V",
+                space_id="view-1",
+            )
+        )
+        assert len(leaves) == 2
+        assert leaves[0][0] == 0
+        assert leaves[0][1] == b"\x01" * 32
+
+    def test_view_state_service_rejects_mismatched_artifact(self, services):
+        """Leaf writes must share artifact_id."""
+        view_state_service = services["view_state"]
+        with pytest.raises(ValueError, match="artifact_id mismatch"):
+            view_state_service.update_view_state(
+                variant=None,
+                leaf_writes=[
+                    LeafWritePayload(
+                        artifact_id="mi2:index:data",
+                        space_kind="C",
+                        space_id="index",
+                        leaf_idx=0,
+                        digest=b"\x00" * 32,
+                    ),
+                    LeafWritePayload(
+                        artifact_id="mi2:other:data",
+                        space_kind="C",
+                        space_id="index",
+                        leaf_idx=1,
+                        digest=b"\x01" * 32,
+                    ),
+                ],
+            )

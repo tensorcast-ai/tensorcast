@@ -11,6 +11,8 @@ import binascii
 import ipaddress
 import threading
 import time
+from datetime import datetime, timezone
+from typing import Optional, cast
 from uuid import UUID
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
@@ -27,8 +29,10 @@ from tensorcast.global_store.exceptions import (
 from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.repositories import (
     ChunkDirectoryRepository,
+    LeafRepository,
     ReplicaRepository,
     TransportRepository,
+    VariantRepository,
     WorkerRepository,
 )
 from tensorcast.global_store.repositories.artifact_index_repository import (
@@ -43,7 +47,12 @@ from tensorcast.global_store.services import (
     ChunkService,
     RecoveryService,
     TransportService,
+    ViewStateService,
     WorkerService,
+)
+from tensorcast.global_store.services.view_state_service import (
+    LeafWritePayload,
+    VariantUpsertPayload,
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import set_span_attributes
@@ -94,6 +103,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
+        self.variant_repository = VariantRepository(self.connection)
+        self.leaf_repository = LeafRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
 
         # Initialize services
@@ -105,6 +116,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.worker_repository, self.replica_repository
         )
         self.chunk_service = ChunkService(self.chunk_directory_repository)
+        self.view_state_service = ViewStateService(
+            self.variant_repository, self.leaf_repository
+        )
 
         # Initialize recovery service for high availability
         self.recovery_service = RecoveryService(
@@ -116,6 +130,44 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # Start background cleanup thread
         self._start_cleanup_thread()
         # Cleanup and optimization are now handled by a single maintenance thread
+
+    @staticmethod
+    def _timestamp_to_datetime(ts: timestamp_pb2.Timestamp | None) -> datetime | None:
+        """Convert protobuf Timestamp to timezone-aware datetime (UTC)."""
+        if ts is None:
+            return None
+        return ts.ToDatetime(tzinfo=timezone.utc)
+
+    @staticmethod
+    def _datetime_to_timestamp(dt: datetime | None) -> timestamp_pb2.Timestamp | None:
+        """Convert datetime to protobuf Timestamp (UTC)."""
+        if dt is None:
+            return None
+        normalized = (
+            dt.astimezone(timezone.utc)
+            if dt.tzinfo
+            else dt.replace(tzinfo=timezone.utc)
+        )
+        proto = timestamp_pb2.Timestamp()
+        proto.FromDatetime(normalized)
+        return proto
+
+    @staticmethod
+    def _coerce_db_datetime(value: object) -> datetime | None:
+        """Best-effort conversion for DuckDB timestamp outputs."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            candidate = value
+        elif isinstance(value, str):
+            candidate = datetime.fromisoformat(value)
+        else:
+            raise ValueError(f"Unsupported datetime value: {value!r}")
+        return (
+            candidate.astimezone(timezone.utc)
+            if candidate.tzinfo
+            else candidate.replace(tzinfo=timezone.utc)
+        )
 
     @staticmethod
     def _multibase_sha256_to_hex(value: str) -> str | None:
@@ -212,23 +264,294 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
 
-            replicas = self.artifact_service.get_artifact_replicas(artifact_id)
-            available_replicas = [self._replica_to_memory_info(r) for r in replicas]
+            include_replicas = True
+            if request.HasField("include_replicas"):
+                include_replicas = request.include_replicas.value
 
+            include_leaves = request.include_leaves
+            include_view_meta = request.include_view_meta
+
+            space_field = request.WhichOneof("space")
+            space_kind: Optional[str] = None  # 'C' or 'V'
+            space_id: Optional[str] = None
+
+            if include_leaves or include_view_meta or space_field is not None:
+                if space_field is None:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(
+                        "space selector required when requesting metadata or leaves"
+                    )
+                    return global_store_pb2.GetArtifactInfoByIdResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                if space_field == "canonical":
+                    if not request.canonical:
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        context.set_details("canonical must be true when selected")
+                        return global_store_pb2.GetArtifactInfoByIdResponse(
+                            status=global_store_pb2.Status.STATUS_ERROR
+                        )
+                    space_kind = "C"
+                    artifact_row = self.artifacts_repo.get(artifact_id)
+                    if not artifact_row or not artifact_row.get("index_multihash"):
+                        context.set_code(grpc.StatusCode.NOT_FOUND)
+                        context.set_details("canonical index not recorded")
+                        return global_store_pb2.GetArtifactInfoByIdResponse(
+                            status=global_store_pb2.Status.STATUS_NOT_FOUND
+                        )
+                    space_id = artifact_row["index_multihash"]
+                elif space_field == "view_id":
+                    view_id = request.view_id
+                    if not view_id:
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        context.set_details(
+                            "view_id is required when selecting variant space"
+                        )
+                        return global_store_pb2.GetArtifactInfoByIdResponse(
+                            status=global_store_pb2.Status.STATUS_ERROR
+                        )
+                    space_kind = "V"
+                    space_id = view_id
+                else:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("unsupported space selector")
+                    return global_store_pb2.GetArtifactInfoByIdResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+
+            available_replicas: list[common_pb2.MemoryInfo] = []
+            if include_replicas:
+                replicas = self.artifact_service.get_artifact_replicas(artifact_id)
+                available_replicas = [self._replica_to_memory_info(r) for r in replicas]
+
+            view_meta_msg: Optional[global_store_pb2.ViewMeta] = None
+            leaves_proto: list[global_store_pb2.Leaf] = []
+            partial_details: list[global_store_pb2.PartialCoverageDetail] = []
+            leaf_filter: Optional[list[int]] = None
+            variant_missing = False
+            partial_leaf_miss = False
+
+            variant_row: Optional[dict[str, object]] = None
+            if space_kind == "V" and (include_leaves or include_view_meta):
+                variant_row = self.view_state_service.get_variant(
+                    artifact_id=artifact_id, view_id=space_id or ""
+                )
+                if variant_row is None:
+                    variant_missing = True
+                    context.set_code(grpc.StatusCode.NOT_FOUND)
+                    context.set_details("variant metadata not found")
+
+            if include_view_meta:
+                if space_kind != "V":
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(
+                        "view metadata is only available for variant space"
+                    )
+                    return global_store_pb2.GetArtifactInfoByIdResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                if variant_row is not None:
+                    view_size_value = cast(int, variant_row["view_size"])
+                    view_meta_msg = global_store_pb2.ViewMeta(
+                        view_spec_json=str(variant_row["view_spec_json"]),
+                        view_size=int(view_size_value),
+                    )
+                    view_data_hash = variant_row.get("view_data_hash")
+                    if view_data_hash:
+                        view_meta_msg.view_data_hash = str(view_data_hash)
+                    verified_at = self._coerce_db_datetime(
+                        variant_row.get("verified_at")
+                    )
+                    proto_ts = self._datetime_to_timestamp(verified_at)
+                    if proto_ts is not None:
+                        view_meta_msg.verified_at.CopyFrom(proto_ts)
+
+            if include_leaves:
+                if space_kind is None or space_id is None:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(
+                        "space selection required when requesting leaves"
+                    )
+                    return global_store_pb2.GetArtifactInfoByIdResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                leaf_filter = list(request.leaf_idxs) if request.leaf_idxs else None
+                if space_kind == "V" and variant_row is None:
+                    partial_leaf_miss = True
+                    detail = global_store_pb2.PartialCoverageDetail(
+                        space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT,
+                        space_id=space_id or "",
+                    )
+                    if leaf_filter:
+                        for idx in sorted(set(leaf_filter)):
+                            detail.missing_ranges.append(
+                                global_store_pb2.Range(off=int(idx), len=1)
+                            )
+                    partial_details.append(detail)
+                else:
+                    leaf_rows = self.view_state_service.get_leaves(
+                        artifact_id=artifact_id,
+                        space_kind=space_kind,
+                        space_id=space_id,
+                        leaf_idxs=leaf_filter,
+                    )
+                    leaves_proto = [
+                        global_store_pb2.Leaf(leaf_idx=idx, digest=digest)
+                        for idx, digest in leaf_rows
+                    ]
+                    if leaf_filter and len(leaves_proto) != len(set(leaf_filter)):
+                        partial_leaf_miss = True
+                        context.set_code(grpc.StatusCode.NOT_FOUND)
+                        context.set_details(
+                            "requested leaf digests not fully available"
+                        )
+                        detail = global_store_pb2.PartialCoverageDetail(
+                            space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT
+                            if space_kind == "V"
+                            else global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
+                            space_id=space_id or "",
+                        )
+                        existing = {leaf.leaf_idx for leaf in leaves_proto}
+                        missing = sorted(
+                            idx for idx in set(leaf_filter) if idx not in existing
+                        )
+                        for idx in missing:
+                            detail.missing_ranges.append(
+                                global_store_pb2.Range(off=int(idx), len=1)
+                            )
+                        partial_details.append(detail)
+
+            has_payload = False
+            if include_replicas and available_replicas:
+                has_payload = True
+            if include_leaves and leaves_proto:
+                has_payload = True
+            if include_view_meta and view_meta_msg is not None:
+                has_payload = True
+
+            need_not_found = (
+                variant_missing
+                or partial_leaf_miss
+                or (
+                    not has_payload
+                    and (include_replicas or include_leaves or include_view_meta)
+                )
+            )
             status = (
-                global_store_pb2.Status.STATUS_OK
-                if available_replicas
-                else global_store_pb2.Status.STATUS_NOT_FOUND
+                global_store_pb2.Status.STATUS_NOT_FOUND
+                if need_not_found
+                else global_store_pb2.Status.STATUS_OK
             )
-            return global_store_pb2.GetArtifactInfoByIdResponse(
-                status=status, replicas=available_replicas
-            )
+
+            response = global_store_pb2.GetArtifactInfoByIdResponse(status=status)
+            if include_replicas:
+                response.replicas.extend(available_replicas)
+            if include_leaves:
+                response.leaves.extend(leaves_proto)
+            if view_meta_msg is not None:
+                response.view_meta.CopyFrom(view_meta_msg)
+            if partial_details:
+                response.partial_coverage.extend(partial_details)
+            return response
 
         except Exception as e:
             logger.exception(f"Error getting artifact info by id for {artifact_id}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.GetArtifactInfoByIdResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def UpdateArtifactViewState(
+        self,
+        request: global_store_pb2.UpdateArtifactViewStateRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpdateArtifactViewStateResponse:
+        """Upsert variant metadata and leaf digests."""
+        artifact_id = request.artifact_id
+        if not artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("artifact_id is required")
+            return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        try:
+            variant_payload: Optional[VariantUpsertPayload] = None
+            if request.HasField("variant"):
+                variant = request.variant
+                if not variant.view_id:
+                    raise ValidationError("variant.view_id is required")
+                if not variant.view_spec_json:
+                    raise ValidationError("variant.view_spec_json is required")
+                if variant.view_size <= 0:
+                    raise ValidationError("variant.view_size must be positive")
+                verified_at = (
+                    self._timestamp_to_datetime(variant.verified_at)
+                    if variant.HasField("verified_at")
+                    else None
+                )
+                view_data_hash = variant.view_data_hash or None
+                variant_payload = VariantUpsertPayload(
+                    artifact_id=artifact_id,
+                    view_id=variant.view_id,
+                    view_spec_json=variant.view_spec_json,
+                    view_size=variant.view_size,
+                    view_data_hash=view_data_hash,
+                    verified_at=verified_at,
+                )
+
+            leaf_payloads: list[LeafWritePayload] = []
+            for leaf in request.leaf_writes:
+                if leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_UNSPECIFIED:
+                    raise ValidationError("leaf.space_kind must be set")
+                if not leaf.space_id:
+                    raise ValidationError("leaf.space_id is required")
+                if not leaf.digest:
+                    raise ValidationError("leaf.digest is required")
+                if leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_CANONICAL:
+                    space_kind = "C"
+                elif leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT:
+                    space_kind = "V"
+                else:
+                    raise ValidationError(f"Unsupported space_kind: {leaf.space_kind}")
+
+                leaf_payloads.append(
+                    LeafWritePayload(
+                        artifact_id=artifact_id,
+                        space_kind=space_kind,
+                        space_id=leaf.space_id,
+                        leaf_idx=leaf.leaf_idx,
+                        digest=bytes(leaf.digest),
+                    )
+                )
+
+            self.view_state_service.update_view_state(
+                variant=variant_payload,
+                leaf_writes=leaf_payloads,
+            )
+            return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_OK
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Failed to update artifact view state for artifact_id=%s", artifact_id
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateArtifactViewStateResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
@@ -239,6 +562,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.RegisterReplicaResponse:
         """Register or update a artifact replica."""
         try:
+            schema_version_value = "v3"
+            if request.HasField("schema_version"):
+                candidate_schema_version = request.schema_version.strip()
+                if candidate_schema_version and candidate_schema_version != "v3":
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("schema_version must be 'v3'")
+                    return global_store_pb2.RegisterReplicaResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+                if candidate_schema_version:
+                    schema_version_value = candidate_schema_version
+
             # Convert proto to domain artifact
             replica = self._memory_info_to_replica_artifact_id(
                 request.mem_info,
@@ -277,14 +612,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     index_mh = parts[1]
                     data_mh = parts[2]
                     # Best-effort encoding/schema; can be refined when descriptor is carried in proto
-                    schema_version = "v2"
                     encoding = "json"
                     try:
                         self.artifacts_repo.upsert_artifact(
                             artifact_id=artifact_id,
                             index_multihash=index_mh,
                             data_multihash=data_mh,
-                            schema_version=schema_version,
+                            schema_version=schema_version_value,
                             encoding=encoding,
                             hash_params_json=None,
                         )
@@ -302,11 +636,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         encoding=(
                             request.encoding if request.HasField("encoding") else "json"
                         ),
-                        schema_version=(
-                            request.schema_version
-                            if request.HasField("schema_version")
-                            else "v2"
-                        ),
+                        schema_version=schema_version_value,
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
@@ -504,7 +834,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_OK,
                 tensor_index_data=data,
                 encoding="json",
-                schema_version="v2",
+                schema_version="v3",
             )
         except Exception as e:
             logger.exception("Error getting artifact index")
@@ -558,7 +888,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_OK,
                 tensor_index_data=data,
                 encoding=str(row.get("encoding") or "json"),
-                schema_version=str(row.get("schema_version") or "v2"),
+                schema_version=str(row.get("schema_version") or "v3"),
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Error getting artifact index by id")

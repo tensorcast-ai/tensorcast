@@ -185,6 +185,46 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "view_planner",
+    srcs = ["view_planner.cc"],
+    hdrs = ["view_planner.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":canonical_index",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "view_plan_source",
+    srcs = ["view_plan_source.cc"],
+    hdrs = ["view_plan_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        ":view_planner",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
+    name = "view_transform_executor",
+    srcs = ["view_transform_executor.cc"],
+    hdrs = ["view_transform_executor.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":view_planner",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+        "@libtorch//:torch",
+    ],
+)
+
 # Sink implementations
 sc_cc_library(
     name = "gpu_memory_sink",
@@ -431,6 +471,42 @@ cc_test(
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "view_planner_test",
+    srcs = ["view_planner_test.cc"],
+    deps = [
+        ":canonical_index",
+        ":view_planner",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "view_plan_source_test",
+    srcs = ["view_plan_source_test.cc"],
+    deps = [
+        ":view_plan_source",
+        ":view_planner",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "view_transform_executor_test",
+    srcs = ["view_transform_executor_test.cc"],
+    deps = [
+        ":view_planner",
+        ":view_transform_executor",
+        "//core/common:memory_location_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
     ],
 )
 

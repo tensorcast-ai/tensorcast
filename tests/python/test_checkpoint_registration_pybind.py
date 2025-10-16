@@ -48,7 +48,7 @@ def test_sdk_begin_commit_and_ipc_map(tmp_path: Path):
             ttl_ms=0,
             tensor_index_data=index_bytes,
             encoding="json",
-            schema_version="v2",
+            schema_version="v3",
             plan=CoalescedPlan(kind="coalesced", max_inflight_bytes=1 << 20),
         )
         assert begin.registration_id
@@ -86,7 +86,7 @@ def test_sdk_begin_abort_then_commit_fails(tmp_path: Path):
             ttl_ms=0,
             tensor_index_data=b"{}",
             encoding="json",
-            schema_version="v2",
+            schema_version="v3",
             plan=CoalescedPlan(kind="coalesced"),
         )
         reg = begin.registration_id
@@ -116,7 +116,7 @@ def test_sdk_ttl_expiry(tmp_path: Path):
             ttl_ms=ttl_ms,
             tensor_index_data=b"{}",
             encoding="json",
-            schema_version="v2",
+            schema_version="v3",
             plan=CoalescedPlan(kind="coalesced"),
         )
         time.sleep(0.02)

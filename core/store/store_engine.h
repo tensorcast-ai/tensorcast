@@ -33,6 +33,12 @@ namespace loading {
 class MaterializeOrchestrator;
 } // namespace loading
 
+namespace loader {
+struct ViewPlan;
+struct ViewSpec;
+class SeekableSource;
+} // namespace loader
+
 class StoreEngine {
   friend class loading::MaterializeOrchestrator;
 
@@ -86,6 +92,18 @@ class StoreEngine {
       MaterializeMode mode = MaterializeMode::AUTO,
       const loading::MaterializeHints& hints = {});
 
+  // View planning/execution helpers (variant-aware path)
+  static absl::StatusOr<loader::ViewPlan> compute_view_plan(
+      std::string_view canonical_index_json,
+      const loader::ViewSpec& spec);
+
+  static bool view_plan_allows_alias(const loader::ViewPlan& plan);
+
+  static absl::StatusOr<std::string> compute_view_data_hash_from_source(
+      loader::SeekableSource& base_source,
+      const loader::ViewPlan& plan,
+      size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
+
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
@@ -94,7 +112,7 @@ class StoreEngine {
     std::string artifact_id; // Logical artifact identifier (old artifact_id)
     std::string tensor_index_key; // Canonical JSON SHA-256 hex (lowercase)
     std::optional<std::string> tensor_index_data; // Optional canonical JSON bytes for UPSERT
-    std::string schema_version{"v2"}; // Data-format schema version
+    std::string schema_version{"v3"}; // Data-format schema version
     std::string encoding{"json"}; // Encoding of index_data (if provided)
     int device_id{0}; // Local CUDA device ordinal
     uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
@@ -134,7 +152,7 @@ class StoreEngine {
     // authoritative descriptor details without recomputation.
     std::string index_multihash; // multibase(base32)-encoded multihash of canonical index
     std::string data_multihash; // multibase(base32)-encoded multihash of tree-hash root
-    std::string schema_version; // e.g. "v2"
+    std::string schema_version; // e.g. "v3"
     std::string encoding; // e.g. "json" or "cbor"
   };
 
@@ -170,6 +188,12 @@ class StoreEngine {
   absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
 
   /**
+   * @brief Inject a custom Global Store client (primarily for testing).
+   * Ownership is shared so tests may reuse the stub beyond the StoreEngine lifetime.
+   */
+  void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
+
+  /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */
   [[nodiscard]] std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;
@@ -203,7 +227,7 @@ class StoreEngine {
   // RFC-0014: Key-mapping wrappers delegating to Global Store client. These
   // avoid exposing the client to callers and ensure we always use the Engine's
   // configured Global Store connection.
-  absl::StatusOr<components::GlobalStoreClient::KeyMapping> resolve_key_mapping(std::string_view key);
+  absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view key);
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
@@ -289,7 +313,7 @@ class StoreEngine {
   gsl::not_null<std::unique_ptr<components::DeviceManager>> device_manager_;
   gsl::not_null<std::unique_ptr<components::ReplicaRegistry>> replica_registry_;
   gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
-  std::unique_ptr<components::GlobalStoreClient> global_store_client_;
+  std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
   gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_; // System-wide VS instance

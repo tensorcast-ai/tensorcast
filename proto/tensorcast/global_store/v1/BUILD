@@ -11,6 +11,7 @@ proto_library(
         "//proto/tensorcast/common/v1:common_proto",
         "@protobuf//:duration_proto",
         "@protobuf//:timestamp_proto",
+        "@protobuf//:wrappers_proto",
     ],
 )
 

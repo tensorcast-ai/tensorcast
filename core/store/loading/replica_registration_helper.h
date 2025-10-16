@@ -16,7 +16,7 @@ class ReplicaRegistrationHelper {
   // Registers the current process' replica of the given artifact with Global Store.
   // This is a thin wrapper around GlobalStoreClient::register_replica().
   static absl::Status register_local_replica(
-      gsl::not_null<components::GlobalStoreClient*> gs_client,
+      gsl::not_null<components::IGlobalStoreClient*> gs_client,
       std::string_view worker_id,
       std::string_view artifact_id,
       const DeviceKey& device,

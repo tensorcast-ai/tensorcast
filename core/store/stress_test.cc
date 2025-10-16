@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <thread>
 #include <unordered_map>
@@ -73,6 +74,7 @@ class ValidationTracker {
     std::unique_lock<std::mutex> lock(mu_);
     counts_[make_key_(artifact_id, gpu_ordinal)]++;
   }
+
   void end(const std::string& artifact_id, int gpu_ordinal) {
     std::unique_lock<std::mutex> lock(mu_);
     auto k = make_key_(artifact_id, gpu_ordinal);
@@ -84,6 +86,7 @@ class ValidationTracker {
       }
     }
   }
+
   void wait(const std::string& artifact_id, int gpu_ordinal) {
     std::unique_lock<std::mutex> lock(mu_);
     auto k = make_key_(artifact_id, gpu_ordinal);
@@ -94,6 +97,7 @@ class ValidationTracker {
   static std::string make_key_(const std::string& artifact_id, int gpu_ordinal) {
     return artifact_id + "|" + std::to_string(gpu_ordinal);
   }
+
   std::mutex mu_;
   std::condition_variable cv_;
   std::unordered_map<std::string, int> counts_;
@@ -105,6 +109,7 @@ class ValidationScopeKey {
       : tracker_(tracker), artifact_id_(artifact_id), ordinal_(gpu_ordinal) {
     tracker_.begin(artifact_id_, ordinal_);
   }
+
   ~ValidationScopeKey() {
     tracker_.end(artifact_id_, ordinal_);
   }
@@ -124,6 +129,7 @@ class ValidationGpuGate {
     std::lock_guard<std::mutex> lock(mu_);
     counts_[gpu_ordinal] += 1;
   }
+
   void end(int gpu_ordinal) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = counts_.find(gpu_ordinal);
@@ -133,6 +139,7 @@ class ValidationGpuGate {
       }
     }
   }
+
   bool active(int gpu_ordinal) const {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = counts_.find(gpu_ordinal);
@@ -149,6 +156,7 @@ class ValidationGpuScope {
   ValidationGpuScope(ValidationGpuGate& gate, int gpu_ordinal) : gate_(gate), ordinal_(gpu_ordinal) {
     gate_.begin(ordinal_);
   }
+
   ~ValidationGpuScope() {
     gate_.end(ordinal_);
   }
@@ -530,7 +538,8 @@ TEST_CASE("C2: Heavy concurrent load", "[store_engine][stress][c2]") {
           // Only validate instances that are actually resident on GPU
           if (info.gpu_state == MemoryLocation::GPU && info.gpu_device_id >= 0) {
             DeviceKey device_key{DeviceType::GPU, info.gpu_device_id, info.gpu_device_uuid};
-            ReplicaKey replica_key{info.artifact_id, device_key, 0};
+            ReplicaKey replica_key{
+                .artifact_id = info.artifact_id, .view_id = std::nullopt, .device = device_key, .replica = 0};
 
             auto state = store->get_replica_state(replica_key, DeviceType::GPU);
             if (state != MemoryState::LOADED && state != MemoryState::LOADING && state != MemoryState::ALLOCATED) {

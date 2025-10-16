@@ -5,6 +5,7 @@
 #include <filesystem>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/loading/replica_registration_helper.h"
@@ -14,7 +15,7 @@ namespace tensorcast::store::loading {
 
 MaterializeOrchestrator::MaterializeOrchestrator(
     gsl::not_null<StoreEngine*> store,
-    gsl::not_null<components::GlobalStoreClient*> gs_client)
+    gsl::not_null<components::IGlobalStoreClient*> gs_client)
     : store_(store), gs_client_(gs_client) {}
 
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
@@ -28,16 +29,43 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
+  const std::optional<std::string> view_id = hints.variant ? hints.variant->view_id : std::nullopt;
+
   // ------------------------------------------------------------------
   // 2. Request transport session – Global Store will choose a suitable source
   // ------------------------------------------------------------------
-  auto transport_or = gs_client_->request_replica_transport(
-      artifact_id,
-      /*source_node_id=*/"", // Local node info optional – left empty here
-      /*source_address=*/"",
-      /*source_port=*/0,
-      target_device,
-      /*wait_timeout_ms=*/30000);
+  absl::StatusOr<components::TransportSession> transport_or;
+  if (view_id.has_value()) {
+    transport_or = gs_client_->request_view_transport(
+        artifact_id,
+        *view_id,
+        /*source_node_id=*/"",
+        /*source_address=*/"",
+        /*source_port=*/0,
+        target_device,
+        /*wait_timeout_ms=*/30000);
+    if (!transport_or.ok()) {
+      if (absl::IsNotFound(transport_or.status()) || absl::IsUnimplemented(transport_or.status())) {
+        LOG(INFO) << "Variant transport unavailable for view_id=" << *view_id << " (" << transport_or.status()
+                  << "); falling back to canonical routing";
+        transport_or = gs_client_->request_replica_transport(
+            artifact_id,
+            /*source_node_id=*/"",
+            /*source_address=*/"",
+            /*source_port=*/0,
+            target_device,
+            /*wait_timeout_ms=*/30000);
+      }
+    }
+  } else {
+    transport_or = gs_client_->request_replica_transport(
+        artifact_id,
+        /*source_node_id=*/"", // Local node info optional – left empty here
+        /*source_address=*/"",
+        /*source_port=*/0,
+        target_device,
+        /*wait_timeout_ms=*/30000);
+  }
 
   if (transport_or.ok()) {
     const auto& session = *transport_or;
@@ -84,7 +112,11 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     if (!comp_status.ok()) {
       LOG(WARNING) << "complete_replica_transport after failure returned error: " << comp_status;
     }
-    LOG(WARNING) << "P2P load failed: " << load_or.status();
+    if (view_id.has_value()) {
+      LOG(WARNING) << "P2P load failed for view_id=" << *view_id << ": " << load_or.status();
+    } else {
+      LOG(WARNING) << "P2P load failed: " << load_or.status();
+    }
 
     if (hints.disk_path.empty()) {
       return load_or.status();
@@ -92,7 +124,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   } else {
     // Not found or GS unavailable → fall back to disk
-    LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk";
+    LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk"
+              << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "");
     if (hints.disk_path.empty()) {
       return transport_or.status();
     }

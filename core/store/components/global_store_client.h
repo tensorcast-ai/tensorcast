@@ -52,13 +52,163 @@ struct TransportSession {
   absl::Time start_time;
 };
 
-class GlobalStoreClient {
+struct ChunkLocationInfo {
+  uint32_t chunk_idx;
+  std::string node_id;
+  std::string node_address;
+  uint32_t p2p_port;
+  replica::ChunkState state;
+  float node_load_ratio;
+  std::string device_uuid;
+  uint32_t replica;
+};
+
+struct ChunkStateUpdate {
+  std::string artifact_id;
+  uint32_t chunk_idx{0};
+  replica::ChunkState state{replica::ChunkState::COLD};
+  std::string device_uuid;
+  uint32_t replica{0};
+};
+
+struct KeyMapping {
+  std::string artifact_id;
+  std::string replica_uuid;
+  std::string daemon_address;
+  std::string disk_path;
+};
+
+class IGlobalStoreClient {
+ public:
+  virtual ~IGlobalStoreClient() = default;
+
+  virtual absl::Status initialize() = 0;
+
+  virtual absl::StatusOr<std::string> register_worker(
+      std::string_view node_id,
+      std::string_view node_address,
+      uint32_t grpc_port,
+      uint32_t p2p_port,
+      uint64_t mem_pool_total_size,
+      uint64_t mem_pool_available_size,
+      bool is_recovery_registration = false,
+      std::string_view previous_worker_id = {}) = 0;
+
+  virtual absl::Status send_heartbeat(
+      std::string_view worker_id,
+      uint64_t mem_pool_available_size,
+      bool accepting_new_requests = true) = 0;
+
+  virtual absl::StatusOr<global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+      std::string_view worker_id,
+      uint64_t mem_pool_available_size,
+      bool accepting_new_requests,
+      uint64_t state_version,
+      std::string_view state_checksum,
+      const std::vector<std::string>& registered_artifact_ids,
+      int64_t last_successful_sync,
+      global_store::v1::ConnectionStatus connection_status = global_store::v1::CONNECTION_STATUS_CONNECTED) = 0;
+
+  virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
+
+  virtual absl::StatusOr<std::string> register_replica(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      common::memory::MemoryLocation location,
+      uint64_t memory_size,
+      uint32_t max_concurrency = 1) = 0;
+
+  virtual absl::Status record_variant_residency(
+      std::string_view canonical_artifact_id,
+      std::string_view view_id,
+      uint64_t view_size_bytes,
+      std::optional<std::string_view> view_data_hash = std::nullopt) = 0;
+
+  virtual absl::StatusOr<std::string> register_memory_replica(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      uint64_t memory_size,
+      std::string_view tensor_index_key,
+      const std::vector<std::string>& remote_memory_keys,
+      const std::vector<uint64_t>& buffer_sizes,
+      const std::optional<std::string>& tensor_index_data = std::nullopt,
+      std::string_view encoding = "json",
+      std::string_view schema_version = "v3",
+      uint32_t max_concurrency = 1,
+      const std::optional<std::string>& verification_json = std::nullopt) = 0;
+
+  virtual absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) = 0;
+
+  virtual absl::StatusOr<TransportSession> request_replica_transport(
+      std::string_view artifact_id,
+      std::string_view source_node_id,
+      std::string_view source_address,
+      uint32_t source_port,
+      const DeviceKey& target_device,
+      uint32_t wait_timeout_ms = 30000) = 0;
+
+  virtual absl::StatusOr<TransportSession> request_view_transport(
+      std::string_view artifact_id,
+      std::string_view view_id,
+      std::string_view source_node_id,
+      std::string_view source_address,
+      uint32_t source_port,
+      const DeviceKey& target_device,
+      uint32_t wait_timeout_ms = 30000) = 0;
+
+  virtual absl::Status complete_replica_transport(std::string_view transport_id) = 0;
+
+  virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id) = 0;
+
+  virtual absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
+      std::string_view artifact_id,
+      const std::vector<uint32_t>& chunk_indices) = 0;
+
+  virtual absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
+      const global_store::v1::WorkerLocalState& local_state,
+      bool force_full_sync,
+      std::vector<global_store::v1::StateChange>* out_changes) = 0;
+
+  virtual absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
+      std::string_view worker_id,
+      uint64_t current_state_version,
+      std::vector<common::v1::ReplicaInfo>* out_expected_replicas) = 0;
+
+  virtual bool is_connected() const = 0;
+
+  virtual absl::Status batch_update_chunk_states(
+      std::string_view worker_id,
+      std::string_view node_id,
+      const std::vector<ChunkStateUpdate>& updates) = 0;
+
+  virtual absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) = 0;
+
+  virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
+
+  virtual absl::Status upsert_key_mapping(
+      std::string_view key,
+      std::string_view artifact_id,
+      std::string_view disk_path,
+      absl::Duration ttl) = 0;
+
+  virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
+
+  virtual void update_local_endpoint(
+      std::string node_id,
+      std::string node_address,
+      uint32_t grpc_port,
+      uint32_t p2p_port) = 0;
+};
+
+class GlobalStoreClient : public IGlobalStoreClient {
  public:
   explicit GlobalStoreClient(GlobalStoreClientConfig config);
-  ~GlobalStoreClient();
+  ~GlobalStoreClient() override;
 
   // Initialize connection to Global Store
-  absl::Status initialize();
+  absl::Status initialize() override;
 
   // Worker registration and lifecycle
   absl::StatusOr<std::string> register_worker(
@@ -69,12 +219,12 @@ class GlobalStoreClient {
       uint64_t mem_pool_total_size,
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
-      std::string_view previous_worker_id = {});
+      std::string_view previous_worker_id = {}) override;
 
   absl::Status send_heartbeat(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
-      bool accepting_new_requests = true);
+      bool accepting_new_requests = true) override;
 
   // Enhanced heartbeat with HA state fields
   absl::StatusOr<global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
@@ -85,9 +235,9 @@ class GlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global_store::v1::ConnectionStatus connection_status = global_store::v1::CONNECTION_STATUS_CONNECTED);
+      global_store::v1::ConnectionStatus connection_status = global_store::v1::CONNECTION_STATUS_CONNECTED) override;
 
-  absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true);
+  absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 
   // Replica management
   absl::StatusOr<std::string> register_replica(
@@ -96,7 +246,15 @@ class GlobalStoreClient {
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t memory_size,
-      uint32_t max_concurrency = 1);
+      uint32_t max_concurrency = 1) override;
+
+  // Record metadata for a variant (view) replica while keeping canonical routing unchanged.
+  // For v1, this is a placeholder that will be backed by Global Store plan 0016-c.
+  absl::Status record_variant_residency(
+      std::string_view canonical_artifact_id,
+      std::string_view view_id,
+      uint64_t view_size_bytes,
+      std::optional<std::string_view> view_data_hash = std::nullopt) override;
 
   // Register a GPU memory replica (in-memory tensor dict) with tensor index key.
   absl::StatusOr<std::string> register_memory_replica(
@@ -109,11 +267,11 @@ class GlobalStoreClient {
       const std::vector<uint64_t>& buffer_sizes,
       const std::optional<std::string>& tensor_index_data = std::nullopt,
       std::string_view encoding = "json",
-      std::string_view schema_version = "v2",
+      std::string_view schema_version = "v3",
       uint32_t max_concurrency = 1,
-      const std::optional<std::string>& verification_json = std::nullopt);
+      const std::optional<std::string>& verification_json = std::nullopt) override;
 
-  absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id);
+  absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override;
 
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_replica_transport(
@@ -122,81 +280,56 @@ class GlobalStoreClient {
       std::string_view source_address,
       uint32_t source_port,
       const DeviceKey& target_device,
-      uint32_t wait_timeout_ms = 30000);
+      uint32_t wait_timeout_ms = 30000) override;
+  absl::StatusOr<TransportSession> request_view_transport(
+      std::string_view artifact_id,
+      std::string_view view_id,
+      std::string_view source_node_id,
+      std::string_view source_address,
+      uint32_t source_port,
+      const DeviceKey& target_device,
+      uint32_t wait_timeout_ms = 30000) override;
 
-  absl::Status complete_replica_transport(std::string_view transport_id);
+  absl::Status complete_replica_transport(std::string_view transport_id) override;
 
-  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id);
-
-  // Chunk-level queries for unified memory management
-  struct ChunkLocationInfo {
-    uint32_t chunk_idx;
-    std::string node_id;
-    std::string node_address;
-    uint32_t p2p_port;
-    replica::ChunkState state;
-    float node_load_ratio;
-    std::string device_uuid;
-    uint32_t replica;
-  };
+  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id) override;
 
   absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
-      const std::vector<uint32_t>& chunk_indices);
+      const std::vector<uint32_t>& chunk_indices) override;
 
   // HA State Synchronization
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const global_store::v1::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::v1::StateChange>* out_changes);
+      std::vector<global_store::v1::StateChange>* out_changes) override;
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<common::v1::ReplicaInfo>* out_expected_replicas);
+      std::vector<common::v1::ReplicaInfo>* out_expected_replicas) override;
 
-  bool is_connected() const;
-
-  // Batch chunk-state updates (VS telemetry -> Global Store)
-  struct ChunkStateUpdate {
-    std::string artifact_id;
-    uint32_t chunk_idx{0};
-    replica::ChunkState state{replica::ChunkState::COLD};
-    std::string device_uuid;
-    uint32_t replica{0};
-  };
+  bool is_connected() const override;
 
   absl::Status batch_update_chunk_states(
       std::string_view worker_id,
       std::string_view node_id,
-      const std::vector<ChunkStateUpdate>& updates);
+      const std::vector<ChunkStateUpdate>& updates) override;
 
-  // ========== RFC-0014: Key Mapping ==========
-  struct KeyMapping {
-    std::string artifact_id;
-    std::string replica_uuid;
-    std::string daemon_address;
-    std::string disk_path;
-  };
+  absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) override;
 
-  // Resolve a human-friendly key to artifact identity and optional hints.
-  absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key);
-
-  // Upsert a key mapping (conflict if mapping points to a different artifact).
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
       std::string_view disk_path = {},
-      absl::Duration ttl = absl::ZeroDuration());
+      absl::Duration ttl = absl::ZeroDuration()) override;
 
-  // Revoke an existing key mapping.
-  absl::Status revoke_key_mapping(std::string_view key);
+  absl::Status revoke_key_mapping(std::string_view key) override;
 
-  // Fetch canonical tensor index bytes by artifact_id.
-  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id);
+  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
 
-  // Update the cached local endpoint for subsequent memory registrations.
-  void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port);
+  void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
+      override;
 
  private:
   // Helper for RPC retries

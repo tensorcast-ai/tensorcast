@@ -11,6 +11,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "core/common/otel/grpc_propagation.h"
@@ -345,6 +346,21 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   return response.replica_id();
 }
 
+absl::Status GlobalStoreClient::record_variant_residency(
+    std::string_view canonical_artifact_id,
+    std::string_view view_id,
+    uint64_t view_size_bytes,
+    std::optional<std::string_view> view_data_hash) {
+  (void)canonical_artifact_id;
+  (void)view_id;
+  (void)view_size_bytes;
+  (void)view_data_hash;
+  // Global Store plan 0016-c introduces a dedicated RPC for variant metadata.
+  // Until that lands, treat this as a best-effort noop so core plumbing can wire
+  // the call sites without coupling to server availability.
+  return absl::UnimplementedError("Global Store variant residency RPC not yet implemented");
+}
+
 absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     std::string_view artifact_id,
     std::string_view worker_id,
@@ -530,6 +546,25 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   LOG(INFO) << "Started P2P transport " << session.transport_id << " from " << session.remote_replica.node_id;
 
   return session;
+}
+
+absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
+    std::string_view artifact_id,
+    std::string_view view_id,
+    std::string_view source_node_id,
+    std::string_view source_address,
+    uint32_t source_port,
+    const DeviceKey& target_device,
+    uint32_t wait_timeout_ms) {
+  (void)view_id;
+  // Placeholder: until Global Store exposes view-aware routes, fall back to canonical transport.
+  auto session_or = request_replica_transport(
+      artifact_id, source_node_id, source_address, source_port, target_device, wait_timeout_ms);
+  if (!session_or.ok()) {
+    return session_or;
+  }
+  VLOG(1) << "request_view_transport fell back to canonical routing for view_id=" << view_id;
+  return session_or;
 }
 
 absl::Status GlobalStoreClient::complete_replica_transport(std::string_view transport_id) {
@@ -822,7 +857,7 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
       absl::StrFormat("RPC %s failed after %d retries", method_name, config_.max_retries + 1));
 }
 
-absl::StatusOr<std::vector<GlobalStoreClient::ChunkLocationInfo>> GlobalStoreClient::query_chunk_locations(
+absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_locations(
     std::string_view artifact_id,
     const std::vector<uint32_t>& chunk_indices) {
   global_store::QueryChunkLocationsRequest request;
@@ -957,7 +992,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
 
 // ========== RFC-0014: Key Mapping ==========
 
-absl::StatusOr<GlobalStoreClient::KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_view key) {
+absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_view key) {
   global_store::ResolveKeyMappingRequest request;
   request.set_key(std::string(key));
 
@@ -1044,8 +1079,22 @@ absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::str
       "GetArtifactIndexById");
   if (!status.ok())
     return status;
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::NotFoundError("artifact index not found");
+  }
+
+  const std::string schema_version = response.schema_version();
+  if (schema_version.empty()) {
+    return absl::FailedPreconditionError(
+        "Global Store returned canonical index without schema_version; schema_version='v3' is required");
+  }
+  if (schema_version != "v3") {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Unsupported canonical index schema_version='", schema_version, "'; expected 'v3'"));
+  }
+
   // In proto3, singular bytes fields do not have presence; check emptiness instead.
-  if (response.status() != global_store::STATUS_OK || response.tensor_index_data().empty()) {
+  if (response.tensor_index_data().empty()) {
     return absl::NotFoundError("artifact index not found");
   }
   return response.tensor_index_data();

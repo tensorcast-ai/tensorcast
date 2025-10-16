@@ -183,7 +183,7 @@ source.verification_info = verification_info;
 ## Optimization directions
 
 - **Adopt streaming hashing**: Switch segment hashing to a true streaming xxhash64 implementation (or equivalent) so results are chunk-size invariant. This would allow dynamic buffers without affecting outcomes.
-- **Embed metadata in `verification.json`**: Record `hash_algo`, `algo_version`, and `chunk_size_bytes` for forward compatibility. Verifiers can respect legacy records while migrating algorithms.
+- **Embed metadata in `verification.json`**: Record `hash_algo`, `algo_version`, `byte_space_id`, and `chunk_size_bytes` for forward compatibility. Verifiers select the correct record for canonical or variant ByteSpaces and can respect legacy files while migrating algorithms.
 - **Parallelize per-segment hashing**: Each of the 8 segments can be hashed concurrently; aggregate into the final record to reduce wall-clock time on large artifacts.
 - **Hardware-accelerated paths**: Explore CUDA kernels or vendor intrinsics for hashing on GPU-resident data to reduce PCIe copies and improve throughput.
 - **Robust fallback levels**: If segment-level verification fails due to legacy records, optionally auto-downgrade to `KEY_POINTS`/`SPARSE_SAMPLING` with clear telemetry, while surfacing a remediation hint.

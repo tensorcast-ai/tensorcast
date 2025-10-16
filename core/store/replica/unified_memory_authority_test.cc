@@ -4,6 +4,7 @@
 
 #include "core/store/replica/unified_memory_authority.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,10 @@ TEST_CASE("UMA allocate + mappings + get_missing_chunks", "[uma]") {
   UnifiedMemoryAuthority uma(gsl::not_null<std::shared_ptr<VirtualAddressSpace>>{vs});
 
   ReplicaKey key{
-      .artifact_id = std::string("uma_unit_test"), .device = {tensorcast::DeviceType::CPU, -1, ""}, .replica = 0};
+      .artifact_id = std::string("uma_unit_test"),
+      .view_id = std::nullopt,
+      .device = {tensorcast::DeviceType::CPU, -1, ""},
+      .replica = 0};
 
   // Allocate 2 chunks worth of CPU memory via UMA (through VS)
   auto st = uma.allocate(key, VirtualAddressSpace::kDefaultChunkSize * 2);

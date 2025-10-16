@@ -4,15 +4,18 @@
 
 #include <unistd.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
 #include <random>
+#include <sstream>
 // For reading/writing descriptor and canonical index files
 #include <fstream>
 #include <limits>
+#include <system_error>
 #include <unordered_map>
 
 #include "absl/container/flat_hash_set.h"
@@ -36,12 +39,15 @@
 #include <nlohmann/json.hpp>
 #include "core/store/loader/canonical_index.h"
 #include "core/store/loader/safetensors_util.h"
+#include "core/store/loader/view_plan_source.h"
+#include "core/store/loader/view_planner.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
 // SegmentPlan linearization (PAD=0 hashing)
 #include "core/store/loader/segment_plan_source.h"
 #include "core/store/loading/materialize_orchestrator.h"
 #include "core/store/loading/replica_registration_helper.h"
+#include "gsl/pointers"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
@@ -60,6 +66,82 @@ using loading::ReplicaKey;
 using loading::ReplicaRegistrationHelper;
 using replica::MemoryState;
 using replica::Replica;
+
+namespace {
+
+std::string sanitize_view_id_for_filename(const std::string& view_id) {
+  if (view_id.empty()) {
+    return std::string("view");
+  }
+  std::string sanitized;
+  sanitized.reserve(view_id.size());
+  for (char ch : view_id) {
+    const unsigned char u = static_cast<unsigned char>(ch);
+    if ((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || ch == '_' || ch == '-' ||
+        ch == '.') {
+      sanitized.push_back(ch);
+    } else {
+      sanitized.push_back('_');
+    }
+  }
+  // Truncate extremely long identifiers from the front to keep filenames manageable.
+  constexpr size_t kMaxSuffixLength = 160;
+  if (sanitized.size() > kMaxSuffixLength) {
+    sanitized.erase(0, sanitized.size() - kMaxSuffixLength);
+  }
+  return sanitized;
+}
+
+std::filesystem::path verification_path_for_view(
+    const std::filesystem::path& artifact_path,
+    const std::optional<std::string>& view_id) {
+  if (!view_id.has_value()) {
+    return artifact_path / "verification.json";
+  }
+  return artifact_path / absl::StrCat("verification.view_", sanitize_view_id_for_filename(*view_id), ".json");
+}
+
+std::optional<std::string> ComputeViewDataHash(
+    replica::Replica& replica,
+    MemoryLocation location,
+    uint64_t view_size_bytes,
+    std::optional<int> gpu_device_id) {
+  if (view_size_bytes == 0) {
+    return std::nullopt;
+  }
+  if (location == MemoryLocation::GPU) {
+    if (!gpu_device_id.has_value()) {
+      return std::nullopt;
+    }
+    auto view_or = replica.get_memory_manager().get_gpu_allocation_view();
+    if (!view_or.ok() || view_or->base_ptr == nullptr) {
+      VLOG(1) << "ComputeViewDataHash: GPU allocation view unavailable";
+      return std::nullopt;
+    }
+    auto hash_or = loader::compute_data_multihash_from_gpu_memory(
+        gsl::not_null<void*>{view_or->base_ptr}, view_size_bytes, *gpu_device_id);
+    if (!hash_or.ok()) {
+      LOG(WARNING) << "compute_data_multihash_from_gpu_memory (view) failed: " << hash_or.status();
+      return std::nullopt;
+    }
+    return *hash_or;
+  }
+
+  const auto cpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::CPU);
+  if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+    VLOG(1) << "ComputeViewDataHash: CPU memory unavailable for view hash";
+    return std::nullopt;
+  }
+  auto hash_or =
+      loader::compute_data_multihash_from_cpu_memory(gsl::not_null<const void*>{cpu_ptrs[0]}, view_size_bytes);
+  if (!hash_or.ok()) {
+    LOG(WARNING) << "compute_data_multihash_from_cpu_memory (view) failed: " << hash_or.status();
+    return std::nullopt;
+  }
+  return *hash_or;
+}
+
+} // namespace
 
 // (hashing utilities moved to core/common/artifact_hash.*)
 // GPU eviction helper kept internal to this translation unit.
@@ -192,7 +274,7 @@ void StoreEngine::initialize_global_store(const StoreEngineOptions& opts) {
     components::GlobalStoreClientConfig gs_cfg;
     gs_cfg.global_store_address = opts.global_store_address;
 
-    global_store_client_ = std::make_unique<components::GlobalStoreClient>(gs_cfg);
+    global_store_client_ = std::make_shared<components::GlobalStoreClient>(gs_cfg);
     absl::Status st = global_store_client_->initialize();
     if (!st.ok()) {
       LOG(WARNING) << "StoreEngine: GlobalStoreClient init failed: " << st;
@@ -215,6 +297,10 @@ void StoreEngine::initialize_communication_manager(const StoreEngineOptions& opt
 StoreEngine::~StoreEngine() {
   LOG(INFO) << "Shutting down StoreEngine";
   clear_mem();
+}
+
+void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
+  global_store_client_ = std::move(client);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -363,6 +449,184 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     resolved_source.path = storage_path_ / source.path;
   }
 
+  std::filesystem::path artifact_path = resolved_source.path;
+  std::error_code fs_error;
+  const bool artifact_exists = std::filesystem::exists(artifact_path, fs_error);
+  if (fs_error) {
+    return absl::ErrnoToStatus(
+        fs_error.value(), absl::StrCat("Failed to access artifact directory '", artifact_path.string(), "'"));
+  }
+  if (!artifact_exists) {
+    return absl::NotFoundError(absl::StrCat("Artifact directory not found: ", artifact_path.string()));
+  }
+  const bool is_artifact_dir = std::filesystem::is_directory(artifact_path, fs_error);
+  if (fs_error) {
+    return absl::ErrnoToStatus(
+        fs_error.value(), absl::StrCat("Failed to stat artifact directory '", artifact_path.string(), "'"));
+  }
+  if (!is_artifact_dir) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Expected artifact path to be a directory: ", artifact_path.string()));
+  }
+  std::optional<std::string> computed_data_mh;
+  std::optional<std::string> computed_index_mh;
+  std::optional<std::string> existing_index_mh;
+  std::optional<std::string> existing_data_mh;
+  std::optional<std::string> descriptor_schema_version;
+  std::optional<std::string> canonical_index_json;
+  std::optional<loader::ViewPlan> resolved_view_plan;
+  std::optional<std::string> view_byte_space_hash;
+  uint64_t logical_total_size = 0;
+
+  bool is_safetensors = false;
+  for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
+    if (entry.is_regular_file()) {
+      const auto name = entry.path().filename().string();
+      if (name.ends_with(".safetensors")) {
+        is_safetensors = true;
+        break;
+      }
+    }
+  }
+
+  const auto descriptor_path = artifact_path / "artifact_descriptor.json";
+  if (std::filesystem::exists(descriptor_path)) {
+    std::ifstream f(descriptor_path);
+    if (f.is_open()) {
+      try {
+        nlohmann::json j;
+        f >> j;
+        if (j.contains("schema_version") && j["schema_version"].is_string()) {
+          descriptor_schema_version = j["schema_version"].get<std::string>();
+        }
+        if (j.contains("index_multihash") && j["index_multihash"].is_string()) {
+          existing_index_mh = j["index_multihash"].get<std::string>();
+        }
+        if (j.contains("data_multihash") && j["data_multihash"].is_string()) {
+          existing_data_mh = j["data_multihash"].get<std::string>();
+        }
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Ignoring malformed artifact_descriptor.json: " << e.what();
+      }
+    }
+  }
+
+  const bool descriptor_present = std::filesystem::exists(descriptor_path);
+  if (descriptor_present && !descriptor_schema_version.has_value()) {
+    return absl::FailedPreconditionError(
+        "artifact_descriptor.json missing schema_version; canonical index v3 required");
+  }
+  if (descriptor_schema_version.has_value() && *descriptor_schema_version != "v3") {
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "Unsupported artifact descriptor schema_version='",
+            *descriptor_schema_version,
+            "'; canonical index v3 is required"));
+  }
+
+  if (!canonical_index_json.has_value()) {
+    if (is_safetensors) {
+      if (existing_index_mh.has_value()) {
+        computed_index_mh = existing_index_mh;
+      }
+      std::vector<std::filesystem::path> st_files;
+      for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
+        if (entry.is_regular_file()) {
+          const auto name = entry.path().filename().string();
+          if (name.ends_with(".safetensors")) {
+            st_files.push_back(entry.path());
+          }
+        }
+      }
+      auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+      if (index_bytes_or.ok()) {
+        canonical_index_json = index_bytes_or.value();
+        if (!computed_index_mh.has_value()) {
+          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
+          if (index_mh_or.ok()) {
+            computed_index_mh = *index_mh_or;
+          } else {
+            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+          }
+        }
+        try {
+          nlohmann::json idx_json = nlohmann::json::parse(*canonical_index_json, nullptr, true);
+          for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+            const auto& arr = it.value();
+            if (!arr.is_array() || arr.size() < 2) {
+              continue;
+            }
+            uint64_t off = arr[0].get<uint64_t>();
+            uint64_t sz = arr[1].get<uint64_t>();
+            logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+          }
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
+        }
+      } else {
+        LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
+      }
+    } else {
+      const auto index_json_path = artifact_path / "tensor_index.json";
+      try {
+        std::string raw_json;
+        if (std::filesystem::exists(index_json_path)) {
+          std::ifstream f(index_json_path);
+          nlohmann::json j;
+          f >> j;
+          raw_json = j.dump();
+        }
+        if (!raw_json.empty()) {
+          auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
+          const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
+          canonical_index_json = canonical_json;
+          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
+          if (index_mh_or.ok()) {
+            computed_index_mh = *index_mh_or;
+          } else {
+            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+          }
+          try {
+            nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
+            for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+              const auto& arr = it.value();
+              if (!arr.is_array() || arr.size() < 2) {
+                continue;
+              }
+              uint64_t off = arr[0].get<uint64_t>();
+              uint64_t sz = arr[1].get<uint64_t>();
+              logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+            }
+          } catch (const std::exception& e) {
+            LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
+          }
+        }
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
+      }
+    }
+  }
+
+  if (!resolved_view_plan.has_value() && hints.variant.has_value()) {
+    if (hints.variant->cached_plan.has_value()) {
+      resolved_view_plan = *hints.variant->cached_plan;
+    } else if (hints.variant->view_spec.has_value()) {
+      if (!canonical_index_json.has_value()) {
+        return absl::FailedPreconditionError(
+            "Variant view requested but canonical index bytes are unavailable for planning");
+      }
+      auto plan_or = compute_view_plan(*canonical_index_json, *hints.variant->view_spec);
+      if (!plan_or.ok()) {
+        return plan_or.status();
+      }
+      resolved_view_plan = std::move(*plan_or);
+    }
+  }
+
+  if (resolved_view_plan.has_value() && resolved_view_plan->view_size_bytes > 0) {
+    logical_total_size = resolved_view_plan->view_size_bytes;
+  }
+
   // Get or create replica
   replica::ReplicaConfig config{
       .source = resolved_source,
@@ -371,9 +635,13 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       .local_device_id = -1,
       .pinned_buffer_pool = memory_pool_,
       .virtual_addr_space = va_space_,
-      .expected_artifact_size = std::nullopt};
+      .expected_artifact_size =
+          resolved_view_plan.has_value() ? std::optional<uint64_t>(resolved_view_plan->view_size_bytes) : std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.max_buffer_bytes = hints.max_buffer_bytes;
+  config.view_id = hints.variant ? hints.variant->view_id : std::nullopt;
+  config.view_plan = resolved_view_plan;
+  config.transform_placement = hints.variant ? hints.variant->placement : loading::TransformPlacement::kServer;
   if (target_location == common::memory::MemoryLocation::GPU) {
     config.local_device_id = target_device_id;
   }
@@ -456,47 +724,15 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     }
   }
 
-  // RFC-0007: After loading, compute/verify content-addressed identity when possible.
-  // Only perform strong verification when the replica is resident in GPU memory (fast path).
-  std::optional<std::string> computed_data_mh;
-  std::optional<std::string> computed_index_mh;
-  std::optional<std::string> existing_index_mh;
-  std::optional<std::string> existing_data_mh;
-  uint64_t logical_total_size = 0;
-  std::filesystem::path artifact_path = resolved_source.path;
-  bool is_safetensors = false;
-  {
-    // Probe directory for .safetensors to differentiate formats
-    for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
-      if (entry.is_regular_file()) {
-        const auto name = entry.path().filename().string();
-        if (name.ends_with(".safetensors")) {
-          is_safetensors = true;
-          break;
-        }
-      }
-    }
+  if (resolved_view_plan.has_value() && !resolved_view_plan->is_identity) {
+    std::optional<int> gpu_device =
+        (target_location == MemoryLocation::GPU) ? std::optional<int>(target_device_id) : std::nullopt;
+    view_byte_space_hash =
+        ComputeViewDataHash(*replica, target_location, resolved_view_plan->view_size_bytes, gpu_device);
   }
 
-  // Try to read descriptor if present
-  const auto descriptor_path = artifact_path / "artifact_descriptor.json";
-  if (std::filesystem::exists(descriptor_path)) {
-    std::ifstream f(descriptor_path);
-    if (f.is_open()) {
-      try {
-        nlohmann::json j;
-        f >> j;
-        if (j.contains("index_multihash") && j["index_multihash"].is_string()) {
-          existing_index_mh = j["index_multihash"].get<std::string>();
-        }
-        if (j.contains("data_multihash") && j["data_multihash"].is_string()) {
-          existing_data_mh = j["data_multihash"].get<std::string>();
-        }
-      } catch (const std::exception& e) {
-        LOG(WARNING) << "Ignoring malformed artifact_descriptor.json: " << e.what();
-      }
-    }
-  }
+  // RFC-0007: After loading, compute/verify content-addressed identity when possible.
+  // Only perform strong verification when the replica is resident in GPU memory (fast path).
 
   // Compute data multihash from GPU memory when requested by hints
   uint64_t verify_size = 0;
@@ -535,44 +771,43 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   if (is_safetensors) {
     if (existing_index_mh.has_value()) {
       computed_index_mh = existing_index_mh; // trust descriptor when present
-    } else {
-      // Build canonical index from safetensors headers
-      std::vector<std::filesystem::path> st_files;
-      for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
-        if (entry.is_regular_file()) {
-          const auto name = entry.path().filename().string();
-          if (name.ends_with(".safetensors")) {
-            st_files.push_back(entry.path());
-          }
+    }
+    std::vector<std::filesystem::path> st_files;
+    for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
+      if (entry.is_regular_file()) {
+        const auto name = entry.path().filename().string();
+        if (name.ends_with(".safetensors")) {
+          st_files.push_back(entry.path());
         }
       }
-      auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
-      if (index_bytes_or.ok()) {
-        // compute_index_multihash prefers inline data
-        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(index_bytes_or.value()), "");
+    }
+    auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+    if (index_bytes_or.ok()) {
+      canonical_index_json = index_bytes_or.value();
+      if (!computed_index_mh.has_value()) {
+        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
-          // Determine logical total size from canonical index bytes
-          try {
-            nlohmann::json idx_json = nlohmann::json::parse(index_bytes_or.value(), nullptr, true);
-            for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
-              const auto& arr = it.value();
-              if (!arr.is_array() || arr.size() < 2) {
-                continue;
-              }
-              uint64_t off = arr[0].get<uint64_t>();
-              uint64_t sz = arr[1].get<uint64_t>();
-              logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
-            }
-          } catch (const std::exception& e) {
-            LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
-          }
         } else {
           LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
         }
-      } else {
-        LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
       }
+      try {
+        nlohmann::json idx_json = nlohmann::json::parse(*canonical_index_json, nullptr, true);
+        for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+          const auto& arr = it.value();
+          if (!arr.is_array() || arr.size() < 2) {
+            continue;
+          }
+          uint64_t off = arr[0].get<uint64_t>();
+          uint64_t sz = arr[1].get<uint64_t>();
+          logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+        }
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
+      }
+    } else {
+      LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
     }
   } else {
     // Standard partition format – read tensor_index.json and canonicalize bytes via nlohmann::json
@@ -590,10 +825,96 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         // Apply stable canonicalization using C++ authority
         auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
         const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
+        canonical_index_json = canonical_json;
         auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
         if (index_mh_or.ok()) {
           computed_index_mh = *index_mh_or;
-          // Determine logical total size from canonical index JSON
+        } else {
+          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+        }
+        // Determine logical total size from canonical index JSON
+        try {
+          nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
+          for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+            const auto& arr = it.value();
+            if (!arr.is_array() || arr.size() < 2) {
+              continue;
+            }
+            uint64_t off = arr[0].get<uint64_t>();
+            uint64_t sz = arr[1].get<uint64_t>();
+            logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+          }
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
+        }
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
+    }
+  }
+
+  if (!canonical_index_json.has_value()) {
+    if (is_safetensors) {
+      if (existing_index_mh.has_value()) {
+        computed_index_mh = existing_index_mh;
+      }
+      std::vector<std::filesystem::path> st_files;
+      for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
+        if (entry.is_regular_file()) {
+          const auto name = entry.path().filename().string();
+          if (name.ends_with(".safetensors")) {
+            st_files.push_back(entry.path());
+          }
+        }
+      }
+      auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
+      if (index_bytes_or.ok()) {
+        canonical_index_json = index_bytes_or.value();
+        if (!computed_index_mh.has_value()) {
+          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
+          if (index_mh_or.ok()) {
+            computed_index_mh = *index_mh_or;
+          } else {
+            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+          }
+        }
+        try {
+          nlohmann::json idx_json = nlohmann::json::parse(*canonical_index_json, nullptr, true);
+          for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
+            const auto& arr = it.value();
+            if (!arr.is_array() || arr.size() < 2) {
+              continue;
+            }
+            uint64_t off = arr[0].get<uint64_t>();
+            uint64_t sz = arr[1].get<uint64_t>();
+            logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
+          }
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
+        }
+      } else {
+        LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
+      }
+    } else {
+      const auto index_json_path = artifact_path / "tensor_index.json";
+      try {
+        std::string raw_json;
+        if (std::filesystem::exists(index_json_path)) {
+          std::ifstream f(index_json_path);
+          nlohmann::json j;
+          f >> j;
+          raw_json = j.dump();
+        }
+        if (!raw_json.empty()) {
+          auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
+          const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
+          canonical_index_json = canonical_json;
+          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
+          if (index_mh_or.ok()) {
+            computed_index_mh = *index_mh_or;
+          } else {
+            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
+          }
           try {
             nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
             for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
@@ -608,13 +929,37 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           } catch (const std::exception& e) {
             LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
           }
-        } else {
-          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
         }
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
       }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
     }
+  }
+
+  if (!resolved_view_plan.has_value() && hints.variant.has_value()) {
+    if (hints.variant->cached_plan.has_value()) {
+      resolved_view_plan = *hints.variant->cached_plan;
+    } else if (hints.variant->view_spec.has_value()) {
+      if (!canonical_index_json.has_value()) {
+        return absl::FailedPreconditionError(
+            "Variant view requested but canonical index bytes are unavailable for planning");
+      }
+      auto plan_or = compute_view_plan(*canonical_index_json, *hints.variant->view_spec);
+      if (!plan_or.ok()) {
+        return plan_or.status();
+      }
+      resolved_view_plan = std::move(*plan_or);
+    }
+  }
+  if (resolved_view_plan.has_value() && resolved_view_plan->view_size_bytes > 0) {
+    logical_total_size = resolved_view_plan->view_size_bytes;
+  }
+
+  if (resolved_view_plan.has_value() && !resolved_view_plan->is_identity && !view_byte_space_hash.has_value()) {
+    std::optional<int> gpu_device =
+        (target_location == MemoryLocation::GPU) ? std::optional<int>(target_device_id) : std::nullopt;
+    view_byte_space_hash =
+        ComputeViewDataHash(*replica, target_location, resolved_view_plan->view_size_bytes, gpu_device);
   }
 
   // If descriptor exists, verify data_multihash matches when we computed it
@@ -624,12 +969,55 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     }
   }
 
+  const bool variant_requested = hints.variant.has_value();
+  const std::optional<std::string> requested_view_id =
+      (variant_requested && hints.variant->view_id.has_value()) ? hints.variant->view_id : std::optional<std::string>{};
+  const bool allow_verification_metadata = !variant_requested || requested_view_id.has_value();
+  const std::string expected_byte_space_id = requested_view_id.value_or("");
+
   // Default post-load lightweight verification when descriptor is present
-  if (std::filesystem::exists(descriptor_path)) {
+  if (std::filesystem::exists(descriptor_path) && allow_verification_metadata) {
     try {
-      // Attempt to load optional verification.json and verify at SEGMENT_HASHES level
-      const auto verification_path = artifact_path / "verification.json";
-      if (std::filesystem::exists(verification_path)) {
+      struct VerificationBuffers {
+        std::vector<void*> ptrs;
+        std::vector<size_t> sizes;
+        int device_id{-1};
+        uint64_t total_size{0};
+        std::shared_ptr<common::memory::GpuDeviceMemory> gpu_guard;
+      };
+
+      auto prepare_buffers = [&]() -> VerificationBuffers {
+        VerificationBuffers buffers;
+        uint64_t resolved_size = 0;
+        if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
+          resolved_size = *sz_or;
+        } else {
+          resolved_size = logical_total_size;
+        }
+        buffers.total_size = resolved_size;
+        if (target_location == MemoryLocation::GPU && buffers.total_size > 0) {
+          auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+          if (view_or.ok()) {
+            buffers.ptrs.push_back(view_or->base_ptr);
+            buffers.sizes.push_back(static_cast<size_t>(buffers.total_size));
+            buffers.device_id = target_device_id;
+            buffers.gpu_guard = view_or->allocation;
+          }
+        } else {
+          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
+          if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && buffers.total_size > 0) {
+            buffers.ptrs.push_back(cpu_ptrs[0]);
+            buffers.sizes.push_back(static_cast<size_t>(buffers.total_size));
+          }
+        }
+        return buffers;
+      };
+
+      const auto verification_path = verification_path_for_view(artifact_path, requested_view_id);
+      bool regenerate_metadata = !std::filesystem::exists(verification_path);
+      bool metadata_verified = false;
+
+      if (!regenerate_metadata) {
         std::ifstream vf(verification_path);
         if (vf.is_open()) {
           std::stringstream vbuf;
@@ -637,82 +1025,54 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
           vf.close();
           auto ver_or = common::ArtifactVerificationInfo::from_json(vbuf.str());
           if (ver_or.ok()) {
-            std::vector<void*> ptrs;
-            std::vector<size_t> sizes;
-            int dev_id = -1;
-            uint64_t sz_for_verify = logical_total_size;
-            if (sz_for_verify == 0) {
-              if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
-                sz_for_verify = *sz_or;
-              }
-            }
-            [[maybe_unused]] std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
-            if (target_location == MemoryLocation::GPU && sz_for_verify > 0) {
-              auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
-              if (view_or.ok()) {
-                ptrs.push_back(view_or->base_ptr);
-                sizes.push_back(static_cast<size_t>(sz_for_verify));
-                dev_id = target_device_id;
-                gpu_allocation_guard = view_or->allocation;
-              }
+            const common::ArtifactVerificationInfo& info = *ver_or;
+            if ((!expected_byte_space_id.empty() || !info.byte_space_id.empty()) &&
+                info.byte_space_id != expected_byte_space_id) {
+              LOG(WARNING) << "Verification metadata at '" << verification_path.string()
+                           << "' was recorded for byte_space_id='" << info.byte_space_id << "', expected '"
+                           << expected_byte_space_id << "'; regenerating.";
+              regenerate_metadata = true;
             } else {
-              const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
-              if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
-                ptrs.push_back(cpu_ptrs[0]);
-                sizes.push_back(static_cast<size_t>(sz_for_verify));
-                dev_id = -1;
+              auto buffers = prepare_buffers();
+              if (!buffers.ptrs.empty()) {
+                absl::Status vstatus = common::ArtifactVerifier::verify_artifact_data(
+                    buffers.ptrs, buffers.sizes, info, common::VerificationLevel::SEGMENT_HASHES, buffers.device_id);
+                if (!vstatus.ok()) {
+                  return absl::DataLossError(
+                      absl::StrCat("ARTIFACT_ID_MISMATCH: verification failed: ", vstatus.message()));
+                }
+                metadata_verified = true;
+              } else {
+                metadata_verified = true; // Nothing to verify (empty replica)
               }
             }
-            if (!ptrs.empty()) {
-              absl::Status vstatus = common::ArtifactVerifier::verify_artifact_data(
-                  ptrs, sizes, *ver_or, common::VerificationLevel::SEGMENT_HASHES, dev_id);
-              if (!vstatus.ok()) {
-                return absl::DataLossError(
-                    absl::StrCat("ARTIFACT_ID_MISMATCH: verification failed: ", vstatus.message()));
-              }
-            }
-          }
-        }
-      } else {
-        // No verification info persisted yet: generate at SEGMENT_HASHES level and persist for future fast checks
-        std::vector<void*> ptrs;
-        std::vector<size_t> sizes;
-        int dev_id = -1;
-        uint64_t sz_for_verify = logical_total_size;
-        if (sz_for_verify == 0) {
-          if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
-            sz_for_verify = *sz_or;
-          }
-        }
-        [[maybe_unused]] std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation_guard;
-        if (target_location == MemoryLocation::GPU && sz_for_verify > 0) {
-          auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
-          if (view_or.ok()) {
-            ptrs.push_back(view_or->base_ptr);
-            sizes.push_back(static_cast<size_t>(sz_for_verify));
-            dev_id = target_device_id;
-            gpu_allocation_guard = view_or->allocation;
+          } else {
+            LOG(WARNING) << "Failed to parse verification metadata at '" << verification_path.string()
+                         << "': " << ver_or.status();
+            regenerate_metadata = true;
           }
         } else {
-          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
-          if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && sz_for_verify > 0) {
-            ptrs.push_back(cpu_ptrs[0]);
-            sizes.push_back(static_cast<size_t>(sz_for_verify));
-            dev_id = -1;
-          }
+          regenerate_metadata = true;
         }
-        if (!ptrs.empty()) {
+      }
+
+      if (!metadata_verified && regenerate_metadata) {
+        auto buffers = prepare_buffers();
+        if (!buffers.ptrs.empty()) {
           auto gen_or = common::ArtifactVerifier::generate_verification_info(
-              ptrs, sizes, dev_id, common::VerificationLevel::SEGMENT_HASHES);
+              buffers.ptrs, buffers.sizes, buffers.device_id, common::VerificationLevel::SEGMENT_HASHES);
           if (gen_or.ok()) {
+            auto info = *gen_or;
+            info.byte_space_id = expected_byte_space_id;
             try {
-              std::ofstream vf(verification_path);
+              std::ofstream vf(verification_path, std::ios::trunc);
               if (vf.is_open()) {
-                vf << gen_or->to_json();
+                vf << info.to_json();
                 vf.close();
               }
             } catch (const std::exception& e) {
-              LOG(WARNING) << "Failed to persist verification.json: " << e.what();
+              LOG(WARNING) << "Failed to persist verification metadata at '" << verification_path.string()
+                           << "': " << e.what();
             }
           }
         }
@@ -720,6 +1080,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     } catch (const std::exception& e) {
       LOG(WARNING) << "Post-load verification skipped due to error: " << e.what();
     }
+  } else if (std::filesystem::exists(descriptor_path) && !allow_verification_metadata) {
+    VLOG(1) << "Skipping verification metadata reuse for unnamed view variant (no view_id provided).";
   }
 
   // If safetensors path lacks descriptor, write it back computing hashes as needed
@@ -762,7 +1124,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         j["artifact_id"] = std::string("mi2:") + *computed_index_mh + ":" + *computed_data_mh;
         j["index_multihash"] = *computed_index_mh;
         j["data_multihash"] = *computed_data_mh;
-        j["schema_version"] = "v2";
+        j["schema_version"] = "v3";
         // Encoding is JSON only per project decision
         const auto index_json_path = artifact_path / "tensor_index.json";
         j["encoding"] = "json";
@@ -823,7 +1185,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.replica_key = loading::ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
+  handle.replica_key = loading::ReplicaKey{
+      .artifact_id = artifact_identifier, .view_id = config.view_id, .device = dev_key, .replica = 0};
 
   // Loading future and states
   handle.ready_future = load_future;
@@ -841,16 +1204,26 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     }
   }
 
+  if (resolved_view_plan.has_value() && !resolved_view_plan->is_identity) {
+    handle.view_index_json = resolved_view_plan->view_index_json;
+  }
+  if (view_byte_space_hash.has_value()) {
+    handle.view_data_hash = view_byte_space_hash;
+  }
+
   // Update metrics
   const auto duration = std::chrono::steady_clock::now() - start_time;
   const double duration_s = std::chrono::duration<double>(duration).count();
   metrics_collector_->record_operation("load_from_disk", duration_s); // no-op after Phase 5
   // Unified artifact load metric with labels
+  std::optional<std::string_view> view_scope =
+      (config.view_id.has_value() ? std::optional<std::string_view>(*config.view_id) : std::nullopt);
   metrics_collector_->record_artifact_load(
       /*source=*/"disk",
       /*device=*/(target_location == common::memory::MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
       /*phase=*/"finalize",
-      duration_s);
+      duration_s,
+      view_scope);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
 
   return handle;
@@ -880,9 +1253,38 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   p2p_span->SetAttribute("tc.p2p.port", static_cast<int64_t>(source.port));
   p2p_span->SetAttribute("tc.size.bytes", static_cast<int64_t>(source.size_bytes));
   p2p_span->SetAttribute("tc.location", target.location.type == common::memory::MemoryLocation::GPU ? "gpu" : "cpu");
+  if (hints.variant && hints.variant->view_id.has_value()) {
+    p2p_span->SetAttribute("tc.view.id", *hints.variant->view_id);
+  }
 
   if (!comm_manager_->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
+  }
+
+  std::optional<loader::ViewPlan> resolved_view_plan;
+  std::optional<std::string> view_byte_space_hash;
+  if (hints.variant.has_value()) {
+    if (hints.variant->cached_plan.has_value()) {
+      resolved_view_plan = *hints.variant->cached_plan;
+    } else if (hints.variant->view_spec.has_value()) {
+      std::optional<std::string> canonical_index_json = hints.variant->canonical_index_json;
+      if (!canonical_index_json.has_value()) {
+        // Fetch canonical index bytes from Global Store.
+        auto idx_or = get_canonical_index_by_id(artifact_identifier);
+        if (!idx_or.ok()) {
+          return idx_or.status();
+        }
+        canonical_index_json = std::move(idx_or).value();
+      }
+      if (canonical_index_json->empty()) {
+        return absl::FailedPreconditionError("Canonical index bytes required for view planning are empty");
+      }
+      auto plan_or = compute_view_plan(*canonical_index_json, *hints.variant->view_spec);
+      if (!plan_or.ok()) {
+        return plan_or.status();
+      }
+      resolved_view_plan = std::move(*plan_or);
+    }
   }
 
   common::memory::MemoryLocation target_location = common::memory::MemoryLocation::CPU;
@@ -903,12 +1305,16 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
       .local_device_id = target.location.device_id,
       .pinned_buffer_pool = memory_pool_,
       .virtual_addr_space = va_space_,
-      .expected_artifact_size = std::nullopt};
+      .expected_artifact_size =
+          resolved_view_plan.has_value() ? std::optional<uint64_t>(resolved_view_plan->view_size_bytes) : std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
   config.local_device_id = target.location.device_id;
   config.max_buffer_bytes = hints.max_buffer_bytes;
   config.p2p_comm_enabled = true;
   config.device_type = (target_location == common::memory::MemoryLocation::GPU) ? DeviceType::GPU : DeviceType::CPU;
+  config.view_id = hints.variant ? hints.variant->view_id : std::nullopt;
+  config.view_plan = resolved_view_plan;
+  config.transform_placement = hints.variant ? hints.variant->placement : loading::TransformPlacement::kServer;
 
   auto replica = get_or_create_replica(artifact_identifier, config);
   if (!replica) {
@@ -952,7 +1358,8 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  handle.replica_key = loading::ReplicaKey{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
+  handle.replica_key = loading::ReplicaKey{
+      .artifact_id = artifact_identifier, .view_id = config.view_id, .device = dev_key, .replica = 0};
 
   // Receiver-side verification: if the P2P source provides verification
   // metadata (JSON), verify the loaded replica before returning.
@@ -969,6 +1376,14 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
       LOG(ERROR) << "Receiver-side verification failed for artifact '" << artifact_identifier << "': " << vst;
       return absl::DataLossError(std::string(vst.message()));
     }
+  }
+
+  if (resolved_view_plan.has_value() && !resolved_view_plan->is_identity) {
+    std::optional<int> gpu_device = (target_location == common::memory::MemoryLocation::GPU)
+        ? std::optional<int>(target.location.device_id)
+        : std::nullopt;
+    view_byte_space_hash =
+        ComputeViewDataHash(*replica, target_location, resolved_view_plan->view_size_bytes, gpu_device);
   }
 
   // Ready future is already resolved (synchronous path)
@@ -989,17 +1404,27 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
     }
   }
 
+  if (resolved_view_plan.has_value() && !resolved_view_plan->is_identity) {
+    handle.view_index_json = resolved_view_plan->view_index_json;
+  }
+  if (view_byte_space_hash.has_value()) {
+    handle.view_data_hash = view_byte_space_hash;
+  }
+
   // Update metrics
   metrics_collector_->record_p2p_transfer(source.size_bytes, true);
   const auto duration = std::chrono::steady_clock::now() - start_time;
   const double duration_s = std::chrono::duration<double>(duration).count();
   metrics_collector_->record_operation("load_from_p2p", duration_s);
   // Unified artifact load metric with labels
+  std::optional<std::string_view> view_scope =
+      (config.view_id.has_value() ? std::optional<std::string_view>(*config.view_id) : std::nullopt);
   metrics_collector_->record_artifact_load(
       /*source=*/"remote",
       /*device=*/(target_location == common::memory::MemoryLocation::GPU ? std::string("gpu") : std::string("cpu")),
       /*phase=*/"finalize",
-      duration_s);
+      duration_s,
+      view_scope);
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
 
   p2p_span->AddEvent("p2p_ingest_complete", {{"bytes", static_cast<int64_t>(source.size_bytes)}});
@@ -1028,7 +1453,8 @@ std::shared_ptr<replica::Replica> StoreEngine::get_or_create_replica(
   } else {
     dev_key = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   }
-  loading::ReplicaKey inst_key{.artifact_id = artifact_identifier, .device = dev_key, .replica = 0};
+  loading::ReplicaKey inst_key{
+      .artifact_id = artifact_identifier, .view_id = config.view_id, .device = dev_key, .replica = 0};
 
   // Fast-path: already present in registry
   if (auto existing_or = replica_registry_->find(inst_key); existing_or.ok()) {
@@ -1138,11 +1564,28 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
     const MaterializeHints& hints) {
-  const std::string canonical_artifact_id = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
+  const std::optional<loading::VariantIdentity>& variant = hints.variant;
+
+  std::string canonical_artifact_id;
+  if (variant.has_value()) {
+    if (variant->canonical_artifact_id.empty()) {
+      return absl::InvalidArgumentError("VariantIdentity must provide canonical_artifact_id when present");
+    }
+    if (!hints.artifact_id.empty() && hints.artifact_id != variant->canonical_artifact_id) {
+      return absl::InvalidArgumentError(
+          "MaterializeHints.artifact_id must match VariantIdentity.canonical_artifact_id");
+    }
+    canonical_artifact_id = variant->canonical_artifact_id;
+  } else {
+    canonical_artifact_id = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
+  }
 
   if (canonical_artifact_id.empty() && mode != MaterializeMode::COPY_ONLY) {
     return absl::InvalidArgumentError("MaterializeHints must provide artifact_id or disk_path for LOAD modes");
   }
+
+  const std::optional<std::string> requested_view_id =
+      variant.has_value() ? variant->view_id : std::optional<std::string>{};
 
   // ────────────────────────────────────────────────────────────────────
   // Validate target device early to avoid entering CUDA paths with
@@ -1164,7 +1607,11 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
   // ────────────────────────────────────────────────────────────────────
   // Fast-path: instance already present on the requested device.
   // ────────────────────────────────────────────────────────────────────
-  const ReplicaKey dst_key{.artifact_id = canonical_artifact_id, .device = target_device, /*replica=*/.replica = 0};
+  const ReplicaKey dst_key{
+      .artifact_id = canonical_artifact_id,
+      .view_id = requested_view_id,
+      .device = target_device,
+      /*replica=*/.replica = 0};
   if (auto existing_or = replica_registry_->find(dst_key); existing_or.ok()) {
     const auto& replica = existing_or.value();
 
@@ -1191,13 +1638,30 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
       }
     }
+    const auto& replica_view_plan = replica->view_plan();
+    if (replica_view_plan.has_value() && !replica_view_plan->is_identity) {
+      handle.view_index_json = replica_view_plan->view_index_json;
+      const uint64_t view_size = replica_view_plan->view_size_bytes;
+      if (view_size > 0) {
+        const bool target_is_gpu = (dst_loc == MemoryLocation::GPU);
+        const bool target_loaded = target_is_gpu ? handle.gpu_state == replica::MemoryState::LOADED
+                                                 : handle.cpu_state == replica::MemoryState::LOADED;
+        std::optional<int> gpu_device = target_is_gpu ? std::optional<int>(target_device.ordinal) : std::nullopt;
+        if (target_loaded) {
+          auto hash = ComputeViewDataHash(*replica, dst_loc, view_size, gpu_device);
+          if (hash.has_value()) {
+            handle.view_data_hash = std::move(hash);
+          }
+        }
+      }
+    }
     return handle;
   }
 
   // Helper lambda: minimal disk-loading path.
   auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<loading::ReplicaHandle> {
     // Guard: content-addressed IDs (mi2:...) are not paths.
-    if (absl::StartsWith(hints.artifact_id, "mi2:")) {
+    if (absl::StartsWith(canonical_artifact_id, "mi2:")) {
       return absl::FailedPreconditionError(
           "LOAD_ONLY/disk fallback disabled for content-addressed artifact_id; Global Store routing required");
     }
@@ -1228,13 +1692,16 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
 
       // Require an explicit artifact identifier so we can locate a source instance.
       // This avoids implicit coupling to disk_path or other hints and keeps COPY_ONLY semantics clear.
-      if (hints.artifact_id.empty()) {
-        return absl::InvalidArgumentError("COPY_ONLY requires hints.artifact_id to locate the source GPU instance");
+      if (canonical_artifact_id.empty()) {
+        return absl::InvalidArgumentError("COPY_ONLY requires a canonical artifact identifier");
       }
 
-      const auto candidates = replica_registry_->find_by_artifact(hints.artifact_id);
+      const auto candidates = replica_registry_->find_by_artifact(canonical_artifact_id);
       for (const auto& cand_key : candidates) {
         if (cand_key.device.type != DeviceType::GPU) {
+          continue;
+        }
+        if (cand_key.view_id != requested_view_id) {
           continue;
         }
 
@@ -1259,13 +1726,16 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         loading::InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
         replica::ReplicaConfig cfg{
             .source = ib_source,
-            .artifact_identifier = hints.artifact_id,
+            .artifact_identifier = canonical_artifact_id,
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_buffer_pool = memory_pool_,
             .virtual_addr_space = va_space_,
             .expected_artifact_size = expected_size};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
+        cfg.view_id = requested_view_id;
+        cfg.view_plan = src_replica->view_plan();
+        cfg.transform_placement = hints.variant ? hints.variant->placement : loading::TransformPlacement::kServer;
 
         auto dst_or = replica::Replica::create(cfg);
         if (!dst_or.ok()) {
@@ -1276,8 +1746,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
           absl::Status emplace_status =
               replica_registry_->emplace(dst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{dst_replica});
           if (absl::IsAlreadyExists(emplace_status)) {
-            VLOG(1) << "Replica already present for COPY_ONLY dst_key (will reuse existing instance): "
-                    << dst_key.artifact_id;
+            VLOG(1) << "Replica already present for COPY_ONLY dst_key (will reuse existing instance): " << dst_key;
           } else if (!emplace_status.ok()) {
             return emplace_status;
           }
@@ -1302,10 +1771,27 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
             std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
           }
         }
+        const auto& dst_view_plan = dst_replica->view_plan();
+        if (dst_view_plan.has_value() && !dst_view_plan->is_identity) {
+          handle.view_index_json = dst_view_plan->view_index_json;
+          auto hash = ComputeViewDataHash(
+              *dst_replica,
+              MemoryLocation::GPU,
+              dst_view_plan->view_size_bytes,
+              std::optional<int>(target_device.ordinal));
+          if (hash.has_value()) {
+            handle.view_data_hash = std::move(hash);
+          }
+        }
         return handle;
       }
       return absl::FailedPreconditionError(
-          absl::StrCat("No suitable source instance for COPY_ONLY mode (artifact_id=", hints.artifact_id, ")"));
+          absl::StrCat(
+              "No suitable source instance for COPY_ONLY mode (artifact_id=",
+              canonical_artifact_id,
+              ", view_id=",
+              requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
+              ")"));
     }
 
     case MaterializeMode::LOAD_ONLY: {
@@ -1318,18 +1804,18 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     }
 
     case MaterializeMode::AUTO: {
-      if (global_store_client_ && global_store_client_->is_connected() && !hints.artifact_id.empty()) {
+      if (global_store_client_ && global_store_client_->is_connected() && !canonical_artifact_id.empty()) {
         loading::MaterializeOrchestrator orchestrator(
             gsl::not_null<StoreEngine*>{this},
-            gsl::not_null<components::GlobalStoreClient*>{global_store_client_.get()});
-        auto orchestrated_or = orchestrator.run(hints.artifact_id, target_device, hints);
+            gsl::not_null<components::IGlobalStoreClient*>{global_store_client_.get()});
+        auto orchestrated_or = orchestrator.run(canonical_artifact_id, target_device, hints);
         if (orchestrated_or.ok()) {
           return *orchestrated_or;
         }
         LOG(WARNING) << "MaterializeOrchestrator failed: " << orchestrated_or.status() << "; falling back to disk load";
       }
       return absl::FailedPreconditionError(
-          "AUTO materialize_replica requires a content-addressed hints.artifact_id with Global Store routing or an explicit hints.disk_path");
+          "AUTO materialize_replica requires a canonical artifact identifier (mi2:...) with Global Store routing or an explicit hints.disk_path");
     }
   }
 
@@ -1613,6 +2099,10 @@ absl::Status StoreEngine::register_replica_with_global_store(
   if (!global_store_client_ || !global_store_client_->is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
+  if (key.view_id.has_value()) {
+    VLOG(1) << "register_replica_with_global_store variant view_id=" << *key.view_id
+            << " (canonical_artifact_id=" << key.artifact_id << ")";
+  }
   // Determine memory location based on device type
   MemoryLocation loc = (key.device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::CPU;
 
@@ -1626,20 +2116,35 @@ absl::Status StoreEngine::register_replica_with_global_store(
 
   const std::string artifact_id = artifact_id_override.empty() ? key.artifact_id : std::string(artifact_id_override);
   const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
-  return ReplicaRegistrationHelper::register_local_replica(
-      gsl::not_null<components::GlobalStoreClient*>{global_store_client_.get()},
+  absl::Status register_status = ReplicaRegistrationHelper::register_local_replica(
+      gsl::not_null<components::IGlobalStoreClient*>{global_store_client_.get()},
       wid,
       artifact_id,
       key.device,
       loc,
       size);
+  if (!register_status.ok()) {
+    return register_status;
+  }
+
+  if (key.view_id.has_value()) {
+    auto variant_status = global_store_client_->record_variant_residency(key.artifact_id, *key.view_id, size);
+    if (!variant_status.ok()) {
+      if (absl::IsUnimplemented(variant_status)) {
+        VLOG(1) << "Global Store does not yet accept variant residency updates: " << variant_status.message();
+      } else {
+        LOG(WARNING) << "record_variant_residency failed for view_id=" << *key.view_id << ": " << variant_status;
+      }
+    }
+  }
+  return register_status;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RFC-0014: Key-mapping wrappers
 // ═══════════════════════════════════════════════════════════════════════════
 
-absl::StatusOr<components::GlobalStoreClient::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {
+absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {
   if (!global_store_client_ || !global_store_client_->is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
@@ -1682,6 +2187,10 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   }
   if (reg.device_id < 0) {
     return absl::InvalidArgumentError("device_id must be >= 0");
+  }
+  if (!reg.schema_version.empty() && reg.schema_version != "v3") {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Unsupported ArtifactRegistration.schema_version='", reg.schema_version, "'; expected 'v3'"));
   }
   // Accept either a pre-existing index key or inline index data.  Only error
   // when both are absent.
@@ -1848,6 +2357,11 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       common::compute_index_multihash(entry.tensor_index_data, entry.tensor_index_key);
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
+  }
+
+  if (!entry.schema_version.empty() && entry.schema_version != "v3") {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Pending registration schema_version must be 'v3'; found '", entry.schema_version, "'"));
   }
 
   // 2) data_multihash via SegmentPlan linearization (PAD=0).
@@ -2048,6 +2562,28 @@ absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view regist
   }
   it->second.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
   return absl::OkStatus();
+}
+
+absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
+    std::string_view canonical_index_json,
+    const loader::ViewSpec& spec) {
+  loader::ViewPlanner planner;
+  return planner.compute_view_plan(canonical_index_json, spec);
+}
+
+bool StoreEngine::view_plan_allows_alias(const loader::ViewPlan& plan) {
+  return plan.selection.is_segment_aligned && plan.selection.total_bytes > 0;
+}
+
+absl::StatusOr<std::string> StoreEngine::compute_view_data_hash_from_source(
+    loader::SeekableSource& base_source,
+    const loader::ViewPlan& plan,
+    size_t leaf_chunk_bytes) {
+  if (plan.selection.total_bytes == 0) {
+    return absl::InvalidArgumentError("view plan selection has zero length");
+  }
+  loader::ViewPlanSource view_source(gsl::not_null<loader::SeekableSource*>{&base_source}, plan.selection);
+  return loader::compute_data_multihash_from_seekable_source(view_source, plan.selection.total_bytes, leaf_chunk_bytes);
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {
