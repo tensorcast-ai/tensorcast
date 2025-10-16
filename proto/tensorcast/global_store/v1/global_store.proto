@@ -261,12 +261,18 @@ message UpdateArtifactViewStateResponse {
   Status status = 1;
 }
 
+message CanonicalCoverage {
+  uint64 total_bytes = 1;
+  uint64 covered_bytes = 2;
+}
+
 message VariantUpsert {
   string view_id = 1;
   string view_spec_json = 2;
   uint64 view_size = 3;
   string view_data_hash = 4;
   google.protobuf.Timestamp verified_at = 5;
+  CanonicalCoverage canonical_coverage = 6;
 }
 
 enum ByteSpaceKind {

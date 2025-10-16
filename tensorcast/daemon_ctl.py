@@ -26,6 +26,7 @@ from tensorcast.proto.daemon.v1 import (
 from tensorcast.types import (
     ArtifactDescriptor,
     BeginRegisterArtifactResult,
+    CanonicalRange,
     CoalescedHandshake,
     CommitResult,
     LeaseHandshake,
@@ -655,6 +656,7 @@ class DaemonCtl:
         schema_version: str = "v2",
         plan: Plan | None = None,
         timeout_s: float = 30.0,
+        view: store_daemon_pb2.ViewRegistrationOptions | None = None,
     ) -> BeginRegisterArtifactResult:
         """Begin unified artifact registration (RFC-0014).
 
@@ -705,6 +707,8 @@ class DaemonCtl:
             plan = _DefaultPlan()
         kind = plan.kind
         plan.apply_to_begin_request(req)
+        if view is not None:
+            req.view.CopyFrom(view)
 
         with self._client_span("Client/BeginRegisterArtifact") as span:
             set_span_attributes(
@@ -809,7 +813,24 @@ class DaemonCtl:
                 encoding=desc.encoding,
                 total_size=int(desc.total_size),
             )
-            return CommitResult(descriptor=ad, existed=existed)
+            canonical_ranges: tuple[CanonicalRange, ...] = tuple(
+                CanonicalRange(offset=int(r.offset), length=int(r.length))
+                for r in resp.canonical_ranges
+            )
+            view_index_json = (
+                bytes(resp.view_index_json) if resp.view_index_json else None
+            )
+            view_id = resp.view_id or None
+            view_data_hash = resp.view_data_hash or None
+            return CommitResult(
+                descriptor=ad,
+                existed=existed,
+                view_id=view_id,
+                view_index_json=view_index_json,
+                view_data_hash=view_data_hash,
+                canonical_ranges=canonical_ranges,
+                allow_partial=bool(resp.allow_partial),
+            )
 
     def abort_registered_artifact(
         self, registration_id: str, *, timeout_s: float = 15.0
@@ -901,6 +922,36 @@ class DaemonCtl:
             return True
         except grpc.RpcError as e:  # noqa: BLE001
             logger.error(f"FeedRegisterArtifactStream(lease) failed: {e}")
+            return False
+
+    def feed_register_artifact_view_chunks(
+        self,
+        registration_id: str,
+        data: bytes | bytearray | memoryview,
+        *,
+        chunk_bytes: int = 4 * 1024 * 1024,
+    ) -> bool:
+        mv = memoryview(data)
+
+        def _iter():
+            offset = 0
+            while offset < mv.nbytes:
+                chunk = mv[offset : offset + chunk_bytes]
+                req = store_daemon_pb2.FeedRegisterArtifactStreamRequest(
+                    registration_id=registration_id
+                )
+                req.view_chunk.view_offset = int(offset)
+                req.view_chunk.data = bytes(chunk)
+                yield req
+                offset += len(chunk)
+
+        try:
+            self._unary_call(
+                self.stub.FeedRegisterArtifactStream, _iter(), timeout=30.0, retries=0
+            )
+            return True
+        except grpc.RpcError as e:  # noqa: BLE001
+            logger.error(f"FeedRegisterArtifactStream(view) failed: {e}")
             return False
 
     def keep_alive_registered_artifact(

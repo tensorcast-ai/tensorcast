@@ -34,6 +34,13 @@ class RegistrationManager {
     bool lease_in_place{false};
     std::string index_key_hex;
     std::string index_data;
+    bool view_registration{false};
+    store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
+    std::string view_id;
+    bool view_allow_partial{false};
+    uint64_t view_ingested_bytes{0};
+    std::vector<store::StoreEngine::CanonicalRange> view_canonical_ranges;
+    std::optional<std::string> view_data_multihash;
     // Join semantics: set when Commit detects an existing replica and the
     // controller joined a lightweight reference for this registration.
     bool joined_existing{false};
@@ -87,6 +94,14 @@ class RegistrationManager {
     auto& bucket = reg_aliases_[reg_id];
     for (auto& a : aliases)
       bucket.push_back(std::move(a));
+  }
+
+  void update_view_ingested_bytes(const std::string& reg_id, uint64_t bytes) {
+    absl::MutexLock l(&mu_);
+    auto it = reg_meta_.find(reg_id);
+    if (it != reg_meta_.end()) {
+      it->second.view_ingested_bytes = bytes;
+    }
   }
 
   std::vector<LeaseSegMeta> get_lease_segments(const std::string& reg_id) const {

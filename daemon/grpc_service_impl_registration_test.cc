@@ -2,6 +2,7 @@
 
 #include "daemon/grpc_service_impl.h"
 
+#include <unistd.h>
 #include <filesystem>
 #include <string>
 
@@ -47,7 +48,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   breq.set_owner_pid(getpid());
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data("{}");
-  idx->set_schema_version("v2");
+  idx->set_schema_version("v3");
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
@@ -75,4 +76,38 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   REQUIRE(!desc.index_multihash().empty());
   REQUIRE(!desc.data_multihash().empty());
   REQUIRE(desc.total_size() == 1 * 1024 * 1024);
+}
+
+TEST_CASE(
+    "BeginRegisterArtifact enforces server transpose fallback when GPU unavailable",
+    "[daemon][registration][view]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  StoreDaemonServiceImpl service(engine);
+
+  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  breq.set_device_id(99); // invalid device id to trigger fallback guard
+  breq.set_total_size(16);
+  breq.set_owner_pid(getpid());
+  auto* idx = breq.mutable_tensor_index_data();
+  idx->set_data(R"({"weights":[0,16,[2,2],[2,1],"torch.float32",0]})");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  auto* view = breq.mutable_view();
+  view->set_view_id("view-transpose");
+  view->set_canonical_size_bytes(16);
+  view->set_allow_partial(false);
+  view->set_placement(tensorcast::daemon::v1::TRANSFORM_PLACEMENT_SERVER);
+  auto& tensors = *view->mutable_spec()->mutable_tensors();
+  tensorcast::daemon::v1::TensorViewOps ops;
+  auto* transpose = ops.add_ops()->mutable_transpose();
+  transpose->set_dim0(0);
+  transpose->set_dim1(1);
+  tensors["weights"] = ops;
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("placement=CLIENT") != std::string::npos);
 }

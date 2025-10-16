@@ -236,6 +236,7 @@ sc_cc_library(
         "//core/store/loader:p2p_loader",
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
+        "//core/store/loader:view_ingest_executor",
         "//core/store/loader:view_plan_source",
         "//core/store/loader:view_planner",
         "//core/store/replica",

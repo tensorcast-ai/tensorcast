@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
@@ -36,6 +37,9 @@ class MaterializeOrchestrator;
 namespace loader {
 struct ViewPlan;
 struct ViewSpec;
+struct ViewWritePlan;
+struct BidirectionalViewPlan;
+class ViewIngestExecutor;
 class SeekableSource;
 } // namespace loader
 
@@ -104,6 +108,22 @@ class StoreEngine {
       const loader::ViewPlan& plan,
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
+  enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
+
+  struct CanonicalRange {
+    uint64_t offset{0};
+    uint64_t length{0};
+  };
+
+  struct ViewRegistration {
+    std::string view_id;
+    loader::ViewSpec spec;
+    ViewPlacement placement{ViewPlacement::kUnspecified};
+    uint64_t canonical_size_bytes{0};
+    std::vector<CanonicalRange> canonical_ranges;
+    bool allow_partial{false};
+  };
+
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
@@ -118,6 +138,7 @@ class StoreEngine {
     uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
     bool enable_p2p{true}; // Whether to enable remote access
     uint32_t ttl_ms{0}; // Optional TTL for Begin→Commit (0 = no TTL)
+    std::optional<ViewRegistration> view;
   };
 
   struct RegistrationBeginResult {
@@ -154,9 +175,21 @@ class StoreEngine {
     std::string data_multihash; // multibase(base32)-encoded multihash of tree-hash root
     std::string schema_version; // e.g. "v3"
     std::string encoding; // e.g. "json" or "cbor"
+    std::optional<std::string> view_id;
+    std::optional<std::string> view_data_multihash;
+    std::optional<std::string> view_index_json;
+    std::vector<CanonicalRange> canonical_ranges;
+    bool allow_partial{false};
   };
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
+
+  absl::Status ingest_view_registration_chunk(
+      std::string_view registration_id,
+      uint64_t view_offset,
+      absl::Span<const std::byte> data);
+
+  absl::StatusOr<uint64_t> get_view_registration_ingested_bytes(std::string_view registration_id);
 
   /**
    * @brief Abort a pending registration and release allocated memory.
@@ -372,10 +405,21 @@ class StoreEngine {
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
     std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
     enum class Plan : uint8_t { COALESCED = 0, CPU = 1 } plan{Plan::COALESCED};
+
+    struct ViewState {
+      ViewRegistration options;
+      loader::BidirectionalViewPlan plan;
+      std::unique_ptr<loader::ViewIngestExecutor> executor;
+      uint64_t expected_view_bytes{0};
+      uint64_t ingested_bytes{0};
+      bool finalized{false};
+    };
+
+    std::unique_ptr<ViewState> view_state;
   };
 
   std::mutex pending_mutex_;
-  std::unordered_map<std::string, PendingRegistrationEntry> pending_regs_;
+  std::unordered_map<std::string, std::shared_ptr<PendingRegistrationEntry>> pending_regs_;
 
   // Worker identity (for Global Store registrations)
   std::string worker_id_;

@@ -4,6 +4,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -26,6 +27,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
@@ -39,6 +41,7 @@
 #include <nlohmann/json.hpp>
 #include "core/store/loader/canonical_index.h"
 #include "core/store/loader/safetensors_util.h"
+#include "core/store/loader/view_ingest_executor.h"
 #include "core/store/loader/view_plan_source.h"
 #include "core/store/loader/view_planner.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
@@ -51,6 +54,7 @@
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
 #include "opentelemetry/trace/span.h"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::store {
 
@@ -139,6 +143,220 @@ std::optional<std::string> ComputeViewDataHash(
     return std::nullopt;
   }
   return *hash_or;
+}
+
+struct TreeHashWithLeaves {
+  std::string multihash;
+  std::vector<std::vector<uint8_t>> leaf_digests;
+};
+
+absl::StatusOr<TreeHashWithLeaves> compute_tree_hash_and_leaves(
+    loader::SeekableSource& source,
+    uint64_t total_size,
+    size_t leaf_chunk_bytes) {
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("total_size must be > 0");
+  }
+  if (leaf_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("leaf_chunk_bytes must be > 0");
+  }
+  std::vector<std::vector<uint8_t>> leaves;
+  leaves.reserve(static_cast<size_t>((total_size + leaf_chunk_bytes - 1) / leaf_chunk_bytes));
+  std::vector<uint8_t> buffer(leaf_chunk_bytes);
+  uint64_t processed = 0;
+  while (processed < total_size) {
+    const size_t to_read = static_cast<size_t>(std::min<uint64_t>(leaf_chunk_bytes, total_size - processed));
+    auto read_or = source.read_at(processed, buffer.data(), to_read);
+    if (!read_or.ok()) {
+      return read_or.status();
+    }
+    const size_t got = read_or.value();
+    if (got == 0) {
+      return absl::DataLossError("short read while computing tree hash");
+    }
+    leaves.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), got)));
+    processed += got;
+  }
+  TreeHashWithLeaves out;
+  out.multihash = common::multibase_multihash_sha256(common::compute_tree_hash_root_sha256(leaves));
+  out.leaf_digests = std::move(leaves);
+  return out;
+}
+
+uint64_t align_up(uint64_t value, uint64_t align) {
+  if (align == 0) {
+    return value;
+  }
+  const uint64_t remainder = value % align;
+  return remainder == 0 ? value : value + (align - remainder);
+}
+
+uint64_t align_down(uint64_t value, uint64_t align) {
+  if (align == 0) {
+    return value;
+  }
+  return value - (value % align);
+}
+
+std::vector<uint64_t> compute_fully_covered_canonical_leaf_indices(
+    absl::Span<const StoreEngine::CanonicalRange> ranges,
+    uint64_t chunk_bytes) {
+  if (chunk_bytes == 0) {
+    return {};
+  }
+  absl::flat_hash_set<uint64_t> indices;
+  for (const auto& range : ranges) {
+    if (range.length == 0) {
+      continue;
+    }
+    const uint64_t range_start = range.offset;
+    const uint64_t range_end = range.offset + range.length;
+    const uint64_t first_full = align_up(range_start, chunk_bytes);
+    const uint64_t last_full = align_down(range_end, chunk_bytes);
+    if (first_full >= last_full) {
+      continue;
+    }
+    for (uint64_t pos = first_full; pos < last_full; pos += chunk_bytes) {
+      indices.insert(pos / chunk_bytes);
+    }
+  }
+  std::vector<uint64_t> sorted(indices.begin(), indices.end());
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
+}
+
+absl::StatusOr<std::vector<std::vector<uint8_t>>> compute_canonical_leaf_digests(
+    const replica::Replica& replica,
+    bool use_cpu_memory,
+    void* gpu_ptr_hint,
+    int device_id,
+    uint64_t total_size_bytes,
+    absl::Span<const uint64_t> leaf_indices,
+    size_t chunk_bytes) {
+  std::vector<std::vector<uint8_t>> digests;
+  if (leaf_indices.empty()) {
+    return digests;
+  }
+  if (use_cpu_memory) {
+    const auto cpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::CPU);
+    if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+      return absl::FailedPreconditionError("CPU pointer unavailable for canonical leaf digests");
+    }
+    const auto* base = static_cast<const uint8_t*>(cpu_ptrs[0]);
+    digests.reserve(leaf_indices.size());
+    for (uint64_t idx : leaf_indices) {
+      const uint64_t offset = idx * chunk_bytes;
+      if (offset + chunk_bytes > total_size_bytes) {
+        continue;
+      }
+      digests.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(base + offset, chunk_bytes)));
+    }
+    return digests;
+  }
+  void* gpu_ptr = gpu_ptr_hint;
+  if (gpu_ptr == nullptr) {
+    const auto gpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::GPU);
+    if (!gpu_ptrs.empty()) {
+      gpu_ptr = gpu_ptrs[0];
+    }
+  }
+  if (gpu_ptr == nullptr) {
+    return absl::FailedPreconditionError("GPU pointer unavailable for canonical leaf digests");
+  }
+  std::vector<uint8_t> buffer(chunk_bytes);
+  digests.reserve(leaf_indices.size());
+  for (uint64_t idx : leaf_indices) {
+    const uint64_t offset = idx * chunk_bytes;
+    if (offset + chunk_bytes > total_size_bytes) {
+      continue;
+    }
+    if (auto st = tensorcast::cuda::set_device(device_id); !st.ok()) {
+      return st;
+    }
+    auto copy_status = tensorcast::cuda::memcpy(
+        buffer.data(), static_cast<uint8_t*>(gpu_ptr) + offset, chunk_bytes, cudaMemcpyDeviceToHost);
+    if (!copy_status.ok()) {
+      return copy_status;
+    }
+    if (auto sync_status = tensorcast::cuda::device_synchronize(); !sync_status.ok()) {
+      return sync_status;
+    }
+    digests.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), chunk_bytes)));
+  }
+  return digests;
+}
+
+uint64_t sum_view_write_bytes(const loader::ViewWritePlan& write_plan) {
+  uint64_t total = 0;
+  for (const auto& chunk : write_plan.chunks) {
+    total += chunk.length;
+  }
+  return total;
+}
+
+std::vector<StoreEngine::CanonicalRange> canonical_ranges_from_write_plan(const loader::ViewWritePlan& write_plan) {
+  std::vector<StoreEngine::CanonicalRange> ranges;
+  ranges.reserve(write_plan.chunks.size());
+  for (const auto& chunk : write_plan.chunks) {
+    StoreEngine::CanonicalRange range;
+    range.offset = chunk.canonical_offset;
+    range.length = chunk.length;
+    ranges.push_back(range);
+  }
+  std::sort(
+      ranges.begin(), ranges.end(), [](const StoreEngine::CanonicalRange& a, const StoreEngine::CanonicalRange& b) {
+        return a.offset < b.offset;
+      });
+  std::vector<StoreEngine::CanonicalRange> merged;
+  merged.reserve(ranges.size());
+  for (const auto& range : ranges) {
+    if (range.length == 0) {
+      continue;
+    }
+    if (merged.empty()) {
+      merged.push_back(range);
+      continue;
+    }
+    auto& last = merged.back();
+    const uint64_t last_end = last.offset + last.length;
+    if (range.offset <= last_end) {
+      const uint64_t new_end = std::max(last_end, range.offset + range.length);
+      last.length = new_end - last.offset;
+    } else {
+      merged.push_back(range);
+    }
+  }
+  return merged;
+}
+
+std::string build_view_spec_json(const loader::ViewSpec& spec) {
+  nlohmann::json tensors = nlohmann::json::object();
+  for (const auto& [tensor_name, ops] : spec.tensors) {
+    nlohmann::json tensor_json;
+    nlohmann::json ops_array = nlohmann::json::array();
+    for (const auto& op : ops.ops) {
+      nlohmann::json op_json;
+      switch (op.kind) {
+        case loader::ViewOp::Kind::kNarrow:
+          op_json["type"] = "narrow";
+          op_json["dim"] = op.narrow.dim;
+          op_json["start"] = op.narrow.start;
+          op_json["length"] = op.narrow.length;
+          break;
+        case loader::ViewOp::Kind::kTranspose:
+          op_json["type"] = "transpose";
+          op_json["dim0"] = op.transpose.dim0;
+          op_json["dim1"] = op.transpose.dim1;
+          break;
+      }
+      ops_array.push_back(std::move(op_json));
+    }
+    tensor_json["ops"] = std::move(ops_array);
+    tensors[tensor_name] = std::move(tensor_json);
+  }
+  nlohmann::json root;
+  root["tensors"] = std::move(tensors);
+  return root.dump();
 }
 
 } // namespace
@@ -2197,6 +2415,55 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   if (reg.tensor_index_key.empty() && !reg.tensor_index_data.has_value()) {
     return absl::InvalidArgumentError("tensor index key or data must be provided");
   }
+  const uint64_t canonical_size = (reg.view.has_value() && reg.view->canonical_size_bytes != 0)
+      ? reg.view->canonical_size_bytes
+      : reg.total_size_bytes;
+
+  std::optional<loader::BidirectionalViewPlan> view_plan;
+  uint64_t expected_view_bytes = 0;
+  std::vector<CanonicalRange> canonical_ranges;
+  if (reg.view.has_value()) {
+    const auto& view_opts = *reg.view;
+    if (!reg.tensor_index_data.has_value() || reg.tensor_index_data->empty()) {
+      return absl::InvalidArgumentError("view registration requires inline canonical index data");
+    }
+    if (view_opts.placement == ViewPlacement::kUnspecified) {
+      return absl::InvalidArgumentError("view registration requires explicit placement");
+    }
+    if (view_opts.canonical_size_bytes != 0 && view_opts.canonical_size_bytes != reg.total_size_bytes) {
+      return absl::InvalidArgumentError("view.canonical_size_bytes must match total_size_bytes");
+    }
+    auto plan_or = loader::ViewPlanner::compute_bidirectional_view_plan(*reg.tensor_index_data, view_opts.spec);
+    if (!plan_or.ok()) {
+      return plan_or.status();
+    }
+    view_plan = std::move(*plan_or);
+    expected_view_bytes = sum_view_write_bytes(view_plan->write);
+    canonical_ranges = canonical_ranges_from_write_plan(view_plan->write);
+    uint64_t covered_bytes = 0;
+    for (const auto& range : canonical_ranges) {
+      covered_bytes += range.length;
+    }
+    if (!view_opts.allow_partial && covered_bytes != canonical_size) {
+      return absl::InvalidArgumentError(
+          "view registration does not fully cover canonical bytes; set allow_partial=true to permit partial coverage");
+    }
+    if (covered_bytes > canonical_size) {
+      return absl::InvalidArgumentError("view registration exceeds canonical byte space");
+    }
+    if (view_opts.placement == ViewPlacement::kServer && view_plan->inverse_transform.requires_materialization) {
+      auto info_or = device_manager_->get_gpu_info(reg.device_id);
+      if (!info_or.ok()) {
+        return absl::FailedPreconditionError(
+            absl::StrCat(
+                "SERVER placement for view registration requires GPU transpose support on device ",
+                reg.device_id,
+                "; retry with placement=CLIENT (",
+                info_or.status().message(),
+                ")"));
+      }
+    }
+  }
 
   // Prepare a memory-only Replica bound to target GPU to own the allocation.
   // Use InlineBufferSource with the known total size so Replica::create() can
@@ -2285,27 +2552,40 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   std::uniform_int_distribution<uint64_t> dis;
   auto reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid(), "_", dis(gen));
 
-  PendingRegistrationEntry entry;
-  entry.registration_id = reg_id;
-  entry.artifact_id = reg.artifact_id;
-  entry.device_id = reg.device_id;
-  entry.size_bytes = reg.total_size_bytes;
-  entry.tensor_index_key = reg.tensor_index_key;
-  entry.tensor_index_data = reg.tensor_index_data;
-  entry.schema_version = reg.schema_version;
-  entry.encoding = reg.encoding;
-  entry.enable_p2p = reg.enable_p2p;
+  auto entry = std::make_shared<PendingRegistrationEntry>();
+  entry->registration_id = reg_id;
+  entry->artifact_id = reg.artifact_id;
+  entry->device_id = reg.device_id;
+  entry->size_bytes = reg.total_size_bytes;
+  entry->tensor_index_key = reg.tensor_index_key;
+  entry->tensor_index_data = reg.tensor_index_data;
+  entry->schema_version = reg.schema_version;
+  entry->encoding = reg.encoding;
+  entry->enable_p2p = reg.enable_p2p;
   if (reg.ttl_ms > 0) {
-    entry.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reg.ttl_ms);
+    entry->expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(reg.ttl_ms);
   }
-  entry.replica = replica;
-  entry.gpu_ptr = base_ptr;
-  entry.ipc_handle = *ipc_or;
-  entry.plan = PendingRegistrationEntry::Plan::COALESCED;
+  entry->replica = replica;
+  entry->gpu_ptr = base_ptr;
+  entry->ipc_handle = *ipc_or;
+  entry->plan = PendingRegistrationEntry::Plan::COALESCED;
+  if (view_plan.has_value()) {
+    entry->view_state = std::make_unique<PendingRegistrationEntry::ViewState>();
+    entry->view_state->options = *reg.view;
+    entry->view_state->options.canonical_size_bytes = canonical_size;
+    entry->view_state->options.canonical_ranges = canonical_ranges;
+    entry->view_state->plan = *view_plan;
+    entry->view_state->expected_view_bytes = expected_view_bytes;
+    entry->view_state->ingested_bytes = 0;
+    if (entry->view_state->options.placement == ViewPlacement::kServer) {
+      entry->view_state->executor = std::make_unique<loader::ViewIngestExecutor>(
+          entry->view_state->plan.write, entry->view_state->plan.inverse_transform);
+    }
+  }
 
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
-    pending_regs_.emplace(reg_id, std::move(entry));
+    pending_regs_.emplace(reg_id, entry);
   }
 
   RegistrationBeginResult out;
@@ -2320,7 +2600,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
     std::string_view registration_id) {
-  PendingRegistrationEntry entry;
+  std::shared_ptr<PendingRegistrationEntry> entry;
   std::shared_ptr<Replica> expired_replica;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -2328,15 +2608,12 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     if (it == pending_regs_.end()) {
       return absl::NotFoundError("registration_id not found");
     }
-    // TTL enforcement: if expired, cleanup and fail fast.
-    // Keep the lock held to prevent race conditions during TTL check and removal
-    if (it->second.expiry_time.time_since_epoch().count() > 0 &&
-        std::chrono::steady_clock::now() > it->second.expiry_time) {
-      expired_replica = it->second.replica;
+    if (it->second->expiry_time.time_since_epoch().count() > 0 &&
+        std::chrono::steady_clock::now() > it->second->expiry_time) {
+      expired_replica = it->second->replica;
       pending_regs_.erase(it);
-      // Release outside the lock to avoid holding mutex during potentially slow operation
     } else {
-      entry = it->second; // make a copy; we may erase after successful commit
+      entry = it->second;
     }
   }
 
@@ -2351,57 +2628,88 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     return absl::DeadlineExceededError("registration expired (TTL)");
   }
 
+  if (!entry) {
+    return absl::InternalError("pending registration entry missing after TTL check");
+  }
+
+  if (entry->view_state && entry->view_state->options.placement == ViewPlacement::kServer) {
+    auto& view_state = *entry->view_state;
+    if (!view_state.executor) {
+      return absl::FailedPreconditionError("view executor missing for server placement registration");
+    }
+    if (!view_state.executor->is_complete()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "view bytes incomplete; expected ",
+              view_state.expected_view_bytes,
+              " received ",
+              view_state.executor->ingested_bytes()));
+    }
+    auto finalize_status = view_state.executor->finalize(MemoryLocation::GPU, entry->gpu_ptr, entry->device_id);
+    if (!finalize_status.ok()) {
+      return finalize_status;
+    }
+    view_state.finalized = true;
+  }
+
   // Compute content-addressed artifact_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
   // 1) index_multihash from canonical index bytes when provided, otherwise from key (sha256 hex)
   absl::StatusOr<std::string> index_mh_or =
-      common::compute_index_multihash(entry.tensor_index_data, entry.tensor_index_key);
+      common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
   if (!index_mh_or.ok()) {
     return index_mh_or.status();
   }
 
-  if (!entry.schema_version.empty() && entry.schema_version != "v3") {
+  if (!entry->schema_version.empty() && entry->schema_version != "v3") {
     return absl::FailedPreconditionError(
-        absl::StrCat("Pending registration schema_version must be 'v3'; found '", entry.schema_version, "'"));
+        absl::StrCat("Pending registration schema_version must be 'v3'; found '", entry->schema_version, "'"));
   }
+
+  std::vector<loader::SegmentPiece> segment_plan;
+  bool segment_plan_ready = false;
 
   // 2) data_multihash via SegmentPlan linearization (PAD=0).
   absl::StatusOr<std::string> data_mh_or;
-  if (entry.plan == PendingRegistrationEntry::Plan::CPU) {
+  if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
     // Hash directly from VS CPU memory (zero-initialized PAD regions).
-    auto region_or = va_space_->region_info(entry.artifact_id);
+    auto region_or = va_space_->region_info(entry->artifact_id);
     if (!region_or.ok()) {
       return region_or.status();
     }
     auto mh_or = loader::compute_data_multihash_from_cpu_memory(
-        gsl::not_null<const void*>{region_or->cpu_base}, entry.size_bytes);
-    if (!mh_or.ok())
+        gsl::not_null<const void*>{region_or->cpu_base}, entry->size_bytes);
+    if (!mh_or.ok()) {
       return mh_or.status();
+    }
     data_mh_or = *mh_or;
   } else {
-    void* gpu_ptr = nullptr;
-    {
-      const auto ptrs = entry.replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+    void* gpu_ptr = entry->gpu_ptr;
+    if (gpu_ptr == nullptr) {
+      const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
       gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
     }
-    if (entry.tensor_index_data.has_value() && !entry.tensor_index_data->empty() && entry.encoding == "json") {
+    if (!gpu_ptr) {
+      return absl::FailedPreconditionError("GPU pointer is null; cannot hash GPU data");
+    }
+    if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() && entry->encoding == "json") {
       auto plan_or = loader::build_segment_plan_from_canonical_index_json(
-          *entry.tensor_index_data, entry.size_bytes, /*align_bytes=*/8);
-      if (plan_or.ok()) {
-        if (!gpu_ptr) {
-          return absl::FailedPreconditionError("GPU pointer is null; cannot hash GPU plan");
-        }
-        auto mh_or = loader::compute_data_multihash_from_gpu_plan(
-            gsl::not_null<void*>{gpu_ptr}, entry.device_id, absl::MakeSpan(*plan_or), entry.size_bytes);
-        if (!mh_or.ok())
-          return mh_or.status();
-        data_mh_or = *mh_or;
-      } else {
+          *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
+      if (!plan_or.ok()) {
         return plan_or.status();
       }
-    } else {
-      auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry.size_bytes, entry.device_id);
-      if (!mh_or.ok())
+      segment_plan = std::move(*plan_or);
+      segment_plan_ready = true;
+      auto mh_or = loader::compute_data_multihash_from_gpu_plan(
+          gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
+      if (!mh_or.ok()) {
         return mh_or.status();
+      }
+      data_mh_or = *mh_or;
+    } else {
+      auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry->size_bytes, entry->device_id);
+      if (!mh_or.ok()) {
+        return mh_or.status();
+      }
       data_mh_or = *mh_or;
     }
   }
@@ -2409,10 +2717,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     return data_mh_or.status();
   }
 
-  const std::string artifact_id_mi2 = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
-
-  // Replace entry.artifact_id with the content-addressed ID for registration and return
-  entry.artifact_id = artifact_id_mi2;
+  entry->artifact_id = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
 
   // Idempotent success: if the same content-addressed artifact already has a
   // replica on the target device, reclaim this allocation and return OK with
@@ -2420,40 +2725,47 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // created and no Global Store upsert is attempted.
   {
     DeviceKey dev_key{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
+        .type = (entry->plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry->plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry->device_id),
         .uuid = ""};
-    loading::ReplicaKey check_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
+    loading::ReplicaKey check_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
     auto existing_or = replica_registry_->find(check_key);
     if (existing_or.ok()) {
-      // Cleanup: erase pending entry and best-effort release the allocation we made
       {
         std::lock_guard<std::mutex> lock(pending_mutex_);
         pending_regs_.erase(std::string(registration_id));
       }
-      if (entry.plan == PendingRegistrationEntry::Plan::CPU) {
-        // VS path allocated CPU memory
-        absl::Status _st = entry.replica->release_memory(MemoryLocation::CPU);
+      if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
+        absl::Status _st = entry->replica->release_memory(MemoryLocation::CPU);
         if (!_st.ok()) {
           VLOG(1) << "release_memory(CPU) failed during idempotent success cleanup: " << _st;
         }
       } else {
-        // Coalesced/Lease-materialized path allocated GPU memory
-        absl::Status _st = entry.replica->release_memory(MemoryLocation::GPU);
+        absl::Status _st = entry->replica->release_memory(MemoryLocation::GPU);
         if (!_st.ok()) {
           VLOG(1) << "release_memory(GPU) failed during idempotent success cleanup: " << _st;
         }
       }
       RegistrationCommitResult result;
       result.registration_id = std::string(registration_id);
-      result.artifact_id = entry.artifact_id;
-      result.device_id = entry.device_id;
-      result.size_bytes = entry.size_bytes;
+      result.artifact_id = entry->artifact_id;
+      result.device_id = entry->device_id;
+      result.size_bytes = entry->size_bytes;
       result.existed = true;
       result.index_multihash = *index_mh_or;
       result.data_multihash = *data_mh_or;
-      result.schema_version = entry.schema_version;
-      result.encoding = entry.encoding;
+      result.schema_version = entry->schema_version;
+      result.encoding = entry->encoding;
+      if (entry->view_state) {
+        if (!entry->view_state->options.view_id.empty()) {
+          result.view_id = entry->view_state->options.view_id;
+        }
+        result.canonical_ranges = entry->view_state->options.canonical_ranges;
+        result.allow_partial = entry->view_state->options.allow_partial;
+        if (!entry->view_state->plan.forward.view_index_json.empty()) {
+          result.view_index_json = entry->view_state->plan.forward.view_index_json;
+        }
+      }
       return result;
     }
   }
@@ -2463,26 +2775,24 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // original logical artifact_id used during Begin/Commit).
   {
     DeviceKey dev_key{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
+        .type = (entry->plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry->plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry->device_id),
         .uuid = ""};
-    ReplicaKey mi2_key{.artifact_id = entry.artifact_id, .device = dev_key, .replica = 0};
-    {
-      absl::Status emplace_status =
-          replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry.replica});
-      if (absl::IsAlreadyExists(emplace_status)) {
-        VLOG(1) << "mi2 mapping already present for artifact_id=" << entry.artifact_id;
-      } else if (!emplace_status.ok()) {
-        return emplace_status;
-      }
+    ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
+    absl::Status emplace_status =
+        replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
+    if (absl::IsAlreadyExists(emplace_status)) {
+      VLOG(1) << "mi2 mapping already present for artifact_id=" << entry->artifact_id;
+    } else if (!emplace_status.ok()) {
+      return emplace_status;
     }
   }
 
   // Export remote memory keys if communication is enabled (GPU location).
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
-  if (entry.plan != PendingRegistrationEntry::Plan::CPU && entry.enable_p2p && comm_manager_->is_enabled()) {
-    auto reg_info_or = entry.replica->enable_remote_memory_access(MemoryLocation::GPU, comm_manager_->get_engine());
+  if (entry->plan != PendingRegistrationEntry::Plan::CPU && entry->enable_p2p && comm_manager_->is_enabled()) {
+    auto reg_info_or = entry->replica->enable_remote_memory_access(MemoryLocation::GPU, comm_manager_->get_engine());
     if (!reg_info_or.ok()) {
       return reg_info_or.status();
     }
@@ -2496,18 +2806,17 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   // Register with Global Store (memory replica). Provide tensor_index_key and optional UPSERT data.
   if (global_store_client_ && global_store_client_->is_connected()) {
     DeviceKey device{
-        .type = (entry.plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry.plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry.device_id),
+        .type = (entry->plan == PendingRegistrationEntry::Plan::CPU ? DeviceType::CPU : DeviceType::GPU),
+        .ordinal = (entry->plan == PendingRegistrationEntry::Plan::CPU ? -1 : entry->device_id),
         .uuid = ""};
     const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
-    // Generate lightweight verification info (KEY_POINTS) for receiver-side validation
     std::optional<std::string> verification_json;
     if (!remote_keys.empty()) {
-      std::vector<void*> data_ptrs = entry.replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+      std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
       if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
-        std::vector<size_t> data_sizes{static_cast<size_t>(entry.size_bytes)};
+        std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
         auto info_or = common::ArtifactVerifier::generate_verification_info(
-            data_ptrs, data_sizes, entry.device_id, common::VerificationLevel::KEY_POINTS);
+            data_ptrs, data_sizes, entry->device_id, common::VerificationLevel::KEY_POINTS);
         if (info_or.ok()) {
           verification_json = info_or->to_json();
         }
@@ -2515,16 +2824,16 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     }
 
     auto reg_or = global_store_client_->register_memory_replica(
-        entry.artifact_id,
+        entry->artifact_id,
         /*worker_id=*/wid,
         device,
-        entry.size_bytes,
-        entry.tensor_index_key,
+        entry->size_bytes,
+        entry->tensor_index_key,
         remote_keys,
         buffer_sizes,
-        entry.tensor_index_data,
-        entry.encoding,
-        entry.schema_version,
+        entry->tensor_index_data,
+        entry->encoding,
+        entry->schema_version,
         /*max_concurrency=*/1,
         verification_json);
     if (!reg_or.ok()) {
@@ -2532,23 +2841,206 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     }
   }
 
-  // Finalize: remove from pending list on success.
+  // Compute view data hash and collect leaf digests once canonical data commit succeeds.
+  std::optional<std::string> view_data_hash;
+  std::optional<std::string> view_spec_json;
+  std::vector<global_store::v1::LeafWrite> leaf_writes;
+  std::vector<uint64_t> canonical_leaf_indices;
+  std::optional<size_t> leaf_chunk_bytes;
+  if (entry->view_state) {
+    if (!segment_plan_ready && entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() &&
+        entry->encoding == "json") {
+      auto plan_or = loader::build_segment_plan_from_canonical_index_json(
+          *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
+      if (plan_or.ok()) {
+        segment_plan = std::move(*plan_or);
+        segment_plan_ready = true;
+      } else {
+        LOG(WARNING) << "Failed to rebuild segment plan for view hash: " << plan_or.status();
+      }
+    }
+    view_spec_json = build_view_spec_json(entry->view_state->options.spec);
+    leaf_chunk_bytes =
+        options_.artifact_chunk_bytes == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : options_.artifact_chunk_bytes;
+
+    if (segment_plan_ready && entry->view_state->plan.forward.selection.total_bytes > 0 &&
+        leaf_chunk_bytes.has_value()) {
+      void* gpu_ptr = entry->gpu_ptr;
+      if (gpu_ptr == nullptr) {
+        const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+        gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+      }
+      if (gpu_ptr != nullptr) {
+        loader::LinearizedGpuPlanSource canonical_source(
+            gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
+        loader::ViewPlanSource view_source(
+            gsl::not_null<loader::SeekableSource*>{&canonical_source}, entry->view_state->plan.forward.selection);
+        auto view_hash_or = compute_tree_hash_and_leaves(
+            view_source, entry->view_state->plan.forward.selection.total_bytes, *leaf_chunk_bytes);
+        if (view_hash_or.ok()) {
+          view_data_hash = view_hash_or->multihash;
+          const auto& digests = view_hash_or->leaf_digests;
+          leaf_writes.reserve(leaf_writes.size() + digests.size());
+          for (size_t idx = 0; idx < digests.size(); ++idx) {
+            global_store::v1::LeafWrite leaf;
+            leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_VARIANT);
+            leaf.set_space_id(entry->view_state->options.view_id);
+            leaf.set_leaf_idx(static_cast<uint64_t>(idx));
+            const auto& digest = digests[idx];
+            leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
+            leaf_writes.push_back(std::move(leaf));
+          }
+        } else {
+          LOG(WARNING) << "ComputeTreeHashAndLeaves (view) failed: " << view_hash_or.status();
+        }
+      }
+    }
+    canonical_leaf_indices = compute_fully_covered_canonical_leaf_indices(
+        entry->view_state->options.canonical_ranges, leaf_chunk_bytes.value_or(0));
+  }
+
+  if (entry->view_state && leaf_chunk_bytes.has_value() && !canonical_leaf_indices.empty()) {
+    auto canonical_digest_or = compute_canonical_leaf_digests(
+        *entry->replica,
+        entry->plan == PendingRegistrationEntry::Plan::CPU,
+        entry->gpu_ptr,
+        entry->device_id,
+        entry->size_bytes,
+        canonical_leaf_indices,
+        *leaf_chunk_bytes);
+    if (!canonical_digest_or.ok()) {
+      LOG(WARNING) << "Failed to compute canonical leaf digests for view registration: "
+                   << canonical_digest_or.status();
+    } else if (canonical_digest_or->size() != canonical_leaf_indices.size()) {
+      LOG(WARNING) << "Canonical leaf digest count mismatch: expected " << canonical_leaf_indices.size() << " got "
+                   << canonical_digest_or->size();
+    } else {
+      leaf_writes.reserve(leaf_writes.size() + canonical_leaf_indices.size());
+      for (size_t i = 0; i < canonical_leaf_indices.size(); ++i) {
+        global_store::v1::LeafWrite leaf;
+        leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_CANONICAL);
+        leaf.set_space_id(*index_mh_or);
+        leaf.set_leaf_idx(canonical_leaf_indices[i]);
+        const auto& digest = (*canonical_digest_or)[i];
+        leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
+        leaf_writes.push_back(std::move(leaf));
+      }
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     pending_regs_.erase(std::string(registration_id));
   }
+
   RegistrationCommitResult result;
   result.registration_id = std::string(registration_id);
-  result.artifact_id = entry.artifact_id;
-  result.device_id = entry.device_id;
-  result.size_bytes = entry.size_bytes;
+  result.artifact_id = entry->artifact_id;
+  result.device_id = entry->device_id;
+  result.size_bytes = entry->size_bytes;
   result.existed = false;
-  // RFC-0007: Fill descriptor fields for upstream layers
   result.index_multihash = *index_mh_or;
   result.data_multihash = *data_mh_or;
-  result.schema_version = entry.schema_version;
-  result.encoding = entry.encoding;
+  result.schema_version = entry->schema_version;
+  result.encoding = entry->encoding;
+  uint64_t covered_bytes = 0;
+  if (entry->view_state) {
+    if (!entry->view_state->options.view_id.empty()) {
+      result.view_id = entry->view_state->options.view_id;
+    }
+    if (view_data_hash.has_value()) {
+      result.view_data_multihash = view_data_hash;
+    }
+    if (!entry->view_state->plan.forward.view_index_json.empty()) {
+      result.view_index_json = entry->view_state->plan.forward.view_index_json;
+    }
+    result.canonical_ranges = entry->view_state->options.canonical_ranges;
+    result.allow_partial = entry->view_state->options.allow_partial;
+    covered_bytes = 0;
+    for (const auto& range : result.canonical_ranges) {
+      covered_bytes += range.length;
+    }
+  }
+
+  if (entry->view_state && global_store_client_ && global_store_client_->is_connected() &&
+      !entry->view_state->options.view_id.empty()) {
+    components::VariantViewUpdate update;
+    update.artifact_id = entry->artifact_id;
+    update.view_id = entry->view_state->options.view_id;
+    update.view_spec_json = view_spec_json.value_or(build_view_spec_json(entry->view_state->options.spec));
+    update.view_size_bytes = entry->view_state->plan.forward.view_size_bytes;
+    update.view_data_hash = view_data_hash;
+    update.mark_verified = true;
+    update.canonical_size_bytes = entry->size_bytes;
+    update.canonical_bytes_covered = covered_bytes;
+    update.leaf_writes = std::move(leaf_writes);
+    absl::Status update_status = global_store_client_->update_artifact_view_state(update);
+    if (!update_status.ok()) {
+      LOG(WARNING) << "UpdateArtifactViewState failed for artifact " << entry->artifact_id
+                   << " view_id=" << entry->view_state->options.view_id << ": " << update_status;
+    }
+  }
   return result;
+}
+
+absl::Status StoreEngine::ingest_view_registration_chunk(
+    std::string_view registration_id,
+    uint64_t view_offset,
+    absl::Span<const std::byte> data) {
+  if (data.empty()) {
+    return absl::OkStatus();
+  }
+  std::shared_ptr<PendingRegistrationEntry> entry;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    auto it = pending_regs_.find(std::string(registration_id));
+    if (it == pending_regs_.end()) {
+      return absl::NotFoundError("registration_id not found");
+    }
+    entry = it->second;
+  }
+  if (!entry || !entry->view_state) {
+    return absl::FailedPreconditionError("registration is not view-enabled");
+  }
+  auto& view_state = *entry->view_state;
+  if (view_state.options.placement != ViewPlacement::kServer) {
+    return absl::FailedPreconditionError("view chunk ingestion is only valid for SERVER placement");
+  }
+  if (!view_state.executor) {
+    return absl::FailedPreconditionError("view executor missing for SERVER placement ingestion");
+  }
+  void* canonical_base = entry->gpu_ptr;
+  if (canonical_base == nullptr) {
+    const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+    canonical_base = (!ptrs.empty() ? ptrs[0] : nullptr);
+    if (canonical_base == nullptr) {
+      return absl::FailedPreconditionError("GPU pointer unavailable for view ingestion");
+    }
+    entry->gpu_ptr = canonical_base;
+  }
+  auto status =
+      view_state.executor->ingest_chunk(view_offset, data, MemoryLocation::GPU, canonical_base, entry->device_id);
+  if (!status.ok()) {
+    return status;
+  }
+  view_state.ingested_bytes = view_state.executor->ingested_bytes();
+  return absl::OkStatus();
+}
+
+absl::StatusOr<uint64_t> StoreEngine::get_view_registration_ingested_bytes(std::string_view registration_id) {
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  auto it = pending_regs_.find(std::string(registration_id));
+  if (it == pending_regs_.end()) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  const std::shared_ptr<PendingRegistrationEntry>& entry = it->second;
+  if (!entry || !entry->view_state) {
+    return absl::FailedPreconditionError("registration has no view state");
+  }
+  if (entry->view_state->executor) {
+    return entry->view_state->executor->ingested_bytes();
+  }
+  return entry->view_state->expected_view_bytes;
 }
 
 absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms) {
@@ -2560,7 +3052,7 @@ absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view regist
   if (it == pending_regs_.end()) {
     return absl::NotFoundError("registration_id not found");
   }
-  it->second.expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  it->second->expiry_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
   return absl::OkStatus();
 }
 
@@ -2594,7 +3086,7 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
     if (it == pending_regs_.end()) {
       return absl::NotFoundError("registration_id not found");
     }
-    replica = it->second.replica;
+    replica = it->second->replica;
     pending_regs_.erase(it);
   }
   if (replica) {

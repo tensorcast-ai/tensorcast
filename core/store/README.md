@@ -124,6 +124,11 @@ graph TB
     - CPU (artifact-level convenience): `get_chunk_states_cpu_uma(artifact_id)`
       - Selection rule when multiple replicas exist: prefer a CPU instance if present; otherwise choose the GPU instance with the smallest device ordinal.
 
+- View registration (v1.5):
+  - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/loader::ViewPlanner`.
+  - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
+  - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
+
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`
   - `register_replica_with_global_store(ReplicaKey, artifact_id_override)`

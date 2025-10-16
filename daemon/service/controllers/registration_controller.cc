@@ -4,12 +4,16 @@
 
 #include "daemon/service/controllers/registration_controller.h"
 
+#include <cstddef>
 #include <string>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "core/store/loader/view_planner.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -18,6 +22,69 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
+
+namespace {
+
+absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpec& spec_proto) {
+  store::loader::ViewSpec spec;
+  for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
+    store::loader::TensorViewOps tensor_ops;
+    for (const auto& op_proto : ops_proto.ops()) {
+      if (op_proto.has_narrow()) {
+        const auto& narrow = op_proto.narrow();
+        store::loader::NarrowOp narrow_op;
+        narrow_op.dim = static_cast<int32_t>(narrow.dim());
+        narrow_op.start = narrow.start();
+        narrow_op.length = narrow.length();
+        tensor_ops.ops.push_back(store::loader::ViewOp::Narrow(narrow_op));
+      } else if (op_proto.has_transpose()) {
+        const auto& transpose = op_proto.transpose();
+        store::loader::TransposeOp transpose_op;
+        transpose_op.dim0 = static_cast<int32_t>(transpose.dim0());
+        transpose_op.dim1 = static_cast<int32_t>(transpose.dim1());
+        tensor_ops.ops.push_back(store::loader::ViewOp::Transpose(transpose_op));
+      } else {
+        return absl::InvalidArgumentError("unsupported view operation in ViewSpec");
+      }
+    }
+    spec.tensors.emplace(tensor_name, std::move(tensor_ops));
+  }
+  return spec;
+}
+
+store::StoreEngine::ViewPlacement ToPlacement(v1::TransformPlacement placement) {
+  switch (placement) {
+    case v1::TRANSFORM_PLACEMENT_SERVER:
+      return store::StoreEngine::ViewPlacement::kServer;
+    case v1::TRANSFORM_PLACEMENT_CLIENT:
+      return store::StoreEngine::ViewPlacement::kClient;
+    case v1::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    default:
+      return store::StoreEngine::ViewPlacement::kUnspecified;
+  }
+}
+
+void record_view_bytes_metric(double bytes) {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_view_bytes_total");
+    counter->Add(bytes);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_view_bytes_total unavailable";
+  }
+}
+
+void record_view_partial_metric() {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_view_partials_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_view_partials_total unavailable";
+  }
+}
+
+} // namespace
 
 grpc::Status RegistrationController::begin(
     RpcContext& rctx,
@@ -55,6 +122,28 @@ grpc::Status RegistrationController::begin(
     meta.index_key_hex = req.tensor_index_key();
   else if (req.has_tensor_index_data())
     meta.index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
+
+  if (req.has_view()) {
+    auto placement = ToPlacement(req.view().placement());
+    if (placement == store::StoreEngine::ViewPlacement::kUnspecified) {
+      return {StatusCode::INVALID_ARGUMENT, "view placement must be specified"};
+    }
+    auto spec_or = BuildViewSpecFromProto(req.view().spec());
+    if (!spec_or.ok()) {
+      return to_grpc_status(spec_or.status());
+    }
+    store::StoreEngine::ViewRegistration view_reg;
+    view_reg.view_id = req.view().view_id();
+    view_reg.spec = std::move(*spec_or);
+    view_reg.placement = placement;
+    view_reg.canonical_size_bytes = req.view().canonical_size_bytes();
+    view_reg.allow_partial = req.view().allow_partial();
+    reg.view = view_reg;
+    meta.view_registration = true;
+    meta.view_placement = placement;
+    meta.view_id = view_reg.view_id;
+    meta.view_allow_partial = view_reg.allow_partial;
+  }
 
   if (plan == RegistrationManager::RegPlan::COALESCED) {
     if (req.has_tensor_index_key())
@@ -164,6 +253,18 @@ grpc::Status RegistrationController::feed_stream(
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
+    } else if (req.has_view_chunk()) {
+      const std::string& payload = req.view_chunk().data();
+      absl::Span<const std::byte> bytes(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
+      auto ingest_status = d_.engine.ingest_view_registration_chunk(reg_id, req.view_chunk().view_offset(), bytes);
+      if (!ingest_status.ok()) {
+        return to_grpc_status(ingest_status);
+      }
+      record_view_bytes_metric(static_cast<double>(payload.size()));
+      auto ingested_or = d_.engine.get_view_registration_ingested_bytes(reg_id);
+      if (ingested_or.ok()) {
+        d_.reg.update_view_ingested_bytes(reg_id, *ingested_or);
+      }
     } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
       // allow requests that only carry storage/alias metadata without segments
     } else {
@@ -260,6 +361,18 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
+    } else if (req.has_view_chunk()) {
+      const std::string& payload = req.view_chunk().data();
+      absl::Span<const std::byte> bytes(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
+      auto ingest_status = d_.engine.ingest_view_registration_chunk(reg_id, req.view_chunk().view_offset(), bytes);
+      if (!ingest_status.ok()) {
+        return to_grpc_status(ingest_status);
+      }
+      record_view_bytes_metric(static_cast<double>(payload.size()));
+      auto ingested_or = d_.engine.get_view_registration_ingested_bytes(reg_id);
+      if (ingested_or.ok()) {
+        d_.reg.update_view_ingested_bytes(reg_id, *ingested_or);
+      }
     } else if (!req.storage_entries().empty() || !req.tensor_aliases().empty()) {
       // allow metadata-only payloads
     } else {
@@ -467,6 +580,41 @@ grpc::Status RegistrationController::commit(
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.size_bytes);
     resp.set_existed(out.existed);
+    if (out.view_id.has_value()) {
+      resp.set_view_id(*out.view_id);
+    }
+    if (out.view_index_json.has_value()) {
+      resp.set_view_index_json(*out.view_index_json);
+    }
+    if (out.view_data_multihash.has_value()) {
+      resp.set_view_data_hash(*out.view_data_multihash);
+    }
+    for (const auto& range : out.canonical_ranges) {
+      auto* r = resp.add_canonical_ranges();
+      r->set_offset(range.offset);
+      r->set_length(range.length);
+    }
+    resp.set_allow_partial(out.allow_partial);
+    if (out.view_id.has_value()) {
+      meta.view_registration = true;
+      meta.view_id = *out.view_id;
+      meta.view_canonical_ranges = out.canonical_ranges;
+      meta.view_data_multihash = out.view_data_multihash;
+      uint64_t covered_bytes = 0;
+      for (const auto& range : out.canonical_ranges) {
+        covered_bytes += range.length;
+      }
+      if (!out.existed && covered_bytes < out.size_bytes) {
+        record_view_partial_metric();
+        LOG(INFO) << "View registration partial coverage: artifact_id=" << out.artifact_id
+                  << " view_id=" << *out.view_id << " covered_bytes=" << covered_bytes
+                  << " canonical_bytes=" << out.size_bytes << " ingested_view_bytes=" << meta.view_ingested_bytes;
+      } else {
+        VLOG(1) << "View registration coverage: artifact_id=" << out.artifact_id << " view_id=" << *out.view_id
+                << " covered_bytes=" << covered_bytes << " canonical_bytes=" << out.size_bytes
+                << " ingested_view_bytes=" << meta.view_ingested_bytes;
+      }
+    }
     if (out.existed) {
       // Join reference to existing GPU replica for coalesced plan duplicates
       store::loading::ReplicaKey key{

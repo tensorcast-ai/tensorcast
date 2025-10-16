@@ -14,6 +14,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/common/otel/grpc_propagation.h"
 #include "core/communicator/misc/utils.h"
 #include "opentelemetry/trace/provider.h"
@@ -359,6 +361,59 @@ absl::Status GlobalStoreClient::record_variant_residency(
   // Until that lands, treat this as a best-effort noop so core plumbing can wire
   // the call sites without coupling to server availability.
   return absl::UnimplementedError("Global Store variant residency RPC not yet implemented");
+}
+
+absl::Status GlobalStoreClient::update_artifact_view_state(const VariantViewUpdate& update) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (update.artifact_id.empty()) {
+    return absl::InvalidArgumentError("update_artifact_view_state requires artifact_id");
+  }
+  if (update.view_id.empty()) {
+    return absl::InvalidArgumentError("update_artifact_view_state requires view_id");
+  }
+
+  global_store::UpdateArtifactViewStateRequest request;
+  request.set_artifact_id(update.artifact_id);
+  auto* variant = request.mutable_variant();
+  variant->set_view_id(update.view_id);
+  variant->set_view_spec_json(update.view_spec_json);
+  variant->set_view_size(update.view_size_bytes);
+  if (update.view_data_hash.has_value()) {
+    variant->set_view_data_hash(*update.view_data_hash);
+  }
+  if (update.canonical_size_bytes > 0 || update.canonical_bytes_covered > 0) {
+    auto* coverage = variant->mutable_canonical_coverage();
+    coverage->set_total_bytes(update.canonical_size_bytes);
+    coverage->set_covered_bytes(update.canonical_bytes_covered);
+  }
+  if (update.mark_verified) {
+    const absl::Time now = absl::Now();
+    auto* ts = variant->mutable_verified_at();
+    const int64_t seconds = absl::ToUnixSeconds(now);
+    const int64_t nanos = absl::ToInt64Nanoseconds(now - absl::UnixEpoch() - absl::Seconds(seconds));
+    ts->set_seconds(seconds);
+    ts->set_nanos(static_cast<int32_t>(nanos));
+  }
+  for (const auto& leaf : update.leaf_writes) {
+    *request.add_leaf_writes() = leaf;
+  }
+
+  global_store::UpdateArtifactViewStateResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpdateArtifactViewState(ctx, req, resp); },
+      "UpdateArtifactViewState");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("UpdateArtifactViewState failed: status=%s", status_to_cstr(response.status())));
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(

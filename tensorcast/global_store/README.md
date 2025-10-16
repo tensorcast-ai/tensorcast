@@ -246,6 +246,7 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - `update_view_state()` persists variant metadata (`variants`) and leaf digests (`leaves`) in a single transaction, leaving canonical `chunk_directory` entries untouched.
   - Groups `LeafWritePayload` batches by ByteSpace (`space_kind`, `space_id`) and normalises case, guaranteeing idempotent upserts.
   - Provides the business logic backing `UpdateArtifactViewState` so daemons have a single helper for publishing variant identities and verification leaves.
+  - Emits Prometheus counters (`tc_view_registration_total`) and gauges (`tc_view_partial_backlog_bytes`) to highlight partial coverage backlog per view; refer to [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the cross-component flow.
 
 ## gRPC Facade (GlobalStoreServicer)
 

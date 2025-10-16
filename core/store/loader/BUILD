@@ -225,6 +225,20 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "view_ingest_executor",
+    srcs = ["view_ingest_executor.cc"],
+    hdrs = ["view_ingest_executor.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":view_planner",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+        "@libtorch//:torch",
+    ],
+)
+
 # Sink implementations
 sc_cc_library(
     name = "gpu_memory_sink",
@@ -505,6 +519,21 @@ cc_test(
         ":view_transform_executor",
         "//core/common:memory_location_lib",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "view_ingest_executor_test",
+    srcs = ["view_ingest_executor_test.cc"],
+    deps = [
+        ":view_ingest_executor",
+        ":view_planner",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],

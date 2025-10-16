@@ -131,6 +131,20 @@ ACTIVE_TRANSPORTS_GAUGE = Gauge(
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
+# View registration ----------------------------------------------------------
+
+VIEW_REGISTRATION_COUNTER = Counter(
+    "tc_view_registration_total",
+    "Total number of view registrations recorded by the Global Store.",
+    labelnames=("result",),  # result=complete|partial
+)
+
+VIEW_PARTIAL_BACKLOG_GAUGE = Gauge(
+    "tc_view_partial_backlog_bytes",
+    "Canonical byte backlog for partial view registrations.",
+    labelnames=("artifact_id", "view_id"),
+)
+
 # Recovery / state-sync ------------------------------------------------------
 
 STATE_SYNC_COUNTER = Counter(
@@ -204,6 +218,22 @@ def set_replicas_per_memtype(memory_type: str, count: int) -> None:
     """Set per-memory-type replica gauge."""
 
     REPLICA_PER_MEMTYPE_GAUGE.labels(memory_type=memory_type).set(count)
+
+
+def inc_view_registration(result: str) -> None:
+    """Increment the view registration counter."""
+
+    VIEW_REGISTRATION_COUNTER.labels(result=result).inc()
+
+
+def set_view_partial_backlog(
+    artifact_id: str, view_id: str, backlog_bytes: int
+) -> None:
+    """Track outstanding canonical bytes for a view registration."""
+
+    VIEW_PARTIAL_BACKLOG_GAUGE.labels(artifact_id=artifact_id, view_id=view_id).set(
+        backlog_bytes
+    )
 
 
 # ---------------------------------------------------------------------------

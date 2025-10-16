@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tensorcast.global_store import metrics
 from tensorcast.global_store.exceptions import (
     NotFoundError,
     TimeoutError,
@@ -617,6 +618,8 @@ class TestServices:
             view_size=128,
             view_data_hash="mhash",
             verified_at=now,
+            canonical_size_bytes=128,
+            canonical_bytes_covered=128,
         )
         leaf_payloads = [
             LeafWritePayload(
@@ -657,6 +660,93 @@ class TestServices:
         assert len(leaves) == 2
         assert leaves[0][0] == 0
         assert leaves[0][1] == b"\x01" * 32
+
+    def test_view_state_service_record_variant_registration(self, services):
+        """record_variant_registration delegates to update_view_state."""
+        view_state_service = services["view_state"]
+        now = datetime.now(timezone.utc)
+        leaf_payloads = [
+            LeafWritePayload(
+                artifact_id="mi2:index:data",
+                space_kind="V",
+                space_id="view-2",
+                leaf_idx=0,
+                digest=b"\x03" * 32,
+            )
+        ]
+
+        view_state_service.record_variant_registration(
+            artifact_id="mi2:index:data",
+            view_id="view-2",
+            view_spec_json='{"tensor":"weights"}',
+            view_size=512,
+            view_data_hash="mhash-2",
+            verified_at=now,
+            canonical_size_bytes=512,
+            canonical_bytes_covered=512,
+            leaf_writes=leaf_payloads,
+        )
+
+        stored_variant = view_state_service.get_variant(
+            artifact_id="mi2:index:data",
+            view_id="view-2",
+        )
+        assert stored_variant is not None
+        assert stored_variant["view_size"] == 512
+        assert stored_variant["view_data_hash"] == "mhash-2"
+
+        leaves = list(
+            view_state_service.get_leaves(
+                artifact_id="mi2:index:data",
+                space_kind="V",
+                space_id="view-2",
+            )
+        )
+        assert len(leaves) == 1
+        assert leaves[0][0] == 0
+        assert leaves[0][1] == b"\x03" * 32
+
+    def test_view_state_service_metrics_track_backlog(self, services):
+        view_state_service = services["view_state"]
+        metrics.VIEW_PARTIAL_BACKLOG_GAUGE.clear()
+        complete_counter = metrics.VIEW_REGISTRATION_COUNTER.labels(result="complete")
+        partial_counter = metrics.VIEW_REGISTRATION_COUNTER.labels(result="partial")
+        baseline_complete = complete_counter._value.get()
+        baseline_partial = partial_counter._value.get()
+
+        view_state_service.record_variant_registration(
+            artifact_id="mi2:index:metrics",
+            view_id="view-metrics",
+            view_spec_json="{}",
+            view_size=256,
+            view_data_hash=None,
+            verified_at=None,
+            canonical_size_bytes=1024,
+            canonical_bytes_covered=512,
+        )
+
+        backlog_value = metrics.VIEW_PARTIAL_BACKLOG_GAUGE.labels(
+            artifact_id="mi2:index:metrics", view_id="view-metrics"
+        )._value.get()
+        assert backlog_value == 512
+        assert partial_counter._value.get() == baseline_partial + 1
+
+        view_state_service.record_variant_registration(
+            artifact_id="mi2:index:metrics",
+            view_id="view-metrics",
+            view_spec_json="{}",
+            view_size=256,
+            view_data_hash=None,
+            verified_at=None,
+            canonical_size_bytes=1024,
+            canonical_bytes_covered=1024,
+        )
+
+        backlog_after = metrics.VIEW_PARTIAL_BACKLOG_GAUGE.labels(
+            artifact_id="mi2:index:metrics", view_id="view-metrics"
+        )._value.get()
+        assert backlog_after == 0
+        assert complete_counter._value.get() == baseline_complete + 1
 
     def test_view_state_service_rejects_mismatched_artifact(self, services):
         """Leaf writes must share artifact_id."""

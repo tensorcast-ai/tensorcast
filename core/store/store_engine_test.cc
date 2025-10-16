@@ -169,6 +169,7 @@ class RecordingGlobalStoreClient final : public tensorcast::store::components::I
   std::vector<std::string> replica_requests;
   std::vector<std::string> registered_replicas;
   std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
+  std::vector<tensorcast::store::components::VariantViewUpdate> view_updates;
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -244,6 +245,12 @@ class RecordingGlobalStoreClient final : public tensorcast::store::components::I
 
   absl::Status unregister_replica(std::string_view, std::string_view) override {
     return absl::UnimplementedError("unregister_replica not supported in test stub");
+  }
+
+  absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate& update) override {
+    view_requests.emplace_back(update.view_id);
+    view_updates.push_back(update);
+    return absl::OkStatus();
   }
 
   absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(

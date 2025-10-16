@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from tensorcast.global_store import metrics
 from tensorcast.global_store.repositories.leaf_repository import LeafRepository
 from tensorcast.global_store.repositories.variant_repository import VariantRepository
 from tensorcast.logger import init_logger
@@ -26,6 +27,8 @@ class VariantUpsertPayload:
     view_size: int
     view_data_hash: Optional[str]
     verified_at: Optional[datetime]
+    canonical_size_bytes: Optional[int] = None
+    canonical_bytes_covered: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,56 @@ class ViewStateService:
                         entries=entries,
                         cursor=cursor,
                     )
+
+        if variant is not None:
+            total = variant.canonical_size_bytes
+            covered = variant.canonical_bytes_covered
+            backlog = None
+            if total is not None and covered is not None and total > 0:
+                capped_covered = min(total, covered)
+                backlog = max(0, total - capped_covered)
+                metrics.set_view_partial_backlog(
+                    variant.artifact_id, variant.view_id, backlog
+                )
+            elif total is not None and total == 0:
+                metrics.set_view_partial_backlog(
+                    variant.artifact_id, variant.view_id, 0
+                )
+            result = "partial" if backlog and backlog > 0 else "complete"
+            metrics.inc_view_registration(result)
+            if backlog is None:
+                metrics.set_view_partial_backlog(
+                    variant.artifact_id, variant.view_id, 0
+                )
+
+    def record_variant_registration(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str,
+        view_spec_json: str,
+        view_size: int,
+        view_data_hash: Optional[str],
+        verified_at: Optional[datetime],
+        canonical_size_bytes: Optional[int] = None,
+        canonical_bytes_covered: Optional[int] = None,
+        leaf_writes: Optional[Sequence[LeafWritePayload]] = None,
+    ) -> None:
+        """Convenience wrapper to persist variant metadata after registration."""
+        variant = VariantUpsertPayload(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            view_spec_json=view_spec_json,
+            view_size=view_size,
+            view_data_hash=view_data_hash,
+            verified_at=verified_at,
+            canonical_size_bytes=canonical_size_bytes,
+            canonical_bytes_covered=canonical_bytes_covered,
+        )
+        self.update_view_state(
+            variant=variant,
+            leaf_writes=leaf_writes or (),
+        )
 
     # ------------------------------------------------------------------
     # Queries

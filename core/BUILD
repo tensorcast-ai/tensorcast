@@ -29,5 +29,6 @@ cc_binary(
         "//core/store/loader:file_partition_source",
         "//core/store/loader:safetensors_util",
         "//core/store/loader:source_hash",
+        "//core/store/loader:view_planner",
     ],
 )
