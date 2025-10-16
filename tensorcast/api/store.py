@@ -1534,6 +1534,15 @@ class Store:
                         status_code="INVALID_ARGUMENT",
                         retryable=False,
                     )
+                # Ensure the requested slice does not exceed the dimension bounds.
+                # Example: dim_extent=10, start=8, stop=15 -> length=7 (<=10) but 8+7>10
+                # Reject such cases to avoid server-side errors.
+                if start + length > dim_extent:
+                    raise ArtifactError(
+                        f"Slice range [{start}, {stop}) exceeds dimension {dim_extent} for tensor '{name}'",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
                 if start == 0 and length == dim_extent:
                     continue  # identity
                 op_container = ensure_ops(name)
