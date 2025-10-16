@@ -23,6 +23,7 @@ Guides for developing specific components:
 - **[Global Store Development](../tensorcast/global_store/README.md)** - Developing the Global Store service
 - **[Store Daemon Development](../daemon/README.md)** - Store Daemon internals and development
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
+- **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
 
 ## ⚙️ Core Modules (C++)
 
