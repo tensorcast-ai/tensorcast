@@ -78,6 +78,18 @@ struct KeyMapping {
   std::string disk_path;
 };
 
+struct VariantViewUpdate {
+  std::string artifact_id;
+  std::string view_id;
+  std::string view_spec_json;
+  uint64_t view_size_bytes{0};
+  std::optional<std::string> view_data_hash;
+  bool mark_verified{false};
+  uint64_t canonical_size_bytes{0};
+  uint64_t canonical_bytes_covered{0};
+  std::vector<global_store::v1::LeafWrite> leaf_writes;
+};
+
 class IGlobalStoreClient {
  public:
   virtual ~IGlobalStoreClient() = default;
@@ -200,6 +212,8 @@ class IGlobalStoreClient {
       std::string node_address,
       uint32_t grpc_port,
       uint32_t p2p_port) = 0;
+
+  virtual absl::Status update_artifact_view_state(const VariantViewUpdate& update) = 0;
 };
 
 class GlobalStoreClient : public IGlobalStoreClient {
@@ -330,6 +344,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
       override;
+
+  absl::Status update_artifact_view_state(const VariantViewUpdate& update) override;
 
  private:
   // Helper for RPC retries

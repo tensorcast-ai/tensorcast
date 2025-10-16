@@ -128,6 +128,20 @@ message ViewSpec {
   map<string, TensorViewOps> tensors = 1;
 }
 
+message CanonicalRange {
+  uint64 offset = 1;
+  uint64 length = 2;
+}
+
+message ViewRegistrationOptions {
+  string view_id = 1;
+  ViewSpec spec = 2;
+  TransformPlacement placement = 3;
+  uint64 canonical_size_bytes = 4;
+  repeated CanonicalRange ranges = 5;
+  bool allow_partial = 6;
+}
+
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   // Exactly one of artifact_id or disk_path (or legacy disk_path) should be provided.
@@ -399,6 +413,8 @@ message BeginRegisterArtifactRequest {
     CoalescedOptions coalesced = 10;
     LeaseOptions lease = 12;
   }
+
+  ViewRegistrationOptions view = 1001;
 }
 
 // Tensor index data with metadata
@@ -442,6 +458,7 @@ message FeedRegisterArtifactStreamRequest {
   string registration_id = 1;
   oneof feed {
     LeaseSegments lease_segments = 11;
+    ViewUploadChunk view_chunk = 12;
   }
   // Optional deduplicated storage table and tensor alias metadata. Clients send
   // these fields when using the unified registration flow; legacy clients omit them.
@@ -449,6 +466,12 @@ message FeedRegisterArtifactStreamRequest {
   repeated TensorAlias tensor_aliases = 21;
 }
 message FeedRegisterArtifactStreamResponse {}
+
+message ViewUploadChunk {
+  uint64 canonical_offset = 1;
+  uint64 view_offset = 2;
+  bytes data = 3;
+}
 
 message LeaseSegments {
   repeated LeasedSegment segments = 1;
@@ -503,6 +526,11 @@ message CommitRegisteredArtifactResponse {
   // device and the daemon returned the existing descriptor while joining a
   // lightweight reference for this registration. See docs/internals/model-loading.md.
   bool existed = 2;
+  string view_id = 1001;
+  bytes view_index_json = 1002;
+  string view_data_hash = 1003;
+  repeated CanonicalRange canonical_ranges = 1004;
+  bool allow_partial = 1005;
 }
 
 // Abort registration request

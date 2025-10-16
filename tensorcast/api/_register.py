@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import json
 import logging
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,15 +19,16 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
 from tensorcast._C import (
+    compute_view_registration_plan,
     get_cuda_memory_handle,
     get_cuda_memory_ptr,
     restore_tensors,
 )
-from tensorcast.api._indices import calculate_tensor_device_offsets
 from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storage_graph
 
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
+
 from tensorcast.api._config import PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import (
@@ -39,14 +41,16 @@ from tensorcast.api._indices import (
     TensorDataIndex,
     TensorDeviceOffsets,
     TensorMetaIndex,
-    build_v2_index_bytes,
+    calculate_tensor_device_offsets,
 )
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.observability.otel import ensure_client_otel
+from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
+    CanonicalRange,
     CoalescedHandshake,
     CoalescedPlan,
     Handshake,
@@ -59,6 +63,10 @@ from tensorcast.types import (
 # Internal alignment hint for layout computation.
 # Currently unused by the underlying calculator but kept for API clarity.
 DEFAULT_ALIGN = 1
+
+
+NormalizedViewOp = Mapping[str, int | str]
+NormalizedViewOps = Mapping[str, Sequence[NormalizedViewOp]]
 
 
 @dataclass
@@ -77,9 +85,57 @@ class RegistrationResult:
     layout: "CoalescedLayout"
     index_bytes: bytes
     plan: PlanType
+    view_id: str | None = None
+    view_index_json: bytes | None = None
+    view_data_hash: str | None = None
+    canonical_ranges: tuple[CanonicalRange, ...] = ()
+    allow_partial: bool = False
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ViewPlanChunk:
+    canonical_offset: int
+    view_offset: int
+    length: int
+    segment_aligned: bool
+
+
+@dataclass(frozen=True)
+class InverseTensorPlan:
+    tensor_name: str
+    dst_offset: int
+    canonical_offset: int
+    storage_offset_elements: int
+    canonical_shape: tuple[int, ...]
+    canonical_stride: tuple[int, ...]
+    view_shape: tuple[int, ...]
+    view_stride: tuple[int, ...]
+    permutation: tuple[int, ...]
+    dtype: str
+    element_size_bytes: int
+
+
+@dataclass(frozen=True)
+class ViewPlanMetadata:
+    view_size_bytes: int
+    view_index_json: bytes
+    write_chunks: tuple[ViewPlanChunk, ...]
+    inverse_requires_materialization: bool
+    inverse_tensors: tuple[InverseTensorPlan, ...]
+
+
+@dataclass
+class ViewRegistrationContext:
+    canonical_index_bytes: bytes
+    view_options: "store_daemon_pb2.ViewRegistrationOptions"
+    placement: int
+    plan: ViewPlanMetadata
+    tensors: dict[str, torch.Tensor]
+    canonical_ranges: tuple[CanonicalRange, ...]
+    allow_partial: bool
 
 
 class RegisteredArtifact:
@@ -437,20 +493,28 @@ class CoalescedLayout:
         )
 
 
-class IndexV2:
-    @staticmethod
-    def build_bytes(
-        tensor_meta_index: TensorMetaIndex,
-        tensor_source_index: TensorDataIndex,
-        tensor_device_offsets: TensorDeviceOffsets,
-        device_id: int,
-    ) -> bytes:
-        return build_v2_index_bytes(
-            tensor_meta_index,
-            tensor_source_index,
-            tensor_device_offsets,
-            int(device_id),
+def build_canonical_index_bytes(
+    tensor_meta_index: TensorMetaIndex,
+    tensor_source_index: TensorDataIndex,
+    tensor_device_offsets: TensorDeviceOffsets,
+    device_id: int,
+) -> bytes:
+    canonical_index: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+    for name in sorted(tensor_meta_index.keys()):
+        shape, stride, dtype, storage_offset = tensor_meta_index[name]
+        _, storage_size = tensor_source_index[name]
+        dst_off = int(tensor_device_offsets[int(device_id)][name])
+        canonical_index[name] = (
+            dst_off,
+            int(storage_size),
+            list(shape),
+            list(stride),
+            dtype,
+            int(storage_offset),
         )
+    return json.dumps(canonical_index, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
 
 
 def _prepare_build(
@@ -462,10 +526,248 @@ def _prepare_build(
     layout = CoalescedLayout.compute(
         ctx.tensor_source_index, ctx.device_id, align=DEFAULT_ALIGN
     )
-    index_bytes = IndexV2.build_bytes(
+    index_bytes = build_canonical_index_bytes(
         ctx.tensor_meta_index, ctx.tensor_source_index, layout.offsets, ctx.device_id
     )
     return ctx, layout, index_bytes
+
+
+def _tensor_indices_from_canonical_index_bytes(
+    index_bytes: bytes,
+) -> tuple[TensorMetaIndex, TensorDataIndex]:
+    try:
+        index_obj = json.loads(index_bytes.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise TensorCastError(
+            "Failed to parse canonical index bytes for view registration"
+        ) from exc
+    tensor_meta_index: TensorMetaIndex = {}
+    tensor_data_index: TensorDataIndex = {}
+    for name, meta in index_obj.items():
+        if not isinstance(meta, list | tuple) or len(meta) != 6:
+            raise TensorCastError(
+                f"Invalid canonical index entry for '{name}': expected 6 fields"
+            )
+        offset, size, shape, stride, dtype, storage_offset = meta
+        tensor_meta_index[name] = (
+            [int(v) for v in shape],
+            [int(v) for v in stride],
+            str(dtype),
+            int(storage_offset),
+        )
+        tensor_data_index[name] = (int(offset), int(size))
+    return tensor_meta_index, tensor_data_index
+
+
+def _build_context_from_canonical_index(
+    index_bytes: bytes,
+    device_id: int,
+) -> tuple["BuildContext", "CoalescedLayout"]:
+    tensor_meta_index, tensor_data_index = _tensor_indices_from_canonical_index_bytes(
+        index_bytes
+    )
+    tensor_device_offsets, unique_chunks = calculate_tensor_device_offsets(
+        tensor_data_index, device_id
+    )
+    chunk_list = unique_chunks.get(device_id, [])
+    total_size = 0
+    for offset, size, _, _ in chunk_list:
+        total_size = max(total_size, int(offset) + int(size))
+
+    storage_graph = TensorStorageGraph(
+        storages={},
+        aliases={},
+        tensor_meta_index=tensor_meta_index,
+        tensor_source_index=tensor_data_index,
+    )
+    ctx = BuildContext(
+        device_id=device_id,
+        input_mode="cpu",
+        tensor_meta_index=tensor_meta_index,
+        tensor_source_index=tensor_data_index,
+        storage_graph=storage_graph,
+    )
+    layout = CoalescedLayout(
+        device_id=device_id,
+        offsets=tensor_device_offsets,
+        unique_chunks=chunk_list,
+        total_size=total_size,
+    )
+    return ctx, layout
+
+
+def _merge_canonical_ranges(
+    chunks: Sequence[ViewPlanChunk],
+) -> tuple[CanonicalRange, ...]:
+    sorted_chunks = sorted(
+        (chunk.canonical_offset, chunk.canonical_offset + chunk.length)
+        for chunk in chunks
+        if chunk.length > 0
+    )
+    if not sorted_chunks:
+        return ()
+    merged: list[CanonicalRange] = []
+    current_start, current_end = sorted_chunks[0]
+    for start, end in sorted_chunks[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            merged.append(
+                CanonicalRange(
+                    offset=int(current_start), length=int(current_end - current_start)
+                )
+            )
+            current_start, current_end = start, end
+    merged.append(
+        CanonicalRange(
+            offset=int(current_start), length=int(current_end - current_start)
+        )
+    )
+    return tuple(merged)
+
+
+def _compute_view_plan_metadata(
+    canonical_index_bytes: bytes,
+    normalized_ops: NormalizedViewOps,
+) -> ViewPlanMetadata:
+    if not normalized_ops:
+        raise TensorCastError("View registration requires explicit view operations")
+    native_plan = compute_view_registration_plan(canonical_index_bytes, normalized_ops)
+    forward = native_plan["forward"]
+    write_chunks = tuple(
+        ViewPlanChunk(
+            canonical_offset=int(chunk["canonical_offset"]),
+            view_offset=int(chunk["view_offset"]),
+            length=int(chunk["length"]),
+            segment_aligned=bool(chunk["segment_aligned"]),
+        )
+        for chunk in native_plan.get("write_chunks", [])
+    )
+    inverse_native = native_plan.get("inverse_transform", {})
+    inverse_tensors = tuple(
+        InverseTensorPlan(
+            tensor_name=str(tp["tensor_name"]),
+            dst_offset=int(tp["dst_offset"]),
+            canonical_offset=int(tp["canonical_offset"]),
+            storage_offset_elements=int(tp["storage_offset_elements"]),
+            canonical_shape=tuple(int(v) for v in tp["canonical_shape"]),
+            canonical_stride=tuple(int(v) for v in tp["canonical_stride"]),
+            view_shape=tuple(int(v) for v in tp["view_shape"]),
+            view_stride=tuple(int(v) for v in tp["view_stride"]),
+            permutation=tuple(int(v) for v in tp["permutation"]),
+            dtype=str(tp["dtype"]),
+            element_size_bytes=int(tp["element_size_bytes"]),
+        )
+        for tp in inverse_native.get("tensors", [])
+    )
+    return ViewPlanMetadata(
+        view_size_bytes=int(forward["view_size_bytes"]),
+        view_index_json=bytes(forward["view_index_json"]),
+        write_chunks=write_chunks,
+        inverse_requires_materialization=bool(
+            inverse_native.get("requires_materialization", False)
+        ),
+        inverse_tensors=inverse_tensors,
+    )
+
+
+def _linearize_view_tensors(
+    tensors: Mapping[str, torch.Tensor],
+    plan: ViewPlanMetadata,
+) -> bytearray:
+    if plan.view_size_bytes == 0:
+        return bytearray()
+    try:
+        layout_index = json.loads(plan.view_index_json.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise TensorCastError("Failed to parse view_index_json from plan") from exc
+
+    buffer = bytearray(plan.view_size_bytes)
+    mv = memoryview(buffer)
+    for name in sorted(layout_index.keys()):
+        if name not in tensors:
+            raise TensorCastError(
+                f"View tensor '{name}' missing from registration payload"
+            )
+        tensor = tensors[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise TensorCastError(f"View tensor '{name}' must be a torch.Tensor")
+        offset, size_bytes, _, _, dtype_str, _ = layout_index[name]
+        expected_bytes = int(size_bytes)
+        src_dtype = str(tensor.dtype)
+        if src_dtype != str(dtype_str):
+            raise TensorCastError(
+                f"Tensor '{name}' dtype mismatch: expected {dtype_str}, found {src_dtype}"
+            )
+        contiguous = tensor.detach()
+        if contiguous.device.type != "cpu":
+            contiguous = contiguous.to(torch.device("cpu"), non_blocking=False)
+        contiguous = contiguous.contiguous()
+        data_bytes = contiguous.numpy().tobytes()
+        if len(data_bytes) != expected_bytes:
+            raise TensorCastError(
+                f"Tensor '{name}' byte size mismatch: expected {expected_bytes}, got {len(data_bytes)}"
+            )
+        start = int(offset)
+        mv[start : start + expected_bytes] = data_bytes
+    return buffer
+
+
+def _torch_dtype_from_string(dtype_str: str) -> torch.dtype:
+    if hasattr(torch, dtype_str.split(".")[-1]):
+        return getattr(torch, dtype_str.split(".")[-1])
+    raise TensorCastError(f"Unsupported dtype for view registration: {dtype_str}")
+
+
+def _materialize_canonical_tensors(
+    canonical_index_bytes: bytes,
+    normalized_ops: NormalizedViewOps,
+    tensors: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    tensor_meta_index, _ = _tensor_indices_from_canonical_index_bytes(
+        canonical_index_bytes
+    )
+    canonical_tensors: dict[str, torch.Tensor] = {}
+    for name, (shape, _, dtype_str, _) in tensor_meta_index.items():
+        if name not in tensors:
+            raise TensorCastError(f"View registration missing tensor '{name}'")
+        tensor = tensors[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise TensorCastError(f"Tensor '{name}' must be a torch.Tensor")
+        tensor_cpu = tensor.detach()
+        if tensor_cpu.device.type != "cpu":
+            tensor_cpu = tensor_cpu.to(torch.device("cpu"), non_blocking=False)
+        tensor_cpu = tensor_cpu.contiguous()
+        ops = list(normalized_ops.get(name, []))
+        # Apply inverse operations (reverse order)
+        for op in reversed(ops):
+            if op["type"] == "transpose":
+                tensor_cpu = tensor_cpu.transpose(int(op["dim0"]), int(op["dim1"]))
+            elif op["type"] == "narrow":
+                dim = int(op["dim"])
+                start = int(op["start"])
+                length = int(op["length"])
+                full = torch.zeros(
+                    tuple(int(d) for d in shape),
+                    dtype=tensor_cpu.dtype,
+                )
+                slice_spec = [slice(None)] * full.ndim
+                slice_spec[dim] = slice(start, start + length)
+                full[tuple(slice_spec)].copy_(tensor_cpu)
+                tensor_cpu = full
+            else:
+                raise TensorCastError(f"Unsupported view operation type: {op['type']}")
+        # Ensure dtype matches canonical requirements
+        target_dtype = _torch_dtype_from_string(dtype_str)
+        if tensor_cpu.dtype != target_dtype:
+            tensor_cpu = tensor_cpu.to(target_dtype)
+        expected_shape = tuple(int(d) for d in shape)
+        if tuple(tensor_cpu.shape) != expected_shape:
+            raise TensorCastError(
+                f"Tensor '{name}' has shape {tuple(tensor_cpu.shape)}, expected {expected_shape}"
+            )
+        canonical_tensors[name] = tensor_cpu
+    return canonical_tensors
 
 
 def make_plan_model(
@@ -658,6 +960,7 @@ def _register_artifact_core(
     daemon_address: str | None = None,
     cancel_event: threading.Event | None = None,
     on_begin: Callable[[RegisteredArtifact], None] | None = None,
+    view: ViewRegistrationContext | None = None,
 ) -> RegistrationResult:
     if client is None:
         runtime = require_runtime()
@@ -671,10 +974,29 @@ def _register_artifact_core(
     if not artifact:
         raise TensorCastError("artifact must not be empty")
 
-    ctx, layout, index_bytes = _prepare_build(artifact, device_id)
+    target_device_id: int | None = None
+    if isinstance(device_id, torch.device):
+        target_device_id = resolve_device(device_id)
+    elif isinstance(device_id, int):
+        target_device_id = int(device_id)
+
+    if view is None:
+        ctx, layout, index_bytes = _prepare_build(artifact, device_id)
+        if target_device_id is None:
+            target_device_id = ctx.device_id
+        else:
+            ctx.device_id = target_device_id
+    else:
+        if target_device_id is None:
+            target_device_id = 0
+        ctx, layout = _build_context_from_canonical_index(
+            view.canonical_index_bytes, target_device_id
+        )
+        index_bytes = view.canonical_index_bytes
 
     if (
-        prevalidate_disk
+        view is None
+        and prevalidate_disk
         and options.disk_path is not None
         and options.disk_path.strip() != ""
     ):
@@ -703,6 +1025,8 @@ def _register_artifact_core(
         raise DeviceMismatch(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"
         )
+    if view is not None and plan_type is not PlanType.VRAM_COALESCED:
+        raise InvalidPlan("View registration requires vram_coalesced plan")
 
     span_names = {
         PlanType.VRAM_COALESCED: "Client/RegisterArtifact.Coalesced",
@@ -716,8 +1040,9 @@ def _register_artifact_core(
             ttl_ms=ttl_ms,
             tensor_index_data=index_bytes,
             encoding="json",
-            schema_version="v2",
+            schema_version="v3",
             plan=plan_model,
+            view=view.view_options if view is not None else None,
             timeout_s=60.0,
         )
         handle = RegisteredArtifact(
@@ -733,6 +1058,55 @@ def _register_artifact_core(
             with contextlib.suppress(Exception):
                 handle.abort(timeout_s=5.0)
             raise CancelledError
+
+        if view is not None:
+            if view.placement == store_daemon_pb2.TRANSFORM_PLACEMENT_SERVER:
+                with handle:
+                    try:
+                        if cancel_event and cancel_event.is_set():
+                            raise CancelledError
+                        payload = _linearize_view_tensors(view.tensors, view.plan)
+                        ok = ctl.feed_register_artifact_view_chunks(
+                            handle.registration_id,
+                            payload,
+                        )
+                        if not ok:
+                            raise TensorCastError(
+                                "Failed to stream view registration bytes to daemon"
+                            )
+                        if cancel_event and cancel_event.is_set():
+                            raise CancelledError
+                        commit_res = handle.commit(timeout_s=60.0)
+                        desc = commit_res.descriptor
+                        _persist_publish_if_needed(
+                            desc=desc,
+                            options=options,
+                            state_dict_to_save=None,
+                            client=ctl,
+                        )
+                        return RegistrationResult(
+                            state_dict=None,
+                            descriptor=desc,
+                            lease=None,
+                            build=ctx,
+                            layout=layout,
+                            index_bytes=index_bytes,
+                            plan=plan_type,
+                            view_id=commit_res.view_id,
+                            view_index_json=commit_res.view_index_json,
+                            view_data_hash=commit_res.view_data_hash,
+                            canonical_ranges=commit_res.canonical_ranges
+                            or view.canonical_ranges,
+                            allow_partial=view.allow_partial,
+                        )
+                    except CancelledError:
+                        with contextlib.suppress(Exception):
+                            handle.abort(timeout_s=5.0)
+                        raise
+            elif view.placement != store_daemon_pb2.TRANSFORM_PLACEMENT_CLIENT:
+                raise TensorCastError(
+                    "Unknown transform placement for view registration"
+                )
 
         registrar = PLAN_REGISTRY[plan_type]
         with handle:
@@ -765,6 +1139,11 @@ def _register_artifact_core(
                         layout=layout,
                         index_bytes=index_bytes,
                         plan=plan_type,
+                        view_id=commit_res.view_id,
+                        view_index_json=commit_res.view_index_json,
+                        view_data_hash=commit_res.view_data_hash,
+                        canonical_ranges=commit_res.canonical_ranges,
+                        allow_partial=commit_res.allow_partial,
                     )
 
                 if isinstance(registrar, _LeaseUploader):
@@ -802,6 +1181,11 @@ def _register_artifact_core(
                         layout=layout,
                         index_bytes=index_bytes,
                         plan=plan_type,
+                        view_id=commit_res.view_id,
+                        view_index_json=commit_res.view_index_json,
+                        view_data_hash=commit_res.view_data_hash,
+                        canonical_ranges=commit_res.canonical_ranges,
+                        allow_partial=commit_res.allow_partial,
                     )
             except CancelledError:
                 with contextlib.suppress(Exception):

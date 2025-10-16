@@ -29,7 +29,6 @@
 ABSL_FLAG(std::string, config, "", "Path to unified daemon config (YAML/JSON)");
 ABSL_FLAG(std::string, config_text, "", "Inline daemon config as YAML/JSON text (mutually exclusive with --config)");
 ABSL_FLAG(bool, use_cursor_pagination, false, "Enable opaque cursor pagination for GetLoadedReplicasV2");
-
 using namespace tensorcast;
 
 int main(int argc, char** argv) {

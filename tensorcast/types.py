@@ -78,6 +78,15 @@ class ArtifactDescriptor(BaseModel):
     total_size: int
 
 
+class CanonicalRange(BaseModel):
+    """Canonical byte range populated during view registration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    offset: int
+    length: int
+
+
 class CommitResult(BaseModel):
     """Commit result with descriptor and idempotency flag."""
 
@@ -85,6 +94,11 @@ class CommitResult(BaseModel):
 
     descriptor: ArtifactDescriptor
     existed: bool = False
+    view_id: str | None = None
+    view_index_json: bytes | None = None
+    view_data_hash: str | None = None
+    canonical_ranges: tuple[CanonicalRange, ...] = ()
+    allow_partial: bool = False
 
 
 # ------------------------------ Plan models --------------------------------
@@ -191,6 +205,7 @@ __all__ = [
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
+    "CanonicalRange",
     "CommitResult",
     "PlanBase",
     "CoalescedPlan",

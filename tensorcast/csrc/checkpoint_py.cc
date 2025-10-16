@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <ranges>
 
+#include <pybind11/stl.h>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/checkpoint/checkpoint.h"
@@ -33,6 +35,7 @@
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/safetensors_util.h"
 #include "core/store/loader/source_hash.h"
+#include "core/store/loader/view_planner.h"
 
 namespace py = pybind11;
 
@@ -45,6 +48,11 @@ using tensorcast::common::ArtifactVerificationInfo;
 using tensorcast::common::ArtifactVerifier;
 using tensorcast::common::compute_index_multihash;
 using tensorcast::common::VerificationLevel;
+using tensorcast::store::loader::BidirectionalViewPlan;
+using tensorcast::store::loader::TensorTransformPlan;
+using tensorcast::store::loader::ViewOp;
+using tensorcast::store::loader::ViewPlanner;
+using tensorcast::store::loader::ViewSpec;
 
 // Helper function to convert ArtifactVerificationInfo to Python dictionary
 py::dict verification_info_to_dict(const ArtifactVerificationInfo& info) {
@@ -113,6 +121,145 @@ ArtifactVerificationInfo dict_to_verification_info(const py::dict& dict) {
 
   return info;
 }
+
+namespace {
+
+ViewSpec build_view_spec_from_py(const py::dict& spec_dict) {
+  ViewSpec spec;
+  for (const auto& item : spec_dict) {
+    const std::string tensor_name = item.first.cast<std::string>();
+    py::list ops_list = item.second.cast<py::list>();
+    tensorcast::store::loader::TensorViewOps ops;
+    for (py::handle handle : ops_list) {
+      if (!py::isinstance<py::dict>(handle)) {
+        PY_THROW_WITH_LOG(PyExc_TypeError, "View operation specification must be dictionaries with 'type' field");
+      }
+      py::dict op_dict = handle.cast<py::dict>();
+      if (!op_dict.contains("type")) {
+        PY_THROW_WITH_LOG(PyExc_KeyError, "View operation missing 'type'");
+      }
+      const std::string kind = op_dict["type"].cast<std::string>();
+      if (kind == "narrow") {
+        if (!op_dict.contains("dim") || !op_dict.contains("start") || !op_dict.contains("length")) {
+          PY_THROW_WITH_LOG(PyExc_KeyError, "Narrow operation requires 'dim', 'start', and 'length'");
+        }
+        tensorcast::store::loader::NarrowOp narrow;
+        narrow.dim = op_dict["dim"].cast<int32_t>();
+        narrow.start = op_dict["start"].cast<int64_t>();
+        narrow.length = op_dict["length"].cast<uint64_t>();
+        ops.ops.push_back(ViewOp::Narrow(narrow));
+      } else if (kind == "transpose") {
+        if (!op_dict.contains("dim0") || !op_dict.contains("dim1")) {
+          PY_THROW_WITH_LOG(PyExc_KeyError, "Transpose operation requires 'dim0' and 'dim1'");
+        }
+        tensorcast::store::loader::TransposeOp transpose;
+        transpose.dim0 = op_dict["dim0"].cast<int32_t>();
+        transpose.dim1 = op_dict["dim1"].cast<int32_t>();
+        ops.ops.push_back(ViewOp::Transpose(transpose));
+      } else {
+        PY_THROW_WITH_LOG(PyExc_ValueError, absl::StrCat("Unsupported view operation: ", kind));
+      }
+    }
+    spec.tensors.emplace(tensor_name, std::move(ops));
+  }
+  return spec;
+}
+
+py::dict tensor_transform_plan_to_dict(const TensorTransformPlan& plan) {
+  py::dict out;
+  out["tensor_name"] = plan.tensor_name;
+  out["dst_offset"] = py::int_(plan.dst_offset);
+  out["canonical_offset"] = py::int_(plan.canonical_offset);
+  out["storage_offset_elements"] = py::int_(plan.storage_offset_elements);
+  py::list canonical_shape;
+  for (int64_t v : plan.canonical_shape) {
+    canonical_shape.append(py::int_(v));
+  }
+  out["canonical_shape"] = canonical_shape;
+  py::list canonical_stride;
+  for (int64_t v : plan.canonical_stride) {
+    canonical_stride.append(py::int_(v));
+  }
+  out["canonical_stride"] = canonical_stride;
+  py::list view_shape;
+  for (int64_t v : plan.view_shape) {
+    view_shape.append(py::int_(v));
+  }
+  out["view_shape"] = view_shape;
+  py::list view_stride;
+  for (int64_t v : plan.view_stride) {
+    view_stride.append(py::int_(v));
+  }
+  out["view_stride"] = view_stride;
+  py::list permutation;
+  for (int64_t v : plan.permutation) {
+    permutation.append(py::int_(v));
+  }
+  out["permutation"] = permutation;
+  out["dtype"] = plan.dtype;
+  out["element_size_bytes"] = py::int_(plan.element_size_bytes);
+  return out;
+}
+
+py::dict selection_range_to_dict(const tensorcast::store::loader::SelectionPlan::Range& range) {
+  py::dict out;
+  out["kind"] = range.kind == tensorcast::store::loader::SelectionPlan::Range::Kind::kData ? "data" : "pad";
+  out["src_offset"] = py::int_(range.src_offset);
+  out["dst_offset"] = py::int_(range.dst_offset);
+  out["length"] = py::int_(range.length);
+  return out;
+}
+
+py::dict compute_view_registration_plan_wrapper(py::bytes canonical_index_bytes, const py::dict& spec_dict) {
+  const std::string canonical_index_json = canonical_index_bytes.cast<std::string>();
+  ViewSpec spec = build_view_spec_from_py(spec_dict);
+
+  absl::StatusOr<BidirectionalViewPlan> plan_or =
+      ViewPlanner::compute_bidirectional_view_plan(canonical_index_json, spec);
+  if (!plan_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, plan_or.status().ToString());
+  }
+  const BidirectionalViewPlan& plan = *plan_or;
+
+  py::dict result;
+  py::dict forward;
+  forward["is_identity"] = plan.forward.is_identity;
+  forward["view_size_bytes"] = py::int_(plan.forward.view_size_bytes);
+  forward["view_index_json"] = py::bytes(plan.forward.view_index_json);
+  forward["selection_total_bytes"] = py::int_(plan.forward.selection.total_bytes);
+  forward["selection_is_contiguous"] = plan.forward.selection.is_contiguous;
+  forward["selection_is_segment_aligned"] = plan.forward.selection.is_segment_aligned;
+  py::list selection_ranges;
+  for (const auto& range : plan.forward.selection.ranges) {
+    selection_ranges.append(selection_range_to_dict(range));
+  }
+  forward["selection_ranges"] = selection_ranges;
+  result["forward"] = forward;
+
+  py::list write_chunks;
+  for (const auto& chunk : plan.write.chunks) {
+    py::dict chunk_dict;
+    chunk_dict["canonical_offset"] = py::int_(chunk.canonical_offset);
+    chunk_dict["view_offset"] = py::int_(chunk.view_offset);
+    chunk_dict["length"] = py::int_(chunk.length);
+    chunk_dict["segment_aligned"] = chunk.segment_aligned;
+    write_chunks.append(chunk_dict);
+  }
+  result["write_chunks"] = write_chunks;
+
+  py::dict inverse;
+  inverse["requires_materialization"] = plan.inverse_transform.requires_materialization;
+  py::list inverse_tensors;
+  for (const TensorTransformPlan& tensor_plan : plan.inverse_transform.tensors) {
+    inverse_tensors.append(tensor_transform_plan_to_dict(tensor_plan));
+  }
+  inverse["tensors"] = inverse_tensors;
+  result["inverse_transform"] = inverse;
+
+  return result;
+}
+
+} // namespace
 
 // Wrapper function for generate_verification_info_from_disk
 py::dict generate_artifact_verification_info_wrapper(const std::string& disk_path, int verification_level = 1) {
@@ -708,6 +855,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("path"),
           py::arg("config") = py::dict(),
           "Unified save: writes data, tensor_index.json, artifact_descriptor.json and returns descriptor")
+      .def(
+          "compute_view_registration_plan",
+          &compute_view_registration_plan_wrapper,
+          py::arg("canonical_index_json"),
+          py::arg("view_ops"),
+          "Compute bidirectional view registration plan using the core ViewPlanner")
       .def("restore_tensors", &tensorcast::checkpoint::restore_tensors, "Restore a state dict")
       .def(
           "restore_tensors_from_disk",

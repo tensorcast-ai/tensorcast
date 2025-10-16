@@ -203,15 +203,89 @@ void finalize_selection_plan(SelectionPlan* plan) {
   plan->is_segment_aligned = plan->is_contiguous && segment_aligned;
 }
 
-} // namespace
+ViewWritePlan build_view_write_plan(const SelectionPlan& selection) {
+  ViewWritePlan write_plan;
+  write_plan.chunks.reserve(selection.ranges.size());
+  for (const auto& range : selection.ranges) {
+    if (range.kind != SelectionPlan::Range::Kind::kData) {
+      continue;
+    }
+    ViewWritePlan::Chunk chunk;
+    chunk.canonical_offset = range.src_offset;
+    chunk.view_offset = range.dst_offset;
+    chunk.length = range.length;
+    chunk.segment_aligned =
+        is_multiple_of(range.src_offset, kAlignmentBytes) && is_multiple_of(range.length, kAlignmentBytes);
+    write_plan.chunks.push_back(std::move(chunk));
+  }
+  return write_plan;
+}
 
-absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonical_index_json, const ViewSpec& spec) {
+absl::StatusOr<std::vector<int64_t>> compute_inverse_permutation(
+    const std::vector<int64_t>& permutation,
+    std::string_view tensor_name) {
+  const size_t n = permutation.size();
+  std::vector<int64_t> inverse(n, 0);
+  std::vector<bool> seen(n, false);
+  for (size_t idx = 0; idx < n; ++idx) {
+    const int64_t value = permutation[idx];
+    if (value < 0 || static_cast<size_t>(value) >= n) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("transpose permutation entry out of range for tensor ", tensor_name));
+    }
+    if (seen[static_cast<size_t>(value)]) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("transpose permutation repeats dimension for tensor ", tensor_name));
+    }
+    seen[static_cast<size_t>(value)] = true;
+    inverse[static_cast<size_t>(value)] = static_cast<int64_t>(idx);
+  }
+  return inverse;
+}
+
+absl::StatusOr<TransformPlan> build_inverse_transform(
+    const TransformPlan& forward,
+    const std::unordered_map<std::string, uint64_t>& canonical_offsets) {
+  TransformPlan inverse;
+  inverse.requires_materialization = forward.requires_materialization;
+  if (forward.tensors.empty()) {
+    return inverse;
+  }
+  inverse.tensors.reserve(forward.tensors.size());
+  for (const TensorTransformPlan& tensor_plan : forward.tensors) {
+    auto it = canonical_offsets.find(tensor_plan.tensor_name);
+    if (it == canonical_offsets.end()) {
+      return absl::InvalidArgumentError(absl::StrCat("missing canonical offset for tensor ", tensor_plan.tensor_name));
+    }
+    auto inverse_perm_or = compute_inverse_permutation(tensor_plan.permutation, tensor_plan.tensor_name);
+    if (!inverse_perm_or.ok()) {
+      return inverse_perm_or.status();
+    }
+    TensorTransformPlan inverse_plan;
+    inverse_plan.tensor_name = tensor_plan.tensor_name;
+    inverse_plan.dst_offset = it->second;
+    inverse_plan.canonical_offset = it->second;
+    inverse_plan.storage_offset_elements = tensor_plan.storage_offset_elements;
+    inverse_plan.canonical_shape = tensor_plan.canonical_shape;
+    inverse_plan.canonical_stride = tensor_plan.canonical_stride;
+    inverse_plan.view_shape = tensor_plan.view_shape;
+    inverse_plan.view_stride = tensor_plan.view_stride;
+    inverse_plan.permutation = std::move(*inverse_perm_or);
+    inverse_plan.dtype = tensor_plan.dtype;
+    inverse_plan.element_size_bytes = tensor_plan.element_size_bytes;
+    inverse.tensors.push_back(std::move(inverse_plan));
+  }
+  return inverse;
+}
+
+absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
+    std::string_view canonical_index_json,
+    const ViewSpec& spec) {
   std::map<std::string, CanonicalEntry> canonical_entries;
   if (auto st = parse_canonical_index(canonical_index_json, &canonical_entries); !st.ok()) {
     return st;
   }
 
-  // Validate spec tensors exist and ops supported.
   for (const auto& [tensor_name, ops] : spec.tensors) {
     if (!canonical_entries.contains(tensor_name)) {
       return absl::InvalidArgumentError(absl::StrCat("ViewSpec references unknown tensor: ", tensor_name));
@@ -233,6 +307,11 @@ absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonic
   std::unordered_map<std::string, uint64_t> offsets;
   std::unordered_map<std::string, uint64_t> sizes;
   std::unordered_map<std::string, CanonicalTensorMeta> metas;
+  std::unordered_map<std::string, uint64_t> canonical_offsets;
+  offsets.reserve(canonical_entries.size());
+  sizes.reserve(canonical_entries.size());
+  metas.reserve(canonical_entries.size());
+  canonical_offsets.reserve(canonical_entries.size());
 
   for (const auto& [name, entry] : canonical_entries) {
     const uint64_t aligned_start = (view_cursor + (kAlignmentBytes - 1)) / kAlignmentBytes * kAlignmentBytes;
@@ -242,6 +321,7 @@ absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonic
     }
 
     ordered_names.push_back(name);
+    canonical_offsets[name] = entry.offset;
     const auto spec_it = spec.tensors.find(name);
     const TensorViewOps* ops = (spec_it == spec.tensors.end() ? nullptr : &spec_it->second);
 
@@ -384,18 +464,19 @@ absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonic
           selection_plan.ranges.push_back(make_data_range(entry.offset, view_cursor, entry.size_bytes));
           view_cursor += entry.size_bytes;
 
-          TensorTransformPlan spec;
-          spec.tensor_name = name;
-          spec.dst_offset = tensor_dst_offset;
-          spec.storage_offset_elements = entry.storage_offset;
-          spec.canonical_shape = entry.shape;
-          spec.canonical_stride = entry.stride.empty() ? compute_compact_stride(entry.shape) : entry.stride;
-          spec.view_shape = view_shape;
-          spec.view_stride = view_stride;
-          spec.permutation.assign(permutation.begin(), permutation.end());
-          spec.dtype = entry.dtype;
-          spec.element_size_bytes = element_size;
-          transform_plan.tensors.push_back(std::move(spec));
+          TensorTransformPlan tensor_transform;
+          tensor_transform.tensor_name = name;
+          tensor_transform.dst_offset = tensor_dst_offset;
+          tensor_transform.canonical_offset = entry.offset;
+          tensor_transform.storage_offset_elements = entry.storage_offset;
+          tensor_transform.canonical_shape = entry.shape;
+          tensor_transform.canonical_stride = entry.stride.empty() ? compute_compact_stride(entry.shape) : entry.stride;
+          tensor_transform.view_shape = view_shape;
+          tensor_transform.view_stride = view_stride;
+          tensor_transform.permutation.assign(permutation.begin(), permutation.end());
+          tensor_transform.dtype = entry.dtype;
+          tensor_transform.element_size_bytes = element_size;
+          transform_plan.tensors.push_back(std::move(tensor_transform));
           any_requires_materialization = true;
         }
       } else {
@@ -417,27 +498,54 @@ absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonic
   selection_plan.requires_materialization = any_requires_materialization;
   transform_plan.requires_materialization = any_requires_materialization;
 
-  ViewPlan plan;
-  plan.is_identity = !has_transform;
-  plan.view_size_bytes = view_cursor;
-  plan.selection = std::move(selection_plan);
-  plan.transform = std::move(transform_plan);
+  ViewPlan forward_plan;
+  forward_plan.is_identity = !has_transform;
+  forward_plan.view_size_bytes = view_cursor;
+  forward_plan.selection = std::move(selection_plan);
+  forward_plan.transform = std::move(transform_plan);
 
-  if (!has_transform) {
+  if (forward_plan.is_identity) {
     auto rebuilt_or = rebuild_stable_canonical_index(std::string(canonical_index_json), 0);
     if (!rebuilt_or.ok()) {
       return rebuilt_or.status();
     }
-    plan.view_index_json = *rebuilt_or;
-    return plan;
+    forward_plan.view_index_json = *rebuilt_or;
+  } else {
+    absl::StatusOr<std::string> view_index_json_or = build_canonical_index_json(ordered_names, offsets, sizes, metas);
+    if (!view_index_json_or.ok()) {
+      return view_index_json_or.status();
+    }
+    forward_plan.view_index_json = *view_index_json_or;
   }
 
-  absl::StatusOr<std::string> view_index_json_or = build_canonical_index_json(ordered_names, offsets, sizes, metas);
-  if (!view_index_json_or.ok()) {
-    return view_index_json_or.status();
+  ViewWritePlan write_plan = build_view_write_plan(forward_plan.selection);
+  auto inverse_transform_or = build_inverse_transform(forward_plan.transform, canonical_offsets);
+  if (!inverse_transform_or.ok()) {
+    return inverse_transform_or.status();
   }
-  plan.view_index_json = *view_index_json_or;
-  return plan;
+
+  BidirectionalViewPlan bidirectional;
+  bidirectional.forward = std::move(forward_plan);
+  bidirectional.write = std::move(write_plan);
+  bidirectional.inverse_transform = std::move(*inverse_transform_or);
+  return bidirectional;
+}
+
+} // namespace
+
+absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonical_index_json, const ViewSpec& spec) {
+  auto bidirectional_or = compute_bidirectional_internal(canonical_index_json, spec);
+  if (!bidirectional_or.ok()) {
+    return bidirectional_or.status();
+  }
+  BidirectionalViewPlan bidirectional = std::move(*bidirectional_or);
+  return std::move(bidirectional.forward);
+}
+
+absl::StatusOr<BidirectionalViewPlan> ViewPlanner::compute_bidirectional_view_plan(
+    std::string_view canonical_index_json,
+    const ViewSpec& spec) {
+  return compute_bidirectional_internal(canonical_index_json, spec);
 }
 
 } // namespace tensorcast::store::loader

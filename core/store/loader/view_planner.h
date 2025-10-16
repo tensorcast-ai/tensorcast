@@ -73,6 +73,7 @@ struct SelectionPlan {
 struct TensorTransformPlan {
   std::string tensor_name;
   uint64_t dst_offset{0};
+  uint64_t canonical_offset{0};
   uint64_t storage_offset_elements{0};
   std::vector<int64_t> canonical_shape;
   std::vector<int64_t> canonical_stride;
@@ -100,9 +101,34 @@ struct ViewPlan {
   TransformPlan transform;
 };
 
+struct ViewWritePlan {
+  struct Chunk {
+    uint64_t canonical_offset{0};
+    uint64_t view_offset{0};
+    uint64_t length{0};
+    bool segment_aligned{false};
+  };
+
+  std::vector<Chunk> chunks;
+
+  [[nodiscard]] bool empty() const {
+    return chunks.empty();
+  }
+};
+
+struct BidirectionalViewPlan {
+  ViewPlan forward;
+  ViewWritePlan write;
+  TransformPlan inverse_transform;
+};
+
 class ViewPlanner {
  public:
   [[nodiscard]] static absl::StatusOr<ViewPlan> compute_view_plan(
+      std::string_view canonical_index_json,
+      const ViewSpec& spec);
+
+  [[nodiscard]] static absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_view_plan(
       std::string_view canonical_index_json,
       const ViewSpec& spec);
 };

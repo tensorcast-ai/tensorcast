@@ -120,6 +120,7 @@ from tensorcast.api.store import (  # noqa: E402
     put_async,
     register,
     register_async,
+    register_view,
     store,
 )
 from tensorcast.startup import init, is_initialized, shutdown  # noqa: E402
@@ -147,6 +148,7 @@ __all__ = [
     "store",
     "register",
     "register_async",
+    "register_view",
     "put",
     "put_async",
     "get",

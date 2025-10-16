@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Generic, Iterator, Literal, TypeVar, cast
 
+import grpc
 import torch
 from opentelemetry import trace
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
@@ -42,6 +43,10 @@ from tensorcast.api._register import (
 from tensorcast.api._register import (
     RegisteredLease,
     RegistrationResult,
+    ViewRegistrationContext,
+    _compute_view_plan_metadata,
+    _materialize_canonical_tensors,
+    _merge_canonical_ranges,
     _register_artifact_core,
 )
 from tensorcast.api._runtime import require_runtime
@@ -76,6 +81,9 @@ ArtifactStatusCode = Literal[
     "CANCELLED",
     "UNKNOWN",
 ]
+
+NormalizedViewOpDict = dict[str, int | str]
+MutableNormalizedViewOps = dict[str, list[NormalizedViewOpDict]]
 
 
 class ArtifactError(RuntimeError):
@@ -776,6 +784,29 @@ class Store:
             return ArtifactError(
                 message, status_code="FAILED_PRECONDITION", retryable=False
             )
+        if isinstance(exc, grpc.RpcError):
+            status_code = exc.code()
+            details = exc.details() or message
+            status_name = status_code.name if status_code is not None else "UNKNOWN"
+            if (
+                status_code == grpc.StatusCode.FAILED_PRECONDITION
+                and "retry with placement=CLIENT" in details
+            ):
+                guidance = (
+                    "Daemon rejected SERVER placement for view registration; "
+                    "retry with placement='CLIENT'."
+                )
+                return ArtifactError(
+                    guidance,
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            retryable = status_code in {
+                grpc.StatusCode.UNAVAILABLE,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                grpc.StatusCode.ABORTED,
+            }
+            return ArtifactError(details, status_code=status_name, retryable=retryable)
         if isinstance(exc, RuntimeError) and "not available" in message.lower():
             return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
         return ArtifactError(message, status_code="UNKNOWN", retryable=False)
@@ -791,11 +822,18 @@ class Store:
         options_override: RegisterArtifactOptions | None = None,
         ttl_override: int | None = None,
         device_override: int | torch.device | None = None,
+        view_registration: ViewRegistrationContext | None = None,
     ) -> RegisteredArtifact:
         material = dict(tensors)
         if not material:
             raise ArtifactError(
                 "Artifact tensors must not be empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if view_registration is not None and plan is not PlanType.VRAM_COALESCED:
+            raise ArtifactError(
+                "View registration requires vram_coalesced plan",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
@@ -841,6 +879,7 @@ class Store:
                 daemon_address=self._daemon_endpoint,
                 cancel_event=cancel_event,
                 on_begin=on_begin,
+                view=view_registration,
             )
         except Exception as exc:  # noqa: BLE001
             raise self._map_registration_error(exc) from exc
@@ -909,6 +948,7 @@ class Store:
         options_override: RegisterArtifactOptions | None = None,
         ttl_override: int | None = None,
         device_override: int | torch.device | None = None,
+        view_registration: ViewRegistrationContext | None = None,
     ) -> RegisteredArtifact:
         method = "register" if plan is PlanType.VRAM_LEASED else "put"
         span_name = "Store/Register" if plan is PlanType.VRAM_LEASED else "Store/Put"
@@ -952,6 +992,7 @@ class Store:
                         options_override=options_override,
                         ttl_override=ttl_override,
                         device_override=device_override,
+                        view_registration=view_registration,
                     )
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
@@ -1424,9 +1465,13 @@ class Store:
         canonical_index: CanonicalIndex,
         slices: Mapping[str, Sequence[object]] | None,
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None,
-    ) -> tuple[store_daemon_pb2.ViewSpec | None, bool]:
+    ) -> tuple[
+        store_daemon_pb2.ViewSpec | None,
+        bool,
+        MutableNormalizedViewOps,
+    ]:
         if not slices and not transpose:
-            return None, False
+            return None, False, {}
 
         entry_map: dict[str, CanonicalIndexEntry] = {
             entry.name: entry for entry in canonical_index.entries
@@ -1444,12 +1489,14 @@ class Store:
             )
 
         tensor_ops: dict[str, store_daemon_pb2.TensorViewOps] = {}
+        normalized_ops: MutableNormalizedViewOps = {}
         has_ops = False
         has_transpose = False
 
         def ensure_ops(name: str) -> store_daemon_pb2.TensorViewOps:
             if name not in tensor_ops:
                 tensor_ops[name] = store_daemon_pb2.TensorViewOps()
+            normalized_ops.setdefault(name, [])
             return tensor_ops[name]
 
         # Narrow handling (single-dimension)
@@ -1550,6 +1597,14 @@ class Store:
                 op.narrow.dim = int(dim)
                 op.narrow.start = int(start)
                 op.narrow.length = int(length)
+                normalized_ops[name].append(
+                    {
+                        "type": "narrow",
+                        "dim": int(dim),
+                        "start": int(start),
+                        "length": int(length),
+                    }
+                )
                 has_ops = True
 
         if transpose:
@@ -1600,16 +1655,23 @@ class Store:
                         current[source_idx],
                         current[target_idx],
                     )
+                    normalized_ops[name].append(
+                        {
+                            "type": "transpose",
+                            "dim0": int(target_idx),
+                            "dim1": int(source_idx),
+                        }
+                    )
                     has_ops = True
                     has_transpose = True
 
         if not has_ops:
-            return None, False
+            return None, False, {}
 
         spec = store_daemon_pb2.ViewSpec()
         for name in sorted(tensor_ops.keys()):
             spec.tensors[name].CopyFrom(tensor_ops[name])
-        return spec, has_transpose
+        return spec, has_transpose, normalized_ops
 
     def _resolve_view_inputs(
         self,
@@ -1620,7 +1682,14 @@ class Store:
         slices: Mapping[str, Sequence[object]] | None,
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None,
         view_id: str | None,
-    ) -> tuple[str, bytes | None, store_daemon_pb2.ViewSpec | None, bool, str | None]:
+    ) -> tuple[
+        str,
+        bytes | None,
+        store_daemon_pb2.ViewSpec | None,
+        bool,
+        str | None,
+        MutableNormalizedViewOps,
+    ]:
         resolved_artifact_id, resolved_key = artifact_id, key
         resolved_artifact_id, resolved_key = self._resolve_identifiers(
             resolved_artifact_id, resolved_key, None
@@ -1643,6 +1712,7 @@ class Store:
         canonical_index_bytes: bytes | None = None
         view_spec: store_daemon_pb2.ViewSpec | None = None
         has_transpose = False
+        normalized_ops: MutableNormalizedViewOps = {}
 
         if view_id is not None:
             if slices or transpose:
@@ -1657,6 +1727,7 @@ class Store:
                 view_spec,
                 has_transpose,
                 disk_path_hint,
+                normalized_ops,
             )
 
         # Building a spec requires canonical metadata.
@@ -1669,7 +1740,7 @@ class Store:
 
         canonical_index_bytes = client.get_artifact_index_by_id(resolved_artifact_id)
         canonical_index = self._canonical_index_from_bytes(canonical_index_bytes)
-        view_spec, has_transpose = self._build_view_spec(
+        view_spec, has_transpose, normalized_ops = self._build_view_spec(
             canonical_index=canonical_index,
             slices=slices,
             transpose=transpose,
@@ -1680,12 +1751,13 @@ class Store:
             view_spec,
             has_transpose,
             disk_path_hint,
+            normalized_ops,
         )
 
     @staticmethod
     def _resolve_transform_placement(
         placement: str | None, *, has_transpose: bool
-    ) -> TransformPlacement | None:
+    ) -> TransformPlacement:
         if placement is None:
             # Default to server-side execution until the client transform path exists.
             return TransformPlacement.TRANSFORM_PLACEMENT_SERVER
@@ -2054,6 +2126,103 @@ class Store:
 
         return ArtifactFuture(future, cancel_callback=_cancel)
 
+    def register_view(
+        self,
+        tensors: TensorDict,
+        *,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        slices: Mapping[str, Sequence[object]] | None = None,
+        transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
+        view_id: str | None = None,
+        placement: Literal["SERVER", "CLIENT"] | None = None,
+        ttl_ms: int | None = None,
+        allow_partial: bool = False,
+        options: RegisterArtifactOptions | None = None,
+    ) -> RegisteredArtifact:
+        if view_id is not None and view_id.strip() == "":
+            raise ArtifactError(
+                "view_id must not be empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        client = self._ensure_client()
+        (
+            resolved_artifact_id,
+            canonical_index_bytes,
+            view_spec,
+            has_transpose,
+            _,
+            normalized_ops,
+        ) = self._resolve_view_inputs(
+            client=client,
+            artifact_id=artifact_id,
+            key=key,
+            slices=slices,
+            transpose=transpose,
+            view_id=view_id,
+        )
+        if view_spec is None:
+            raise ArtifactError(
+                "View registration via pre-existing view_id is not supported yet",
+                status_code="UNIMPLEMENTED",
+                retryable=False,
+            )
+        placement_choice = placement
+        if placement_choice is None:
+            placement_choice = "CLIENT" if has_transpose else "SERVER"
+        placement_enum = self._resolve_transform_placement(
+            placement_choice, has_transpose=has_transpose
+        )
+        assert canonical_index_bytes is not None
+        canonical_index = self._canonical_index_from_bytes(canonical_index_bytes)
+        plan_metadata = _compute_view_plan_metadata(
+            canonical_index_bytes, normalized_ops
+        )
+        canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
+        view_options = store_daemon_pb2.ViewRegistrationOptions()
+        if view_id:
+            view_options.view_id = view_id
+        view_options.spec.CopyFrom(view_spec)
+        view_options.placement = placement_enum
+        view_options.canonical_size_bytes = canonical_index.total_size_bytes
+        for rng in canonical_ranges:
+            range_proto = view_options.ranges.add()
+            range_proto.offset = rng.offset
+            range_proto.length = rng.length
+        view_options.allow_partial = bool(allow_partial)
+        upload_tensors: dict[str, torch.Tensor]
+        if placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_SERVER:
+            upload_tensors = dict(tensors)
+        elif placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_CLIENT:
+            upload_tensors = _materialize_canonical_tensors(
+                canonical_index_bytes, normalized_ops, tensors
+            )
+        else:
+            raise ArtifactError(
+                "Unsupported placement for register_view",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        view_ctx = ViewRegistrationContext(
+            canonical_index_bytes=canonical_index_bytes,
+            view_options=view_options,
+            placement=placement_enum,
+            plan=plan_metadata,
+            tensors=dict(tensors),
+            canonical_ranges=canonical_ranges,
+            allow_partial=allow_partial,
+        )
+        return self._perform_registration(
+            upload_tensors,
+            key=key,
+            plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            ttl_override=ttl_ms,
+            view_registration=view_ctx,
+        )
+
     def put(
         self,
         tensors: TensorDict,
@@ -2162,6 +2331,7 @@ class Store:
             view_spec,
             has_transpose,
             disk_path_hint,
+            _,
         ) = self._resolve_view_inputs(
             client=client,
             artifact_id=artifact_id,
@@ -2401,6 +2571,7 @@ class Store:
             view_spec,
             has_transpose,
             disk_path_hint,
+            _,
         ) = self._resolve_view_inputs(
             client=client,
             artifact_id=artifact_id,
@@ -2569,6 +2740,33 @@ def register_async(
         key=key,
         options=options,
         ttl_ms=ttl_ms,
+    )
+
+
+def register_view(
+    tensors: TensorDict,
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    slices: Mapping[str, Sequence[object]] | None = None,
+    transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
+    view_id: str | None = None,
+    placement: Literal["SERVER", "CLIENT"] | None = None,
+    ttl_ms: int | None = None,
+    allow_partial: bool = False,
+    options: RegisterArtifactOptions | None = None,
+) -> RegisteredArtifact:
+    return _coerce_store().register_view(
+        tensors,
+        artifact_id=artifact_id,
+        key=key,
+        slices=slices,
+        transpose=transpose,
+        view_id=view_id,
+        placement=placement,
+        ttl_ms=ttl_ms,
+        allow_partial=allow_partial,
+        options=options,
     )
 
 

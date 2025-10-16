@@ -492,6 +492,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     else None
                 )
                 view_data_hash = variant.view_data_hash or None
+                canonical_size: Optional[int] = None
+                canonical_covered: Optional[int] = None
+                if variant.HasField("canonical_coverage"):
+                    canonical_size = int(variant.canonical_coverage.total_bytes)
+                    canonical_covered = int(variant.canonical_coverage.covered_bytes)
                 variant_payload = VariantUpsertPayload(
                     artifact_id=artifact_id,
                     view_id=variant.view_id,
@@ -499,6 +504,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     view_size=variant.view_size,
                     view_data_hash=view_data_hash,
                     verified_at=verified_at,
+                    canonical_size_bytes=canonical_size,
+                    canonical_bytes_covered=canonical_covered,
                 )
 
             leaf_payloads: list[LeafWritePayload] = []
