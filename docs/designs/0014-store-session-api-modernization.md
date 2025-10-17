@@ -65,16 +65,22 @@ DeviceSelector = str | torch.device | None
 
 ArtifactStatusCode = Literal[
     "OK",
-    "INVALID_ARGUMENT",
-    "FAILED_PRECONDITION",
-    "NOT_FOUND",
-    "RESOURCE_EXHAUSTED",
-    "DEADLINE_EXCEEDED",
-    "UNAVAILABLE",
-    "ABORTED",
-    "DATA_LOSS",
     "CANCELLED",
     "UNKNOWN",
+    "INVALID_ARGUMENT",
+    "DEADLINE_EXCEEDED",
+    "NOT_FOUND",
+    "ALREADY_EXISTS",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "ABORTED",
+    "OUT_OF_RANGE",
+    "UNIMPLEMENTED",
+    "INTERNAL",
+    "UNAVAILABLE",
+    "DATA_LOSS",
+    "UNAUTHENTICATED",
 ]
 
 class ArtifactFuture(Protocol[T]):

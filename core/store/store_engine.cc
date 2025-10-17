@@ -436,18 +436,14 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
           gsl::not_null<std::unique_ptr<components::DeviceManager>>(std::make_unique<components::DeviceManager>())),
       replica_registry_(
           gsl::not_null<std::unique_ptr<components::ReplicaRegistry>>(std::make_unique<components::ReplicaRegistry>())),
-      metrics_collector_(
-          gsl::not_null<std::unique_ptr<components::MetricsCollector>>(
-              std::make_unique<components::MetricsCollector>())),
-      comm_manager_(
-          gsl::not_null<std::shared_ptr<components::CommunicationManager>>(
-              std::make_shared<components::CommunicationManager>())),
-      memory_pool_(
-          gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
-              std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
-      va_space_(
-          gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
-              std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
+      metrics_collector_(gsl::not_null<std::unique_ptr<components::MetricsCollector>>(
+          std::make_unique<components::MetricsCollector>())),
+      comm_manager_(gsl::not_null<std::shared_ptr<components::CommunicationManager>>(
+          std::make_shared<components::CommunicationManager>())),
+      memory_pool_(gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
+          std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
+      va_space_(gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
+          std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
@@ -735,11 +731,10 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         "artifact_descriptor.json missing schema_version; canonical index v3 required");
   }
   if (descriptor_schema_version.has_value() && *descriptor_schema_version != "v3") {
-    return absl::FailedPreconditionError(
-        absl::StrCat(
-            "Unsupported artifact descriptor schema_version='",
-            *descriptor_schema_version,
-            "'; canonical index v3 is required"));
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Unsupported artifact descriptor schema_version='",
+        *descriptor_schema_version,
+        "'; canonical index v3 is required"));
   }
 
   if (!canonical_index_json.has_value()) {
@@ -2003,13 +1998,12 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         }
         return handle;
       }
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "No suitable source instance for COPY_ONLY mode (artifact_id=",
-              canonical_artifact_id,
-              ", view_id=",
-              requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
-              ")"));
+      return absl::FailedPreconditionError(absl::StrCat(
+          "No suitable source instance for COPY_ONLY mode (artifact_id=",
+          canonical_artifact_id,
+          ", view_id=",
+          requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
+          ")"));
     }
 
     case MaterializeMode::LOAD_ONLY: {
@@ -2454,13 +2448,12 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
     if (view_opts.placement == ViewPlacement::kServer && view_plan->inverse_transform.requires_materialization) {
       auto info_or = device_manager_->get_gpu_info(reg.device_id);
       if (!info_or.ok()) {
-        return absl::FailedPreconditionError(
-            absl::StrCat(
-                "SERVER placement for view registration requires GPU transpose support on device ",
-                reg.device_id,
-                "; retry with placement=CLIENT (",
-                info_or.status().message(),
-                ")"));
+        return absl::FailedPreconditionError(absl::StrCat(
+            "SERVER placement for view registration requires GPU transpose support on device ",
+            reg.device_id,
+            "; retry with placement=CLIENT (",
+            info_or.status().message(),
+            ")"));
       }
     }
   }
@@ -2494,14 +2487,13 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
             reg.device_id,
             reg.total_size_bytes - free_bytes);
         if (!evict_status.ok()) {
-          return absl::ResourceExhaustedError(
-              absl::StrCat(
-                  "Insufficient GPU memory available. Requested: ",
-                  reg.total_size_bytes,
-                  " bytes, Free: ",
-                  free_bytes,
-                  ". ",
-                  evict_status.message()));
+          return absl::ResourceExhaustedError(absl::StrCat(
+              "Insufficient GPU memory available. Requested: ",
+              reg.total_size_bytes,
+              " bytes, Free: ",
+              free_bytes,
+              ". ",
+              evict_status.message()));
         }
       }
     }
@@ -2638,18 +2630,65 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       return absl::FailedPreconditionError("view executor missing for server placement registration");
     }
     if (!view_state.executor->is_complete()) {
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "view bytes incomplete; expected ",
-              view_state.expected_view_bytes,
-              " received ",
-              view_state.executor->ingested_bytes()));
+      return absl::FailedPreconditionError(absl::StrCat(
+          "view bytes incomplete; expected ",
+          view_state.expected_view_bytes,
+          " received ",
+          view_state.executor->ingested_bytes()));
     }
     auto finalize_status = view_state.executor->finalize(MemoryLocation::GPU, entry->gpu_ptr, entry->device_id);
     if (!finalize_status.ok()) {
       return finalize_status;
     }
     view_state.finalized = true;
+  }
+
+  // Zero-fill any canonical regions not covered by the view when allow_partial=true.
+  // This ensures deterministic hashing and read semantics: uncovered bytes are canonical zeros.
+  if (entry->view_state && entry->view_state->options.allow_partial) {
+    const auto& ranges = entry->view_state->options.canonical_ranges;
+    uint64_t covered_bytes = 0;
+    for (const auto& r : ranges) {
+      covered_bytes += r.length;
+    }
+    if (covered_bytes < entry->size_bytes) {
+      void* gpu_ptr = entry->gpu_ptr;
+      if (gpu_ptr == nullptr) {
+        const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+        gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+      }
+      if (!gpu_ptr) {
+        return absl::FailedPreconditionError("GPU pointer is null; cannot zero uncovered regions");
+      }
+
+      auto dev_status = cuda::set_device(entry->device_id);
+      if (!dev_status.ok()) {
+        return dev_status;
+      }
+
+      uint64_t cursor = 0;
+      for (const auto& r : ranges) {
+        if (r.offset > cursor) {
+          auto ms = cuda::memset(static_cast<uint8_t*>(gpu_ptr) + cursor, 0, static_cast<size_t>(r.offset - cursor));
+          if (!ms.ok()) {
+            return ms;
+          }
+        }
+        const uint64_t r_end = r.offset + r.length;
+        cursor = std::max(r_end, cursor);
+      }
+      if (cursor < entry->size_bytes) {
+        auto ms =
+            cuda::memset(static_cast<uint8_t*>(gpu_ptr) + cursor, 0, static_cast<size_t>(entry->size_bytes - cursor));
+        if (!ms.ok()) {
+          return ms;
+        }
+      }
+      auto sync = cuda::device_synchronize();
+      if (!sync.ok()) {
+        return sync;
+      }
+    }
   }
 
   // Compute content-addressed artifact_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
