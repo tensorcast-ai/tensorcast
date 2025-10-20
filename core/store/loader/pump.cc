@@ -9,17 +9,17 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/async_copy_manager.h"
-// Direct write grant handled via sink capability
+
 #include <cstdlib>
-// OpenTelemetry counters for copy failure tracking
+
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/provider.h"
@@ -112,6 +112,31 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       pool.return_chunk(slot_id);
     }
 
+    void record_status(const absl::Status& st) {
+      {
+        absl::MutexLock lock(&status_mutex);
+        callback_status = st;
+        has_status = true;
+      }
+      status_cv.SignalAll();
+    }
+
+    absl::Status await_final_status(const absl::Status& fallback) {
+      absl::MutexLock lock(&status_mutex);
+      while (!has_status) {
+        status_cv.Wait(&status_mutex);
+      }
+      has_status = false;
+      if (callback_status.ok()) {
+        return fallback;
+      }
+      return callback_status;
+    }
+
+    void request_pool_shutdown() {
+      pool.shutdown();
+    }
+
     BufferPool& pool;
     int slot_id;
     uint64_t global_chunk_id;
@@ -119,6 +144,10 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
     size_t bytes;
     SlotLease lease;
     std::atomic<bool> returned{false};
+    absl::Mutex status_mutex;
+    absl::CondVar status_cv;
+    absl::Status callback_status ABSL_GUARDED_BY(status_mutex) = absl::OkStatus();
+    bool has_status ABSL_GUARDED_BY(status_mutex) = false;
   };
 
   // Track in-flight async copies when destination supports async writes
@@ -133,7 +162,11 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
 
   std::vector<InFlight> inflight;
   auto* async = dynamic_cast<AsyncPositionedSink*>(&dst);
-  auto finalize_inflight = [&](InFlight& entry, const absl::Status& st) -> bool {
+  auto finalize_inflight = [&](InFlight& entry, const absl::Status& handle_status) -> bool {
+    absl::Status st = handle_status;
+    if (entry.slot_ctx) {
+      st = entry.slot_ctx->await_final_status(handle_status);
+    }
     const bool failed = !st.ok();
     if (failed) {
       {
@@ -217,19 +250,12 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       const size_t chunk_bytes = chunk.bytes_in_chunk;
       write_opts.copy_options = copy_opts;
       auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes);
-      write_opts.copy_options->callbacks.on_copy_done = [slot_ctx, state_ptr = &state](absl::Status st) {
+      write_opts.copy_options->callbacks.on_copy_done = [slot_ctx](absl::Status st) {
+        slot_ctx->record_status(st);
+        slot_ctx->return_if_needed();
         if (!st.ok()) {
           record_copy_failure_("gpu");
-          {
-            absl::MutexLock lock(&state_ptr->status_mutex);
-            if (state_ptr->consumer_status.ok()) {
-              state_ptr->consumer_status = st;
-            }
-          }
-          state_ptr->should_stop.store(true, std::memory_order_release);
-          state_ptr->drain_requested.store(true, std::memory_order_release);
-          slot_ctx->pool.shutdown();
-          slot_ctx->return_if_needed();
+          slot_ctx->request_pool_shutdown();
         }
         VLOG(2) << "pump_async_callback slot=" << slot_ctx->slot_id << " chunk_id=" << slot_ctx->global_chunk_id
                 << " dest_offset=" << slot_ctx->dest_offset << " bytes=" << slot_ctx->bytes << " status=" << st;
@@ -271,15 +297,16 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       }
     }
 
-    // Sweep completed in-flight operations and return their slots.
-    // Drop completed handles whose wait() already succeeded via callback.
+    // Sweep in-flight operations: process any handle that is completed
+    // (success or failure). Skip only pending operations by probing with a
+    // zero-timeout wait.
     if (!inflight.empty()) {
       for (size_t i = 0; i < inflight.size();) {
-        if (!inflight[i].handle.ok()) {
-          ++i;
+        absl::Status st = inflight[i].handle.wait(absl::ZeroDuration());
+        if (absl::IsDeadlineExceeded(st)) {
+          ++i; // still pending
           continue;
         }
-        absl::Status st = inflight[i].handle.wait();
         finalize_inflight(inflight[i], st);
         inflight.erase(inflight.begin() + i);
       }

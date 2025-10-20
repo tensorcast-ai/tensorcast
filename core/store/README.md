@@ -260,7 +260,7 @@ stateDiagram-v2
 ### Async Copy Manager Integration
 
 - H2D/D2H transfers submit via `AsyncCopyManager` (ACM), which wraps `cudaMemcpyAsync` with traced host callbacks and forwards completions onto a dedicated CPU worker to avoid making CUDA Runtime calls inside `cudaLaunchHostFunc`.
-- StreamingPinnedBuffer slots stay owned by the pump consumer until ACM completion; the completion callback is the only place that returns slots, preventing early reuse while the GPU DMA is still active. Callers that need post-callback state (e.g., VS writes) must also block on the callback’s completion signal before reporting success.
+- StreamingPinnedBuffer slots remain owned by the pump consumer. ACM callbacks now only publish their completion status (and may request a `BufferPool::shutdown()` on failure); the consumer thread waits for that status and then returns the slot. Callbacks must not mutate `PumpState` or hand the slot back directly.
 - Use `StreamingChunkGuard` (from `core/common/memory/streaming_chunk_guard.h`) when staging chunks for AsyncCopyManager. The guard acquires slots, promotes them to consumer ownership, and guarantees cleanup if submission fails, so callers cannot forget the `promote_producer_slot_to_consumer` transition.
 - For H2D, UMA state should advance from the completion callback (if the caller needs it) using the `absl::Status` argument as proof of success; per-chunk `stream_synchronize` remains unnecessary.
 - ACM owns per-device non-blocking streams per direction (H2D/D2H/D2D) and routes all copies through them; external stream injection has been removed.
