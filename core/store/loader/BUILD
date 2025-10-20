@@ -103,6 +103,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "index_reader",
+    srcs = ["index_reader.cc"],
+    hdrs = ["index_reader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":canonical_index",
+        ":safetensors_util",
+        "//core/common:artifact_hash_lib",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
     name = "safetensors_source",
     srcs = ["safetensors_source.cc"],
     hdrs = ["safetensors_source.h"],
@@ -165,6 +179,25 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "@abseil-cpp//absl/types:span",
         "@gsl",
+    ],
+)
+
+sc_cc_library(
+    name = "verification_utils",
+    srcs = ["verification_utils.cc"],
+    hdrs = ["verification_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":safetensors_util",
+        ":source_hash",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_verification_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -460,6 +493,34 @@ cc_test(
 )
 
 cc_test(
+    name = "index_reader_test",
+    srcs = ["index_reader_test.cc"],
+    deps = [
+        ":index_reader",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "verification_utils_test",
+    srcs = ["verification_utils_test.cc"],
+    deps = [
+        ":source_hash",
+        ":verification_utils",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_verification_lib",
+        "//core/common:cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+        "@gsl",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "disk_loader_safetensors_test",
     srcs = ["disk_loader_safetensors_test.cc"],
     deps = [
@@ -640,13 +701,19 @@ cc_test(
     ],
     deps = [
         ":buffer_pool",
+        ":gpu_memory_sink",
         ":pump",
         ":sink",
         ":source",
+        ":streaming_buffer_adapter",
         "//core/common:async_copy_manager_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:streaming_pinned_buffer_lib",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/types:span",
         "@catch2//:catch2_main",
+        "@gsl",
     ],
 )
 

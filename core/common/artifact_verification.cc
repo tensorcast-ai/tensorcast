@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,8 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
 #include "core/common/error_handling.h"
 
@@ -41,20 +44,35 @@ std::string bytes_to_hex(absl::Span<const uint8_t> bytes) {
   return out;
 }
 
-// JSON serialization using nlohmann/json
-std::string ArtifactVerificationInfo::to_json() const {
+std::string bytes_to_compact_hex(absl::Span<const uint8_t> bytes) {
+  std::string out;
+  out.reserve(bytes.size() * 2);
+  for (uint8_t byte : bytes) {
+    absl::StrAppendFormat(&out, "%02x", byte);
+  }
+  return out;
+}
+
+json build_base_verification_json(const ArtifactVerificationInfo& info) {
   json j;
   j["version"] = "1.0";
-  if (!byte_space_id.empty()) {
-    j["byte_space_id"] = byte_space_id;
+  if (!info.byte_space_id.empty()) {
+    j["byte_space_id"] = info.byte_space_id;
   }
-  j["artifact_size"] = artifact_size;
-  j["full_hash"] = full_hash;
-  j["segment_hashes"] = segment_hashes;
-  j["sample_values"] = sample_values;
-  j["key_values"] = key_values;
+  j["artifact_size"] = info.artifact_size;
+  j["full_hash"] = info.full_hash;
+  j["segment_hashes"] = info.segment_hashes;
+  j["sample_values"] = info.sample_values;
+  j["key_values"] = info.key_values;
+  return j;
+}
 
-  return j.dump(2); // Pretty print with 2-space indentation
+// JSON serialization using nlohmann/json
+std::string ArtifactVerificationInfo::to_json() const {
+  json base = build_base_verification_json(*this);
+  json enriched = base;
+  enriched["metadata_signature"] = compute_metadata_signature();
+  return enriched.dump(2); // Pretty print with 2-space indentation
 }
 
 // JSON deserialization using nlohmann/json
@@ -63,6 +81,17 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerificationInfo::from_json(con
     json j = json::parse(json_str);
 
     ArtifactVerificationInfo info;
+
+    std::optional<std::string> provided_signature;
+    if (j.contains("metadata_signature")) {
+      if (!j["metadata_signature"].is_string()) {
+        return absl::InvalidArgumentError("metadata_signature must be a string");
+      }
+      provided_signature = j["metadata_signature"].get<std::string>();
+      j.erase("metadata_signature");
+    } else {
+      return absl::FailedPreconditionError("metadata_signature missing from verification metadata");
+    }
 
     if (j.contains("byte_space_id") && j["byte_space_id"].is_string()) {
       info.byte_space_id = j["byte_space_id"].get<std::string>();
@@ -108,6 +137,19 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerificationInfo::from_json(con
       }
     }
 
+    const std::string computed_signature = info.compute_metadata_signature();
+    info.metadata_signature = computed_signature;
+    info.signature_present = true;
+    if (!provided_signature.has_value()) {
+      info.signature_valid = false;
+      return absl::FailedPreconditionError("metadata_signature missing after parse");
+    }
+    if (computed_signature != *provided_signature) {
+      info.signature_valid = false;
+      return absl::DataLossError("metadata_signature mismatch");
+    }
+    info.signature_valid = true;
+
     return info;
 
   } catch (const json::parse_error& e) {
@@ -117,6 +159,20 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerificationInfo::from_json(con
   } catch (const std::exception& e) {
     return absl::InvalidArgumentError(absl::StrCat("JSON processing error: ", e.what()));
   }
+}
+
+std::string ArtifactVerificationInfo::compute_metadata_signature() const {
+  json base = build_base_verification_json(*this);
+  const std::string canonical = base.dump();
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(canonical.data()), canonical.size()));
+  return bytes_to_compact_hex(digest);
+}
+
+void ArtifactVerificationInfo::refresh_metadata_signature() {
+  metadata_signature = compute_metadata_signature();
+  signature_present = true;
+  signature_valid = true;
 }
 
 // Rotate left
@@ -350,6 +406,11 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerifier::generate_verification
   }
   info.key_values[2] = *last_val;
 
+  auto fmt_hex = [](uint64_t value) { return absl::StrCat("0x", absl::Hex(value, absl::kZeroPad16)); };
+  LOG(INFO) << "ArtifactVerifier::generate_verification_info device_id=" << device_id << " size=" << info.artifact_size
+            << " key_values=[" << fmt_hex(info.key_values[0]) << ", " << fmt_hex(info.key_values[1]) << ", "
+            << fmt_hex(info.key_values[2]) << "]";
+
   // 2. Sample values (16 evenly distributed points) - minimal data copying
   for (size_t i = 0; i < NUM_SAMPLES; ++i) {
     size_t offset = (info.artifact_size * i) / NUM_SAMPLES;
@@ -536,8 +597,19 @@ absl::Status ArtifactVerifier::verify_artifact_data(
       if (!val.ok()) {
         return val.status();
       }
-      if (*val != expected_info.sample_values.at(i)) {
-        return absl::DataLossError(absl::StrCat("Sample value mismatch at offset ", offset));
+      const uint64_t expected = expected_info.sample_values.at(i);
+      const uint64_t actual = *val;
+      if (actual != expected) {
+        LOG(ERROR) << "ArtifactVerifier sample mismatch offset=" << offset << " actual=0x" << absl::Hex(actual)
+                   << " expected=0x" << absl::Hex(expected);
+        return absl::DataLossError(
+            absl::StrCat(
+                "Sample value mismatch at offset ",
+                offset,
+                ": actual=0x",
+                absl::Hex(actual),
+                " expected=0x",
+                absl::Hex(expected)));
       }
     }
   }

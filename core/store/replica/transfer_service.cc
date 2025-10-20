@@ -12,7 +12,9 @@
 #include "absl/log/log.h"
 #include "absl/log/vlog_is_on.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 #include "core/store/loader/cpu_va_sink.h"
 #include "core/store/loader/file_partition_source.h"
@@ -109,6 +111,33 @@ void GpuSchedHandle::update_inflight_copies_(int device_id, int delta) {
     g_if_copies_gauge->AddCallback(&inflight_copies_callback, nullptr);
   }
 }
+} // namespace
+
+namespace {
+
+absl::Status synchronize_gpu_after_transfer(int device_id, absl::string_view context, uint64_t total_bytes) {
+  if (device_id < 0) {
+    return absl::InvalidArgumentError("GPU synchronize requested with invalid device id");
+  }
+  auto set_dev_status = tensorcast::cuda::set_device(device_id);
+  if (!set_dev_status.ok()) {
+    LOG(ERROR) << context << ": cuda set_device failed for device=" << device_id << ": " << set_dev_status;
+    return set_dev_status;
+  }
+  const auto sync_start = std::chrono::steady_clock::now();
+  auto sync_status = tensorcast::cuda::device_synchronize();
+  const auto sync_end = std::chrono::steady_clock::now();
+  const auto sync_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sync_end - sync_start);
+  if (!sync_status.ok()) {
+    LOG(ERROR) << context << ": device_synchronize failed for device=" << device_id
+               << " duration_ms=" << sync_ms.count() << " status=" << sync_status;
+    return sync_status;
+  }
+  VLOG(1) << context << " cuda synchronize device=" << device_id << " bytes=" << total_bytes
+          << " duration_ms=" << sync_ms.count();
+  return absl::OkStatus();
+}
+
 } // namespace
 
 TransferService::TransferService(
@@ -369,6 +398,12 @@ absl::Status TransferService::load_from_source(
   uint64_t total_bytes = 0;
   for (const auto& r : ranges)
     total_bytes += r.second;
+  if (target_location == MemoryLocation::GPU && total_bytes > 0) {
+    auto sync_status = synchronize_gpu_after_transfer(device_id, "TransferService::load_from_source", total_bytes);
+    if (!sync_status.ok()) {
+      return sync_status;
+    }
+  }
   // Record duration metric
   try {
     auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -455,6 +490,12 @@ absl::Status TransferService::execute(
   uint64_t total_bytes = 0;
   for (const auto& r : plan.ranges)
     total_bytes += r.second;
+  if (target_location == MemoryLocation::GPU && total_bytes > 0) {
+    auto sync_status = synchronize_gpu_after_transfer(device_id, "TransferService::execute", total_bytes);
+    if (!sync_status.ok()) {
+      return sync_status;
+    }
+  }
   if (target_location == MemoryLocation::GPU && gpu_ptr_or_null != nullptr && device_id >= 0 && total_bytes > 0 &&
       VLOG_IS_ON(1)) {
     constexpr size_t kTailSampleBytes = 16;

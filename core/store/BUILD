@@ -161,6 +161,45 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "eviction_service",
+    srcs = ["components/eviction_service.cc"],
+    hdrs = ["components/eviction_service.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_manager",
+        ":metrics_collector",
+        ":replica_registry",
+        "//core/common:memory_location_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:device_types",
+        "//core/store/replica",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "eviction_service_test",
+    srcs = ["components/eviction_service_test.cc"],
+    deps = [
+        ":eviction_service",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "multi_gpu_verification_race_test",
+    srcs = ["multi_gpu_verification_race_test.cc"],
+    deps = [
+        "//core/store/loader:verification_utils",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # ========== Loading orchestration ==========
 
 # materialize_orchestrator is now part of store_engine target to avoid circular dependency
@@ -197,6 +236,19 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "view_utils",
+    srcs = ["view_utils.cc"],
+    hdrs = ["view_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/loader:view_planner",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
 # ========== Main Store Engine ==========
 
 sc_cc_library(
@@ -216,12 +268,14 @@ sc_cc_library(
         ":device_manager",
         ":device_registry",
         ":device_types",
+        ":eviction_service",
         ":global_store_client",
         ":loading_spec",
         ":metrics_collector",
         ":replica_registration_helper",
         ":replica_registry",
         ":store_engine_options",
+        ":view_utils",
         "//core/checkpoint:checkpoint_lib",
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_verification_lib",
@@ -233,9 +287,11 @@ sc_cc_library(
         "//core/store/loader",
         "//core/store/loader:canonical_index",
         "//core/store/loader:disk_loader",
+        "//core/store/loader:index_reader",
         "//core/store/loader:p2p_loader",
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
+        "//core/store/loader:verification_utils",
         "//core/store/loader:view_ingest_executor",
         "//core/store/loader:view_plan_source",
         "//core/store/loader:view_planner",

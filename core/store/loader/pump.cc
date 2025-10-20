@@ -4,20 +4,22 @@
 
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/async_copy_manager.h"
-// Direct write grant handled via sink capability
+
 #include <cstdlib>
-// OpenTelemetry counters for copy failure tracking
+
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/provider.h"
@@ -28,6 +30,7 @@ namespace {
 
 struct PumpState {
   std::atomic<bool> should_stop{false};
+  std::atomic<bool> drain_requested{false};
   std::atomic<uint64_t> next_chunk_id{0};
   absl::Status producer_status;
   absl::Status consumer_status;
@@ -88,8 +91,64 @@ class SlotLease {
 };
 
 void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
-  LOG(INFO) << "Consumer thread started";
+  VLOG(1) << "Consumer thread started";
   bool draining = false;
+
+  struct AsyncSlot {
+    AsyncSlot(BufferPool& pool_in, int slot_in, uint64_t chunk_in, uint64_t dest_in, size_t bytes_in)
+        : pool(pool_in),
+          slot_id(slot_in),
+          global_chunk_id(chunk_in),
+          dest_offset(dest_in),
+          bytes(bytes_in),
+          lease(pool_in, slot_in) {}
+
+    void return_if_needed() {
+      bool expected = false;
+      if (!returned.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+      }
+      lease.release();
+      pool.return_chunk(slot_id);
+    }
+
+    void record_status(const absl::Status& st) {
+      {
+        absl::MutexLock lock(&status_mutex);
+        callback_status = st;
+        has_status = true;
+      }
+      status_cv.SignalAll();
+    }
+
+    absl::Status await_final_status(const absl::Status& fallback) {
+      absl::MutexLock lock(&status_mutex);
+      while (!has_status) {
+        status_cv.Wait(&status_mutex);
+      }
+      has_status = false;
+      if (callback_status.ok()) {
+        return fallback;
+      }
+      return callback_status;
+    }
+
+    void request_pool_shutdown() {
+      pool.shutdown();
+    }
+
+    BufferPool& pool;
+    int slot_id;
+    uint64_t global_chunk_id;
+    uint64_t dest_offset;
+    size_t bytes;
+    SlotLease lease;
+    std::atomic<bool> returned{false};
+    absl::Mutex status_mutex;
+    absl::CondVar status_cv;
+    absl::Status callback_status ABSL_GUARDED_BY(status_mutex) = absl::OkStatus();
+    bool has_status ABSL_GUARDED_BY(status_mutex) = false;
+  };
 
   // Track in-flight async copies when destination supports async writes
   struct InFlight {
@@ -98,14 +157,18 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
     uint64_t global_chunk_id;
     uint64_t dest_offset;
     size_t bytes;
+    std::shared_ptr<AsyncSlot> slot_ctx;
   };
 
   std::vector<InFlight> inflight;
   auto* async = dynamic_cast<AsyncPositionedSink*>(&dst);
-  auto finalize_inflight = [&](InFlight& entry, const absl::Status& st) {
+  auto finalize_inflight = [&](InFlight& entry, const absl::Status& handle_status) -> bool {
+    absl::Status st = handle_status;
+    if (entry.slot_ctx) {
+      st = entry.slot_ctx->await_final_status(handle_status);
+    }
     const bool failed = !st.ok();
     if (failed) {
-      record_copy_failure_("gpu");
       {
         absl::MutexLock lock(&state.status_mutex);
         if (state.consumer_status.ok()) {
@@ -113,14 +176,16 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
         }
       }
       state.should_stop.store(true, std::memory_order_release);
-    }
-    pool.return_chunk(entry.slot_id);
-    if (failed) {
+      state.drain_requested.store(true, std::memory_order_release);
       pool.shutdown();
       draining = true;
     }
+    if (entry.slot_ctx) {
+      entry.slot_ctx->return_if_needed();
+    }
     VLOG(2) << "pump_async_completion slot=" << entry.slot_id << " chunk_id=" << entry.global_chunk_id
             << " dest_offset=" << entry.dest_offset << " bytes=" << entry.bytes << " status=" << st;
+    return true;
   };
   auto flush_inflight = [&]() {
     if (inflight.empty()) {
@@ -134,6 +199,9 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   };
   absl::Cleanup flush_guard = [&]() { flush_inflight(); };
   while (!state.should_stop.load(std::memory_order_acquire) || draining) {
+    if (state.drain_requested.load(std::memory_order_acquire)) {
+      draining = true;
+    }
     auto chunk_result = pool.get_ready_chunk();
     if (!chunk_result.ok()) {
       if (absl::IsUnavailable(chunk_result.status())) {
@@ -181,6 +249,17 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       const uint64_t chunk_id = chunk.global_chunk_id;
       const size_t chunk_bytes = chunk.bytes_in_chunk;
       write_opts.copy_options = copy_opts;
+      auto slot_ctx = std::make_shared<AsyncSlot>(pool, slot_id, chunk_id, dest_offset, chunk_bytes);
+      write_opts.copy_options->callbacks.on_copy_done = [slot_ctx](absl::Status st) {
+        slot_ctx->record_status(st);
+        slot_ctx->return_if_needed();
+        if (!st.ok()) {
+          record_copy_failure_("gpu");
+          slot_ctx->request_pool_shutdown();
+        }
+        VLOG(2) << "pump_async_callback slot=" << slot_ctx->slot_id << " chunk_id=" << slot_ctx->global_chunk_id
+                << " dest_offset=" << slot_ctx->dest_offset << " bytes=" << slot_ctx->bytes << " status=" << st;
+      };
       auto hdl_or = async->write_at_async(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk, write_opts);
       if (!hdl_or.ok()) {
         record_copy_failure_("gpu");
@@ -189,7 +268,7 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
           state.consumer_status = hdl_or.status();
         }
         // Return the slot and request shutdown
-        pool.return_chunk(chunk.slot_id);
+        slot_ctx->return_if_needed();
         state.should_stop.store(true, std::memory_order_release);
         pool.shutdown();
         // Switch to drain mode to return remaining ready chunks
@@ -201,7 +280,8 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
                 .slot_id = chunk.slot_id,
                 .global_chunk_id = chunk.global_chunk_id,
                 .dest_offset = dest_offset,
-                .bytes = chunk.bytes_in_chunk});
+                .bytes = chunk.bytes_in_chunk,
+                .slot_ctx = std::move(slot_ctx)});
       }
     } else {
       auto status = dst.write_at(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk);
@@ -217,13 +297,14 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       }
     }
 
-    // Sweep completed in-flight operations and return their slots.
-    // Drop completed handles whose wait() already succeeded via callback.
+    // Sweep in-flight operations: process any handle that is completed
+    // (success or failure). Skip only pending operations by probing with a
+    // zero-timeout wait.
     if (!inflight.empty()) {
       for (size_t i = 0; i < inflight.size();) {
         absl::Status st = inflight[i].handle.wait(absl::ZeroDuration());
         if (absl::IsDeadlineExceeded(st)) {
-          ++i;
+          ++i; // still pending
           continue;
         }
         finalize_inflight(inflight[i], st);
@@ -237,6 +318,7 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
     absl::Status st = item.handle.wait();
     finalize_inflight(item, st);
   }
+  inflight.clear();
 }
 
 void run_range_producer(
@@ -358,18 +440,6 @@ void run_range_producer(
       }
 
       // Emit lightweight diagnostics for chunk payload (first/last 8 bytes).
-      if (bytes_read >= sizeof(uint64_t)) {
-        const uint64_t first_sample = *reinterpret_cast<const uint64_t*>(buffer);
-        const uint64_t last_sample =
-            *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(buffer) + bytes_read - sizeof(uint64_t));
-        LOG(INFO) << "pump_producer chunk_id=" << chunk_id << " offset=" << current_offset << " bytes=" << bytes_read
-                  << " first=0x" << absl::Hex(first_sample, absl::kZeroPad16) << " last=0x"
-                  << absl::Hex(last_sample, absl::kZeroPad16);
-      } else {
-        LOG(INFO) << "pump_producer chunk_id=" << chunk_id << " offset=" << current_offset << " bytes=" << bytes_read
-                  << " (<8 bytes payload)";
-      }
-
       current_offset += bytes_read;
       remaining -= bytes_read;
       // Transfer ownership to consumer; avoid returning the slot here

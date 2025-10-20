@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "absl/status/status.h"
+#include "core/common/artifact_verification.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/common.h"
@@ -76,16 +77,16 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
 
   // Write a bad verification.json (wrong key_values ensures failure)
-  nlohmann::json bad;
-  bad["version"] = "1.0";
-  bad["artifact_size"] = artifact_size;
-  bad["full_hash"] = 0ULL;
-  bad["segment_hashes"] = std::vector<uint64_t>(8, 0ULL);
-  bad["sample_values"] = std::vector<uint64_t>(16, 0ULL);
-  bad["key_values"] = std::vector<uint64_t>{1ULL, 2ULL, 3ULL};
+  tensorcast::common::ArtifactVerificationInfo bad_info;
+  bad_info.artifact_size = artifact_size;
+  bad_info.full_hash = 0ULL;
+  bad_info.segment_hashes.fill(0ULL);
+  bad_info.sample_values.fill(0ULL);
+  bad_info.key_values = {1ULL, 2ULL, 3ULL};
+  bad_info.refresh_metadata_signature();
   std::ofstream out(artifact_dir2 / "verification.json");
   REQUIRE(out.is_open());
-  out << bad.dump(2);
+  out << bad_info.to_json();
   out.close();
 
   tensorcast::store::loading::MaterializeHints hints2;
