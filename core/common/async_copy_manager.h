@@ -92,6 +92,11 @@ class AsyncCopyManager {
   // other async submissions, enabling CPU-only tests to exercise pump logic.
   absl::StatusOr<CopyHandle> submit_h2h(const HostRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
 
+  // Synchronize the per-device H2D stream to guarantee that all outstanding
+  // host→device copies have completed. If no stream has been created for the
+  // device, this returns OK immediately.
+  absl::Status synchronize_h2d_stream(int device_id);
+
   // Destroy all lazily-created per-device streams. Safe to call multiple times.
   void shutdown();
 

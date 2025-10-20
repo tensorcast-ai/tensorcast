@@ -11,6 +11,7 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 
@@ -222,8 +223,9 @@ absl::Status ReplicaLoadController::allocate_gpu_memory() {
 
   absl::MutexLock lock(&mutex_);
   gpu_.cuda_mem = *gpu_alloc_result;
-  VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id
-          << "): UMA GPU allocation successful (ptr=" << gpu_.cuda_mem->get() << ").";
+  LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id
+            << "): UMA GPU allocation successful (device=" << replica_key_.device.ordinal
+            << ", ptr=" << gpu_.cuda_mem->get() << ", size=" << artifact_size_ << ")";
   return set_state_locked(MemoryLocation::GPU, MemoryState::ALLOCATED);
 }
 
@@ -1276,6 +1278,25 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
         }
         LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): UMA plan_load ok; launching execute";
         auto plan = std::move(*plan_or);
+        {
+          std::string range_str;
+          range_str.reserve(plan.ranges.size() * 32);
+          range_str.append("[");
+          const size_t sample = std::min<size_t>(plan.ranges.size(), 8);
+          for (size_t i = 0; i < sample; ++i) {
+            if (i > 0) {
+              range_str.append(", ");
+            }
+            const auto& r = plan.ranges[i];
+            absl::StrAppend(&range_str, "{off=", r.first, ", len=", r.second, "}");
+          }
+          if (plan.ranges.size() > sample) {
+            range_str.append(", ...");
+          }
+          range_str.append("]");
+          LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): plan ranges device=" << device_id
+                    << " target=" << static_cast<int>(target_location) << " ranges=" << range_str;
+        }
         absl::Status exec_status =
             transfer_service_->execute(plan, target_location, *source, concurrency, gpu_ptr, gpu_allocation, device_id);
         if (!exec_status.ok()) {

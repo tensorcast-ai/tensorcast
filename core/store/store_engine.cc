@@ -39,17 +39,21 @@
 #include "core/store/replica/replica_config.h"
 // RFC-0007 helpers for safetensors canonical index
 #include <nlohmann/json.hpp>
+#include "core/store/components/eviction_service.h"
 #include "core/store/loader/canonical_index.h"
+#include "core/store/loader/index_reader.h"
 #include "core/store/loader/safetensors_util.h"
 #include "core/store/loader/view_ingest_executor.h"
 #include "core/store/loader/view_plan_source.h"
 #include "core/store/loader/view_planner.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
+#include "core/store/loader/verification_utils.h"
 // SegmentPlan linearization (PAD=0 hashing)
 #include "core/store/loader/segment_plan_source.h"
 #include "core/store/loading/materialize_orchestrator.h"
 #include "core/store/loading/replica_registration_helper.h"
+#include "core/store/view_utils.h"
 #include "gsl/pointers"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
@@ -73,38 +77,6 @@ using replica::Replica;
 
 namespace {
 
-std::string sanitize_view_id_for_filename(const std::string& view_id) {
-  if (view_id.empty()) {
-    return std::string("view");
-  }
-  std::string sanitized;
-  sanitized.reserve(view_id.size());
-  for (char ch : view_id) {
-    const unsigned char u = static_cast<unsigned char>(ch);
-    if ((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || ch == '_' || ch == '-' ||
-        ch == '.') {
-      sanitized.push_back(ch);
-    } else {
-      sanitized.push_back('_');
-    }
-  }
-  // Truncate extremely long identifiers from the front to keep filenames manageable.
-  constexpr size_t kMaxSuffixLength = 160;
-  if (sanitized.size() > kMaxSuffixLength) {
-    sanitized.erase(0, sanitized.size() - kMaxSuffixLength);
-  }
-  return sanitized;
-}
-
-std::filesystem::path verification_path_for_view(
-    const std::filesystem::path& artifact_path,
-    const std::optional<std::string>& view_id) {
-  if (!view_id.has_value()) {
-    return artifact_path / "verification.json";
-  }
-  return artifact_path / absl::StrCat("verification.view_", sanitize_view_id_for_filename(*view_id), ".json");
-}
-
 std::optional<std::string> ComputeViewDataHash(
     replica::Replica& replica,
     MemoryLocation location,
@@ -113,6 +85,12 @@ std::optional<std::string> ComputeViewDataHash(
   if (view_size_bytes == 0) {
     return std::nullopt;
   }
+  loader::verification::MemoryView mem_view;
+  mem_view.location = location;
+  mem_view.size_bytes = view_size_bytes;
+  mem_view.gpu_device_id = gpu_device_id;
+  std::shared_ptr<common::memory::GpuDeviceMemory> gpu_guard;
+
   if (location == MemoryLocation::GPU) {
     if (!gpu_device_id.has_value()) {
       return std::nullopt;
@@ -122,168 +100,26 @@ std::optional<std::string> ComputeViewDataHash(
       VLOG(1) << "ComputeViewDataHash: GPU allocation view unavailable";
       return std::nullopt;
     }
-    auto hash_or = loader::compute_data_multihash_from_gpu_memory(
-        gsl::not_null<void*>{view_or->base_ptr}, view_size_bytes, *gpu_device_id);
-    if (!hash_or.ok()) {
-      LOG(WARNING) << "compute_data_multihash_from_gpu_memory (view) failed: " << hash_or.status();
-      return std::nullopt;
-    }
-    return *hash_or;
-  }
-
-  const auto cpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::CPU);
-  if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
-    VLOG(1) << "ComputeViewDataHash: CPU memory unavailable for view hash";
-    return std::nullopt;
-  }
-  auto hash_or =
-      loader::compute_data_multihash_from_cpu_memory(gsl::not_null<const void*>{cpu_ptrs[0]}, view_size_bytes);
-  if (!hash_or.ok()) {
-    LOG(WARNING) << "compute_data_multihash_from_cpu_memory (view) failed: " << hash_or.status();
-    return std::nullopt;
-  }
-  return *hash_or;
-}
-
-struct TreeHashWithLeaves {
-  std::string multihash;
-  std::vector<std::vector<uint8_t>> leaf_digests;
-};
-
-absl::StatusOr<TreeHashWithLeaves> compute_tree_hash_and_leaves(
-    loader::SeekableSource& source,
-    uint64_t total_size,
-    size_t leaf_chunk_bytes) {
-  if (total_size == 0) {
-    return absl::InvalidArgumentError("total_size must be > 0");
-  }
-  if (leaf_chunk_bytes == 0) {
-    return absl::InvalidArgumentError("leaf_chunk_bytes must be > 0");
-  }
-  std::vector<std::vector<uint8_t>> leaves;
-  leaves.reserve(static_cast<size_t>((total_size + leaf_chunk_bytes - 1) / leaf_chunk_bytes));
-  std::vector<uint8_t> buffer(leaf_chunk_bytes);
-  uint64_t processed = 0;
-  while (processed < total_size) {
-    const size_t to_read = static_cast<size_t>(std::min<uint64_t>(leaf_chunk_bytes, total_size - processed));
-    auto read_or = source.read_at(processed, buffer.data(), to_read);
-    if (!read_or.ok()) {
-      return read_or.status();
-    }
-    const size_t got = read_or.value();
-    if (got == 0) {
-      return absl::DataLossError("short read while computing tree hash");
-    }
-    leaves.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), got)));
-    processed += got;
-  }
-  TreeHashWithLeaves out;
-  out.multihash = common::multibase_multihash_sha256(common::compute_tree_hash_root_sha256(leaves));
-  out.leaf_digests = std::move(leaves);
-  return out;
-}
-
-uint64_t align_up(uint64_t value, uint64_t align) {
-  if (align == 0) {
-    return value;
-  }
-  const uint64_t remainder = value % align;
-  return remainder == 0 ? value : value + (align - remainder);
-}
-
-uint64_t align_down(uint64_t value, uint64_t align) {
-  if (align == 0) {
-    return value;
-  }
-  return value - (value % align);
-}
-
-std::vector<uint64_t> compute_fully_covered_canonical_leaf_indices(
-    absl::Span<const StoreEngine::CanonicalRange> ranges,
-    uint64_t chunk_bytes) {
-  if (chunk_bytes == 0) {
-    return {};
-  }
-  absl::flat_hash_set<uint64_t> indices;
-  for (const auto& range : ranges) {
-    if (range.length == 0) {
-      continue;
-    }
-    const uint64_t range_start = range.offset;
-    const uint64_t range_end = range.offset + range.length;
-    const uint64_t first_full = align_up(range_start, chunk_bytes);
-    const uint64_t last_full = align_down(range_end, chunk_bytes);
-    if (first_full >= last_full) {
-      continue;
-    }
-    for (uint64_t pos = first_full; pos < last_full; pos += chunk_bytes) {
-      indices.insert(pos / chunk_bytes);
-    }
-  }
-  std::vector<uint64_t> sorted(indices.begin(), indices.end());
-  std::sort(sorted.begin(), sorted.end());
-  return sorted;
-}
-
-absl::StatusOr<std::vector<std::vector<uint8_t>>> compute_canonical_leaf_digests(
-    const replica::Replica& replica,
-    bool use_cpu_memory,
-    void* gpu_ptr_hint,
-    int device_id,
-    uint64_t total_size_bytes,
-    absl::Span<const uint64_t> leaf_indices,
-    size_t chunk_bytes) {
-  std::vector<std::vector<uint8_t>> digests;
-  if (leaf_indices.empty()) {
-    return digests;
-  }
-  if (use_cpu_memory) {
+    gpu_guard = view_or->allocation;
+    mem_view.base_ptr = view_or->base_ptr;
+  } else {
     const auto cpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::CPU);
     if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
-      return absl::FailedPreconditionError("CPU pointer unavailable for canonical leaf digests");
+      VLOG(1) << "ComputeViewDataHash: CPU memory unavailable for view hash";
+      return std::nullopt;
     }
-    const auto* base = static_cast<const uint8_t*>(cpu_ptrs[0]);
-    digests.reserve(leaf_indices.size());
-    for (uint64_t idx : leaf_indices) {
-      const uint64_t offset = idx * chunk_bytes;
-      if (offset + chunk_bytes > total_size_bytes) {
-        continue;
-      }
-      digests.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(base + offset, chunk_bytes)));
-    }
-    return digests;
+    mem_view.base_ptr = const_cast<void*>(cpu_ptrs[0]);
   }
-  void* gpu_ptr = gpu_ptr_hint;
-  if (gpu_ptr == nullptr) {
-    const auto gpu_ptrs = replica.get_memory_manager().get_pointer(MemoryLocation::GPU);
-    if (!gpu_ptrs.empty()) {
-      gpu_ptr = gpu_ptrs[0];
+
+  auto hash_or = loader::verification::compute_data_multihash(mem_view);
+  if (!hash_or.ok()) {
+    if (!absl::IsNotFound(hash_or.status())) {
+      LOG(WARNING) << "compute_data_multihash (view) failed: " << hash_or.status();
     }
+    return std::nullopt;
   }
-  if (gpu_ptr == nullptr) {
-    return absl::FailedPreconditionError("GPU pointer unavailable for canonical leaf digests");
-  }
-  std::vector<uint8_t> buffer(chunk_bytes);
-  digests.reserve(leaf_indices.size());
-  for (uint64_t idx : leaf_indices) {
-    const uint64_t offset = idx * chunk_bytes;
-    if (offset + chunk_bytes > total_size_bytes) {
-      continue;
-    }
-    if (auto st = tensorcast::cuda::set_device(device_id); !st.ok()) {
-      return st;
-    }
-    auto copy_status = tensorcast::cuda::memcpy(
-        buffer.data(), static_cast<uint8_t*>(gpu_ptr) + offset, chunk_bytes, cudaMemcpyDeviceToHost);
-    if (!copy_status.ok()) {
-      return copy_status;
-    }
-    if (auto sync_status = tensorcast::cuda::device_synchronize(); !sync_status.ok()) {
-      return sync_status;
-    }
-    digests.push_back(common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), chunk_bytes)));
-  }
-  return digests;
+  (void)gpu_guard;
+  return *hash_or;
 }
 
 uint64_t sum_view_write_bytes(const loader::ViewWritePlan& write_plan) {
@@ -329,97 +165,10 @@ std::vector<StoreEngine::CanonicalRange> canonical_ranges_from_write_plan(const 
   return merged;
 }
 
-std::string build_view_spec_json(const loader::ViewSpec& spec) {
-  nlohmann::json tensors = nlohmann::json::object();
-  for (const auto& [tensor_name, ops] : spec.tensors) {
-    nlohmann::json tensor_json;
-    nlohmann::json ops_array = nlohmann::json::array();
-    for (const auto& op : ops.ops) {
-      nlohmann::json op_json;
-      switch (op.kind) {
-        case loader::ViewOp::Kind::kNarrow:
-          op_json["type"] = "narrow";
-          op_json["dim"] = op.narrow.dim;
-          op_json["start"] = op.narrow.start;
-          op_json["length"] = op.narrow.length;
-          break;
-        case loader::ViewOp::Kind::kTranspose:
-          op_json["type"] = "transpose";
-          op_json["dim0"] = op.transpose.dim0;
-          op_json["dim1"] = op.transpose.dim1;
-          break;
-      }
-      ops_array.push_back(std::move(op_json));
-    }
-    tensor_json["ops"] = std::move(ops_array);
-    tensors[tensor_name] = std::move(tensor_json);
-  }
-  nlohmann::json root;
-  root["tensors"] = std::move(tensors);
-  return root.dump();
-}
-
 } // namespace
 
 // (hashing utilities moved to core/common/artifact_hash.*)
 // GPU eviction helper kept internal to this translation unit.
-absl::Status try_evict_gpu_memory_impl(
-    ReplicaRegistry& registry,
-    DeviceManager& device_manager,
-    MetricsCollector& metrics,
-    int device_id,
-    size_t required_bytes) {
-  // Query initial free memory so we can track progress.
-  auto free_before_or = device_manager.get_free_memory(device_id);
-  if (!free_before_or.ok()) {
-    return free_before_or.status();
-  }
-  size_t free_before = free_before_or.value();
-
-  // Helper to check whether we have reclaimed enough GPU memory.
-  auto has_freed_enough = [&](size_t free_now) { return (free_now - free_before) >= required_bytes; };
-
-  // Iterate LRU instances – GPU only.
-  auto lru_instances = registry.get_lru_instances();
-  for (const auto& key : lru_instances) {
-    if (key.device.type != DeviceType::GPU || key.device.ordinal != device_id) {
-      continue; // Different device or CPU instance.
-    }
-
-    auto replica_or = registry.find(key);
-    if (!replica_or.ok()) {
-      continue;
-    }
-    const auto& replica = replica_or.value();
-
-    if (replica->get_memory_state(MemoryLocation::GPU) != MemoryState::LOADED) {
-      continue; // Nothing to free.
-    }
-
-    // Attempt to release GPU memory (safe mode to avoid mid-transfer memory).
-    auto st = replica->release_memory(MemoryLocation::GPU);
-    if (!st.ok()) {
-      continue; // Couldn't free – maybe busy.
-    }
-
-    metrics.record_memory_eviction();
-
-    // Update free memory reading.
-    auto free_now_or = device_manager.get_free_memory(device_id);
-    if (!free_now_or.ok()) {
-      // Non-fatal – continue trying.
-      continue;
-    }
-    size_t free_now = free_now_or.value();
-
-    if (has_freed_enough(free_now)) {
-      return absl::OkStatus();
-    }
-  }
-
-  return absl::ResourceExhaustedError("Could not free enough GPU memory for device " + std::to_string(device_id));
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Construction and Destruction
 // ═══════════════════════════════════════════════════════════════════════════
@@ -436,14 +185,18 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
           gsl::not_null<std::unique_ptr<components::DeviceManager>>(std::make_unique<components::DeviceManager>())),
       replica_registry_(
           gsl::not_null<std::unique_ptr<components::ReplicaRegistry>>(std::make_unique<components::ReplicaRegistry>())),
-      metrics_collector_(gsl::not_null<std::unique_ptr<components::MetricsCollector>>(
-          std::make_unique<components::MetricsCollector>())),
-      comm_manager_(gsl::not_null<std::shared_ptr<components::CommunicationManager>>(
-          std::make_shared<components::CommunicationManager>())),
-      memory_pool_(gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
-          std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
-      va_space_(gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
-          std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
+      metrics_collector_(
+          gsl::not_null<std::unique_ptr<components::MetricsCollector>>(
+              std::make_unique<components::MetricsCollector>())),
+      comm_manager_(
+          gsl::not_null<std::shared_ptr<components::CommunicationManager>>(
+              std::make_shared<components::CommunicationManager>())),
+      memory_pool_(
+          gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
+              std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
+      va_space_(
+          gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
+              std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
@@ -731,93 +484,43 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         "artifact_descriptor.json missing schema_version; canonical index v3 required");
   }
   if (descriptor_schema_version.has_value() && *descriptor_schema_version != "v3") {
-    return absl::FailedPreconditionError(absl::StrCat(
-        "Unsupported artifact descriptor schema_version='",
-        *descriptor_schema_version,
-        "'; canonical index v3 is required"));
+    return absl::FailedPreconditionError(
+        absl::StrCat(
+            "Unsupported artifact descriptor schema_version='",
+            *descriptor_schema_version,
+            "'; canonical index v3 is required"));
   }
 
   if (!canonical_index_json.has_value()) {
-    if (is_safetensors) {
-      if (existing_index_mh.has_value()) {
-        computed_index_mh = existing_index_mh;
+    auto index_info_or = loader::read_from_artifact_dir(artifact_path, target_device_id);
+    if (index_info_or.ok()) {
+      const loader::IndexInfo& info = *index_info_or;
+      canonical_index_json = info.canonical_index_json;
+      if (!info.index_multihash.empty()) {
+        computed_index_mh = info.index_multihash;
       }
-      std::vector<std::filesystem::path> st_files;
-      for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
-        if (entry.is_regular_file()) {
-          const auto name = entry.path().filename().string();
-          if (name.ends_with(".safetensors")) {
-            st_files.push_back(entry.path());
-          }
-        }
-      }
-      auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
-      if (index_bytes_or.ok()) {
-        canonical_index_json = index_bytes_or.value();
-        if (!computed_index_mh.has_value()) {
-          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
-          if (index_mh_or.ok()) {
-            computed_index_mh = *index_mh_or;
-          } else {
-            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
-          }
-        }
-        try {
-          nlohmann::json idx_json = nlohmann::json::parse(*canonical_index_json, nullptr, true);
-          for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
-            const auto& arr = it.value();
-            if (!arr.is_array() || arr.size() < 2) {
-              continue;
-            }
-            uint64_t off = arr[0].get<uint64_t>();
-            uint64_t sz = arr[1].get<uint64_t>();
-            logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
-          }
-        } catch (const std::exception& e) {
-          LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
-        }
-      } else {
-        LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
-      }
-    } else {
-      const auto index_json_path = artifact_path / "tensor_index.json";
-      try {
-        std::string raw_json;
-        if (std::filesystem::exists(index_json_path)) {
-          std::ifstream f(index_json_path);
-          nlohmann::json j;
-          f >> j;
-          raw_json = j.dump();
-        }
-        if (!raw_json.empty()) {
-          auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
-          const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
-          canonical_index_json = canonical_json;
-          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
-          if (index_mh_or.ok()) {
-            computed_index_mh = *index_mh_or;
-          } else {
-            LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
-          }
-          try {
-            nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
-            for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
-              const auto& arr = it.value();
-              if (!arr.is_array() || arr.size() < 2) {
-                continue;
-              }
-              uint64_t off = arr[0].get<uint64_t>();
-              uint64_t sz = arr[1].get<uint64_t>();
-              logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
-            }
-          } catch (const std::exception& e) {
-            LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
-          }
-        }
-      } catch (const std::exception& e) {
-        LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
-      }
+      logical_total_size = std::max<uint64_t>(logical_total_size, info.total_size_bytes);
+      is_safetensors = info.is_safetensors;
+    } else if (!absl::IsNotFound(index_info_or.status())) {
+      LOG(WARNING) << "Failed to resolve canonical index for '" << artifact_path.string()
+                   << "': " << index_info_or.status();
     }
+  } else {
+    auto info_or = loader::canonicalize_from_raw_json(*canonical_index_json, target_device_id);
+    if (info_or.ok()) {
+      const loader::IndexInfo& info = *info_or;
+      canonical_index_json = info.canonical_index_json;
+      if (!computed_index_mh.has_value() && !info.index_multihash.empty()) {
+        computed_index_mh = info.index_multihash;
+      }
+      logical_total_size = std::max<uint64_t>(logical_total_size, info.total_size_bytes);
+    } else if (!absl::IsNotFound(info_or.status())) {
+      LOG(WARNING) << "Failed to canonicalize index JSON: " << info_or.status();
+    }
+  }
+
+  if (!computed_index_mh.has_value() && existing_index_mh.has_value()) {
+    computed_index_mh = existing_index_mh;
   }
 
   if (!resolved_view_plan.has_value() && hints.variant.has_value()) {
@@ -898,7 +601,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
                  << "). Attempting GPU eviction on device " << target_device_id << " for ~" << required_bytes
                  << " bytes.";
 
-    auto evict_st = try_evict_gpu_memory_impl(
+    auto evict_st = components::evict_for_gpu(
         *replica_registry_, *device_manager_, *metrics_collector_, target_device_id, required_bytes);
 
     if (evict_st.ok()) {
@@ -980,89 +683,16 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
     }
   }
 
-  // Compute or obtain index multihash
-  if (is_safetensors) {
-    if (existing_index_mh.has_value()) {
-      computed_index_mh = existing_index_mh; // trust descriptor when present
-    }
-    std::vector<std::filesystem::path> st_files;
-    for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
-      if (entry.is_regular_file()) {
-        const auto name = entry.path().filename().string();
-        if (name.ends_with(".safetensors")) {
-          st_files.push_back(entry.path());
-        }
+  // Compute or obtain index multihash if still missing
+  if (!computed_index_mh.has_value() && canonical_index_json.has_value()) {
+    auto meta_or = loader::canonicalize_from_raw_json(*canonical_index_json, target_device_id);
+    if (meta_or.ok()) {
+      if (!meta_or->index_multihash.empty()) {
+        computed_index_mh = meta_or->index_multihash;
       }
-    }
-    auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
-    if (index_bytes_or.ok()) {
-      canonical_index_json = index_bytes_or.value();
-      if (!computed_index_mh.has_value()) {
-        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
-        if (index_mh_or.ok()) {
-          computed_index_mh = *index_mh_or;
-        } else {
-          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
-        }
-      }
-      try {
-        nlohmann::json idx_json = nlohmann::json::parse(*canonical_index_json, nullptr, true);
-        for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
-          const auto& arr = it.value();
-          if (!arr.is_array() || arr.size() < 2) {
-            continue;
-          }
-          uint64_t off = arr[0].get<uint64_t>();
-          uint64_t sz = arr[1].get<uint64_t>();
-          logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
-        }
-      } catch (const std::exception& e) {
-        LOG(WARNING) << "Failed to parse canonical index for total_size: " << e.what();
-      }
-    } else {
-      LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
-    }
-  } else {
-    // Standard partition format – read tensor_index.json and canonicalize bytes via nlohmann::json
-    const auto index_json_path = artifact_path / "tensor_index.json";
-    try {
-      // Read canonical index (JSON), then rebuild with stable grouping
-      std::string raw_json;
-      if (std::filesystem::exists(index_json_path)) {
-        std::ifstream f(index_json_path);
-        nlohmann::json j;
-        f >> j;
-        raw_json = j.dump();
-      }
-      if (!raw_json.empty()) {
-        // Apply stable canonicalization using C++ authority
-        auto rebuilt_or = loader::rebuild_stable_canonical_index(raw_json, target_device_id);
-        const std::string& canonical_json = rebuilt_or.ok() ? *rebuilt_or : raw_json;
-        canonical_index_json = canonical_json;
-        auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_json), "");
-        if (index_mh_or.ok()) {
-          computed_index_mh = *index_mh_or;
-        } else {
-          LOG(WARNING) << "Index multihash computation failed: " << index_mh_or.status();
-        }
-        // Determine logical total size from canonical index JSON
-        try {
-          nlohmann::json idx_json = nlohmann::json::parse(canonical_json);
-          for (auto it = idx_json.begin(); it != idx_json.end(); ++it) {
-            const auto& arr = it.value();
-            if (!arr.is_array() || arr.size() < 2) {
-              continue;
-            }
-            uint64_t off = arr[0].get<uint64_t>();
-            uint64_t sz = arr[1].get<uint64_t>();
-            logical_total_size = std::max<uint64_t>(logical_total_size, off + sz);
-          }
-        } catch (const std::exception& e) {
-          LOG(WARNING) << "Failed to parse canonical index JSON for total_size: " << e.what();
-        }
-      }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to read/parse tensor_index.json: " << e.what();
+      logical_total_size = std::max<uint64_t>(logical_total_size, meta_or->total_size_bytes);
+    } else if (!absl::IsNotFound(meta_or.status())) {
+      LOG(WARNING) << "Failed to recompute canonical index metadata: " << meta_or.status();
     }
   }
 
@@ -1190,109 +820,39 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
 
   // Default post-load lightweight verification when descriptor is present
   if (std::filesystem::exists(descriptor_path) && allow_verification_metadata) {
-    try {
-      struct VerificationBuffers {
-        std::vector<void*> ptrs;
-        std::vector<size_t> sizes;
-        int device_id{-1};
-        uint64_t total_size{0};
-        std::shared_ptr<common::memory::GpuDeviceMemory> gpu_guard;
-      };
-
-      auto prepare_buffers = [&]() -> VerificationBuffers {
-        VerificationBuffers buffers;
-        uint64_t resolved_size = 0;
-        if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
-          resolved_size = *sz_or;
-        } else {
-          resolved_size = logical_total_size;
-        }
-        buffers.total_size = resolved_size;
-        if (target_location == MemoryLocation::GPU && buffers.total_size > 0) {
-          auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
-          if (view_or.ok()) {
-            buffers.ptrs.push_back(view_or->base_ptr);
-            buffers.sizes.push_back(static_cast<size_t>(buffers.total_size));
-            buffers.device_id = target_device_id;
-            buffers.gpu_guard = view_or->allocation;
-          }
-        } else {
-          const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
-          if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr && buffers.total_size > 0) {
-            buffers.ptrs.push_back(cpu_ptrs[0]);
-            buffers.sizes.push_back(static_cast<size_t>(buffers.total_size));
-          }
-        }
-        return buffers;
-      };
-
-      const auto verification_path = verification_path_for_view(artifact_path, requested_view_id);
-      bool regenerate_metadata = !std::filesystem::exists(verification_path);
-      bool metadata_verified = false;
-
-      if (!regenerate_metadata) {
-        std::ifstream vf(verification_path);
-        if (vf.is_open()) {
-          std::stringstream vbuf;
-          vbuf << vf.rdbuf();
-          vf.close();
-          auto ver_or = common::ArtifactVerificationInfo::from_json(vbuf.str());
-          if (ver_or.ok()) {
-            const common::ArtifactVerificationInfo& info = *ver_or;
-            if ((!expected_byte_space_id.empty() || !info.byte_space_id.empty()) &&
-                info.byte_space_id != expected_byte_space_id) {
-              LOG(WARNING) << "Verification metadata at '" << verification_path.string()
-                           << "' was recorded for byte_space_id='" << info.byte_space_id << "', expected '"
-                           << expected_byte_space_id << "'; regenerating.";
-              regenerate_metadata = true;
-            } else {
-              auto buffers = prepare_buffers();
-              if (!buffers.ptrs.empty()) {
-                absl::Status vstatus = common::ArtifactVerifier::verify_artifact_data(
-                    buffers.ptrs, buffers.sizes, info, common::VerificationLevel::SEGMENT_HASHES, buffers.device_id);
-                if (!vstatus.ok()) {
-                  return absl::DataLossError(
-                      absl::StrCat("ARTIFACT_ID_MISMATCH: verification failed: ", vstatus.message()));
-                }
-                metadata_verified = true;
-              } else {
-                metadata_verified = true; // Nothing to verify (empty replica)
-              }
-            }
-          } else {
-            LOG(WARNING) << "Failed to parse verification metadata at '" << verification_path.string()
-                         << "': " << ver_or.status();
-            regenerate_metadata = true;
-          }
-        } else {
-          regenerate_metadata = true;
-        }
-      }
-
-      if (!metadata_verified && regenerate_metadata) {
-        auto buffers = prepare_buffers();
-        if (!buffers.ptrs.empty()) {
-          auto gen_or = common::ArtifactVerifier::generate_verification_info(
-              buffers.ptrs, buffers.sizes, buffers.device_id, common::VerificationLevel::SEGMENT_HASHES);
-          if (gen_or.ok()) {
-            auto info = *gen_or;
-            info.byte_space_id = expected_byte_space_id;
-            try {
-              std::ofstream vf(verification_path, std::ios::trunc);
-              if (vf.is_open()) {
-                vf << info.to_json();
-                vf.close();
-              }
-            } catch (const std::exception& e) {
-              LOG(WARNING) << "Failed to persist verification metadata at '" << verification_path.string()
-                           << "': " << e.what();
-            }
-          }
-        }
-      }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Post-load verification skipped due to error: " << e.what();
+    uint64_t resolved_size = 0;
+    if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
+      resolved_size = *sz_or;
+    } else {
+      resolved_size = logical_total_size;
     }
+
+    loader::verification::MemoryView verification_view;
+    verification_view.location = target_location;
+    verification_view.size_bytes = resolved_size;
+    verification_view.gpu_device_id =
+        (target_location == MemoryLocation::GPU) ? std::optional<int>(target_device_id) : std::nullopt;
+    std::shared_ptr<common::memory::GpuDeviceMemory> metadata_gpu_guard;
+
+    if (target_location == MemoryLocation::GPU && verification_view.size_bytes > 0) {
+      auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
+      if (view_or.ok()) {
+        metadata_gpu_guard = view_or->allocation;
+        verification_view.base_ptr = view_or->base_ptr;
+      }
+    } else if (target_location == MemoryLocation::CPU && verification_view.size_bytes > 0) {
+      const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+        verification_view.base_ptr = const_cast<void*>(cpu_ptrs[0]);
+      }
+    }
+
+    auto verification_status = loader::verification::reuse_or_generate_verification_json(
+        artifact_path, expected_byte_space_id, verification_view);
+    if (!verification_status.ok()) {
+      return verification_status;
+    }
+    (void)metadata_gpu_guard;
   } else if (std::filesystem::exists(descriptor_path) && !allow_verification_metadata) {
     VLOG(1) << "Skipping verification metadata reuse for unnamed view variant (no view_id provided).";
   }
@@ -1308,82 +868,43 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
         }
       }
       if (total > 0) {
+        loader::verification::MemoryView data_view;
+        data_view.location = target_location;
+        data_view.size_bytes = total;
+        data_view.gpu_device_id =
+            (target_location == MemoryLocation::GPU) ? std::optional<int>(target_device_id) : std::nullopt;
+        std::shared_ptr<common::memory::GpuDeviceMemory> data_gpu_guard;
         if (target_location == MemoryLocation::GPU) {
           auto view_or = replica->get_memory_manager().get_gpu_allocation_view();
           if (view_or.ok()) {
-            [[maybe_unused]] auto keep_gpu_allocation = view_or->allocation;
-            auto mh_or = loader::compute_data_multihash_from_gpu_memory(
-                gsl::not_null<void*>{view_or->base_ptr}, total, target_device_id);
-            if (mh_or.ok()) {
-              computed_data_mh = *mh_or;
-            }
+            data_gpu_guard = view_or->allocation;
+            data_view.base_ptr = view_or->base_ptr;
           }
         } else {
           const auto cpu_ptrs = replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
           if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
-            auto mh_or = loader::compute_data_multihash_from_cpu_memory(gsl::not_null<const void*>{cpu_ptrs[0]}, total);
-            if (mh_or.ok()) {
-              computed_data_mh = *mh_or;
-            }
+            data_view.base_ptr = const_cast<void*>(cpu_ptrs[0]);
           }
         }
+        auto mh_or = loader::verification::compute_data_multihash(data_view);
+        if (mh_or.ok()) {
+          computed_data_mh = mh_or.value();
+        }
+        (void)data_gpu_guard;
       }
     }
 
     if (computed_index_mh.has_value() && computed_data_mh.has_value()) {
-      try {
-        // 1) Persist artifact_descriptor.json
-        nlohmann::json j;
-        j["artifact_id"] = std::string("mi2:") + *computed_index_mh + ":" + *computed_data_mh;
-        j["index_multihash"] = *computed_index_mh;
-        j["data_multihash"] = *computed_data_mh;
-        j["schema_version"] = "v3";
-        // Encoding is JSON only per project decision
-        const auto index_json_path = artifact_path / "tensor_index.json";
-        j["encoding"] = "json";
-        uint64_t total_for_desc = logical_total_size;
-        if (total_for_desc == 0) {
-          if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
-            total_for_desc = *sz_or;
-          }
+      uint64_t total_for_desc = logical_total_size;
+      if (total_for_desc == 0) {
+        if (auto sz_or = replica->get_artifact_size(); sz_or.ok()) {
+          total_for_desc = *sz_or;
         }
-        j["total_size"] = total_for_desc;
-        nlohmann::json hp;
-        hp["chunk_size"] = 4 * 1024 * 1024;
-        hp["fanout"] = 2;
-        hp["algorithm"] = "sha2-256";
-        j["hash_params"] = hp;
-        std::ofstream of(descriptor_path);
-        if (!of.is_open()) {
-          return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write artifact_descriptor.json");
-        }
-        of << j.dump(2);
-
-        // 2) Optionally persist canonical index (JSON) if not already present
-        if (!std::filesystem::exists(index_json_path)) {
-          // Rebuild canonical index bytes from safetensors headers
-          std::vector<std::filesystem::path> st_files;
-          for (const auto& entry : std::filesystem::directory_iterator(artifact_path)) {
-            if (entry.is_regular_file()) {
-              const auto name = entry.path().filename().string();
-              if (name.ends_with(".safetensors")) {
-                st_files.push_back(entry.path());
-              }
-            }
-          }
-          auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(st_files);
-          if (index_bytes_or.ok()) {
-            // Write JSON index directly
-            std::ofstream oj(index_json_path);
-            if (!oj.is_open()) {
-              return absl::PermissionDeniedError("DESCRIPTOR_NOT_WRITABLE: cannot write tensor_index.json");
-            }
-            oj << index_bytes_or.value();
-            oj.close();
-          }
-        }
-      } catch (const std::exception& e) {
-        return absl::PermissionDeniedError(std::string("DESCRIPTOR_NOT_WRITABLE: ") + e.what());
+      }
+      auto desc_status = loader::verification::write_descriptor_if_absent(
+          artifact_path, *computed_index_mh, *computed_data_mh, total_for_desc, "json");
+      if (!desc_status.ok()) {
+        return desc_status;
       }
     }
   }
@@ -1703,38 +1224,7 @@ std::shared_ptr<replica::Replica> StoreEngine::get_or_create_replica(
 }
 
 absl::Status StoreEngine::try_evict_memory_for_replica(size_t required_size) {
-  // Prefer the new multi-device LRU ordering.
-  auto lru_instances = replica_registry_->get_lru_instances();
-
-  for (const auto& inst_key : lru_instances) {
-    auto replica_or = replica_registry_->find(inst_key);
-    if (!replica_or.ok()) {
-      continue;
-    }
-
-    const auto& replica = replica_or.value();
-
-    // Only attempt to free CPU memory for now – GPU eviction will be handled
-    // in a future iteration.
-    auto free_status = replica->release_memory(common::memory::MemoryLocation::CPU);
-    if (free_status.ok()) {
-      metrics_collector_->record_memory_eviction();
-      LOG(INFO) << "Evicted replica " << inst_key.artifact_id
-                << " (device=" << (inst_key.device.type == DeviceType::CPU ? "CPU" : "GPU") << ":"
-                << inst_key.device.ordinal << ") from CPU memory";
-
-      // Check if we have freed enough memory.
-      if (memory_pool_->get_available_size() >= required_size) {
-        return absl::OkStatus();
-      }
-    }
-  }
-
-  // No further legacy fallbacks – the new multi-device registry covers all
-  // cases.  If eviction above fails to free enough memory, report resource
-  // exhaustion.
-
-  return absl::ResourceExhaustedError("Could not free enough memory");
+  return components::evict_for_cpu(*replica_registry_, *memory_pool_, *metrics_collector_, required_size);
 }
 
 size_t StoreEngine::get_num_chunk_from_tensor_size(size_t tensor_size) const {
@@ -1906,7 +1396,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
       // Require an explicit artifact identifier so we can locate a source instance.
       // This avoids implicit coupling to disk_path or other hints and keeps COPY_ONLY semantics clear.
       if (canonical_artifact_id.empty()) {
-        return absl::InvalidArgumentError("COPY_ONLY requires a canonical artifact identifier");
+        return absl::InvalidArgumentError("COPY_ONLY requires hints.artifact_id (canonical artifact identifier)");
       }
 
       const auto candidates = replica_registry_->find_by_artifact(canonical_artifact_id);
@@ -1998,12 +1488,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
         }
         return handle;
       }
-      return absl::FailedPreconditionError(absl::StrCat(
-          "No suitable source instance for COPY_ONLY mode (artifact_id=",
-          canonical_artifact_id,
-          ", view_id=",
-          requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
-          ")"));
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "No suitable source instance for COPY_ONLY mode (artifact_id=",
+              canonical_artifact_id,
+              ", view_id=",
+              requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
+              ")"));
     }
 
     case MaterializeMode::LOAD_ONLY: {
@@ -2448,12 +1939,13 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
     if (view_opts.placement == ViewPlacement::kServer && view_plan->inverse_transform.requires_materialization) {
       auto info_or = device_manager_->get_gpu_info(reg.device_id);
       if (!info_or.ok()) {
-        return absl::FailedPreconditionError(absl::StrCat(
-            "SERVER placement for view registration requires GPU transpose support on device ",
-            reg.device_id,
-            "; retry with placement=CLIENT (",
-            info_or.status().message(),
-            ")"));
+        return absl::FailedPreconditionError(
+            absl::StrCat(
+                "SERVER placement for view registration requires GPU transpose support on device ",
+                reg.device_id,
+                "; retry with placement=CLIENT (",
+                info_or.status().message(),
+                ")"));
       }
     }
   }
@@ -2480,20 +1972,21 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
       size_t free_bytes = free_or.value();
       if (reg.total_size_bytes > free_bytes) {
         // Try to evict unused GPU memory first on the specific device
-        auto evict_status = try_evict_gpu_memory_impl(
+        auto evict_status = components::evict_for_gpu(
             *replica_registry_,
             *device_manager_,
             *metrics_collector_,
             reg.device_id,
             reg.total_size_bytes - free_bytes);
         if (!evict_status.ok()) {
-          return absl::ResourceExhaustedError(absl::StrCat(
-              "Insufficient GPU memory available. Requested: ",
-              reg.total_size_bytes,
-              " bytes, Free: ",
-              free_bytes,
-              ". ",
-              evict_status.message()));
+          return absl::ResourceExhaustedError(
+              absl::StrCat(
+                  "Insufficient GPU memory available. Requested: ",
+                  reg.total_size_bytes,
+                  " bytes, Free: ",
+                  free_bytes,
+                  ". ",
+                  evict_status.message()));
         }
       }
     }
@@ -2630,11 +2123,12 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       return absl::FailedPreconditionError("view executor missing for server placement registration");
     }
     if (!view_state.executor->is_complete()) {
-      return absl::FailedPreconditionError(absl::StrCat(
-          "view bytes incomplete; expected ",
-          view_state.expected_view_bytes,
-          " received ",
-          view_state.executor->ingested_bytes()));
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "view bytes incomplete; expected ",
+              view_state.expected_view_bytes,
+              " received ",
+              view_state.executor->ingested_bytes()));
     }
     auto finalize_status = view_state.executor->finalize(MemoryLocation::GPU, entry->gpu_ptr, entry->device_id);
     if (!finalize_status.ok()) {
@@ -2898,7 +2392,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         LOG(WARNING) << "Failed to rebuild segment plan for view hash: " << plan_or.status();
       }
     }
-    view_spec_json = build_view_spec_json(entry->view_state->options.spec);
+    view_spec_json = view::build_view_spec_json(entry->view_state->options.spec);
     leaf_chunk_bytes =
         options_.artifact_chunk_bytes == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : options_.artifact_chunk_bytes;
 
@@ -2914,7 +2408,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
             gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
         loader::ViewPlanSource view_source(
             gsl::not_null<loader::SeekableSource*>{&canonical_source}, entry->view_state->plan.forward.selection);
-        auto view_hash_or = compute_tree_hash_and_leaves(
+        auto view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
             view_source, entry->view_state->plan.forward.selection.total_bytes, *leaf_chunk_bytes);
         if (view_hash_or.ok()) {
           view_data_hash = view_hash_or->multihash;
@@ -2934,19 +2428,32 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         }
       }
     }
-    canonical_leaf_indices = compute_fully_covered_canonical_leaf_indices(
+    canonical_leaf_indices = view::compute_fully_covered_canonical_leaf_indices(
         entry->view_state->options.canonical_ranges, leaf_chunk_bytes.value_or(0));
   }
 
   if (entry->view_state && leaf_chunk_bytes.has_value() && !canonical_leaf_indices.empty()) {
-    auto canonical_digest_or = compute_canonical_leaf_digests(
-        *entry->replica,
-        entry->plan == PendingRegistrationEntry::Plan::CPU,
-        entry->gpu_ptr,
-        entry->device_id,
-        entry->size_bytes,
-        canonical_leaf_indices,
-        *leaf_chunk_bytes);
+    loader::verification::MemoryView canonical_view;
+    canonical_view.size_bytes = entry->size_bytes;
+    if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
+      canonical_view.location = MemoryLocation::CPU;
+      const auto cpu_ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+        canonical_view.base_ptr = const_cast<void*>(cpu_ptrs[0]);
+      }
+    } else {
+      canonical_view.location = MemoryLocation::GPU;
+      canonical_view.gpu_device_id = entry->device_id;
+      void* gpu_ptr = entry->gpu_ptr;
+      if (gpu_ptr == nullptr) {
+        const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+        gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
+      }
+      canonical_view.base_ptr = gpu_ptr;
+    }
+
+    auto canonical_digest_or = loader::verification::compute_canonical_leaf_digests(
+        canonical_view, absl::Span<const uint64_t>(canonical_leaf_indices), *leaf_chunk_bytes);
     if (!canonical_digest_or.ok()) {
       LOG(WARNING) << "Failed to compute canonical leaf digests for view registration: "
                    << canonical_digest_or.status();
@@ -3006,7 +2513,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     components::VariantViewUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
-    update.view_spec_json = view_spec_json.value_or(build_view_spec_json(entry->view_state->options.spec));
+    update.view_spec_json = view_spec_json.value_or(view::build_view_spec_json(entry->view_state->options.spec));
     update.view_size_bytes = entry->view_state->plan.forward.view_size_bytes;
     update.view_data_hash = view_data_hash;
     update.mark_verified = true;
@@ -3114,7 +2621,12 @@ absl::StatusOr<std::string> StoreEngine::compute_view_data_hash_from_source(
     return absl::InvalidArgumentError("view plan selection has zero length");
   }
   loader::ViewPlanSource view_source(gsl::not_null<loader::SeekableSource*>{&base_source}, plan.selection);
-  return loader::compute_data_multihash_from_seekable_source(view_source, plan.selection.total_bytes, leaf_chunk_bytes);
+  auto hash_or = loader::verification::compute_view_tree_hash_and_leaves(
+      view_source, plan.selection.total_bytes, leaf_chunk_bytes);
+  if (!hash_or.ok()) {
+    return hash_or.status();
+  }
+  return hash_or->multihash;
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {

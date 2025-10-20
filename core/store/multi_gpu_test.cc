@@ -321,14 +321,15 @@ TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
 
   hints.disk_path = artifact_id;
   auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  REQUIRE(handle0.ok());
+  REQUIRE(handle0.value().wait_ready(std::chrono::milliseconds(30000)).ok());
+
   auto handle1 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
 
   LOG(INFO) << "handle0: " << handle0.status().message();
   LOG(INFO) << "handle1: " << handle1.status().message();
-  REQUIRE(handle0.ok());
   REQUIRE(handle1.ok());
 
-  REQUIRE(handle0.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   REQUIRE(handle1.value().wait_ready(std::chrono::milliseconds(30000)).ok());
 
   // Verify full content on both GPUs to ensure data correctness before unload

@@ -18,6 +18,11 @@ Key files:
 - Replica + ReplicaLoadController: core/store/replica/*
 - Loaders and pump: core/store/loader/*
 - View planning + execution: core/store/loader/view_planner.{h,cc}, core/store/loader/view_plan_source.{h,cc}
+- Service helpers:
+  - IndexService: core/store/loader/index_reader.{h,cc}
+  - VerificationService: core/store/loader/verification_utils.{h,cc}
+  - EvictionService: core/store/components/eviction_service.{h,cc}
+  - View spec helpers: core/store/view_utils.{h,cc}
 - Components: core/store/components/*
 - Types: core/store/loading/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
@@ -250,7 +255,7 @@ stateDiagram-v2
 
 
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. TransferService tracks every in-flight H2D submission and waits for the outstanding `AsyncCopyManager` handles before completing so GPU residency is fully committed prior to verification.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration
 
@@ -410,7 +415,8 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - Variant replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_variant_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
-- Note on verification: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. When the P2P source provides `verification_json` (e.g., via a sender daemon’s `LockTransportChunks`), `StoreEngine::ingest_from_p2p_internal()` parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a DataLoss error and aborts materialization.
+- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; `StoreEngine::ingest_from_p2p_internal()` parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
+- Debug visibility: enabling `--v=1` (or higher) now emits the key-point triplet and artifact size whenever verification metadata is regenerated or reused. These logs include the active CUDA device id so stale metadata vs. stale GPU residency issues can be distinguished quickly when diagnosing DataLoss failures.
 ## Granularity Terminology and Invariants
 
 - Artifact layout chunk: `artifact_chunk_bytes` (VS/UMA)

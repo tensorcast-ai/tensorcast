@@ -80,6 +80,7 @@ TEST_CASE("ArtifactVerifier Direct Testing", "[verification][direct]") {
     REQUIRE(!invalid.ok());
     REQUIRE_THAT(invalid.status().ToString(), ContainsSubstring("parse error"));
     auto incomplete = ArtifactVerificationInfo::from_json("{\"artifact_size\": 123}");
-    REQUIRE(incomplete.ok());
+    REQUIRE(!incomplete.ok());
+    CHECK(incomplete.status().code() == absl::StatusCode::kFailedPrecondition);
   }
 }

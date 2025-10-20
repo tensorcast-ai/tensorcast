@@ -92,6 +92,7 @@ sc_cc_library(
     hdrs = ["artifact_verification.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_hash_lib",
         ":cuda_api_lib",
         ":error_handling_lib",
         "@abseil-cpp//absl/strings",

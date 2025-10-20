@@ -320,7 +320,6 @@ absl::Status StreamingPinnedBuffer::mark_chunk_ready(int slot_id, size_t global_
   set_slot_state_unsafe(slot_id, SlotState::kReady);
   chunks_produced_++;
   ready_cv_.Signal();
-
   return absl::OkStatus();
 }
 
@@ -355,7 +354,6 @@ absl::StatusOr<StreamingPinnedBuffer::ReadyChunk> StreamingPinnedBuffer::get_rea
   }
   set_slot_state_unsafe(chunk.slot_id, SlotState::kConsumerOwned);
   slot_chunk_ids_[chunk.slot_id] = chunk.global_chunk_id;
-
   return chunk;
 }
 
@@ -384,7 +382,6 @@ absl::Status StreamingPinnedBuffer::return_chunk(int slot_id) {
   free_queue_.push(slot_id);
   chunks_consumed_++;
   free_cv_.Signal();
-
   return absl::OkStatus();
 }
 

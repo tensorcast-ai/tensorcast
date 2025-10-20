@@ -26,6 +26,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/view_utils.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store {
@@ -110,10 +111,7 @@ class StoreEngine {
 
   enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
 
-  struct CanonicalRange {
-    uint64_t offset{0};
-    uint64_t length{0};
-  };
+  using CanonicalRange = view::CanonicalRange;
 
   struct ViewRegistration {
     std::string view_id;

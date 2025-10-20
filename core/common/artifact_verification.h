@@ -31,9 +31,24 @@ struct ArtifactVerificationInfo {
   std::array<uint64_t, 16> sample_values = {}; // Values at 16 sample points
   std::array<uint64_t, 3> key_values = {}; // Values at start, middle, end
 
+  // Integrity metadata for persisted verification artifacts.
+  // `metadata_signature` is the canonical SHA-256 hex digest of the serialized
+  // verification payload (excluding the signature field itself). These fields
+  // are derived data and are populated by the serializer/deserializer helpers.
+  std::string metadata_signature;
+  bool signature_present = false;
+  bool signature_valid = false;
+
   // Serialize to/from JSON string for storage
   [[nodiscard]] std::string to_json() const;
   static absl::StatusOr<ArtifactVerificationInfo> from_json(const std::string& json_str);
+
+  // Recompute and refresh the metadata signature fields based on current
+  // verification values.
+  void refresh_metadata_signature();
+
+  // Compute the canonical metadata signature without mutating the struct.
+  [[nodiscard]] std::string compute_metadata_signature() const;
 } __attribute__((aligned(128)));
 
 class ArtifactVerifier {

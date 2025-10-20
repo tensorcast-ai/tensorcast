@@ -404,6 +404,29 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2h(
   return handle;
 }
 
+absl::Status AsyncCopyManager::synchronize_h2d_stream(int device_id) {
+  if (device_id < 0) {
+    return absl::InvalidArgumentError("invalid device_id for H2D stream synchronize");
+  }
+  cudaStream_t stream = nullptr;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = h2d_streams_.find(device_id);
+    if (it == h2d_streams_.end()) {
+      return absl::OkStatus();
+    }
+    stream = it->second;
+  }
+  if (stream == nullptr) {
+    return absl::OkStatus();
+  }
+  auto set_dev_status = cuda::set_device(device_id);
+  if (!set_dev_status.ok()) {
+    return set_dev_status;
+  }
+  return cuda::stream_synchronize(stream);
+}
+
 void AsyncCopyManager::enqueue_callback_(std::function<void()> cb) {
   if (!cb) {
     return;

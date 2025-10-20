@@ -252,6 +252,63 @@ class DelayedAsyncSink : public PositionedSink, public AsyncPositionedSink {
   std::atomic<int> callbacks_{0};
 };
 
+// Async sink that defers error notification until after a fixed delay. The pump
+// completes before the callback fires, reproducing the post-teardown failure.
+class PostPumpFailureSink : public PositionedSink, public AsyncPositionedSink {
+ public:
+  explicit PostPumpFailureSink(absl::Duration delay)
+      : delay_(delay),
+        fired_count_(std::make_shared<std::atomic<int>>(0)),
+        failure_status_(absl::InternalError("async callback failure (delayed)")) {}
+
+  absl::Status write_at(uint64_t, const void*, size_t) override {
+    return absl::UnimplementedError("PostPumpFailureSink expects async write");
+  }
+
+  absl::Status close() override {
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<tensorcast::common::CopyHandle> write_at_async(
+      uint64_t,
+      const void* src,
+      size_t bytes,
+      const AsyncWriteOptions& options = AsyncWriteOptions{}) override {
+    tensorcast::common::HostRegion hsrc{.base = src, .length = bytes, .pinned = true};
+    if (scratch_.size() < bytes) {
+      scratch_.resize(bytes);
+    }
+    tensorcast::common::HostRegion hdst{.base = scratch_.data(), .length = bytes, .pinned = true};
+    tensorcast::common::CopyOptions copy_opts = options.copy_options.value_or(tensorcast::common::CopyOptions{});
+    auto downstream = copy_opts.callbacks.on_copy_done;
+    auto fired = fired_count_;
+    const absl::Duration delay = delay_;
+    const absl::Status failure = failure_status_;
+    copy_opts.callbacks.on_copy_done = [downstream, fired, delay, failure](absl::Status) {
+      std::thread([downstream, fired, delay, failure]() {
+        absl::SleepFor(delay);
+        if (downstream) {
+          downstream(failure);
+        }
+        if (fired) {
+          fired->fetch_add(1, std::memory_order_relaxed);
+        }
+      }).detach();
+    };
+    return tensorcast::common::AsyncCopyManager::instance().submit_h2h(hsrc, hdst, copy_opts);
+  }
+
+  int callbacks_fired() const {
+    return fired_count_ ? fired_count_->load(std::memory_order_relaxed) : 0;
+  }
+
+ private:
+  absl::Duration delay_;
+  std::shared_ptr<std::atomic<int>> fired_count_;
+  std::vector<char> scratch_;
+  const absl::Status failure_status_;
+};
+
 TEST_CASE("Pump uses AsyncPositionedSink path", "[pump][async]") {
   const size_t total = 32 * 1024;
   TestSeekableSource src(total);
@@ -309,4 +366,22 @@ TEST_CASE("Pump async tolerates delayed callbacks", "[pump][async][delay]") {
   REQUIRE(sink.max_inflight() >= 1);
   REQUIRE(pool.returned_slots().size() == total / pool.chunk_size());
   REQUIRE(sink.callback_count() == expected_chunks);
+}
+
+TEST_CASE("Pump async surfaces delayed callback failure", "[pump][async][regression]") {
+  const size_t total = 4 * 1024;
+  TestSeekableSource src(total);
+  PostPumpFailureSink sink(absl::Milliseconds(10));
+  TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/1);
+  std::vector<Range> ranges{{0ULL, total}};
+
+  auto status = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1);
+
+  const absl::Time deadline = absl::Now() + absl::Milliseconds(200);
+  while (sink.callbacks_fired() == 0 && absl::Now() < deadline) {
+    absl::SleepFor(absl::Milliseconds(1));
+  }
+  REQUIRE(sink.callbacks_fired() > 0);
+  REQUIRE(!status.ok());
+  REQUIRE(status.message().find("async callback failure") != std::string::npos);
 }
