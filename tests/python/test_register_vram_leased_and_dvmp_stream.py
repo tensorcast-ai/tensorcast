@@ -13,7 +13,6 @@ from concurrent.futures import CancelledError
 from tensorcast import ArtifactError, startup
 from tensorcast.api import PlanType, RegisterArtifactOptions, Store
 from tensorcast.api.store import RegisteredArtifact as StoreRegisteredArtifact
-from tensorcast.types import LeaseSegment
 from tests.python.utils.daemon import start_daemon_binary
 
 
@@ -100,35 +99,37 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path, monkeypatch):
                 handshake,
                 cancel_event=None,
             ):
-                def _export_cuda_ipc_handle(ptr: int) -> bytes:
-                    return register_mod.get_cuda_memory_handle(ctx.device_id, int(ptr))
+                original_feed = handle.client.feed_register_artifact_lease_segments
 
-                segments: list[LeaseSegment] = []
-                chunks = list(layout.unique_chunks)
-                random.shuffle(chunks)
-                for src_ptr, size, dst_off, _ in chunks:
-                    if cancel_event and cancel_event.is_set():
-                        raise CancelledError
-                    handle_bytes = _export_cuda_ipc_handle(int(src_ptr))
-                    segments.append(
-                        register_mod.LeaseSegment(
-                            device_id=int(ctx.device_id),
-                            cuda_ipc_handle=handle_bytes,
-                            base_addr=0,
-                            length=int(size),
-                            dst_offset=int(dst_off),
-                        )
+                def shuffled_feed(
+                    registration_id,
+                    segments,
+                    *,
+                    storages=None,
+                    tensor_aliases=None,
+                ):
+                    shuffled_segments = list(segments)
+                    random.shuffle(shuffled_segments)
+                    return original_feed(
+                        registration_id,
+                        shuffled_segments,
+                        storages=storages,
+                        tensor_aliases=tensor_aliases,
                     )
-                if cancel_event and cancel_event.is_set():
-                    raise CancelledError
-                ok = handle.client.feed_register_artifact_lease_segments(
-                    handle.registration_id, segments
-                )
-                if not ok:
-                    raise register_mod.FeedFailed(
-                        "Lease segments feed failed (shuffled)"
+
+                handle.client.feed_register_artifact_lease_segments = shuffled_feed
+                try:
+                    return original_upload(
+                        self,
+                        artifact=artifact,
+                        ctx=ctx,
+                        layout=layout,
+                        handle=handle,
+                        handshake=handshake,
+                        cancel_event=cancel_event,
                     )
-                return artifact
+                finally:
+                    handle.client.feed_register_artifact_lease_segments = original_feed
 
             monkeypatch.setattr(
                 register_mod._LeaseUploader,

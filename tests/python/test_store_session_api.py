@@ -16,7 +16,12 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._materialize import MaterializedArtifact
-from tensorcast.api._register import BuildContext, CoalescedLayout, RegistrationResult
+from tensorcast.api._register import (
+    BuildContext,
+    CoalescedLayout,
+    RegistrationResult,
+    ViewRegistrationContext,
+)
 from tensorcast.api.store import (
     ArtifactError,
     ArtifactFuture,
@@ -175,7 +180,9 @@ class FakeEnvironment:
         daemon_address: str,
         cancel_event: threading.Event | None,
         on_begin: Callable[[FakeHandle], None] | None,
+        view: ViewRegistrationContext | None = None,
     ) -> RegistrationResult:
+        del view
         handle = FakeHandle()
         if on_begin is not None:
             on_begin(handle)
