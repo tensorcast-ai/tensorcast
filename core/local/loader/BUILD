@@ -15,6 +15,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":chunk_loader",
-        "//core/local/chunk:data_chunk_lib",
+        "//core/local/chunk:chunk_lib",
     ],
 )

@@ -21,7 +21,7 @@ cc_binary(
         "-lrt",  # 链接 clock_gettime 等函数
     ],
     deps = [
-        "//core/local/chunk:data_chunk_lib",
+        "//core/local/chunk:chunk_lib",
         "//core/local/loader:disk_chunk_loader",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/log:initialize",

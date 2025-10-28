@@ -6,7 +6,7 @@
 
 ```
 core/local/
-├── chunk/        # 数据块相关实现（DataChunk）
+├── chunk/        # 数据块相关实现（DataChunk、CPUDataChunk）
 ├── loader/       # 数据加载器实现
 ├── test/         # 单元测试
 └── benchmark/    # 性能基准测试

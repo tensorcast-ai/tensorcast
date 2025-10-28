@@ -1,9 +1,16 @@
 load("//core:BUILD.bzl", "sc_cc_library")
 
 sc_cc_library(
-    name = "data_chunk_lib",
-    srcs = ["data_chunk.cc"],
-    hdrs = ["data_chunk.h"],
+    name = "chunk_lib",
+    srcs = [
+        "chunk.cc",
+        "cpu_data_chunk.cc",
+        "data_chunk.cc",
+    ],
+    hdrs = [
+        "chunk.h",
+        "data_chunk.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//core/store:store_engine",

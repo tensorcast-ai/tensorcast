@@ -2,11 +2,16 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sys/mman.h>
+#include <unistd.h>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
+#include "core/local/chunk/chunk.h"
 #include "core/local/chunk/data_chunk.h" // for DataChunk
 #include "core/local/loader/disk_chunk_loader.h" // for BackendFile
+#include "core/store/device_types.h"
 #include "core/testing/common.h"
 
 namespace fs = std::filesystem;
@@ -16,6 +21,61 @@ using tensorcast::local::loader::BackendFile;
 using tensorcast::local::loader::DiskChunkLoader;
 using tensorcast::testing::create_dummy_file;
 using tensorcast::testing::read_file_content;
+
+using tensorcast::local::chunk::Chunk;
+
+namespace {
+
+tensorcast::store::DeviceKey MakeCpuDeviceKey() {
+  tensorcast::store::DeviceKey key;
+  key.type = tensorcast::DeviceType::CPU;
+  key.ordinal = -1;
+  key.uuid = "cpu";
+  return key;
+}
+
+struct ChunkWithData {
+  std::shared_ptr<tensorcast::local::chunk::Chunk> chunk;
+  std::shared_ptr<DataChunk> data_chunk;
+};
+
+size_t GetPageSize() {
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  REQUIRE(page_size > 0);
+  return static_cast<size_t>(page_size);
+}
+
+class DataChunkBuilder {
+ public:
+  explicit DataChunkBuilder(size_t chunk_size, off_t r_offset = 0)
+      : chunk_size_(chunk_size), r_offset_(r_offset), device_key_(MakeCpuDeviceKey()) {}
+
+  ChunkWithData make() const {
+    auto chunk = std::make_shared<tensorcast::local::chunk::Chunk>(chunk_size_, /*replica_ptr=*/nullptr, r_offset_);
+    chunk->generate_data_chunks({device_key_});
+    DataChunk* ptr = chunk->get_data_chunk(device_key_);
+    REQUIRE(ptr != nullptr);
+    return {chunk, std::shared_ptr<DataChunk>(chunk, ptr)};
+  }
+
+ private:
+  size_t chunk_size_;
+  off_t r_offset_;
+  tensorcast::store::DeviceKey device_key_;
+};
+
+void ReleaseChunk(DataChunk* chunk) {
+  if (chunk == nullptr) {
+    return;
+  }
+  (void)chunk->drop();
+  if (chunk->base_addr != nullptr) {
+    ::munmap(chunk->base_addr, chunk->get_size());
+    chunk->base_addr = nullptr;
+  }
+}
+
+} // namespace
 
 TEST_CASE("BackendFile get_or_create deduplicates by dev+ino and supports pread", "[backendfile]") {
   fs::path tmpdir = fs::temp_directory_path() / "backendfile_test";
@@ -74,23 +134,28 @@ TEST_CASE("DiskChunkLoader load_async reads full file", "[disk_chunk_loader][asy
   fs::create_directories(tmpdir);
 
   const fs::path file_path = tmpdir / "data.bin";
-  const size_t file_size = 4096;
+  const size_t file_size = GetPageSize();
   REQUIRE(create_dummy_file(file_path, file_size, 'K'));
 
   const auto expected = read_file_content(file_path);
   REQUIRE(expected.size() == file_size);
 
-  std::vector<char> buf(file_size, 0);
-  DataChunk chunk;
-  chunk.size = file_size;
-  chunk.cpu_base = buf.data();
+  DataChunkBuilder builder(file_size);
+  auto chunk_with_data = builder.make();
+  auto* chunk = chunk_with_data.data_chunk.get();
+  auto* buf_ptr = static_cast<char*>(chunk->base_addr);
+  REQUIRE(buf_ptr != nullptr);
 
-  DiskChunkLoader loader(&chunk, file_path, /*f_offset=*/0);
+  std::memset(buf_ptr, 0, file_size);
+
+  DiskChunkLoader loader(chunk, file_path, /*f_offset=*/0);
   auto fut = loader.load_async();
   REQUIRE(fut.valid());
   auto st = fut.get();
   REQUIRE(st.ok());
-  REQUIRE(buf == expected);
+  REQUIRE(std::memcmp(buf_ptr, expected.data(), file_size) == 0);
+
+  ReleaseChunk(chunk);
 
   fs::remove_all(tmpdir);
 }
@@ -103,35 +168,42 @@ TEST_CASE("DiskChunkLoader load_async supports offset and repeated calls", "[dis
   fs::create_directories(tmpdir);
 
   const fs::path file_path = tmpdir / "data2.bin";
-  const size_t file_size = 2048;
+  const size_t page_size = GetPageSize();
+  const size_t file_size = page_size * 2;
   REQUIRE(create_dummy_file(file_path, file_size, 'Z'));
 
   const auto expected = read_file_content(file_path);
-  const size_t half = file_size / 2;
+  const size_t half = page_size;
 
   // First: read second half using offset
-  std::vector<char> half_buf(half, 0);
-  DataChunk chunk;
-  chunk.size = half;
-  chunk.cpu_base = half_buf.data();
+  DataChunkBuilder half_builder(half);
+  auto half_chunk_with_data = half_builder.make();
+  auto* half_chunk = half_chunk_with_data.data_chunk.get();
+  REQUIRE(half_chunk->base_addr != nullptr);
+
   {
-    DiskChunkLoader loader(&chunk, file_path, /*f_offset=*/static_cast<off_t>(half));
+    DiskChunkLoader loader(half_chunk, file_path, /*f_offset=*/static_cast<off_t>(half));
     auto fut = loader.load_async();
     auto st = fut.get();
     REQUIRE(st.ok());
   }
-  REQUIRE(std::vector<char>(expected.begin() + half, expected.end()) == half_buf);
+  REQUIRE(std::memcmp(half_chunk->base_addr, expected.data() + half, half) == 0);
 
   // Second: reuse different buffer with full read via new loader
-  std::vector<char> full_buf(file_size, 0);
-  chunk.size = file_size;
-  chunk.cpu_base = full_buf.data();
+  DataChunkBuilder full_builder(file_size);
+  auto full_chunk_with_data = full_builder.make();
+  auto* full_chunk = full_chunk_with_data.data_chunk.get();
+  REQUIRE(full_chunk->base_addr != nullptr);
+
   {
-    DiskChunkLoader loader(&chunk, file_path, /*f_offset=*/0);
+    DiskChunkLoader loader(full_chunk, file_path, /*f_offset=*/0);
     auto st = loader.load_async().get();
     REQUIRE(st.ok());
   }
-  REQUIRE(full_buf == expected);
+  REQUIRE(std::memcmp(full_chunk->base_addr, expected.data(), file_size) == 0);
+
+  ReleaseChunk(half_chunk);
+  ReleaseChunk(full_chunk);
 
   fs::remove_all(tmpdir);
 }

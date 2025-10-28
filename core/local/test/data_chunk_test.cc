@@ -1,7 +1,9 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include "core/local/chunk/chunk.h"
 #include "core/local/chunk/data_chunk.h"
 #include "core/local/loader/disk_chunk_loader.h"
+#include "core/store/device_types.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -14,6 +16,7 @@
 #include <future>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <system_error>
 #include <vector>
 
@@ -22,6 +25,52 @@
 namespace tensorcast::local::chunk {
 
 namespace {
+
+store::DeviceKey MakeCpuDeviceKey() {
+  store::DeviceKey key;
+  key.type = DeviceType::CPU;
+  key.ordinal = -1;
+  key.uuid = "cpu";
+  return key;
+}
+
+struct ChunkWithData {
+  std::shared_ptr<Chunk> chunk;
+  std::shared_ptr<DataChunk> data_chunk;
+};
+
+class DataChunkBuilder {
+ public:
+  explicit DataChunkBuilder(size_t chunk_size, off_t r_offset = 0)
+      : chunk_size_(chunk_size), r_offset_(r_offset), device_key_(MakeCpuDeviceKey()) {}
+
+  ChunkWithData make() const {
+    auto chunk = std::make_shared<Chunk>(chunk_size_, /*replica_ptr=*/nullptr, r_offset_);
+    chunk->generate_data_chunks({device_key_});
+    DataChunk* ptr = chunk->get_data_chunk(device_key_);
+    REQUIRE(ptr != nullptr);
+    return {chunk, std::shared_ptr<DataChunk>(chunk, ptr)};
+  }
+
+  const store::DeviceKey& device_key() const {
+    return device_key_;
+  }
+
+  size_t chunk_size() const {
+    return chunk_size_;
+  }
+
+ private:
+  size_t chunk_size_;
+  off_t r_offset_;
+  store::DeviceKey device_key_;
+};
+
+size_t GetPageSize() {
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  REQUIRE(page_size > 0);
+  return static_cast<size_t>(page_size);
+}
 
 struct TempFileFixture {
   explicit TempFileFixture(size_t size_bytes) : data_(size_bytes) {
@@ -60,20 +109,13 @@ struct TempFileFixture {
   std::vector<std::uint8_t> data_;
 };
 
-std::vector<std::shared_ptr<DataChunk>> MakeChunks(size_t count) {
+std::vector<std::shared_ptr<DataChunk>> MakeDataChunks(size_t count, size_t chunk_size) {
+  DataChunkBuilder builder(chunk_size);
   std::vector<std::shared_ptr<DataChunk>> chunks;
   chunks.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    auto chunk = std::make_shared<DataChunk>();
-    chunk->size = 4096;
-    chunk->gpu_base = nullptr;
-    chunk->cpu_base = nullptr;
-    chunk->replica = nullptr;
-    chunk->r_offset = 0;
-    chunk->in_dram = true;
-    chunk->in_gpu = false;
-    chunk->preempt_level = 0;
-    chunks.push_back(std::move(chunk));
+    auto pair = builder.make();
+    chunks.push_back(std::move(pair.data_chunk));
   }
   return chunks;
 }
@@ -85,7 +127,8 @@ std::vector<std::shared_ptr<DataChunk>> CopyRefs(const std::vector<std::shared_p
 } // namespace
 
 TEST_CASE("ChunkPinLease sets and clears lock state for single lease", "[data_chunk]") {
-  auto chunks = MakeChunks(3);
+  const size_t chunk_size = GetPageSize();
+  auto chunks = MakeDataChunks(3, chunk_size);
 
   {
     auto lease = ChunkPinLease::pin_chunks(CopyRefs(chunks));
@@ -102,7 +145,8 @@ TEST_CASE("ChunkPinLease sets and clears lock state for single lease", "[data_ch
 }
 
 TEST_CASE("ChunkPinLease tracks nested leases via refcount", "[data_chunk]") {
-  auto chunks = MakeChunks(2);
+  const size_t chunk_size = GetPageSize();
+  auto chunks = MakeDataChunks(2, chunk_size);
 
   {
     auto lease_a = ChunkPinLease::pin_chunks(CopyRefs(chunks));
@@ -142,7 +186,8 @@ TEST_CASE("DataChunk constructor enforces page alignment", "[data_chunk]") {
   TempFileFixture fixture(kFileBytes);
 
   SECTION("non-aligned length throws") {
-    REQUIRE_THROWS_AS(DataChunk(nullptr, /*replica_offset=*/0, page_size + 1), std::invalid_argument);
+    DataChunkBuilder builder(page_size + 1);
+    REQUIRE_THROWS_AS(builder.make(), std::invalid_argument);
   }
 
   SECTION("aligned length maps successfully") {
@@ -150,13 +195,15 @@ TEST_CASE("DataChunk constructor enforces page alignment", "[data_chunk]") {
     const size_t len = page_size * 2;
     REQUIRE(static_cast<size_t>(file_offset) + len <= fixture.data().size());
 
-    DataChunk chunk(nullptr, /*replica_offset=*/0, len);
+    DataChunkBuilder builder(len);
+    auto chunk_with_data = builder.make();
+    auto* data_chunk = chunk_with_data.data_chunk.get();
 
-    REQUIRE(chunk.cpu_base != nullptr);
-    REQUIRE(chunk.size == len);
+    REQUIRE(data_chunk->base_addr != nullptr);
+    REQUIRE(data_chunk->get_size() == len);
 
-    REQUIRE(::munmap(chunk.cpu_base, len) == 0);
-    chunk.cpu_base = nullptr;
+    REQUIRE(::munmap(data_chunk->base_addr, len) == 0);
+    data_chunk->base_addr = nullptr;
   }
 }
 
@@ -172,36 +219,38 @@ TEST_CASE("DataChunk load reads backing file and drop releases pin", "[data_chun
   const size_t len = page_size;
   REQUIRE(static_cast<size_t>(file_offset) + len <= fixture.data().size());
 
-  DataChunk chunk(nullptr, /*replica_offset=*/0, len);
-  REQUIRE(chunk.cpu_base != nullptr);
-  REQUIRE(chunk.size == len);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk.cpu_base);
+  DataChunkBuilder builder(len);
+  auto chunk_with_data = builder.make();
+  auto* chunk = chunk_with_data.data_chunk.get();
+  REQUIRE(chunk->base_addr != nullptr);
+  REQUIRE(chunk->get_size() == len);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
   std::memset(mapped_bytes, 0, len);
 
   // Register a disk loader (high priority) to read from the file
-  tensorcast::local::loader::DiskChunkLoader disk_loader(&chunk, fixture.file_path(), file_offset);
-  chunk.register_loader(&disk_loader, DataChunk::LoaderPriority::High);
+  tensorcast::local::loader::DiskChunkLoader disk_loader(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(&disk_loader, DataChunk::LoaderPriority::High);
 
-  auto status = chunk.load();
+  auto status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk.in_dram);
+  REQUIRE(chunk->loaded);
 
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
-  auto drop_status = chunk.drop();
+  auto drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
 
   std::memset(mapped_bytes, 0, len);
 
-  status = chunk.load();
+  status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk.in_dram);
+  REQUIRE(chunk->loaded);
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
-  drop_status = chunk.drop();
+  drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
 
-  REQUIRE(::munmap(chunk.cpu_base, len) == 0);
+  REQUIRE(::munmap(chunk->base_addr, len) == 0);
 }
 
 TEST_CASE("DataChunk load priority fallback works", "[data_chunk]") {
@@ -216,30 +265,32 @@ TEST_CASE("DataChunk load priority fallback works", "[data_chunk]") {
   const size_t len = page_size * 2;
   REQUIRE(static_cast<size_t>(file_offset) + len <= fixture.data().size());
 
-  DataChunk chunk(nullptr, /*replica_offset=*/0, len);
-  REQUIRE(chunk.cpu_base != nullptr);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk.cpu_base);
+  DataChunkBuilder builder(len);
+  auto chunk_with_data = builder.make();
+  auto* chunk = chunk_with_data.data_chunk.get();
+  REQUIRE(chunk->base_addr != nullptr);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
   //   std::memset(mapped_bytes, 0, len);
 
   // Register a bad high-priority loader first (should fail)
   std::filesystem::path bad_path = fixture.file_path();
   bad_path += ".missing";
-  tensorcast::local::loader::DiskChunkLoader bad_loader(&chunk, bad_path, file_offset);
-  chunk.register_loader(&bad_loader, DataChunk::LoaderPriority::High);
+  tensorcast::local::loader::DiskChunkLoader bad_loader(chunk, bad_path, file_offset);
+  chunk->register_loader(&bad_loader, DataChunk::LoaderPriority::High);
 
   // Register a valid low-priority loader
-  tensorcast::local::loader::DiskChunkLoader good_loader(&chunk, fixture.file_path(), file_offset);
-  chunk.register_loader(&good_loader, DataChunk::LoaderPriority::Low);
+  tensorcast::local::loader::DiskChunkLoader good_loader(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(&good_loader, DataChunk::LoaderPriority::Low);
 
-  auto status = chunk.load();
+  auto status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk.in_dram);
+  REQUIRE(chunk->loaded);
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
-  auto drop_status = chunk.drop();
+  auto drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
 
-  REQUIRE(::munmap(chunk.cpu_base, len) == 0);
+  REQUIRE(::munmap(chunk->base_addr, len) == 0);
 }
 
 TEST_CASE("DataChunk load_async loads data correctly", "[data_chunk]") {
@@ -254,23 +305,25 @@ TEST_CASE("DataChunk load_async loads data correctly", "[data_chunk]") {
   const size_t len = page_size;
   REQUIRE(static_cast<size_t>(file_offset) + len <= fixture.data().size());
 
-  DataChunk chunk(nullptr, /*replica_offset=*/0, len);
-  REQUIRE(chunk.cpu_base != nullptr);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk.cpu_base);
+  DataChunkBuilder builder(len);
+  auto chunk_with_data = builder.make();
+  auto* chunk = chunk_with_data.data_chunk.get();
+  REQUIRE(chunk->base_addr != nullptr);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
   std::memset(mapped_bytes, 0, len);
 
-  tensorcast::local::loader::DiskChunkLoader loader(&chunk, fixture.file_path(), file_offset);
-  chunk.register_loader(&loader, DataChunk::LoaderPriority::High);
+  tensorcast::local::loader::DiskChunkLoader loader(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(&loader, DataChunk::LoaderPriority::High);
 
-  auto fut = chunk.load_async();
+  auto fut = chunk->load_async();
   auto status = fut.get();
   REQUIRE(status.ok());
-  REQUIRE(chunk.in_dram);
+  REQUIRE(chunk->loaded);
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
-  auto drop_status = chunk.drop();
+  auto drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
-  REQUIRE(::munmap(chunk.cpu_base, len) == 0);
+  REQUIRE(::munmap(chunk->base_addr, len) == 0);
 }
 
 TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data_chunk]") {
@@ -286,13 +339,21 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   const off_t offset_b = static_cast<off_t>(page_size * 2);
   const off_t offset_c = static_cast<off_t>(page_size * 4);
 
-  DataChunk a(nullptr, /*replica_offset=*/0, len);
-  DataChunk b(nullptr, /*replica_offset=*/0, len);
-  DataChunk c(nullptr, /*replica_offset=*/0, len);
+  DataChunkBuilder builder_a(len, offset_a);
+  DataChunkBuilder builder_b(len, offset_b);
+  DataChunkBuilder builder_c(len, offset_c);
 
-  auto* bytes_a = static_cast<std::uint8_t*>(a.cpu_base);
-  auto* bytes_b = static_cast<std::uint8_t*>(b.cpu_base);
-  auto* bytes_c = static_cast<std::uint8_t*>(c.cpu_base);
+  auto awd = builder_a.make();
+  auto bwd = builder_b.make();
+  auto cwd = builder_c.make();
+
+  auto* a = awd.data_chunk.get();
+  auto* b = bwd.data_chunk.get();
+  auto* c = cwd.data_chunk.get();
+
+  auto* bytes_a = static_cast<std::uint8_t*>(a->base_addr);
+  auto* bytes_b = static_cast<std::uint8_t*>(b->base_addr);
+  auto* bytes_c = static_cast<std::uint8_t*>(c->base_addr);
   REQUIRE(bytes_a != nullptr);
   REQUIRE(bytes_b != nullptr);
   REQUIRE(bytes_c != nullptr);
@@ -300,16 +361,16 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   std::memset(bytes_b, 0, len);
   std::memset(bytes_c, 0, len);
 
-  tensorcast::local::loader::DiskChunkLoader loader_a(&a, fixture.file_path(), offset_a);
-  tensorcast::local::loader::DiskChunkLoader loader_b(&b, fixture.file_path(), offset_b);
-  tensorcast::local::loader::DiskChunkLoader loader_c(&c, fixture.file_path(), offset_c);
-  a.register_loader(&loader_a, DataChunk::LoaderPriority::High);
-  b.register_loader(&loader_b, DataChunk::LoaderPriority::High);
-  c.register_loader(&loader_c, DataChunk::LoaderPriority::High);
+  tensorcast::local::loader::DiskChunkLoader loader_a(a, fixture.file_path(), offset_a);
+  tensorcast::local::loader::DiskChunkLoader loader_b(b, fixture.file_path(), offset_b);
+  tensorcast::local::loader::DiskChunkLoader loader_c(c, fixture.file_path(), offset_c);
+  a->register_loader(&loader_a, DataChunk::LoaderPriority::High);
+  b->register_loader(&loader_b, DataChunk::LoaderPriority::High);
+  c->register_loader(&loader_c, DataChunk::LoaderPriority::High);
 
-  auto f1 = a.load_async();
-  auto f2 = b.load_async();
-  auto f3 = c.load_async();
+  auto f1 = a->load_async();
+  auto f2 = b->load_async();
+  auto f3 = c->load_async();
 
   REQUIRE(f1.get().ok());
   REQUIRE(f2.get().ok());
@@ -319,13 +380,13 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   REQUIRE(std::memcmp(bytes_b, fixture.data().data() + offset_b, len) == 0);
   REQUIRE(std::memcmp(bytes_c, fixture.data().data() + offset_c, len) == 0);
 
-  REQUIRE(a.drop().ok());
-  REQUIRE(b.drop().ok());
-  REQUIRE(c.drop().ok());
+  REQUIRE(a->drop().ok());
+  REQUIRE(b->drop().ok());
+  REQUIRE(c->drop().ok());
 
-  REQUIRE(::munmap(a.cpu_base, len) == 0);
-  REQUIRE(::munmap(b.cpu_base, len) == 0);
-  REQUIRE(::munmap(c.cpu_base, len) == 0);
+  REQUIRE(::munmap(a->base_addr, len) == 0);
+  REQUIRE(::munmap(b->base_addr, len) == 0);
+  REQUIRE(::munmap(c->base_addr, len) == 0);
 }
 
 } // namespace tensorcast::local::chunk

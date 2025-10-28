@@ -13,7 +13,7 @@ namespace tensorcast::local::loader {
 
 class ChunkLoader {
  public:
-  explicit ChunkLoader(chunk::DataChunk* chunk) : chunk_(chunk) {}
+  explicit ChunkLoader(chunk::DataChunk* data_chunk) : data_chunk_(data_chunk) {}
 
   virtual ~ChunkLoader() = default;
 
@@ -24,7 +24,7 @@ class ChunkLoader {
   virtual std::future<absl::Status> load_async() = 0;
 
  protected:
-  chunk::DataChunk* chunk_{nullptr};
+  chunk::DataChunk* data_chunk_{nullptr};
 };
 
 } // namespace tensorcast::local::loader

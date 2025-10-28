@@ -4,7 +4,7 @@ cc_test(
     name = "data_chunk_test",
     srcs = ["data_chunk_test.cc"],
     deps = [
-        "//core/local/chunk:data_chunk_lib",
+        "//core/local/chunk:chunk_lib",
         "//core/local/loader:disk_chunk_loader",
         "//core/testing:catch_main",
         "//core/testing:common",

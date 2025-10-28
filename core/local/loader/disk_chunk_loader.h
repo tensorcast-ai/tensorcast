@@ -48,8 +48,8 @@ class BackendFile final {
 
 class DiskChunkLoader : public ChunkLoader {
  public:
-  DiskChunkLoader(chunk::DataChunk* chunk, std::filesystem::path f_path, off_t f_offset)
-      : ChunkLoader(chunk), f_path_(std::move(f_path)), f_offset_(f_offset) {
+  DiskChunkLoader(chunk::DataChunk* data_chunk, std::filesystem::path f_path, off_t f_offset)
+      : ChunkLoader(data_chunk), f_path_(std::move(f_path)), f_offset_(f_offset) {
     auto bf_or = BackendFile::get_or_create(f_path_);
     if (bf_or.ok()) {
       backend_file_ = *bf_or;

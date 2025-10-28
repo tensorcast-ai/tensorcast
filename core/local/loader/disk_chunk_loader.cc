@@ -97,7 +97,7 @@ absl::StatusOr<BackendFile::Ptr> BackendFile::get_or_create(const std::filesyste
 // -------------------- DiskChunkLoader --------------------
 
 absl::Status DiskChunkLoader::_load() {
-  if (chunk_ == nullptr) {
+  if (data_chunk_ == nullptr) {
     return absl::FailedPreconditionError("DataChunk pointer is null");
   }
 
@@ -105,11 +105,11 @@ absl::Status DiskChunkLoader::_load() {
     return absl::InvalidArgumentError("DiskChunkLoader requires backing file path");
   }
 
-  if (chunk_->size == 0) {
+  if (data_chunk_->get_size() == 0) {
     return absl::InvalidArgumentError("DataChunk size must be non-zero");
   }
 
-  if (chunk_->cpu_base == nullptr) {
+  if (data_chunk_->base_addr == nullptr) {
     return absl::FailedPreconditionError("DataChunk CPU base not mapped");
   }
 
@@ -121,7 +121,7 @@ absl::Status DiskChunkLoader::_load() {
     backend_file_ = *bf_or;
   }
 
-  return backend_file_->read(chunk_->cpu_base, chunk_->size, f_offset_);
+  return backend_file_->read(data_chunk_->base_addr, data_chunk_->get_size(), f_offset_);
 }
 
 absl::Status DiskChunkLoader::load() {
