@@ -278,6 +278,7 @@ sc_cc_library(
         ":view_utils",
         "//core/checkpoint:checkpoint_lib",
         "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",

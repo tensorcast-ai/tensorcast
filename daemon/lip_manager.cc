@@ -469,6 +469,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     uint32_t ttl_ms,
     uint64_t epoch,
     uint64_t total_size,
+    tensorcast::common::ArtifactIdKind id_kind,
+    const std::string& client_artifact_id,
     const std::string& index_data,
     const std::string& index_key_hex,
     std::vector<LeaseSegMeta>&& segments,
@@ -590,20 +592,34 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     uint64_t cur_{0};
   } src(std::move(opened), total_size);
 
-  // Compute multihashes
-  auto index_mh_or = common::compute_index_multihash(
-      canonical_index_json.empty() ? std::optional<std::string>() : std::optional<std::string>(canonical_index_json),
-      index_key_hex);
-  if (!index_mh_or.ok())
-    return index_mh_or.status();
-  auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
-  if (!data_mh_or.ok())
-    return data_mh_or.status();
-
+  std::string index_multihash;
+  std::string data_multihash;
   CommitLeaseResult out;
-  out.index_multihash = *index_mh_or;
-  out.data_multihash = *data_mh_or;
-  out.artifact_id = absl::StrCat("mi2:", out.index_multihash, ":", out.data_multihash);
+
+  if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
+    auto index_mh_or = common::compute_index_multihash(
+        canonical_index_json.empty() ? std::optional<std::string>() : std::optional<std::string>(canonical_index_json),
+        index_key_hex);
+    if (!index_mh_or.ok())
+      return index_mh_or.status();
+    index_multihash = *index_mh_or;
+
+    auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
+    if (!data_mh_or.ok())
+      return data_mh_or.status();
+    data_multihash = *data_mh_or;
+
+    out.index_multihash = index_multihash;
+    out.data_multihash = data_multihash;
+    out.artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
+    out.id_kind = common::ArtifactIdKind::kMi2;
+  } else {
+    out.index_multihash.clear();
+    out.data_multihash.clear();
+    out.artifact_id = client_artifact_id;
+    out.id_kind = common::ArtifactIdKind::kCgid;
+  }
+
   out.schema_version = "v2";
   out.encoding = "json";
   out.total_size = total_size;
@@ -649,6 +665,8 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   LipLeaseEntry lease;
   lease.registration_id = registration_id;
   lease.artifact_id = out.artifact_id;
+  lease.client_artifact_id = client_artifact_id;
+  lease.id_kind = out.id_kind;
   lease.device_id = device_id;
   lease.owner_pid = owner_pid;
   lease.ttl_ms = ttl_ms > 0 ? ttl_ms : 600000U; // default 10 minutes

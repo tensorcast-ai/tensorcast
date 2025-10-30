@@ -17,6 +17,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/loader/disk_dir_hash.h"
 #include "core/store/loader/source_hash.h"
 #include "core/store/loader/view_planner.h"
@@ -154,6 +155,52 @@ TEST_CASE("ReplicaKey distinguishes variant byte spaces", "[store_engine][replic
   REQUIRE(canonical != variant);
   ReplicaKeyHash hasher;
   REQUIRE(hasher(canonical) != hasher(variant));
+}
+
+TEST_CASE("StoreEngine commit reports MI2 identity", "[store_engine][registration]") {
+  auto storage = fs::temp_directory_path() / "store-engine-mi2";
+  fs::create_directories(storage);
+  StoreEngine engine = make_store(storage);
+
+  tensorcast::store::StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = "temp-reg-mi2";
+  reg.device_id = 0;
+  reg.total_size_bytes = 256 * 1024;
+  reg.tensor_index_data = std::string("{}");
+
+  auto begin_or = engine.begin_register_artifact(reg);
+  REQUIRE(begin_or.ok());
+
+  auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  const auto& result = commit_or.value();
+  REQUIRE(result.id_kind == tensorcast::common::ArtifactIdKind::kMi2);
+  REQUIRE(result.artifact_id.rfind("mi2:", 0) == 0);
+  REQUIRE(!result.index_multihash.empty());
+}
+
+TEST_CASE("StoreEngine commit honours CGID", "[store_engine][registration]") {
+  auto storage = fs::temp_directory_path() / "store-engine-cgid";
+  fs::create_directories(storage);
+  StoreEngine engine = make_store(storage);
+
+  tensorcast::store::StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = "temp-reg-cgid";
+  reg.device_id = 0;
+  reg.total_size_bytes = 128 * 1024;
+  reg.tensor_index_data = std::string("{}");
+  reg.client_artifact_id = std::string("cgid:engine-test-1");
+
+  auto begin_or = engine.begin_register_artifact(reg);
+  REQUIRE(begin_or.ok());
+
+  auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+  const auto& result = commit_or.value();
+  REQUIRE(result.id_kind == tensorcast::common::ArtifactIdKind::kCgid);
+  REQUIRE(result.artifact_id == "cgid:engine-test-1");
+  REQUIRE(result.index_multihash.empty());
+  REQUIRE(result.data_multihash.empty());
 }
 
 static absl::Status wait_ready(

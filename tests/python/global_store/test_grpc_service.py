@@ -666,6 +666,25 @@ class TestGRPCService:
         assert sorted(r.off for r in detail.missing_ranges) == [0, 1]
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
+    def test_register_replica_with_cgid(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        artifact_id = "cgid:test-suite-1"
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+        )
+        response = servicer.RegisterReplica(register_request, test_context)
+        assert response.status == global_store_pb2.Status.STATUS_OK
+        record = servicer.artifacts_repo.get(artifact_id)
+        assert record is not None
+        assert record["id_kind"] == "CGID"
+        assert record["index_multihash"] is None
+        assert record["data_multihash"] is None
+
     def test_get_artifact_canonical_partial_coverage(
         self, servicer, test_context, memory_info, registered_worker
     ):

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Literal, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
+from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.proto.daemon.v1 import (
     store_daemon_pb2 as store_daemon_pb2,
 )
@@ -71,11 +72,43 @@ class ArtifactDescriptor(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     artifact_id: str
-    index_multihash: str
-    data_multihash: str
-    schema_version: str
-    encoding: str
+    index_multihash: str | None = None
+    data_multihash: str | None = None
+    schema_version: str | None = None
+    encoding: str | None = None
     total_size: int
+    id_kind: ArtifactIdKind = ArtifactIdKind.MI2
+
+    @field_validator(
+        "index_multihash",
+        "data_multihash",
+        "schema_version",
+        "encoding",
+        mode="before",
+    )
+    @classmethod
+    def _empty_str_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @field_validator("id_kind", mode="before")
+    @classmethod
+    def _coerce_id_kind(cls, value: object) -> ArtifactIdKind:
+        if isinstance(value, ArtifactIdKind):
+            return value
+        if isinstance(value, str):
+            upper = value.upper()
+            if upper == "MI2":
+                return ArtifactIdKind.MI2
+            if upper == "CGID":
+                return ArtifactIdKind.CGID
+        if isinstance(value, int):
+            if value == 1:
+                return ArtifactIdKind.MI2
+            if value == 2:
+                return ArtifactIdKind.CGID
+        raise ValueError(f"Unsupported artifact id kind: {value!r}")
 
 
 class CanonicalRange(BaseModel):

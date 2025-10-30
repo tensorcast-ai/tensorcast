@@ -3,6 +3,7 @@
 """Repository for artifact replica data access."""
 
 import time
+from collections.abc import Sequence
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
@@ -25,6 +26,35 @@ def _to_uuid(value: str | UUID) -> UUID:
 class ReplicaRepository(BaseRepository):
     """Repository for managing artifact replicas in the database."""
 
+    # Canonical column list for replica reads. Always keep in sync with schema.
+    # We expose a single source of truth for SELECT projections to guarantee
+    # column presence and ordering, while mapping by name in _row_to_model.
+    _REPLICA_PROJECTION = (
+        "mr.replica_id, mr.artifact_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
+        "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
+        "COALESCE(rc.current_requests, 0) AS current_requests, "
+        "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.verification_json, mr.worker_id, "
+        "mr.created_at, mr.updated_at, mr.expires_at"
+    )
+
+    @staticmethod
+    def _replica_select_sql(join_type: str = "LEFT JOIN") -> str:
+        """Build the canonical SELECT for replicas with configurable join type.
+
+        Args:
+            join_type: SQL join type between artifact_replicas and replica_counters.
+                       Common values: "LEFT JOIN" (default) or "JOIN".
+
+        Returns:
+            A SELECT ... FROM ... SQL string without trailing WHERE/ORDER clauses.
+        """
+        return (
+            "SELECT "
+            + ReplicaRepository._REPLICA_PROJECTION
+            + " FROM artifact_replicas mr "
+            + f"{join_type} replica_counters rc ON rc.replica_id = mr.replica_id"
+        )
+
     def has_any_replica(self, artifact_id: str) -> bool:
         """Return True when at least one replica exists for *artifact_id*."""
 
@@ -38,36 +68,17 @@ class ReplicaRepository(BaseRepository):
     def find_by_id(self, replica_id: UUID, artifact_id: str) -> Replica | None:
         """Find a replica by ID and content-addressed artifact_id."""
         cursor = self.get_cursor()
-        result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.verification_json,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.replica_id = ? AND mr.artifact_id = ?
-            """,
-            [str(replica_id), artifact_id],
-        ).fetchone()
+        sql = (
+            self._replica_select_sql("LEFT JOIN")
+            + " WHERE mr.replica_id = ? AND mr.artifact_id = ?"
+        )
+        query = cursor.execute(sql, [str(replica_id), artifact_id])
 
-        if result:
-            return self._row_to_model(result)
+        row = query.fetchone()
+        if row:
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
         return None
 
     def find_existing(
@@ -81,36 +92,17 @@ class ReplicaRepository(BaseRepository):
     ) -> Replica | None:
         """Find existing replica with same identifying information."""
         cursor = self.get_cursor()
-        result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.verification_json,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.artifact_id = ?
-              AND mr.node_id = ?
-              AND mr.node_address = ?
-              AND mr.node_port = ?
-              AND mr.memory_type = ?
-              AND mr.device_id = ?
-            """,
+        sql = (
+            self._replica_select_sql("LEFT JOIN")
+            + " WHERE mr.artifact_id = ?"
+            + " AND mr.node_id = ?"
+            + " AND mr.node_address = ?"
+            + " AND mr.node_port = ?"
+            + " AND mr.memory_type = ?"
+            + " AND mr.device_id = ?"
+        )
+        query = cursor.execute(
+            sql,
             [
                 artifact_id,
                 node_id,
@@ -119,10 +111,13 @@ class ReplicaRepository(BaseRepository):
                 memory_type.value,
                 device_id,
             ],
-        ).fetchone()
+        )
 
-        if result:
-            return self._row_to_model(result)
+        row = query.fetchone()
+        if row:
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
         return None
 
     def find_available_for_transport(
@@ -184,36 +179,14 @@ class ReplicaRepository(BaseRepository):
         replica_id = row[0]
 
         # Fetch full replica data including current_requests
-        full_row = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                rc.current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.verification_json,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.replica_id = ?
-            """,
-            [str(replica_id)],
-        ).fetchone()
+        sql = self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?"
+        result = cursor.execute(sql, [str(replica_id)])
 
+        full_row = result.fetchone()
         if full_row:
-            return self._row_to_model(full_row)
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            return self._row_to_model(full_row, columns)
         return None
 
     def create(self, replica: Replica) -> Replica:
@@ -327,7 +300,8 @@ class ReplicaRepository(BaseRepository):
                     buffer_sizes = ?,
                     verification_json = ?,
                     memory_size = ?,
-                    worker_id = ?
+                    worker_id = ?,
+                    expires_at = ?
                 WHERE replica_id = ?
                 """,
                 [
@@ -338,6 +312,7 @@ class ReplicaRepository(BaseRepository):
                     replica.verification_json,
                     replica.memory_size,
                     replica.worker_id,
+                    replica.expires_at,
                     str(existing_replica_id),
                 ],
             )
@@ -349,8 +324,8 @@ class ReplicaRepository(BaseRepository):
                 INSERT INTO artifact_replicas (
                     replica_id, artifact_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
-                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
@@ -369,6 +344,7 @@ class ReplicaRepository(BaseRepository):
                     list(replica.buffer_sizes),
                     replica.verification_json,
                     replica.worker_id,
+                    replica.expires_at,
                 ],
             )
 
@@ -527,17 +503,7 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         # Build dynamic query joining with replica_counters
-        query = (
-            "SELECT "
-            "mr.replica_id, mr.artifact_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
-            "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
-            "COALESCE(rc.current_requests, 0) AS current_requests, "
-            "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.verification_json, mr.worker_id, "
-            "mr.created_at, mr.updated_at "
-            "FROM artifact_replicas mr "
-            "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
-            "WHERE 1=1"
-        )
+        query = self._replica_select_sql("LEFT JOIN") + " WHERE 1=1"
         params: list = []
 
         if artifact_id is not None:
@@ -565,7 +531,10 @@ class ReplicaRepository(BaseRepository):
             params.append(device_id)
 
         result = cursor.execute(query, params)
-        replicas = [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        replicas = [self._row_to_model(row, columns) for row in rows]
         return replicas
 
     def mark_unavailable_by_worker(self, worker_id: str) -> int:
@@ -602,33 +571,13 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.verification_json,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            ORDER BY mr.created_at DESC
-            """
+            self._replica_select_sql("LEFT JOIN") + " ORDER BY mr.created_at DESC"
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def mark_as_stale(self, replica_id: UUID) -> bool:
         """Mark a replica as stale (for recovery purposes)."""
@@ -675,33 +624,15 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            LEFT JOIN workers w ON mr.worker_id = w.worker_id
-            WHERE mr.worker_id IS NOT NULL AND w.worker_id IS NULL
-            """
+            self._replica_select_sql("LEFT JOIN")
+            + " LEFT JOIN workers w ON mr.worker_id = w.worker_id"
+            + " WHERE mr.worker_id IS NOT NULL AND w.worker_id IS NULL"
         )
 
-        orphaned = [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        orphaned = [self._row_to_model(row, columns) for row in rows]
         if orphaned:
             logger.warning(f"Found {len(orphaned)} orphaned replicas")
         return orphaned
@@ -711,34 +642,15 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.worker_id = ?
-            ORDER BY mr.created_at DESC
-            """,
+            self._replica_select_sql("LEFT JOIN")
+            + " WHERE mr.worker_id = ? ORDER BY mr.created_at DESC",
             [worker_id],
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def update_worker_id(self, replica_id: UUID, new_worker_id: str) -> bool:
         """Update the worker_id for a replica."""
@@ -765,34 +677,15 @@ class ReplicaRepository(BaseRepository):
         cursor = self.get_cursor()
 
         result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE EXTRACT(epoch FROM mr.updated_at) < ?
-            ORDER BY mr.updated_at DESC
-            """,
+            self._replica_select_sql("LEFT JOIN")
+            + " WHERE EXTRACT(epoch FROM mr.updated_at) < ? ORDER BY mr.updated_at DESC",
             [recovery_time],
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def cleanup_stale_replicas(self, recovery_time: int) -> int:
         """
@@ -819,60 +712,57 @@ class ReplicaRepository(BaseRepository):
             logger.info(f"Marked {cleaned_up_count} stale replicas as unavailable")
         return cleaned_up_count
 
-    def _row_to_model(self, row: tuple) -> Replica:
-        """Convert a database row to Replica object.
+    def _row_to_model(self, row: tuple, columns: Sequence[str]) -> Replica:
+        """Convert a database row to Replica object using column metadata."""
 
-        The repository has historically used slightly different SELECT column
-        orders across methods.  This helper normalises the tuple layout by
-        detecting whether ``disk_path`` is present after ``artifact_id``.
-        """
+        if not columns:
+            raise ValueError("Replica row conversion requires column metadata.")
 
-        replica_id = _to_uuid(row[0])
-        artifact_id = row[1]
+        column_index = {column: idx for idx, column in enumerate(columns)}
 
-        # Layout A (with disk_path):
-        # [replica_id, artifact_id, disk_path, node_id, node_address, node_port, ...]
-        # Layout B (without disk_path):
-        # [replica_id, artifact_id, node_id, node_address, node_port, ...]
-        # Some queries now include verification_json before worker_id. We detect
-        # presence by row length heuristics.
-        has_disk_path = len(row) >= 17
+        def get(column: str, *, default=None):
+            idx = column_index.get(column)
+            if idx is None:
+                return default
+            value = row[idx]
+            if value is None and default is not None:
+                return default
+            return value
 
-        idx = 2
-        disk_path = row[idx] if has_disk_path else None
-        if has_disk_path:
-            idx += 1
+        def require(column: str):
+            value = get(column)
+            if value is None:
+                raise ValueError(f"Replica row missing required column: {column}")
+            return value
 
-        node_id = row[idx]
-        node_address = row[idx + 1]
-        node_port = row[idx + 2]
-        memory_size = row[idx + 3]
-        memory_type = MemoryType(row[idx + 4])
-        device_id = row[idx + 5]
-        max_concurrency = row[idx + 6]
-        current_requests = row[idx + 7]
-        is_available = row[idx + 8]
-        remote_memory_keys = row[idx + 9] if row[idx + 9] else []
-        buffer_sizes = row[idx + 10] if row[idx + 10] else []
-        # Verification JSON may be present at idx + 11, depending on SELECT
-        verification_json = None
-        worker_id = None
-        created_at = None
-        updated_at = None
+        replica_id = _to_uuid(require("replica_id"))
+        artifact_id = require("artifact_id")
+        disk_path = get("disk_path")
+        node_id = require("node_id")
+        node_address = require("node_address")
+        node_port = int(require("node_port"))
+        memory_size = int(require("memory_size"))
+        memory_type = MemoryType(require("memory_type"))
+        device_id_value = get("device_id")
+        device_id = int(device_id_value) if device_id_value is not None else -1
+        max_concurrency = int(require("max_concurrency"))
+        current_requests_value = get("current_requests", default=0)
+        current_requests = int(current_requests_value or 0)
+        is_available = bool(require("is_available"))
 
-        # Detect if verification_json present by checking remaining length
-        # After buffer_sizes we expect either worker_id at (idx+11) or
-        # verification_json then worker_id.
-        if len(row) >= idx + 14:
-            # Likely layout with verification_json
-            verification_json = row[idx + 11]
-            worker_id = row[idx + 12]
-            created_at = row[idx + 13]
-            updated_at = row[idx + 14] if len(row) > idx + 14 else None
-        else:
-            worker_id = row[idx + 11] if len(row) > idx + 11 else None
-            created_at = row[idx + 12] if len(row) > idx + 12 else None
-            updated_at = row[idx + 13] if len(row) > idx + 13 else None
+        remote_memory_keys_value = get("remote_memory_keys", default=())
+        remote_memory_keys = (
+            list(remote_memory_keys_value) if remote_memory_keys_value else []
+        )
+
+        buffer_sizes_value = get("buffer_sizes", default=())
+        buffer_sizes = list(buffer_sizes_value) if buffer_sizes_value else []
+
+        verification_json = get("verification_json")
+        worker_id = get("worker_id")
+        created_at = get("created_at")
+        updated_at = get("updated_at")
+        expires_at = get("expires_at")
 
         return Replica(
             replica_id=replica_id,
@@ -893,35 +783,17 @@ class ReplicaRepository(BaseRepository):
             verification_json=verification_json,
             created_at=created_at,
             updated_at=updated_at,
+            expires_at=expires_at,
         )
 
     def find_by_disk_path(self, disk_path: str) -> list[Replica]:
         """Find all replicas registered under a given disk path (legacy flow)."""
         cursor = self.get_cursor()
         result = cursor.execute(
-            """
-            SELECT
-                mr.replica_id,
-                mr.artifact_id,
-                mr.disk_path,
-                mr.node_id,
-                mr.node_address,
-                mr.node_port,
-                mr.memory_size,
-                mr.memory_type,
-                mr.device_id,
-                mr.max_concurrency,
-                COALESCE(rc.current_requests, 0) AS current_requests,
-                mr.is_available,
-                mr.remote_memory_keys,
-                mr.buffer_sizes,
-                mr.worker_id,
-                mr.created_at,
-                mr.updated_at
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.disk_path = ?
-            """,
+            self._replica_select_sql("LEFT JOIN") + " WHERE mr.disk_path = ?",
             [disk_path],
         )
-        return [self._row_to_model(row) for row in result.fetchall()]
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]

@@ -68,6 +68,8 @@ class LipManager {
       uint32_t ttl_ms,
       uint64_t epoch,
       uint64_t total_size,
+      tensorcast::common::ArtifactIdKind id_kind,
+      const std::string& client_artifact_id,
       const std::string& index_data, // canonical index JSON (may be empty)
       const std::string& index_key_hex, // precomputed index sha256 hex (may be empty)
       std::vector<LeaseSegMeta>&& segments,

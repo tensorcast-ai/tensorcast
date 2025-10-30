@@ -34,6 +34,8 @@ class RegistrationManager {
     bool lease_in_place{false};
     std::string index_key_hex;
     std::string index_data;
+    tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
+    std::string client_artifact_id;
     bool view_registration{false};
     store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
     std::string view_id;

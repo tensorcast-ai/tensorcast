@@ -11,6 +11,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
+#include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
@@ -76,6 +77,39 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   REQUIRE(!desc.index_multihash().empty());
   REQUIRE(!desc.data_multihash().empty());
   REQUIRE(desc.total_size() == 1 * 1024 * 1024);
+  REQUIRE(desc.id_kind() == tensorcast::common::v1::ARTIFACT_ID_KIND_MI2);
+}
+
+TEST_CASE("CommitRegisteredArtifact accepts CGID", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  StoreDaemonServiceImpl service(engine);
+
+  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  breq.set_device_id(0);
+  breq.set_total_size(512 * 1024);
+  breq.set_owner_pid(getpid());
+  breq.set_client_artifact_id("cgid:testcgid123");
+  auto* idx = breq.mutable_tensor_index_data();
+  idx->set_data("{}");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
+  REQUIRE(st.ok());
+
+  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  creq.set_registration_id(bresp.registration_id());
+  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
+  REQUIRE(st.ok());
+  REQUIRE(cresp.has_artifact_descriptor());
+  const auto& desc = cresp.artifact_descriptor();
+  REQUIRE(desc.artifact_id() == "cgid:testcgid123");
+  REQUIRE(desc.index_multihash().empty());
+  REQUIRE(desc.data_multihash().empty());
+  REQUIRE(desc.id_kind() == tensorcast::common::v1::ARTIFACT_ID_KIND_CGID);
 }
 
 TEST_CASE(

@@ -129,6 +129,16 @@ sc_cc_library(
     ),
 )
 
+sc_cc_library(
+    name = "artifact_identity_lib",
+    srcs = ["artifact_identity.cc"],
+    hdrs = ["artifact_identity.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings:strings",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",

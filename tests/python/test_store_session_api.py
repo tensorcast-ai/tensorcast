@@ -29,6 +29,7 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
+from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -117,6 +118,7 @@ class FakeEnvironment:
         artifact: dict[str, torch.Tensor],
         *,
         device_id: int | None,
+        client_artifact_id: str | None = None,
     ) -> RegistrationResult:
         index: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
         offset = 0
@@ -131,7 +133,11 @@ class FakeEnvironment:
                 int(tensor.storage_offset()),
             )
             offset += size_bytes
-        artifact_id = f"mi2:test:{plan.value}:{offset}"
+        normalized_client_id = (
+            client_artifact_id.strip() if client_artifact_id and client_artifact_id.strip() else None
+        )
+        artifact_id = normalized_client_id or f"mi2:test:{plan.value}:{offset}"
+        id_kind = ArtifactIdKind.CGID if artifact_id.startswith("cgid:") else ArtifactIdKind.MI2
         descriptor = ArtifactDescriptor(
             artifact_id=artifact_id,
             index_multihash="hash-index",
@@ -139,6 +145,7 @@ class FakeEnvironment:
             schema_version="v3",
             encoding="raw",
             total_size=offset,
+            id_kind=id_kind,
         )
         index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
         device = 0 if device_id is None else int(device_id)
@@ -174,6 +181,7 @@ class FakeEnvironment:
         options: RegisterArtifactOptions,
         device_id: int | None,
         ttl_ms: int | None,
+        client_artifact_id: str | None = None,
         force_lease_in_place: bool,
         prevalidate_disk: bool,
         client: FakeDaemonCtl,
@@ -193,7 +201,12 @@ class FakeEnvironment:
         if cancel_event is not None and cancel_event.is_set():
             raise concurrent.futures.CancelledError
         plan = PlanType.VRAM_LEASED if force_lease_in_place else options.plan
-        return self.make_registration_result(plan, artifact, device_id=device_id)
+        return self.make_registration_result(
+            plan,
+            artifact,
+            device_id=device_id,
+            client_artifact_id=client_artifact_id,
+        )
 
     def fake_materialize(
         self,
@@ -628,6 +641,7 @@ def test_register_function_delegates_to_session(
             self,
             tensors: store_mod.TensorDict,
             *,
+            artifact_id: str | None = None,
             key: str | None = None,
             options: RegisterArtifactOptions | None = None,
             ttl_ms: int | None = None,
@@ -636,6 +650,7 @@ def test_register_function_delegates_to_session(
                 (
                     tensors,
                     {
+                        "artifact_id": artifact_id,
                         "key": key,
                         "options": options,
                         "ttl_ms": ttl_ms,
@@ -669,6 +684,7 @@ def test_put_async_function_delegates_to_session(
             self,
             tensors: store_mod.TensorDict,
             *,
+            artifact_id: str | None = None,
             key: str | None = None,
             options: RegisterArtifactOptions | None = None,
             device: int | torch.device | None = None,
@@ -677,6 +693,7 @@ def test_put_async_function_delegates_to_session(
                 (
                     tensors,
                     {
+                        "artifact_id": artifact_id,
                         "key": key,
                         "options": options,
                         "device": device,
