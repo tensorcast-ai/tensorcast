@@ -5,15 +5,12 @@
 #include <future>
 #include "absl/status/status.h"
 
-namespace tensorcast::local::chunk {
+namespace tensorcast::local::data {
 class DataChunk;
-}
-
-namespace tensorcast::local::loader {
 
 class ChunkLoader {
  public:
-  explicit ChunkLoader(chunk::DataChunk* data_chunk) : data_chunk_(data_chunk) {}
+  explicit ChunkLoader(DataChunk* data_chunk) : data_chunk_(data_chunk) {}
 
   virtual ~ChunkLoader() = default;
 
@@ -24,7 +21,7 @@ class ChunkLoader {
   virtual std::future<absl::Status> load_async() = 0;
 
  protected:
-  chunk::DataChunk* data_chunk_{nullptr};
+  DataChunk* data_chunk_{nullptr};
 };
 
-} // namespace tensorcast::local::loader
+} // namespace tensorcast::local::data

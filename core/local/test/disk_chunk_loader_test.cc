@@ -16,13 +16,13 @@
 
 namespace fs = std::filesystem;
 
-using tensorcast::local::chunk::DataChunk;
-using tensorcast::local::loader::BackendFile;
-using tensorcast::local::loader::DiskChunkLoader;
+using tensorcast::local::data::BackendFile;
+using tensorcast::local::data::DataChunk;
+using tensorcast::local::data::DiskChunkLoader;
 using tensorcast::testing::create_dummy_file;
 using tensorcast::testing::read_file_content;
 
-using tensorcast::local::chunk::Chunk;
+using tensorcast::local::meta::Chunk;
 
 namespace {
 
@@ -35,7 +35,7 @@ tensorcast::store::DeviceKey MakeCpuDeviceKey() {
 }
 
 struct ChunkWithData {
-  std::shared_ptr<tensorcast::local::chunk::Chunk> chunk;
+  std::shared_ptr<tensorcast::local::meta::Chunk> chunk;
   std::shared_ptr<DataChunk> data_chunk;
 };
 
@@ -47,11 +47,10 @@ size_t GetPageSize() {
 
 class DataChunkBuilder {
  public:
-  explicit DataChunkBuilder(size_t chunk_size, off_t r_offset = 0)
-      : chunk_size_(chunk_size), r_offset_(r_offset), device_key_(MakeCpuDeviceKey()) {}
+  explicit DataChunkBuilder(size_t chunk_size) : chunk_size_(chunk_size), device_key_(MakeCpuDeviceKey()) {}
 
   ChunkWithData make() const {
-    auto chunk = std::make_shared<tensorcast::local::chunk::Chunk>(chunk_size_, /*replica_ptr=*/nullptr, r_offset_);
+    auto chunk = std::make_shared<tensorcast::local::meta::Chunk>(chunk_size_, /*replica_ptr=*/nullptr);
     chunk->generate_data_chunks({device_key_});
     DataChunk* ptr = chunk->get_data_chunk(device_key_);
     REQUIRE(ptr != nullptr);
@@ -60,7 +59,7 @@ class DataChunkBuilder {
 
  private:
   size_t chunk_size_;
-  off_t r_offset_;
+  // off_t r_offset_;
   tensorcast::store::DeviceKey device_key_;
 };
 

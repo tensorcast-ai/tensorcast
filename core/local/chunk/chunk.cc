@@ -2,18 +2,19 @@
 
 #include "core/local/chunk/chunk.h"
 
+#include "core/local/artifact/artifact.h"
 #include "core/local/chunk/data_chunk.h"
 
-namespace tensorcast::local::chunk {
+namespace tensorcast::local::meta {
 
 void Chunk::generate_data_chunks(const std::vector<store::DeviceKey>& device_keys) {
   for (const auto& key : device_keys) {
-    auto chunk = std::make_unique<CPUDataChunk>(this);
+    auto chunk = std::make_unique<data::CPUDataChunk>(this);
     dev_data_chunks_.emplace(key, std::move(chunk));
   }
 }
 
-DataChunk* Chunk::get_data_chunk(const store::DeviceKey& device_key) const {
+data::DataChunk* Chunk::get_data_chunk(const store::DeviceKey& device_key) const {
   auto it = dev_data_chunks_.find(device_key);
   if (it == dev_data_chunks_.end()) {
     return nullptr;
@@ -21,4 +22,27 @@ DataChunk* Chunk::get_data_chunk(const store::DeviceKey& device_key) const {
   return it->second.get();
 }
 
-} // namespace tensorcast::local::chunk
+std::string Chunk::to_string() const {
+  return absl::StrFormat("Chunk(ptr: %p, size: %zu, artifact: %s)", this, size_, get_artifact()->get_artifact_id());
+}
+
+off_t Chunk::get_offset_in_view(const View* view) const {
+  auto it = offset_in_view_.find(view->get_view_id());
+  if (it == offset_in_view_.end()) {
+    return -1;
+  }
+  return it->second;
+}
+
+std::vector<View*> Chunk::get_holder_views() const {
+  std::vector<View*> holder_views;
+  for (const auto& pair : offset_in_view_) {
+    auto* view = artifact_->get_view_by_id(pair.first);
+    if (view != nullptr) {
+      holder_views.push_back(view);
+    }
+  }
+  return holder_views;
+}
+
+} // namespace tensorcast::local::meta

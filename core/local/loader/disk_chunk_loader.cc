@@ -15,7 +15,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 
-namespace tensorcast::local::loader {
+namespace tensorcast::local::data {
 
 // -------------------- BackendFile --------------------
 
@@ -132,4 +132,4 @@ std::future<absl::Status> DiskChunkLoader::load_async() {
   return std::async(std::launch::async, [this]() { return this->_load(); });
 }
 
-} // namespace tensorcast::local::loader
+} // namespace tensorcast::local::data

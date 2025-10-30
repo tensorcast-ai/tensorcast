@@ -11,9 +11,9 @@
 #include "absl/log/log.h"
 #include "core/local/loader/chunk_loader.h"
 
-namespace tensorcast::local::chunk {
+namespace tensorcast::local::data {
 
-CPUDataChunk::CPUDataChunk(Chunk* chunk) : DataChunk(chunk) {
+CPUDataChunk::CPUDataChunk(meta::Chunk* chunk) : DataChunk(chunk) {
   // check size is page-aligned
   int64_t page_size = ::sysconf(_SC_PAGESIZE);
   if (page_size <= 0) {
@@ -112,4 +112,4 @@ absl::Status CPUDataChunk::drop() {
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::local::chunk
+} // namespace tensorcast::local::data

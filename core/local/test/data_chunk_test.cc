@@ -22,13 +22,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-namespace tensorcast::local::chunk {
+using namespace tensorcast::local::meta;
+
+using namespace tensorcast::local::data;
 
 namespace {
 
-store::DeviceKey MakeCpuDeviceKey() {
-  store::DeviceKey key;
-  key.type = DeviceType::CPU;
+tensorcast::store::DeviceKey MakeCpuDeviceKey() {
+  tensorcast::store::DeviceKey key;
+  key.type = tensorcast::DeviceType::CPU;
   key.ordinal = -1;
   key.uuid = "cpu";
   return key;
@@ -41,18 +43,17 @@ struct ChunkWithData {
 
 class DataChunkBuilder {
  public:
-  explicit DataChunkBuilder(size_t chunk_size, off_t r_offset = 0)
-      : chunk_size_(chunk_size), r_offset_(r_offset), device_key_(MakeCpuDeviceKey()) {}
+  explicit DataChunkBuilder(size_t chunk_size) : chunk_size_(chunk_size), device_key_(MakeCpuDeviceKey()) {}
 
   ChunkWithData make() const {
-    auto chunk = std::make_shared<Chunk>(chunk_size_, /*replica_ptr=*/nullptr, r_offset_);
+    auto chunk = std::make_shared<Chunk>(chunk_size_, /*replica_ptr=*/nullptr);
     chunk->generate_data_chunks({device_key_});
     DataChunk* ptr = chunk->get_data_chunk(device_key_);
     REQUIRE(ptr != nullptr);
     return {chunk, std::shared_ptr<DataChunk>(chunk, ptr)};
   }
 
-  const store::DeviceKey& device_key() const {
+  const tensorcast::store::DeviceKey& device_key() const {
     return device_key_;
   }
 
@@ -62,8 +63,8 @@ class DataChunkBuilder {
 
  private:
   size_t chunk_size_;
-  off_t r_offset_;
-  store::DeviceKey device_key_;
+  // off_t r_offset_;
+  tensorcast::store::DeviceKey device_key_;
 };
 
 size_t GetPageSize() {
@@ -228,7 +229,7 @@ TEST_CASE("DataChunk load reads backing file and drop releases pin", "[data_chun
   std::memset(mapped_bytes, 0, len);
 
   // Register a disk loader (high priority) to read from the file
-  tensorcast::local::loader::DiskChunkLoader disk_loader(chunk, fixture.file_path(), file_offset);
+  DiskChunkLoader disk_loader(chunk, fixture.file_path(), file_offset);
   chunk->register_loader(&disk_loader, DataChunk::LoaderPriority::High);
 
   auto status = chunk->load();
@@ -275,11 +276,11 @@ TEST_CASE("DataChunk load priority fallback works", "[data_chunk]") {
   // Register a bad high-priority loader first (should fail)
   std::filesystem::path bad_path = fixture.file_path();
   bad_path += ".missing";
-  tensorcast::local::loader::DiskChunkLoader bad_loader(chunk, bad_path, file_offset);
+  DiskChunkLoader bad_loader(chunk, bad_path, file_offset);
   chunk->register_loader(&bad_loader, DataChunk::LoaderPriority::High);
 
   // Register a valid low-priority loader
-  tensorcast::local::loader::DiskChunkLoader good_loader(chunk, fixture.file_path(), file_offset);
+  DiskChunkLoader good_loader(chunk, fixture.file_path(), file_offset);
   chunk->register_loader(&good_loader, DataChunk::LoaderPriority::Low);
 
   auto status = chunk->load();
@@ -312,7 +313,7 @@ TEST_CASE("DataChunk load_async loads data correctly", "[data_chunk]") {
   auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
   std::memset(mapped_bytes, 0, len);
 
-  tensorcast::local::loader::DiskChunkLoader loader(chunk, fixture.file_path(), file_offset);
+  DiskChunkLoader loader(chunk, fixture.file_path(), file_offset);
   chunk->register_loader(&loader, DataChunk::LoaderPriority::High);
 
   auto fut = chunk->load_async();
@@ -339,9 +340,9 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   const off_t offset_b = static_cast<off_t>(page_size * 2);
   const off_t offset_c = static_cast<off_t>(page_size * 4);
 
-  DataChunkBuilder builder_a(len, offset_a);
-  DataChunkBuilder builder_b(len, offset_b);
-  DataChunkBuilder builder_c(len, offset_c);
+  DataChunkBuilder builder_a(len);
+  DataChunkBuilder builder_b(len);
+  DataChunkBuilder builder_c(len);
 
   auto awd = builder_a.make();
   auto bwd = builder_b.make();
@@ -361,9 +362,9 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   std::memset(bytes_b, 0, len);
   std::memset(bytes_c, 0, len);
 
-  tensorcast::local::loader::DiskChunkLoader loader_a(a, fixture.file_path(), offset_a);
-  tensorcast::local::loader::DiskChunkLoader loader_b(b, fixture.file_path(), offset_b);
-  tensorcast::local::loader::DiskChunkLoader loader_c(c, fixture.file_path(), offset_c);
+  DiskChunkLoader loader_a(a, fixture.file_path(), offset_a);
+  DiskChunkLoader loader_b(b, fixture.file_path(), offset_b);
+  DiskChunkLoader loader_c(c, fixture.file_path(), offset_c);
   a->register_loader(&loader_a, DataChunk::LoaderPriority::High);
   b->register_loader(&loader_b, DataChunk::LoaderPriority::High);
   c->register_loader(&loader_c, DataChunk::LoaderPriority::High);
@@ -388,5 +389,3 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   REQUIRE(::munmap(b->base_addr, len) == 0);
   REQUIRE(::munmap(c->base_addr, len) == 0);
 }
-
-} // namespace tensorcast::local::chunk

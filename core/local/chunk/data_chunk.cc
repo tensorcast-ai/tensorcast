@@ -9,9 +9,12 @@
 #include <stdexcept>
 
 #include "absl/log/log.h"
+#include "core/local/chunk/chunk.h"
 #include "core/local/loader/chunk_loader.h"
 
-namespace tensorcast::local::chunk {
+// #include "core/local/artifact/artifact.h"
+
+namespace tensorcast::local::data {
 
 int DataChunk::lock_refcnt() const {
   std::lock_guard<std::mutex> guard(lock_state_.mutex);
@@ -23,7 +26,7 @@ bool DataChunk::is_locked() const {
   return lock_state_.locked;
 }
 
-void DataChunk::register_loader(loader::ChunkLoader* loader, LoaderPriority priority) {
+void DataChunk::register_loader(ChunkLoader* loader, LoaderPriority priority) {
   if (loader == nullptr) {
     return;
   }
@@ -33,6 +36,10 @@ void DataChunk::register_loader(loader::ChunkLoader* loader, LoaderPriority prio
     low_priority_loaders_.push_back(loader);
   }
 }
+
+size_t DataChunk::get_size() const {
+  return chunk_->get_size();
+};
 
 ChunkPinLease::~ChunkPinLease() {
   release();
@@ -71,12 +78,19 @@ void ChunkPinLease::release() noexcept {
   if (!impl_)
     return;
   if (is_expired()) {
-    if (!impl_->data_chunks.empty() && impl_->data_chunks[0] && impl_->data_chunks[0]->chunk_->get_replica()) {
-      LOG(WARNING) << "ChunkPinLease expired before being destroyed for replica: "
-                   << impl_->data_chunks[0]->chunk_->get_replica()->artifact_id();
-    } else {
-      LOG(WARNING) << "ChunkPinLease expired before being destroyed";
-    }
+    //   if (!impl_->data_chunks.empty() && impl_->data_chunks[0]) {
+    //     auto& chunk = impl_->data_chunks[0]->chunk_;
+    //     // auto artifact = data_chunk->chunk_->get_artifact();
+    //     if (chunk) {
+    //       LOG(WARNING) << "ChunkPinLease expired before being destroyed for replica: "
+    //                    << chunk->to_string();
+    //     } else {
+    //       LOG(WARNING)
+    //           << "ChunkPinLease expired before being destroyed (artifact already released)";
+    //     }
+    //   } else {
+    LOG(WARNING) << "ChunkPinLease expired before being destroyed";
+    // }
   }
   for (const auto& chunk : impl_->data_chunks) {
     if (!chunk) {
@@ -104,4 +118,4 @@ ChunkPinLease ChunkPinLease::pin_chunks(
   return ChunkPinLease(std::move(impl));
 }
 
-} // namespace tensorcast::local::chunk
+} // namespace tensorcast::local::data

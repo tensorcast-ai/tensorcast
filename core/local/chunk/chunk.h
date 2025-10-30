@@ -2,16 +2,23 @@
 
 #pragma once
 
+#include <sys/types.h>
 #include <memory>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "core/local/chunk/data_chunk.h"
 #include "core/store/device_types.h"
-#include "core/store/replica/replica.h"
 
-namespace tensorcast::local::chunk {
+// namespace tensorcast::local::data {
+// class DataChunk;
+// }  // namespace tensorcast::local::data
 
-class DataChunk;
+namespace tensorcast::local::meta {
+class Artifact;
+class View;
 
 /**
  * A chunk is a part of an artifact view. This class is the
@@ -22,32 +29,37 @@ class DataChunk;
  */
 class Chunk {
  public:
-  explicit Chunk(size_t size, store::replica::Replica* replica_ptr, off_t r_offset)
-      : replica_(replica_ptr), r_offset_(r_offset), size_(size) {}
+  explicit Chunk(size_t size, meta::Artifact* artifact_ptr) : artifact_(std::move(artifact_ptr)), size_(size) {}
 
   virtual ~Chunk() = default;
 
+  // generate data chunks on different devices
   void generate_data_chunks(const std::vector<store::DeviceKey>& device_keys);
-  DataChunk* get_data_chunk(const store::DeviceKey& device_key) const;
+  // get the data chunk on a specific device
+  data::DataChunk* get_data_chunk(const store::DeviceKey& device_key) const;
 
   size_t get_size() const {
     return size_;
   };
 
-  store::replica::Replica* get_replica() const {
-    return replica_;
+  Artifact* get_artifact() const {
+    return artifact_;
   };
 
-  off_t get_r_offset() const {
-    return r_offset_;
-  };
+  std::string to_string() const;
+
+  off_t get_offset_in_view(const View* view) const;
+
+  std::vector<View*> get_holder_views() const;
 
  private:
-  // TODO: this should be artifact
-  store::replica::Replica* replica_;
-  off_t r_offset_{0};
+  Artifact* artifact_;
   size_t size_{0};
   // data chunks on different devices
-  std::unordered_map<store::DeviceKey, std::unique_ptr<DataChunk>, store::DeviceKeyHash> dev_data_chunks_;
+  std::unordered_map<store::DeviceKey, std::unique_ptr<data::DataChunk>, store::DeviceKeyHash> dev_data_chunks_;
+
+  // view id to offset
+  std::unordered_map<std::string, off_t> offset_in_view_;
+  friend class View;
 };
-} // namespace tensorcast::local::chunk
+} // namespace tensorcast::local::meta

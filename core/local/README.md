@@ -6,8 +6,10 @@
 
 ```
 core/local/
-├── chunk/        # 数据块相关实现（DataChunk、CPUDataChunk）
+├── chunk/        # Chunk 元数据、DataChunk 管理
 ├── loader/       # 数据加载器实现
+├── artifact/     # Artifact 元数据模型
+├── view/         # View 视图建模与映射逻辑
 ├── test/         # 单元测试
 └── benchmark/    # 性能基准测试
 ```
@@ -18,11 +20,12 @@ core/local/
 
 ```bash
 # 构建所有实现库
-bazel build //core/local/chunk:data_chunk_lib //core/local/loader:disk_chunk_loader
+bazel build //core/local:local_data_lib \
+           //core/local:local_meta_lib
 
 # 单独构建某个库
-bazel build //core/local/chunk:data_chunk_lib
-bazel build //core/local/loader:disk_chunk_loader
+bazel build //core/local:local_data_lib
+bazel build //core/local:local_meta_lib
 ```
 
 ### 运行单元测试
@@ -78,3 +81,4 @@ bazel build //core/local/benchmark:data_chunk_benchmark
 - 基准测试可能需要较长时间运行，通常不会在常规 CI 流程中执行
 - benchmark 使用 `-O3` 优化，可能会增加构建时间
 - 单元测试和 benchmark 是独立的，可以分别构建和运行
+- `Chunk::get_artifact()` 会返回 `std::shared_ptr`，请在使用前检查是否为空指针。

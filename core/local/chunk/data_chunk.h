@@ -14,14 +14,14 @@
 
 #include "absl/status/status.h"
 
-#include "core/local/chunk/chunk.h"
-#include "core/store/replica/replica.h"
+// #include "core/local/chunk/chunk.h"
+#include "core/local/loader/chunk_loader.h"
 
-namespace tensorcast::local::loader {
-class ChunkLoader;
-}
+namespace tensorcast::local::meta {
+class Chunk;
+} // namespace tensorcast::local::meta
 
-namespace tensorcast::local::chunk {
+namespace tensorcast::local::data {
 
 // A chunk of data in the address space of a device.
 class DataChunk {
@@ -34,11 +34,9 @@ class DataChunk {
 
   enum class LoaderPriority : uint8_t { High, Low };
   // Register a loader with a priority marker (high or low).
-  void register_loader(loader::ChunkLoader* loader, LoaderPriority priority);
+  void register_loader(ChunkLoader* loader, LoaderPriority priority);
 
-  size_t get_size() const {
-    return chunk_->get_size();
-  };
+  size_t get_size() const;
 
   virtual absl::Status load() = 0;
   virtual std::future<absl::Status> load_async() = 0;
@@ -49,7 +47,7 @@ class DataChunk {
   bool loaded{false};
   int preempt_level{0};
 
-  explicit DataChunk(Chunk* chunk) : chunk_(chunk) {};
+  explicit DataChunk(meta::Chunk* chunk) : chunk_(chunk) {};
 
  protected:
   friend class ChunkPinLease;
@@ -60,16 +58,16 @@ class DataChunk {
     bool locked{false};
   };
 
-  Chunk* chunk_;
+  meta::Chunk* chunk_;
   LockState lock_state_;
 
-  std::vector<loader::ChunkLoader*> high_priority_loaders_;
-  std::vector<loader::ChunkLoader*> low_priority_loaders_;
+  std::vector<ChunkLoader*> high_priority_loaders_;
+  std::vector<ChunkLoader*> low_priority_loaders_;
 };
 
 class CPUDataChunk final : public DataChunk {
  public:
-  explicit CPUDataChunk(Chunk* chunk);
+  explicit CPUDataChunk(meta::Chunk* chunk);
 
   absl::Status load() override;
   std::future<absl::Status> load_async() override;
@@ -108,4 +106,4 @@ class ChunkPinLease {
   std::shared_ptr<Impl> impl_;
 };
 
-} // namespace tensorcast::local::chunk
+} // namespace tensorcast::local::data
