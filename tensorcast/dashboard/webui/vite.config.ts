@@ -19,5 +19,13 @@ export default defineConfig(({ mode }) => {
       outDir: path.resolve(__dirname, '../static'),
       emptyOutDir: true,
     },
+    server: {
+      proxy: {
+        '/api': {
+          target: 'http://localhost:8080',
+          changeOrigin: true,
+        },
+      }
+    }
   };
 });

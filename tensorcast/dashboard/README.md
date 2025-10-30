@@ -188,3 +188,30 @@ Compatibility
 - No schema changes; read‑only behavior
 
 
+Mock Global Store (for local development)
+----------------------------------------
+
+When no real Global Store is available, run the built‑in mock gRPC server to power the dashboard end‑to‑end.
+
+1) Start the mock server:
+
+```bash
+uv run tensorcast/dashboard/mock_gs_server.py --port 50051
+```
+
+2) Start the dashboard backend pointing to the mock:
+
+```bash
+TENSORCAST_GS_ADDR=127.0.0.1:50051 \
+TENSORCAST_GS_SECURE=0 \
+uv run uvicorn tensorcast.dashboard.api:app --reload --host 0.0.0.0 --port 8080
+```
+
+The mock implements minimal, static responses for:
+
+- HealthCheck
+- ListActiveWorkers
+- ListReplicasV2
+- GetArtifactInfoById
+- QueryChunkLocations
+

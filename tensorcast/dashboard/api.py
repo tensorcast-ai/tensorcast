@@ -2,22 +2,17 @@
 
 """FastAPI application factory for the Global Store dashboard backend."""
 
-from __future__ import annotations
-
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated
 
 import grpc
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
 
 from tensorcast.dashboard.config import DashboardSettings, get_settings
 from tensorcast.dashboard.gs_client import (
@@ -259,28 +254,28 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
             ).inc()
             REQUEST_LATENCY.labels(endpoint=path, method=method).observe(duration)
 
-    class _CSPMiddleware(BaseHTTPMiddleware):
-        def __init__(self, app: ASGIApp, grafana_host: str | None):
-            super().__init__(app)
-            self._grafana_host = grafana_host
+    # class _CSPMiddleware(BaseHTTPMiddleware):
+    #     def __init__(self, app: ASGIApp, grafana_host: str | None):
+    #         super().__init__(app)
+    #         self._grafana_host = grafana_host
 
-        async def dispatch(self, request: Request, call_next):
-            response = await call_next(request)
-            if self._grafana_host:
-                csp = f"default-src 'self'; frame-src {self._grafana_host}; "
-            else:
-                csp = "default-src 'self'"
-            # Do not expose any auth tokens to browser; we only set CSP.
-            response.headers.setdefault("Content-Security-Policy", csp)
-            return response
+    #     async def dispatch(self, request: Request, call_next):
+    #         response = await call_next(request)
+    #         if self._grafana_host:
+    #             csp = f"default-src 'self'; frame-src {self._grafana_host}; "
+    #         else:
+    #             csp = "default-src 'self'"
+    #         # Do not expose any auth tokens to browser; we only set CSP.
+    #         response.headers.setdefault("Content-Security-Policy", csp)
+    #         return response
 
     # Attach CSP middleware based on Grafana config
-    app.add_middleware(
-        _CSPMiddleware,
-        grafana_host=(
-            resolved_settings.grafana.host if resolved_settings.grafana else None
-        ),
-    )
+    # app.add_middleware(
+    #     _CSPMiddleware,
+    #     grafana_host=(
+    #         resolved_settings.grafana.host if resolved_settings.grafana else None
+    #     ),
+    # )
 
     # Optionally serve static frontend assets if present
     static_dir = Path(__file__).with_name("static")
@@ -324,9 +319,8 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
         return {"status": "alive"}
 
     @app.get("/readyz", include_in_schema=False)
-    async def readyz(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
-    ) -> dict[str, str]:
+    async def readyz(request: Request) -> dict[str, str]:
+        client = get_client_dependency(request)
         try:
             response = await client.health_check()
         except grpc.aio.AioRpcError as exc:
@@ -346,27 +340,25 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/api/health", response_model=HealthResponse)
-    async def api_health(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
-    ) -> HealthResponse:
-        response = await client.health_check()
+    async def api_health(request: Request) -> HealthResponse:
+        response = await get_client_dependency(request).health_check()
         return HealthResponse.from_proto(response)
 
     @app.get("/api/workers", response_model=WorkersResponse)
     async def api_workers(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
+        request: Request,
         include_unavailable: bool = Query(
             default=False, description="Include workers marked unavailable"
         ),
     ) -> WorkersResponse:
-        response = await client.list_active_workers(
+        response = await get_client_dependency(request).list_active_workers(
             include_unavailable=include_unavailable
         )
         return WorkersResponse.from_proto(response)
 
     @app.get("/api/replicas", response_model=ReplicasResponse)
     async def api_replicas(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
+        request: Request,
         artifact_id: str | None = Query(default=None),
         node_id: str | None = Query(default=None),
         node_address: str | None = Query(default=None),
@@ -378,7 +370,7 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
         memory_type_value = (
             _memory_type_from_param(memory_type) if memory_type else None
         )
-        response = await client.list_replicas(
+        response = await get_client_dependency(request).list_replicas(
             artifact_id=artifact_id,
             node_id=node_id,
             node_address=node_address,
@@ -391,7 +383,7 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
 
     @app.get("/api/artifacts/{artifact_id}", response_model=ArtifactDetailResponse)
     async def api_artifact_detail(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
+        request: Request,
         artifact_id: str,
         include: str | None = Query(
             default=None, description="Comma-separated sections (replicas,view,leaves)"
@@ -403,7 +395,7 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
         include_replicas, include_view, include_leaves = _include_flags(include)
         canonical, resolved_view_id = _space_flags(space, view_id)
         indices = _parse_leaf_indices(leaf_indices)
-        response = await client.get_artifact_info(
+        response = await get_client_dependency(request).get_artifact_info(
             artifact_id,
             include_replicas=include_replicas,
             include_view=include_view,
@@ -416,12 +408,14 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
 
     @app.get("/api/chunks", response_model=ChunkLocationsResponse)
     async def api_chunk_locations(
-        client: Annotated[GlobalStoreClient, Depends(get_client_dependency)],
+        request: Request,
         artifact_id: str = Query(...),
         chunk_indices: str | None = Query(default=None),
     ) -> ChunkLocationsResponse:
         indices = _parse_chunk_indices(chunk_indices)
-        response = await client.query_chunk_locations(artifact_id, indices)
+        response = await get_client_dependency(request).query_chunk_locations(
+            artifact_id, indices
+        )
         return ChunkLocationsResponse.from_proto(response)
 
     @app.get("/api/config", include_in_schema=False)

@@ -58,7 +58,7 @@ class GlobalStoreClient:
     def __init__(self, config: ClientConfig):
         self._config = config
         self._channel: grpc.aio.Channel | None = None
-        self._stub: global_store_pb2_grpc.GlobalStoreServiceStub
+        self._stub: global_store_pb2_grpc.GlobalStoreServiceStub | None = None
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
@@ -116,6 +116,7 @@ class GlobalStoreClient:
 
     async def health_check(self) -> global_store_pb2.HealthCheckResponse:
         await self.connect()
+        assert self._stub is not None
         response = await self._call(
             "HealthCheck",
             self._stub.HealthCheck,
@@ -128,6 +129,7 @@ class GlobalStoreClient:
         self, include_unavailable: bool
     ) -> global_store_pb2.ListActiveWorkersResponse:
         await self.connect()
+        assert self._stub is not None
         response = await self._call(
             "ListActiveWorkers",
             self._stub.ListActiveWorkers,
@@ -144,12 +146,13 @@ class GlobalStoreClient:
         artifact_id: str | None = None,
         node_id: str | None = None,
         node_address: str | None = None,
-        memory_type: common_pb2.MemoryType.ValueType | None = None,
+        memory_type: common_pb2.MemoryType | None = None,
         device_id: int | None = None,
         page_token: str | None = None,
         page_size: int | None = None,
     ) -> global_store_pb2.ListReplicasV2Response:
         await self.connect()
+        assert self._stub is not None
 
         pagination = None
         if page_token is not None or page_size is not None:
@@ -193,6 +196,7 @@ class GlobalStoreClient:
         leaf_indices: list[int] | None,
     ) -> global_store_pb2.GetArtifactInfoByIdResponse:
         await self.connect()
+        assert self._stub is not None
 
         request = global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
         if include_replicas:
@@ -222,6 +226,7 @@ class GlobalStoreClient:
         self, artifact_id: str, chunk_indices: list[int] | None
     ) -> global_store_pb2.QueryChunkLocationsResponse:
         await self.connect()
+        assert self._stub is not None
 
         request = global_store_pb2.QueryChunkLocationsRequest(artifact_id=artifact_id)
         if chunk_indices:
