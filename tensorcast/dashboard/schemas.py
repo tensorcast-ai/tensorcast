@@ -36,7 +36,7 @@ def _memory_type_to_str(memory_type: int) -> str:
         common_pb2.MemoryType.MEMORY_TYPE_GPU: "GPU",
         common_pb2.MemoryType.MEMORY_TYPE_DISK: "DISK",
     }
-    return mapping.get(memory_type, "UNSPECIFIED")
+    return mapping.get(common_pb2.MemoryType(memory_type), "UNSPECIFIED")
 
 
 def _connection_status_to_str(status: int) -> str:
@@ -45,7 +45,7 @@ def _connection_status_to_str(status: int) -> str:
         global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED: "DISCONNECTED",
         global_store_pb2.ConnectionStatus.CONNECTION_STATUS_RECONNECTING: "RECONNECTING",
     }
-    return mapping.get(status, "UNSPECIFIED")
+    return mapping.get(global_store_pb2.ConnectionStatus(status), "UNSPECIFIED")
 
 
 def _chunk_state_to_str(state: int) -> str:
@@ -56,7 +56,7 @@ def _chunk_state_to_str(state: int) -> str:
         global_store_pb2.ChunkState.CHUNK_STATE_EVICTED: "EVICTED",
         global_store_pb2.ChunkState.CHUNK_STATE_HOT: "HOT",
     }
-    return mapping.get(state, "UNSPECIFIED")
+    return mapping.get(global_store_pb2.ChunkState(state), "UNSPECIFIED")
 
 
 class HealthStatus(str, Enum):
