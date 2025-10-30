@@ -82,3 +82,17 @@ repos:
             - --comment-style=#
             - --detect-license-in-X-top-lines=5
             - --use-current-year
+    - repo: local
+      hooks:
+        - id: webui-prettier
+          name: webui-prettier-check
+          language: system
+          entry: bash -c 'command -v pnpm >/dev/null 2>&1 && cd tensorcast/dashboard/webui && pnpm exec prettier --check'
+          pass_filenames: true
+          files: ^tensorcast/dashboard/webui/.*\.(ts|tsx|js|jsx|css|json|md|ya?ml)$
+        - id: webui-eslint
+          name: webui-eslint
+          language: system
+          entry: bash -c 'command -v pnpm >/dev/null 2>&1 && cd tensorcast/dashboard/webui && pnpm exec eslint --max-warnings=0'
+          pass_filenames: true
+          files: ^tensorcast/dashboard/webui/.*\.(ts|tsx|js|jsx)$

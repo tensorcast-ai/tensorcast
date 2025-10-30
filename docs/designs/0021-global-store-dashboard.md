@@ -108,8 +108,11 @@ Notes
 ## Implementation Stack & Packaging
 
 - Backend: Python + FastAPI + Pydantic models for strict request/response schemas. Uses the existing Global Store gRPC stubs.
-- Frontend: static Single Page App (framework agnostic). Served as static files by the backend or any CDN.
-- Packaging: ship the backend with the Python wheel under `tensorcast/dashboard/backend`, and publish the built frontend assets under `tensorcast/dashboard/static`.
+- Frontend: React + TypeScript + Vite + Tailwind (shadcn/ui) under `tensorcast/dashboard/webui`.
+  - Router `basename` 与 Vite `base` 通过 `BASE_PATH`/`VITE_BASE_PATH` 对齐，支持子路径部署。
+  - 不直接读取 Prometheus；Metrics 页面仅在 `GRAFANA_*` 配置存在时显示嵌入面板。
+  - 前端运行时以 `import.meta.env.BASE_URL` 作为 Router `basename`，构建时由 `VITE_BASE_PATH` 写入 Vite `base`。
+- Packaging: ship the backend with the Python wheel under `tensorcast/dashboard/backend`, and publish the built frontend assets under `tensorcast/dashboard/static`（Vite build outDir 指向该目录）。
 - Entry points:
   - ASGI app: `tensorcast.dashboard.api:app` (served by Uvicorn or any ASGI server).
   - CLI: `tensorcast-dashboard` console script that loads configuration and starts the server.
@@ -118,7 +121,8 @@ Directory sketch (non-normative):
 - `tensorcast/dashboard/api.py` — FastAPI app and routers
 - `tensorcast/dashboard/schemas.py` — Pydantic models
 - `tensorcast/dashboard/gs_client.py` — thin gRPC client wrapping GS RPCs
-- `tensorcast/dashboard/static/` — compiled frontend
+- `tensorcast/dashboard/webui/` — web UI source (React/Vite/Tailwind/shadcn)
+- `tensorcast/dashboard/static/` — compiled frontend (Vite build 输出)
 
 ## API Contracts & Error Semantics
 
