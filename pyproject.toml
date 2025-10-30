@@ -13,6 +13,7 @@ requires-python = ">=3.10"
 # The package name will include the torch version suffix (e.g., tensorcast-0.0.2+torch26)
 dependencies = [
     "click>=8.1.8",
+    "fastapi>=0.115.5",
     "grpcio>=1.56.0,<2",
     "pandas>=2.2.3",
     "prometheus-client>=0.21.1",
@@ -25,6 +26,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.36.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.36.0",
     "opentelemetry-instrumentation-grpc>=0.57b0",
+    "uvicorn>=0.32.0",
 ]
 
 dynamic = ["version"]
