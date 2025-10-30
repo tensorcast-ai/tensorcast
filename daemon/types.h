@@ -11,6 +11,7 @@
 #include "daemon/cuda_ipc_raii.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "core/common/artifact_identity.h"
 
 namespace tensorcast::daemon {
 
@@ -55,6 +56,8 @@ struct RegisterTensorAliasMeta {
 struct LipLeaseEntry {
   std::string registration_id; // original registration id for keepalive/revoke
   std::string artifact_id;
+  std::string client_artifact_id;
+  tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
   int device_id{0};
   int owner_pid{0};
   uint32_t ttl_ms{0};
@@ -86,6 +89,7 @@ struct CommitLeaseResult {
   std::string encoding; // e.g., "json"
   uint64_t total_size{0};
   std::string verification_json; // optional JSON payload
+  tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
 };
 
 } // namespace tensorcast::daemon

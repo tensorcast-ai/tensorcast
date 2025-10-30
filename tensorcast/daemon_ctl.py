@@ -25,6 +25,7 @@ from tensorcast.proto.daemon.v1 import (
 )
 from tensorcast.types import (
     ArtifactDescriptor,
+    ArtifactIdKind,
     BeginRegisterArtifactResult,
     CanonicalRange,
     CoalescedHandshake,
@@ -654,6 +655,7 @@ class DaemonCtl:
         tensor_index_data: bytes | None = None,
         encoding: str = "json",
         schema_version: str = "v2",
+        client_artifact_id: str | None = None,
         plan: Plan | None = None,
         timeout_s: float = 30.0,
         view: store_daemon_pb2.ViewRegistrationOptions | None = None,
@@ -699,6 +701,9 @@ class DaemonCtl:
             )
         else:
             req.tensor_index_key = tensor_index_key or ""
+
+        if client_artifact_id:
+            req.client_artifact_id = client_artifact_id
 
         # Plan oneof
         if plan is None:
@@ -812,6 +817,7 @@ class DaemonCtl:
                 schema_version=desc.schema_version,
                 encoding=desc.encoding,
                 total_size=int(desc.total_size),
+                id_kind=desc.id_kind,
             )
             canonical_ranges: tuple[CanonicalRange, ...] = tuple(
                 CanonicalRange(offset=int(r.offset), length=int(r.length))
@@ -1052,11 +1058,16 @@ class DaemonCtl:
         # Map our typed descriptor into proto
         pb = common_pb2.ArtifactDescriptor(
             artifact_id=descriptor.artifact_id,
-            index_multihash=descriptor.index_multihash,
-            data_multihash=descriptor.data_multihash,
-            schema_version=descriptor.schema_version,
-            encoding=descriptor.encoding,
+            index_multihash=descriptor.index_multihash or "",
+            data_multihash=descriptor.data_multihash or "",
+            schema_version=descriptor.schema_version or "",
+            encoding=descriptor.encoding or "",
             total_size=int(descriptor.total_size),
+        )
+        pb.id_kind = (
+            common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
+            if descriptor.id_kind is ArtifactIdKind.CGID
+            else common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
         )
         req.artifact_descriptor.CopyFrom(pb)
 

@@ -214,7 +214,10 @@ sc_header_only_library(
     name = "types_hdr",
     hdrs = ["types.h"],
     visibility = ["//visibility:public"],
-    deps = [":cuda_ipc_raii_hdr"],
+    deps = [
+        ":cuda_ipc_raii_hdr",
+        "//core/common:artifact_identity_lib",
+    ],
 )
 
 sc_header_only_library(
@@ -387,6 +390,7 @@ sc_cc_library(
         ":status_utils",
         "//core/store:store_engine",
         "//core/store/loader:segment_plan_source",
+        "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",

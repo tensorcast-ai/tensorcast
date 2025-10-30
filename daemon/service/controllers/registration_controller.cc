@@ -13,9 +13,11 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/loader/view_planner.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
+#include "tensorcast/common/v1/common.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -24,6 +26,19 @@ using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
 namespace {
+
+tensorcast::common::v1::ArtifactIdKind ToProtoKind(tensorcast::common::ArtifactIdKind kind) {
+  using ProtoKind = tensorcast::common::v1::ArtifactIdKind;
+  switch (kind) {
+    case tensorcast::common::ArtifactIdKind::kCgid:
+      return ProtoKind::ARTIFACT_ID_KIND_CGID;
+    case tensorcast::common::ArtifactIdKind::kMi2:
+      return ProtoKind::ARTIFACT_ID_KIND_MI2;
+    case tensorcast::common::ArtifactIdKind::kUnspecified:
+    default:
+      return ProtoKind::ARTIFACT_ID_KIND_UNSPECIFIED;
+  }
+}
 
 absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
@@ -112,6 +127,17 @@ grpc::Status RegistrationController::begin(
   meta.total_size = req.total_size();
   meta.device_id = req.device_id();
   meta.owner_pid = req.owner_pid();
+  if (!req.client_artifact_id().empty()) {
+    auto id_status = common::validate_client_generated_id(req.client_artifact_id());
+    if (!id_status.ok()) {
+      return {StatusCode::INVALID_ARGUMENT, std::string(id_status.message())};
+    }
+    meta.id_kind = common::ArtifactIdKind::kCgid;
+    meta.client_artifact_id = req.client_artifact_id();
+  } else {
+    meta.id_kind = common::ArtifactIdKind::kMi2;
+    meta.client_artifact_id.clear();
+  }
   if (req.has_lease())
     meta.lease_in_place = req.lease().in_place();
   if (req.has_ttl_ms() && req.ttl_ms() > 0) {
@@ -152,6 +178,9 @@ grpc::Status RegistrationController::begin(
       reg.tensor_index_data = meta.index_data;
       reg.schema_version = req.tensor_index_data().schema_version();
       reg.encoding = req.tensor_index_data().encoding();
+    }
+    if (!meta.client_artifact_id.empty()) {
+      reg.client_artifact_id = meta.client_artifact_id;
     }
     auto begin_or = d_.engine.begin_register_artifact(reg);
     if (!begin_or.ok())
@@ -510,6 +539,8 @@ grpc::Status RegistrationController::commit(
         meta.ttl_ms,
         meta.epoch,
         meta.total_size,
+        meta.id_kind,
+        meta.client_artifact_id,
         meta.index_data,
         meta.index_key_hex,
         std::move(lease_vec),
@@ -537,6 +568,7 @@ grpc::Status RegistrationController::commit(
     desc->set_schema_version(out.schema_version);
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.total_size);
+    desc->set_id_kind(ToProtoKind(out.id_kind));
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_commit_lip_total");
@@ -579,6 +611,7 @@ grpc::Status RegistrationController::commit(
     desc->set_schema_version(out.schema_version);
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.size_bytes);
+    desc->set_id_kind(ToProtoKind(out.id_kind));
     resp.set_existed(out.existed);
     if (out.view_id.has_value()) {
       resp.set_view_id(*out.view_id);

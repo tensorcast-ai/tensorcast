@@ -2040,6 +2040,13 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
   auto entry = std::make_shared<PendingRegistrationEntry>();
   entry->registration_id = reg_id;
   entry->artifact_id = reg.artifact_id;
+  if (reg.client_artifact_id.has_value()) {
+    entry->client_artifact_id = *reg.client_artifact_id;
+    entry->id_kind = common::ArtifactIdKind::kCgid;
+  } else {
+    entry->client_artifact_id.clear();
+    entry->id_kind = common::ArtifactIdKind::kMi2;
+  }
   entry->device_id = reg.device_id;
   entry->size_bytes = reg.total_size_bytes;
   entry->tensor_index_key = reg.tensor_index_key;
@@ -2185,72 +2192,82 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     }
   }
 
-  // Compute content-addressed artifact_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
-  // 1) index_multihash from canonical index bytes when provided, otherwise from key (sha256 hex)
-  absl::StatusOr<std::string> index_mh_or =
-      common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
-  if (!index_mh_or.ok()) {
-    return index_mh_or.status();
-  }
-
-  if (!entry->schema_version.empty() && entry->schema_version != "v3") {
-    return absl::FailedPreconditionError(
-        absl::StrCat("Pending registration schema_version must be 'v3'; found '", entry->schema_version, "'"));
-  }
-
+  std::string index_multihash;
+  std::string data_multihash;
   std::vector<loader::SegmentPiece> segment_plan;
   bool segment_plan_ready = false;
 
-  // 2) data_multihash via SegmentPlan linearization (PAD=0).
-  absl::StatusOr<std::string> data_mh_or;
-  if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
-    // Hash directly from VS CPU memory (zero-initialized PAD regions).
-    auto region_or = va_space_->region_info(entry->artifact_id);
-    if (!region_or.ok()) {
-      return region_or.status();
+  if (entry->id_kind == common::ArtifactIdKind::kMi2 || entry->client_artifact_id.empty()) {
+    // Compute content-addressed artifact_id per RFC-0007: "mi2:<index_multihash>:<data_multihash>"
+    // 1) index_multihash from canonical index bytes when provided, otherwise from key (sha256 hex)
+    absl::StatusOr<std::string> index_mh_or =
+        common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
+    if (!index_mh_or.ok()) {
+      return index_mh_or.status();
     }
-    auto mh_or = loader::compute_data_multihash_from_cpu_memory(
-        gsl::not_null<const void*>{region_or->cpu_base}, entry->size_bytes);
-    if (!mh_or.ok()) {
-      return mh_or.status();
+    index_multihash = *index_mh_or;
+
+    if (!entry->schema_version.empty() && entry->schema_version != "v3") {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Pending registration schema_version must be 'v3'; found '", entry->schema_version, "'"));
     }
-    data_mh_or = *mh_or;
-  } else {
-    void* gpu_ptr = entry->gpu_ptr;
-    if (gpu_ptr == nullptr) {
-      const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
-      gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
-    }
-    if (!gpu_ptr) {
-      return absl::FailedPreconditionError("GPU pointer is null; cannot hash GPU data");
-    }
-    if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() && entry->encoding == "json") {
-      auto plan_or = loader::build_segment_plan_from_canonical_index_json(
-          *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
-      if (!plan_or.ok()) {
-        return plan_or.status();
+
+    // 2) data_multihash via SegmentPlan linearization (PAD=0).
+    absl::StatusOr<std::string> data_mh_or;
+    if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
+      auto region_or = va_space_->region_info(entry->artifact_id);
+      if (!region_or.ok()) {
+        return region_or.status();
       }
-      segment_plan = std::move(*plan_or);
-      segment_plan_ready = true;
-      auto mh_or = loader::compute_data_multihash_from_gpu_plan(
-          gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
+      auto mh_or = loader::compute_data_multihash_from_cpu_memory(
+          gsl::not_null<const void*>{region_or->cpu_base}, entry->size_bytes);
       if (!mh_or.ok()) {
         return mh_or.status();
       }
       data_mh_or = *mh_or;
     } else {
-      auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry->size_bytes, entry->device_id);
-      if (!mh_or.ok()) {
-        return mh_or.status();
+      void* gpu_ptr = entry->gpu_ptr;
+      if (gpu_ptr == nullptr) {
+        const auto ptrs = entry->replica->get_memory_manager().get_pointer(MemoryLocation::GPU);
+        gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
       }
-      data_mh_or = *mh_or;
+      if (!gpu_ptr) {
+        return absl::FailedPreconditionError("GPU pointer is null; cannot hash GPU data");
+      }
+      if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() && entry->encoding == "json") {
+        auto plan_or = loader::build_segment_plan_from_canonical_index_json(
+            *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
+        if (!plan_or.ok()) {
+          return plan_or.status();
+        }
+        segment_plan = std::move(*plan_or);
+        segment_plan_ready = true;
+        auto mh_or = loader::compute_data_multihash_from_gpu_plan(
+            gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
+        if (!mh_or.ok()) {
+          return mh_or.status();
+        }
+        data_mh_or = *mh_or;
+      } else {
+        auto mh_or = common::compute_data_multihash_from_gpu(gpu_ptr, entry->size_bytes, entry->device_id);
+        if (!mh_or.ok()) {
+          return mh_or.status();
+        }
+        data_mh_or = *mh_or;
+      }
     }
+    if (!data_mh_or.ok()) {
+      return data_mh_or.status();
+    }
+    data_multihash = *data_mh_or;
+    entry->artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
+    entry->id_kind = common::ArtifactIdKind::kMi2;
+  } else {
+    entry->artifact_id = entry->client_artifact_id;
+    entry->id_kind = common::ArtifactIdKind::kCgid;
+    index_multihash.clear();
+    data_multihash.clear();
   }
-  if (!data_mh_or.ok()) {
-    return data_mh_or.status();
-  }
-
-  entry->artifact_id = absl::StrCat("mi2:", *index_mh_or, ":", *data_mh_or);
 
   // Idempotent success: if the same content-addressed artifact already has a
   // replica on the target device, reclaim this allocation and return OK with
@@ -2285,10 +2302,11 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       result.device_id = entry->device_id;
       result.size_bytes = entry->size_bytes;
       result.existed = true;
-      result.index_multihash = *index_mh_or;
-      result.data_multihash = *data_mh_or;
+      result.index_multihash = index_multihash;
+      result.data_multihash = data_multihash;
       result.schema_version = entry->schema_version;
       result.encoding = entry->encoding;
+      result.id_kind = entry->id_kind;
       if (entry->view_state) {
         if (!entry->view_state->options.view_id.empty()) {
           result.view_id = entry->view_state->options.view_id;
@@ -2432,7 +2450,8 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
         entry->view_state->options.canonical_ranges, leaf_chunk_bytes.value_or(0));
   }
 
-  if (entry->view_state && leaf_chunk_bytes.has_value() && !canonical_leaf_indices.empty()) {
+  if (entry->id_kind == common::ArtifactIdKind::kMi2 && entry->view_state && leaf_chunk_bytes.has_value() &&
+      !canonical_leaf_indices.empty() && !index_multihash.empty()) {
     loader::verification::MemoryView canonical_view;
     canonical_view.size_bytes = entry->size_bytes;
     if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
@@ -2465,7 +2484,7 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
       for (size_t i = 0; i < canonical_leaf_indices.size(); ++i) {
         global_store::v1::LeafWrite leaf;
         leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_CANONICAL);
-        leaf.set_space_id(*index_mh_or);
+        leaf.set_space_id(index_multihash);
         leaf.set_leaf_idx(canonical_leaf_indices[i]);
         const auto& digest = (*canonical_digest_or)[i];
         leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
@@ -2485,10 +2504,11 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
   result.device_id = entry->device_id;
   result.size_bytes = entry->size_bytes;
   result.existed = false;
-  result.index_multihash = *index_mh_or;
-  result.data_multihash = *data_mh_or;
+  result.index_multihash = index_multihash;
+  result.data_multihash = data_multihash;
   result.schema_version = entry->schema_version;
   result.encoding = entry->encoding;
+  result.id_kind = entry->id_kind;
   uint64_t covered_bytes = 0;
   if (entry->view_state) {
     if (!entry->view_state->options.view_id.empty()) {

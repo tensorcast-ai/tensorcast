@@ -46,6 +46,7 @@ from tensorcast.api._indices import (
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
+from tensorcast.common.identity import ArtifactIdKind, validate_client_generated_id
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.types import (
@@ -954,6 +955,7 @@ def _register_artifact_core(
     options: RegisterArtifactOptions,
     device_id: int | torch.device | None,
     ttl_ms: int | None,
+    client_artifact_id: str | None = None,
     force_lease_in_place: bool = False,
     prevalidate_disk: bool = True,
     client: DaemonCtl | None = None,
@@ -979,6 +981,20 @@ def _register_artifact_core(
         target_device_id = resolve_device(device_id)
     elif isinstance(device_id, int):
         target_device_id = int(device_id)
+
+    normalized_artifact_id: str | None = None
+    identity_kind = ArtifactIdKind.MI2
+    if client_artifact_id:
+        candidate = client_artifact_id.strip()
+        if candidate:
+            try:
+                validate_client_generated_id(candidate)
+            except ValueError as exc:
+                raise TensorCastError(str(exc)) from exc
+            normalized_artifact_id = candidate
+            identity_kind = ArtifactIdKind.CGID
+        else:
+            normalized_artifact_id = None
 
     if view is None:
         ctx, layout, index_bytes = _prepare_build(artifact, device_id)
@@ -1034,6 +1050,10 @@ def _register_artifact_core(
     }
 
     with tracer.start_as_current_span(span_names[plan_type], kind=SpanKind.INTERNAL):
+        span = trace.get_current_span()
+        span.set_attribute("tc.artifact.identity_kind", identity_kind.value)
+        if normalized_artifact_id:
+            span.set_attribute("tc.artifact.client_artifact_id", normalized_artifact_id)
         begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
             total_size_bytes=layout.total_size,
@@ -1041,6 +1061,7 @@ def _register_artifact_core(
             tensor_index_data=index_bytes,
             encoding="json",
             schema_version="v3",
+            client_artifact_id=normalized_artifact_id,
             plan=plan_model,
             view=view.view_options if view is not None else None,
             timeout_s=60.0,

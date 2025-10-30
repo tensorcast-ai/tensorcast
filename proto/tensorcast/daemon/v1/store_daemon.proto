@@ -401,6 +401,7 @@ message BeginRegisterArtifactRequest {
   uint64 total_size = 2; // Total size in bytes (8-byte aligned)
   optional uint32 ttl_ms = 3; // TTL for registration (milliseconds), used by Lease
   int32 owner_pid = 6; // REQUIRED: Owner process ID for lease lifecycle (must be > 0)
+  string client_artifact_id = 1002; // Optional client-provided artifact identity (cgid:...)
 
   // Tensor index can be provided as key or data
   oneof index {

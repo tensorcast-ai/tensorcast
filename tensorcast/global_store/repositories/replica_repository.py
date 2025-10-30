@@ -327,7 +327,8 @@ class ReplicaRepository(BaseRepository):
                     buffer_sizes = ?,
                     verification_json = ?,
                     memory_size = ?,
-                    worker_id = ?
+                    worker_id = ?,
+                    expires_at = ?
                 WHERE replica_id = ?
                 """,
                 [
@@ -338,6 +339,7 @@ class ReplicaRepository(BaseRepository):
                     replica.verification_json,
                     replica.memory_size,
                     replica.worker_id,
+                    replica.expires_at,
                     str(existing_replica_id),
                 ],
             )
@@ -349,8 +351,8 @@ class ReplicaRepository(BaseRepository):
                 INSERT INTO artifact_replicas (
                     replica_id, artifact_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
-                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
@@ -369,6 +371,7 @@ class ReplicaRepository(BaseRepository):
                     list(replica.buffer_sizes),
                     replica.verification_json,
                     replica.worker_id,
+                    replica.expires_at,
                 ],
             )
 
@@ -859,20 +862,29 @@ class ReplicaRepository(BaseRepository):
         worker_id = None
         created_at = None
         updated_at = None
+        expires_at = None
 
-        # Detect if verification_json present by checking remaining length
-        # After buffer_sizes we expect either worker_id at (idx+11) or
-        # verification_json then worker_id.
-        if len(row) >= idx + 14:
-            # Likely layout with verification_json
+        remaining = len(row) - (idx + 11)
+        if remaining >= 5:
             verification_json = row[idx + 11]
             worker_id = row[idx + 12]
             created_at = row[idx + 13]
-            updated_at = row[idx + 14] if len(row) > idx + 14 else None
-        else:
-            worker_id = row[idx + 11] if len(row) > idx + 11 else None
-            created_at = row[idx + 12] if len(row) > idx + 12 else None
-            updated_at = row[idx + 13] if len(row) > idx + 13 else None
+            updated_at = row[idx + 14]
+            expires_at = row[idx + 15]
+        elif remaining == 4:
+            verification_json = row[idx + 11]
+            worker_id = row[idx + 12]
+            created_at = row[idx + 13]
+            updated_at = row[idx + 14]
+        elif remaining == 3:
+            verification_json = row[idx + 11]
+            worker_id = row[idx + 12]
+            created_at = row[idx + 13]
+        elif remaining == 2:
+            worker_id = row[idx + 11]
+            created_at = row[idx + 12]
+        elif remaining == 1:
+            worker_id = row[idx + 11]
 
         return Replica(
             replica_id=replica_id,
@@ -893,6 +905,7 @@ class ReplicaRepository(BaseRepository):
             verification_json=verification_json,
             created_at=created_at,
             updated_at=updated_at,
+            expires_at=expires_at,
         )
 
     def find_by_disk_path(self, disk_path: str) -> list[Replica]:

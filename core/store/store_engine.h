@@ -14,6 +14,7 @@
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_identity.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
@@ -136,6 +137,7 @@ class StoreEngine {
     uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
     bool enable_p2p{true}; // Whether to enable remote access
     uint32_t ttl_ms{0}; // Optional TTL for Begin→Commit (0 = no TTL)
+    std::optional<std::string> client_artifact_id; // Optional CGID supplied by client
     std::optional<ViewRegistration> view;
   };
 
@@ -178,6 +180,7 @@ class StoreEngine {
     std::optional<std::string> view_index_json;
     std::vector<CanonicalRange> canonical_ranges;
     bool allow_partial{false};
+    common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
   };
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
@@ -391,6 +394,7 @@ class StoreEngine {
   struct PendingRegistrationEntry {
     std::string registration_id;
     std::string artifact_id;
+    std::string client_artifact_id;
     int device_id{0};
     uint64_t size_bytes{0};
     std::string tensor_index_key;
@@ -398,6 +402,7 @@ class StoreEngine {
     std::string schema_version;
     std::string encoding;
     bool enable_p2p{true};
+    common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
     std::shared_ptr<replica::Replica> replica; // Backing replica for memory ownership
     void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
     cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes

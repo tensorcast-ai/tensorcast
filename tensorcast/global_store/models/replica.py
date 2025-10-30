@@ -65,6 +65,7 @@ class Replica:
     # Timestamps
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    expires_at: datetime | None = None
 
     @property
     def load_ratio(self) -> float:

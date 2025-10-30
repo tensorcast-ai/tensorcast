@@ -29,6 +29,7 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
+from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -139,6 +140,7 @@ class FakeEnvironment:
             schema_version="v3",
             encoding="raw",
             total_size=offset,
+            id_kind=ArtifactIdKind.MI2,
         )
         index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
         device = 0 if device_id is None else int(device_id)

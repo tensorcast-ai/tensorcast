@@ -21,6 +21,13 @@ message ArtifactDescriptor {
   string schema_version = 4;
   string encoding = 5;
   uint64 total_size = 6;
+  ArtifactIdKind id_kind = 7;
+}
+
+enum ArtifactIdKind {
+  ARTIFACT_ID_KIND_UNSPECIFIED = 0;
+  ARTIFACT_ID_KIND_MI2 = 1;
+  ARTIFACT_ID_KIND_CGID = 2;
 }
 
 enum MemoryType {

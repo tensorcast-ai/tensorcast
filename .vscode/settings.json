@@ -35,6 +35,10 @@
     "python.pythonPath": ".venv/bin/python3.10",
     "clangd.arguments": [
         "--background-index",
+    ],
+    "cSpell.words": [
+        "absl",
+        "tensorcast"
     ]
 
 }
