@@ -12,6 +12,10 @@
 
 Router 使用 `createBrowserRouter` 并通过 `basename` 与 Vite 的 `base` 对齐，实现子路径部署。
 
+### 布局与导航
+
+全局使用 `shadcn/ui` 的 `NavigationMenu` 作为顶栏导航（见 `src/components/Layout.tsx`）。所有页面通过该布局渲染。
+
 ### 环境变量
 
 前端使用 Vite 约定的 `VITE_` 前缀变量：
@@ -58,5 +62,3 @@ pnpm build
 
 - Overview/Workers/Replicas/ArtifactDetail 页面已就绪占位，将通过 Dashboard 后端 REST API 接入数据。
 - Metrics 页面只做外部面板嵌入，不直接读取 Prometheus。
-
-
