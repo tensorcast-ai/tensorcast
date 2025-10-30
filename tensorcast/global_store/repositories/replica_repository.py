@@ -3,6 +3,7 @@
 """Repository for artifact replica data access."""
 
 import time
+from collections.abc import Sequence
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
@@ -38,7 +39,7 @@ class ReplicaRepository(BaseRepository):
     def find_by_id(self, replica_id: UUID, artifact_id: str) -> Replica | None:
         """Find a replica by ID and content-addressed artifact_id."""
         cursor = self.get_cursor()
-        result = cursor.execute(
+        query = cursor.execute(
             """
             SELECT
                 mr.replica_id,
@@ -64,10 +65,12 @@ class ReplicaRepository(BaseRepository):
             WHERE mr.replica_id = ? AND mr.artifact_id = ?
             """,
             [str(replica_id), artifact_id],
-        ).fetchone()
+        )
 
-        if result:
-            return self._row_to_model(result)
+        row = query.fetchone()
+        if row:
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
         return None
 
     def find_existing(
@@ -81,7 +84,7 @@ class ReplicaRepository(BaseRepository):
     ) -> Replica | None:
         """Find existing replica with same identifying information."""
         cursor = self.get_cursor()
-        result = cursor.execute(
+        query = cursor.execute(
             """
             SELECT
                 mr.replica_id,
@@ -119,10 +122,12 @@ class ReplicaRepository(BaseRepository):
                 memory_type.value,
                 device_id,
             ],
-        ).fetchone()
+        )
 
-        if result:
-            return self._row_to_model(result)
+        row = query.fetchone()
+        if row:
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
         return None
 
     def find_available_for_transport(
@@ -184,7 +189,7 @@ class ReplicaRepository(BaseRepository):
         replica_id = row[0]
 
         # Fetch full replica data including current_requests
-        full_row = cursor.execute(
+        result = cursor.execute(
             """
             SELECT
                 mr.replica_id,
@@ -210,10 +215,12 @@ class ReplicaRepository(BaseRepository):
             WHERE mr.replica_id = ?
             """,
             [str(replica_id)],
-        ).fetchone()
+        )
 
+        full_row = result.fetchone()
         if full_row:
-            return self._row_to_model(full_row)
+            columns = [desc[0] for desc in result.description]
+            return self._row_to_model(full_row, columns)
         return None
 
     def create(self, replica: Replica) -> Replica:
@@ -568,7 +575,9 @@ class ReplicaRepository(BaseRepository):
             params.append(device_id)
 
         result = cursor.execute(query, params)
-        replicas = [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        replicas = [self._row_to_model(row, columns) for row in rows]
         return replicas
 
     def mark_unavailable_by_worker(self, worker_id: str) -> int:
@@ -631,7 +640,9 @@ class ReplicaRepository(BaseRepository):
             """
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def mark_as_stale(self, replica_id: UUID) -> bool:
         """Mark a replica as stale (for recovery purposes)."""
@@ -704,7 +715,9 @@ class ReplicaRepository(BaseRepository):
             """
         )
 
-        orphaned = [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        orphaned = [self._row_to_model(row, columns) for row in rows]
         if orphaned:
             logger.warning(f"Found {len(orphaned)} orphaned replicas")
         return orphaned
@@ -741,7 +754,9 @@ class ReplicaRepository(BaseRepository):
             [worker_id],
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def update_worker_id(self, replica_id: UUID, new_worker_id: str) -> bool:
         """Update the worker_id for a replica."""
@@ -795,7 +810,9 @@ class ReplicaRepository(BaseRepository):
             [recovery_time],
         )
 
-        return [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
 
     def cleanup_stale_replicas(self, recovery_time: int) -> int:
         """
@@ -822,69 +839,57 @@ class ReplicaRepository(BaseRepository):
             logger.info(f"Marked {cleaned_up_count} stale replicas as unavailable")
         return cleaned_up_count
 
-    def _row_to_model(self, row: tuple) -> Replica:
-        """Convert a database row to Replica object.
+    def _row_to_model(self, row: tuple, columns: Sequence[str]) -> Replica:
+        """Convert a database row to Replica object using column metadata."""
 
-        The repository has historically used slightly different SELECT column
-        orders across methods.  This helper normalises the tuple layout by
-        detecting whether ``disk_path`` is present after ``artifact_id``.
-        """
+        if not columns:
+            raise ValueError("Replica row conversion requires column metadata.")
 
-        replica_id = _to_uuid(row[0])
-        artifact_id = row[1]
+        column_index = {column: idx for idx, column in enumerate(columns)}
 
-        # Layout A (with disk_path):
-        # [replica_id, artifact_id, disk_path, node_id, node_address, node_port, ...]
-        # Layout B (without disk_path):
-        # [replica_id, artifact_id, node_id, node_address, node_port, ...]
-        # Some queries now include verification_json before worker_id. We detect
-        # presence by row length heuristics.
-        has_disk_path = len(row) >= 17
+        def get(column: str, *, default=None):
+            idx = column_index.get(column)
+            if idx is None:
+                return default
+            value = row[idx]
+            if value is None and default is not None:
+                return default
+            return value
 
-        idx = 2
-        disk_path = row[idx] if has_disk_path else None
-        if has_disk_path:
-            idx += 1
+        def require(column: str):
+            value = get(column)
+            if value is None:
+                raise ValueError(f"Replica row missing required column: {column}")
+            return value
 
-        node_id = row[idx]
-        node_address = row[idx + 1]
-        node_port = row[idx + 2]
-        memory_size = row[idx + 3]
-        memory_type = MemoryType(row[idx + 4])
-        device_id = row[idx + 5]
-        max_concurrency = row[idx + 6]
-        current_requests = row[idx + 7]
-        is_available = row[idx + 8]
-        remote_memory_keys = row[idx + 9] if row[idx + 9] else []
-        buffer_sizes = row[idx + 10] if row[idx + 10] else []
-        # Verification JSON may be present at idx + 11, depending on SELECT
-        verification_json = None
-        worker_id = None
-        created_at = None
-        updated_at = None
-        expires_at = None
+        replica_id = _to_uuid(require("replica_id"))
+        artifact_id = require("artifact_id")
+        disk_path = get("disk_path")
+        node_id = require("node_id")
+        node_address = require("node_address")
+        node_port = int(require("node_port"))
+        memory_size = int(require("memory_size"))
+        memory_type = MemoryType(require("memory_type"))
+        device_id_value = get("device_id")
+        device_id = int(device_id_value) if device_id_value is not None else None
+        max_concurrency = int(require("max_concurrency"))
+        current_requests_value = get("current_requests", default=0)
+        current_requests = int(current_requests_value or 0)
+        is_available = bool(require("is_available"))
 
-        remaining = len(row) - (idx + 11)
-        if remaining >= 5:
-            verification_json = row[idx + 11]
-            worker_id = row[idx + 12]
-            created_at = row[idx + 13]
-            updated_at = row[idx + 14]
-            expires_at = row[idx + 15]
-        elif remaining == 4:
-            verification_json = row[idx + 11]
-            worker_id = row[idx + 12]
-            created_at = row[idx + 13]
-            updated_at = row[idx + 14]
-        elif remaining == 3:
-            verification_json = row[idx + 11]
-            worker_id = row[idx + 12]
-            created_at = row[idx + 13]
-        elif remaining == 2:
-            worker_id = row[idx + 11]
-            created_at = row[idx + 12]
-        elif remaining == 1:
-            worker_id = row[idx + 11]
+        remote_memory_keys_value = get("remote_memory_keys", default=())
+        remote_memory_keys = (
+            list(remote_memory_keys_value) if remote_memory_keys_value else []
+        )
+
+        buffer_sizes_value = get("buffer_sizes", default=())
+        buffer_sizes = list(buffer_sizes_value) if buffer_sizes_value else []
+
+        verification_json = get("verification_json")
+        worker_id = get("worker_id")
+        created_at = get("created_at")
+        updated_at = get("updated_at")
+        expires_at = get("expires_at")
 
         return Replica(
             replica_id=replica_id,
@@ -937,4 +942,6 @@ class ReplicaRepository(BaseRepository):
             """,
             [disk_path],
         )
-        return [self._row_to_model(row) for row in result.fetchall()]
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]

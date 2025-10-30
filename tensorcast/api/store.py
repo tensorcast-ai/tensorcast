@@ -686,8 +686,10 @@ class Store:
     def _canonical_index_from_result(
         self, result: RegistrationResult
     ) -> CanonicalIndex:
+        avbs_hash = result.descriptor.data_multihash or ""
         return self._canonical_index_from_bytes(
-            result.index_bytes, avbs_hash=result.descriptor.data_multihash
+            result.index_bytes,
+            avbs_hash=avbs_hash,
         )
 
     @staticmethod

@@ -38,6 +38,9 @@
     ],
     "cSpell.words": [
         "absl",
+        "avbs",
+        "multihash",
+        "retryable",
         "tensorcast"
     ]
 
