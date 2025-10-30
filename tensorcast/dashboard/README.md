@@ -153,7 +153,7 @@ Security & Deployment
 - No built‑in authentication; rely on network controls and/or reverse proxy policies
 - TLS to Global Store is supported when `TENSORCAST_GS_SECURE=true` and CA is provided
 - CORS: allowlist via `CORS_ALLOWED_ORIGINS` (disabled by default)
-- CSP: the backend sets a strict `Content-Security-Policy` and only allows `frame-src` for the configured Grafana host (when embedding is enabled)
+- CSP: the backend does not set CSP headers by default. Configure a strict `Content-Security-Policy` at your reverse proxy (when Grafana embedding is enabled, allow only the required `frame-src`). Backend‑side CSP middleware may be added in the future.
 - Do not expose Grafana tokens to browsers; prefer anonymous viewer or terminate Grafana auth at a reverse proxy
 
 

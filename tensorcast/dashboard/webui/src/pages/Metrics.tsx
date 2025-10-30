@@ -1,4 +1,4 @@
-import { metricsConfig } from '@/lib/config';
+import { metricsConfig } from '@/utils/config';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { NavLink } from 'react-router-dom';

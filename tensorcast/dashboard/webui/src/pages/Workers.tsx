@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, type WorkersResponse } from '@/lib/api';
+import { api, type WorkersResponse } from '@/utils/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatBytes, timeAgo } from '@/lib/utils';
+import { formatBytes, timeAgo } from '@/utils/utils';
 
 type Row = WorkersResponse['workers'][number];
 

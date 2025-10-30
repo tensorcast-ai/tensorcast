@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, type ReplicasResponse } from '@/lib/api';
+import { api, type ReplicasResponse } from '@/utils/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatBytes } from '@/lib/utils';
+import { formatBytes } from '@/utils/utils';
 import { NavLink, useSearchParams } from 'react-router-dom';
 
 type Row = ReplicasResponse['replicas'][number];

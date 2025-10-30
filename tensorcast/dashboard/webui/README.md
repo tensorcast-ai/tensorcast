@@ -21,6 +21,7 @@ Router 使用 `createBrowserRouter` 并通过 `basename` 与 Vite 的 `base` 对
 前端使用 Vite 约定的 `VITE_` 前缀变量：
 
 - `VITE_BASE_PATH`：静态站点子路径前缀（如 `/tensorcast-dashboard/`）。默认 `'/'`。
+- `VITE_API_BASE_PATH`：后端 API 子路径前缀（如 `/tensorcast-dashboard` 或空字符串）。默认 `''`（与站点根同源）。
 - `VITE_GRAFANA_HOST`：Grafana 基础地址（可选）。
 - `VITE_GRAFANA_DASHBOARD_UID`：Grafana Dashboard UID（可选）。
 - `VITE_GRAFANA_PANEL_IDS`：以逗号分隔的 Panel ID 列表（可选）。
@@ -40,6 +41,7 @@ pnpm dev
 
 ```
 VITE_BASE_PATH=/tensorcast-dashboard/
+VITE_API_BASE_PATH=/tensorcast-dashboard
 VITE_GRAFANA_HOST=https://grafana.example.com
 VITE_GRAFANA_DASHBOARD_UID=abcd1234
 VITE_GRAFANA_PANEL_IDS=1,2,3
@@ -56,6 +58,11 @@ pnpm build
 ### 子路径部署说明
 
 - 前端：设置 `VITE_BASE_PATH`（例如 `/tensorcast-dashboard/`），Vite 会在构建时写入静态资源路径，Router 使用 `basename=import.meta.env.BASE_URL` 保持一致。
+- 后端 API：若后端挂载在同一子路径下，设置 `VITE_API_BASE_PATH`（例如 `/tensorcast-dashboard`），前端请求将以该前缀访问 `/api/*`。
+
+### API 契约
+
+- 前端请求/响应类型应与后端 `tensorcast/dashboard/schemas.py` 保持一致，参考后端文档 `tensorcast/dashboard/README.md` 的 “API Surface (REST)” 部分。
 - 后端：通过 `BASE_PATH` 在 ASGI 层挂载相同前缀以正确分发静态与 API 路径（见设计文档）。
 
 ### 后续接入

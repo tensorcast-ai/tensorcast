@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, type Health, type WorkersResponse } from '@/lib/api';
+import { api, type Health, type WorkersResponse } from '@/utils/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatBytes } from '@/lib/utils';
+import { formatBytes } from '@/utils/utils';
 import { NavLink } from 'react-router-dom';
 
 export default function Overview() {

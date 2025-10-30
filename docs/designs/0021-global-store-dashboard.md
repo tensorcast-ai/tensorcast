@@ -1,13 +1,17 @@
 ---
 slug: 0021-global-store-dashboard
 title: Global Store Dashboard (Design)
-status: proposed
+status: accepted
 areas: ["global_store", "infra"]
 related_code:
   - tensorcast/global_store/grpc_service.py
   - tensorcast/global_store/metrics.py
   - proto/tensorcast/global_store/v1/global_store.proto
   - tensorcast/global_store/README.md
+  - tensorcast/dashboard/api.py
+  - tensorcast/dashboard/gs_client.py
+  - tensorcast/dashboard/schemas.py
+  - tensorcast/dashboard/webui/
 ---
 
 # Summary
@@ -99,6 +103,12 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
   - Maps to `QueryChunkLocations`.
   - Returns flattened chunk placement/state records.
 
+Auxiliary endpoints
+- `GET /api/config` — returns sanitized UI configuration (Grafana host/UID/panels). No secrets.
+- `GET /healthz` — liveness (process up)
+- `GET /readyz` — readiness (GS reachable and healthy)
+- `GET /metrics` — Prometheus metrics for the dashboard backend itself
+
 Notes
 - Pagination mirrors proto: `page_token` is an opaque string compatible with `ListReplicasV2`; clients must not assume integer semantics.
 - `memory_type` filter uses proto enum values (`RAM|GPU|DISK`).
@@ -112,10 +122,8 @@ Notes
   - Router `basename` 与 Vite `base` 通过 `BASE_PATH`/`VITE_BASE_PATH` 对齐，支持子路径部署。
   - 不直接读取 Prometheus；Metrics 页面仅在 `GRAFANA_*` 配置存在时显示嵌入面板。
   - 前端运行时以 `import.meta.env.BASE_URL` 作为 Router `basename`，构建时由 `VITE_BASE_PATH` 写入 Vite `base`。
-- Packaging: ship the backend with the Python wheel under `tensorcast/dashboard/backend`, and publish the built frontend assets under `tensorcast/dashboard/static`（Vite build outDir 指向该目录）。
-- Entry points:
-  - ASGI app: `tensorcast.dashboard.api:app` (served by Uvicorn or any ASGI server).
-  - CLI: `tensorcast-dashboard` console script that loads configuration and starts the server.
+- Packaging: 后端随 Python wheel 分发；前端构建产物位于 `tensorcast/dashboard/static`（Vite build 的 outDir 指向该目录）。
+- Entry point: ASGI 应用 `tensorcast.dashboard.api:app`（使用 Uvicorn 等 ASGI 服务器启动）。
 
 Directory sketch (non-normative):
 - `tensorcast/dashboard/api.py` — FastAPI app and routers
@@ -156,7 +164,7 @@ Error body (uniform)
 }
 ```
 
-Endpoints — request/response examples
+Endpoints — request/response examples（与 `tensorcast/dashboard/schemas.py` 对齐）
 
 - GET `/api/health`
   - Response 200
@@ -193,13 +201,11 @@ Endpoints — request/response examples
     "replicas": [
       {
         "artifact_id": "af-001",
-        "replica_id": "r-1",
         "node_id": "n-1",
         "node_address": "10.0.0.1",
         "device_id": 0,
         "memory_type": "GPU",
         "bytes": 1048576,
-        "state": "READY",
         "created_ts": "2025-01-24T12:01:00Z"
       }
     ],
@@ -215,21 +221,28 @@ Endpoints — request/response examples
   {
     "artifact_id": "af-001",
     "replicas": [
-      { "replica_id": "r-1", "node_id": "n-1", "memory_type": "GPU", "state": "READY" }
+      {
+        "node_id": "n-1",
+        "node_address": "10.0.0.1",
+        "device_id": 0,
+        "memory_type": "GPU",
+        "bytes": 1048576,
+        "created_ts": "2025-01-24T12:01:00Z"
+      }
     ],
     "view_meta": {
-      "view_id": "v-7",
-      "total_leaves": 128,
-      "schema_version": 1
+      "view_spec_json": "{}",
+      "view_size": 1048576,
+      "view_data_hash": "abcd...",
+      "verified_at": "2025-01-24T12:01:00Z"
     },
     "leaves": [
-      { "index": 0, "size": 4096 },
-      { "index": 1, "size": 4096 }
+      { "index": 0, "digest_b64": "..." },
+      { "index": 1, "digest_b64": "..." }
     ],
-    "partial_coverage": {
-      "covered": [0, 1, 2],
-      "missing": [3, 5]
-    }
+    "partial_coverage": [
+      { "space_kind": "CANONICAL", "space_id": "default", "missing": [ { "offset": 0, "length": 4096 } ] }
+    ]
   }
   ```
 
@@ -238,8 +251,16 @@ Endpoints — request/response examples
   ```json
   {
     "chunks": [
-      { "index": 0, "node_id": "n-1", "memory_type": "GPU", "state": "READY" },
-      { "index": 1, "node_id": "n-2", "memory_type": "RAM", "state": "FETCHING" }
+      {
+        "index": 0,
+        "node_id": "n-1",
+        "node_address": "10.0.0.1",
+        "p2p_port": 9090,
+        "state": "HOT",
+        "node_load_ratio": 0.42,
+        "device_uuid": "GPU-...",
+        "replica": 0
+      }
     ]
   }
   ```
@@ -282,7 +303,7 @@ Future (non‑MVP)
 - No built‑in authentication in the dashboard. Rely on internal network controls and/or reverse proxy policies if access restriction is needed.
 - TLS: serve HTTPS directly (cert/key) or terminate at the reverse proxy.
 - CORS: configurable allowlist via `CORS_ALLOWED_ORIGINS` (comma‑separated). Default is disabled (no cross‑origin access).
-- CSP: set strict `Content-Security-Policy` allowing `frame-src` only for the configured Grafana host when embedding.
+- CSP: 后端当前未默认设置 CSP 标头；建议在反向代理侧设置严格的 `Content-Security-Policy`（当启用 Grafana 嵌入时仅允许相应 `frame-src`）。后续可在后端增设可配置的 CSP 中间件。
 - Do not expose Grafana tokens to the browser. Prefer anonymous viewer mode, or terminate Grafana auth at the reverse proxy and allow only panel paths from the dashboard origin.
 - Path prefix: support hosting under a subpath (e.g., `/tensorcast-dashboard`) via `BASE_PATH`.
 - Health probes:

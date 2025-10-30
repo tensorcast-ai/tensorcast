@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { NavLink, Outlet, useMatch, useResolvedPath } from 'react-router-dom';
-import { metricsConfig } from '@/lib/config';
+import { metricsConfig } from '@/utils/config';
 import {
   NavigationMenu,
   NavigationMenuList,
