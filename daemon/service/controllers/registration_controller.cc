@@ -30,7 +30,7 @@ namespace {
 void ReleaseRegionRefs(IpcRegionRegistry& registry, const absl::flat_hash_map<std::string, uint32_t>& refs) {
   for (const auto& [region_id, count] : refs) {
     for (uint32_t i = 0; i < count; ++i) {
-      absl::Status st = registry.Release(region_id);
+      absl::Status st = registry.release(region_id);
       if (!st.ok()) {
         LOG(WARNING) << "ReleaseRegionRefs: release failed for region=" << region_id << ": " << st;
       }
@@ -388,7 +388,7 @@ grpc::Status RegistrationController::feed_stream(
           return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
-          auto desc_or = d_.regions.Acquire(meta.region_id, current_meta.owner_pid);
+          auto desc_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
           if (!desc_or.ok()) {
             return to_grpc_status(desc_or.status());
           }
@@ -554,7 +554,7 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
           return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
-          auto desc_or = d_.regions.Acquire(meta.region_id, current_meta.owner_pid);
+          auto desc_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
           if (!desc_or.ok()) {
             return to_grpc_status(desc_or.status());
           }

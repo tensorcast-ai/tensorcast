@@ -5,13 +5,13 @@
 #include <algorithm>
 #include <limits>
 
-#include "absl/log/log.h"
+// removed unused absl/log/log.h include
 
 namespace tensorcast::daemon {
 
 namespace {
 
-uint32_t ClampTtlMs(uint32_t requested, absl::Duration max_ttl) {
+uint32_t clamp_ttl_ms(uint32_t requested, absl::Duration max_ttl) {
   if (requested == 0) {
     return 0;
   }
@@ -31,7 +31,7 @@ uint32_t ClampTtlMs(uint32_t requested, absl::Duration max_ttl) {
 
 IpcRegionRegistry::IpcRegionRegistry(Options opts) : opts_(std::move(opts)) {}
 
-absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Register(const RegisterParams& params) {
+absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_region(const RegisterParams& params) {
   if (params.owner_pid <= 0) {
     return absl::InvalidArgumentError("owner_pid must be > 0");
   }
@@ -54,11 +54,11 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Register(
   }
 
   RegionRecord rec;
-  rec.desc.region_id = MintRegionIdLocked();
+  rec.desc.region_id = mint_region_id_locked();
   rec.desc.device_id = params.device_id;
   rec.desc.owner_pid = params.owner_pid;
   rec.desc.size_bytes = params.size_bytes;
-  const uint32_t ttl_ms = ClampTtlMs(params.ttl_ms, opts_.max_ttl);
+  const uint32_t ttl_ms = clamp_ttl_ms(params.ttl_ms, opts_.max_ttl);
   if (ttl_ms == 0) {
     return absl::InvalidArgumentError("effective ttl_ms underflowed");
   }
@@ -77,7 +77,7 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Register(
   return it->second.desc;
 }
 
-absl::StatusOr<bool> IpcRegionRegistry::Unregister(const std::string& region_id, int owner_pid, bool force) {
+absl::StatusOr<bool> IpcRegionRegistry::unregister_region(const std::string& region_id, int owner_pid, bool force) {
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
@@ -93,7 +93,7 @@ absl::StatusOr<bool> IpcRegionRegistry::Unregister(const std::string& region_id,
   return true;
 }
 
-absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Describe(const std::string& region_id) const {
+absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::describe(const std::string& region_id) const {
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
@@ -102,7 +102,7 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Describe(
   return it->second.desc;
 }
 
-bool IpcRegionRegistry::RefreshTtl(const std::string& region_id, uint32_t ttl_ms) {
+bool IpcRegionRegistry::refresh_ttl(const std::string& region_id, uint32_t ttl_ms) {
   if (ttl_ms == 0) {
     return false;
   }
@@ -111,7 +111,7 @@ bool IpcRegionRegistry::RefreshTtl(const std::string& region_id, uint32_t ttl_ms
   if (it == regions_.end()) {
     return false;
   }
-  const uint32_t effective = ClampTtlMs(ttl_ms, opts_.max_ttl);
+  const uint32_t effective = clamp_ttl_ms(ttl_ms, opts_.max_ttl);
   if (effective == 0) {
     return false;
   }
@@ -120,7 +120,7 @@ bool IpcRegionRegistry::RefreshTtl(const std::string& region_id, uint32_t ttl_ms
   return true;
 }
 
-std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::SweepExpired(absl::Time now) {
+std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::sweep_expired(absl::Time now) {
   std::vector<RegionDescriptor> expired;
   absl::MutexLock lock(&mu_);
   for (auto it = regions_.begin(); it != regions_.end();) {
@@ -141,7 +141,7 @@ std::vector<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::SweepExpired
   return expired;
 }
 
-absl::StatusOr<std::string> IpcRegionRegistry::GetHandleBytes(const std::string& region_id) const {
+absl::StatusOr<std::string> IpcRegionRegistry::get_handle_bytes(const std::string& region_id) const {
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
@@ -150,7 +150,7 @@ absl::StatusOr<std::string> IpcRegionRegistry::GetHandleBytes(const std::string&
   return it->second.handle_bytes;
 }
 
-absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Acquire(
+absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::acquire(
     const std::string& region_id,
     int owner_pid) {
   absl::MutexLock lock(&mu_);
@@ -166,7 +166,7 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::Acquire(
   return it->second.desc;
 }
 
-absl::Status IpcRegionRegistry::Release(const std::string& region_id) {
+absl::Status IpcRegionRegistry::release(const std::string& region_id) {
   absl::MutexLock lock(&mu_);
   auto it = regions_.find(region_id);
   if (it == regions_.end()) {
@@ -182,7 +182,7 @@ absl::Status IpcRegionRegistry::Release(const std::string& region_id) {
   return absl::OkStatus();
 }
 
-std::string IpcRegionRegistry::MintRegionIdLocked() {
+std::string IpcRegionRegistry::mint_region_id_locked() {
   // 128 bits of randomness, rendered as hex.
   for (;;) {
     uint64_t hi = absl::Uniform<uint64_t>(bitgen_);

@@ -1,7 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#ifndef TENSORCAST_DAEMON_IPC_REGION_REGISTRY_H_
-#define TENSORCAST_DAEMON_IPC_REGION_REGISTRY_H_
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -12,8 +11,6 @@
 #include "absl/random/random.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -55,28 +52,28 @@ class IpcRegionRegistry {
   explicit IpcRegionRegistry(Options opts);
 
   // Register a new CUDA IPC region and return its descriptor.
-  absl::StatusOr<RegionDescriptor> Register(const RegisterParams& params);
+  absl::StatusOr<RegionDescriptor> register_region(const RegisterParams& params);
 
   // Unregister a region. Returns true when the region was removed.
-  absl::StatusOr<bool> Unregister(const std::string& region_id, int owner_pid, bool force);
+  absl::StatusOr<bool> unregister_region(const std::string& region_id, int owner_pid, bool force);
 
   // Retrieve metadata for a region. Returns NOT_FOUND when missing.
-  absl::StatusOr<RegionDescriptor> Describe(const std::string& region_id) const;
+  absl::StatusOr<RegionDescriptor> describe(const std::string& region_id) const;
 
   // Refresh the TTL for a region. Returns false when region not found.
-  bool RefreshTtl(const std::string& region_id, uint32_t ttl_ms);
+  bool refresh_ttl(const std::string& region_id, uint32_t ttl_ms);
 
   // Remove regions whose expiry is before |now| and return their descriptors.
-  std::vector<RegionDescriptor> SweepExpired(absl::Time now);
+  std::vector<RegionDescriptor> sweep_expired(absl::Time now);
 
   // Retrieve the raw CUDA handle bytes for a region.
-  absl::StatusOr<std::string> GetHandleBytes(const std::string& region_id) const;
+  absl::StatusOr<std::string> get_handle_bytes(const std::string& region_id) const;
 
   // Acquire a region for active use, incrementing its reference count.
-  absl::StatusOr<RegionDescriptor> Acquire(const std::string& region_id, int owner_pid);
+  absl::StatusOr<RegionDescriptor> acquire(const std::string& region_id, int owner_pid);
 
   // Release a previously acquired region.
-  absl::Status Release(const std::string& region_id);
+  absl::Status release(const std::string& region_id);
 
  private:
   struct RegionRecord {
@@ -86,7 +83,7 @@ class IpcRegionRegistry {
     absl::Time inserted_at = absl::Now();
   };
 
-  std::string MintRegionIdLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  std::string mint_region_id_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   const Options opts_;
   mutable absl::Mutex mu_;
@@ -95,5 +92,3 @@ class IpcRegionRegistry {
 };
 
 } // namespace tensorcast::daemon
-
-#endif // TENSORCAST_DAEMON_IPC_REGION_REGISTRY_H_

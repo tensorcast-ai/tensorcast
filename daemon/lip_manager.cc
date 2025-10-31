@@ -34,7 +34,7 @@ class RegionAcquireGuard {
     if (registry_ == nullptr) {
       return absl::FailedPreconditionError("region registry unavailable");
     }
-    auto desc_or = registry_->Acquire(region_id, owner_pid);
+    auto desc_or = registry_->acquire(region_id, owner_pid);
     if (!desc_or.ok()) {
       return desc_or.status();
     }
@@ -47,7 +47,7 @@ class RegionAcquireGuard {
       return;
     for (const auto& [region_id, count] : refs_) {
       for (uint32_t i = 0; i < count; ++i) {
-        absl::Status st = registry_->Release(region_id);
+        absl::Status st = registry_->release(region_id);
         if (!st.ok()) {
           LOG(WARNING) << "RegionAcquireGuard: release failed for region_id=" << region_id << ": " << st;
         }
@@ -84,7 +84,7 @@ absl::StatusOr<CudaIpcMapping*> GetOrOpenMappingForStorage(
     if (registry == nullptr) {
       return absl::FailedPreconditionError("region registry unavailable");
     }
-    auto handle_or = registry->GetHandleBytes(storage.region_id);
+    auto handle_or = registry->get_handle_bytes(storage.region_id);
     if (!handle_or.ok())
       return handle_or.status();
     auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
@@ -655,7 +655,7 @@ absl::Status LipManager::extend_ttl_for_artifact(const std::string& artifact_id,
   if (region_registry_ != nullptr && extend_ttl_ms > 0) {
     for (const auto& s : found->storages) {
       if (s.has_region()) {
-        (void)region_registry_->RefreshTtl(s.region_id, extend_ttl_ms);
+        (void)region_registry_->refresh_ttl(s.region_id, extend_ttl_ms);
       }
     }
   }

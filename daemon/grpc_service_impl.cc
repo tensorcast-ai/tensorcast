@@ -222,7 +222,7 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   }
   params.handle_bytes = std::string(req->cuda_ipc_handle());
 
-  auto desc_or = region_registry_->Register(params);
+  auto desc_or = region_registry_->register_region(params);
   if (!desc_or.ok()) {
     return to_grpc_status(desc_or.status());
   }
@@ -255,7 +255,7 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
   }
 
   const bool force = req->has_force() ? req->force() : false;
-  auto released_or = region_registry_->Unregister(req->region_id(), req->owner_pid(), force);
+  auto released_or = region_registry_->unregister_region(req->region_id(), req->owner_pid(), force);
   if (!released_or.ok()) {
     return to_grpc_status(released_or.status());
   }

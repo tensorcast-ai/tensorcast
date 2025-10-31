@@ -24,7 +24,7 @@ TEST_CASE("IpcRegionRegistry basic register/describe/unregister", "[daemon][regi
     p.size_bytes = 4096;
     p.ttl_ms = 1000;
     p.handle_bytes = "handle";
-    auto st = reg.Register(p);
+    auto st = reg.register_region(p);
     REQUIRE_FALSE(st.ok());
   }
 
@@ -38,7 +38,7 @@ TEST_CASE("IpcRegionRegistry basic register/describe/unregister", "[daemon][regi
   params.region_name = "kv-slab";
   params.handle_bytes = std::string("fake-cuda-ipc-handle");
 
-  auto desc_or = reg.Register(params);
+  auto desc_or = reg.register_region(params);
   REQUIRE(desc_or.ok());
   auto desc = *desc_or;
   REQUIRE_FALSE(desc.region_id.empty());
@@ -48,19 +48,19 @@ TEST_CASE("IpcRegionRegistry basic register/describe/unregister", "[daemon][regi
   REQUIRE(desc.ttl_ms > 0);
 
   // Describe returns same
-  auto desc2_or = reg.Describe(desc.region_id);
+  auto desc2_or = reg.describe(desc.region_id);
   REQUIRE(desc2_or.ok());
   REQUIRE(desc2_or->region_id == desc.region_id);
 
   // Acquire/Release updates refcount and blocks unregister while held
-  auto acq_or = reg.Acquire(desc.region_id, params.owner_pid);
+  auto acq_or = reg.acquire(desc.region_id, params.owner_pid);
   REQUIRE(acq_or.ok());
-  auto unreg_or = reg.Unregister(desc.region_id, params.owner_pid, /*force=*/false);
+  auto unreg_or = reg.unregister_region(desc.region_id, params.owner_pid, /*force=*/false);
   REQUIRE_FALSE(unreg_or.ok()); // active references prevent normal unregister
-  REQUIRE(reg.Release(desc.region_id).ok());
+  REQUIRE(reg.release(desc.region_id).ok());
 
   // Now unregister succeeds
-  auto unreg2_or = reg.Unregister(desc.region_id, params.owner_pid, /*force=*/false);
+  auto unreg2_or = reg.unregister_region(desc.region_id, params.owner_pid, /*force=*/false);
   REQUIRE(unreg2_or.ok());
   REQUIRE(*unreg2_or);
 }
@@ -79,20 +79,20 @@ TEST_CASE("IpcRegionRegistry TTL refresh and sweep", "[daemon][region]") {
   params.ttl_ms = 100; // clamped by max_ttl but valid
   params.handle_bytes = "h";
 
-  auto d_or = reg.Register(params);
+  auto d_or = reg.register_region(params);
   REQUIRE(d_or.ok());
   const std::string region_id = d_or->region_id;
 
   // Refresh pushes expiry out
-  REQUIRE(reg.RefreshTtl(region_id, 150));
+  REQUIRE(reg.refresh_ttl(region_id, 150));
 
   // Sweep before expiry -> nothing
-  auto expired = reg.SweepExpired(absl::Now());
+  auto expired = reg.sweep_expired(absl::Now());
   REQUIRE(expired.empty());
 
   // Advance time well beyond TTL and sweep -> should expire
   absl::SleepFor(absl::Milliseconds(210));
-  expired = reg.SweepExpired(absl::Now());
+  expired = reg.sweep_expired(absl::Now());
   REQUIRE(expired.size() == 1);
   REQUIRE(expired[0].region_id == region_id);
 }

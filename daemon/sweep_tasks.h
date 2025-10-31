@@ -69,7 +69,7 @@ class RegionRegistrySweepTask final : public IBackgroundTask {
   explicit RegionRegistrySweepTask(IpcRegionRegistry& registry) : registry_(registry) {}
 
   void run_once() override {
-    auto expired = registry_.SweepExpired(absl::Now());
+    auto expired = registry_.sweep_expired(absl::Now());
     if (expired.empty()) {
       return;
     }
