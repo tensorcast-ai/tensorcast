@@ -24,6 +24,7 @@ from tensorcast._C import (
     get_cuda_memory_ptr,
     restore_tensors,
 )
+from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storage_graph
 
 if TYPE_CHECKING:  # for static type checkers only
@@ -902,25 +903,55 @@ class _LeaseUploader:
                     f"Storage '{storage_id}' device mismatch: expected cuda:{ctx.device_id}, got {entry.device_id}"
                 )
             dst_offset = storage_to_dst[storage_id]
-            handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
             length_bytes = int(entry.size_bytes)
-            segments.append(
-                LeaseSegment(
-                    device_id=int(ctx.device_id),
-                    cuda_ipc_handle=handle_bytes,
-                    base_addr=0,
-                    length=length_bytes,
-                    dst_offset=int(dst_offset),
-                )
+            # Prefer region-backed registration when the storage is fully covered
+            # by a pre-registered VRAM region for this device.
+            rec = region_cache.find_region_for(
+                int(ctx.device_id), int(entry.base_ptr), int(entry.size_bytes)
             )
-            storages_payload.append(
-                RegisterStorage(
-                    storage_id=storage_id,
-                    device_id=int(ctx.device_id),
-                    cuda_ipc_handle=handle_bytes,
-                    storage_length=length_bytes,
+            if rec is not None:
+                # Emit a region-referenced storage entry; drop redundant handle export.
+                base_offset = int(entry.base_ptr) - int(rec.base_ptr)
+                segments.append(
+                    LeaseSegment(
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=None,
+                        base_addr=0,
+                        length=length_bytes,
+                        dst_offset=int(dst_offset),
+                        storage_id=storage_id,
+                    )
                 )
-            )
+                storages_payload.append(
+                    RegisterStorage(
+                        storage_id=storage_id,
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=None,
+                        storage_length=length_bytes,
+                        vram_region_id=rec.region_id,
+                        region_base_offset=int(base_offset),
+                    )
+                )
+            else:
+                # Fallback to legacy handle-based path.
+                handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
+                segments.append(
+                    LeaseSegment(
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=handle_bytes,
+                        base_addr=0,
+                        length=length_bytes,
+                        dst_offset=int(dst_offset),
+                    )
+                )
+                storages_payload.append(
+                    RegisterStorage(
+                        storage_id=storage_id,
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=handle_bytes,
+                        storage_length=length_bytes,
+                    )
+                )
         if not storages_payload:
             raise TensorCastError(
                 "No storage entries resolved during lease registration; artifact tensors must supply shared storage metadata"

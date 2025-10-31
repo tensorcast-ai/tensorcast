@@ -27,6 +27,46 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+void ReleaseRegionRefs(IpcRegionRegistry& registry, const absl::flat_hash_map<std::string, uint32_t>& refs) {
+  for (const auto& [region_id, count] : refs) {
+    for (uint32_t i = 0; i < count; ++i) {
+      absl::Status st = registry.Release(region_id);
+      if (!st.ok()) {
+        LOG(WARNING) << "ReleaseRegionRefs: release failed for region=" << region_id << ": " << st;
+      }
+    }
+  }
+}
+
+class RegionPinGuard {
+ public:
+  explicit RegionPinGuard(IpcRegionRegistry& registry) : registry_(registry) {}
+
+  ~RegionPinGuard() {
+    if (!active_)
+      return;
+    ReleaseRegionRefs(registry_, refs_);
+  }
+
+  void add(const std::string& region_id) {
+    ++refs_[region_id];
+  }
+
+  void release() {
+    active_ = false;
+    refs_.clear();
+  }
+
+  const absl::flat_hash_map<std::string, uint32_t>& refs() const {
+    return refs_;
+  }
+
+ private:
+  IpcRegionRegistry& registry_;
+  absl::flat_hash_map<std::string, uint32_t> refs_;
+  bool active_{true};
+};
+
 tensorcast::common::v1::ArtifactIdKind ToProtoKind(tensorcast::common::ArtifactIdKind kind) {
   using ProtoKind = tensorcast::common::v1::ArtifactIdKind;
   switch (kind) {
@@ -234,13 +274,16 @@ grpc::Status RegistrationController::feed_stream(
     v1::FeedRegisterArtifactStreamResponse& /*resp*/) {
   v1::FeedRegisterArtifactStreamRequest req;
   std::string reg_id;
+  RegistrationManager::RegMeta current_meta;
+  bool have_meta = false;
   while (reader.Read(&req)) {
     if (reg_id.empty()) {
       reg_id = req.registration_id();
       if (!d_.reg.has_meta(reg_id)) {
         return {StatusCode::NOT_FOUND, "registration_id not found"};
       }
-      if (d_.reg.expire_if_ttl_elapsed(reg_id)) {
+      absl::flat_hash_map<std::string, uint32_t> expired_refs;
+      if (d_.reg.expire_if_ttl_elapsed(reg_id, &expired_refs)) {
         try {
           static auto meter =
               opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -249,8 +292,15 @@ grpc::Status RegistrationController::feed_stream(
         } catch (...) {
           VLOG(1) << "metrics counter tc_register_ttl_expired_feed_total unavailable";
         }
+        ReleaseRegionRefs(d_.regions, expired_refs);
         return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
       }
+      auto meta_opt = d_.reg.get_meta(reg_id);
+      if (!meta_opt.has_value()) {
+        return {StatusCode::NOT_FOUND, "registration metadata missing"};
+      }
+      current_meta = *meta_opt;
+      have_meta = true;
     } else if (req.registration_id() != reg_id) {
       return {StatusCode::INVALID_ARGUMENT, "registration_id changed in stream"};
     }
@@ -275,10 +325,17 @@ grpc::Status RegistrationController::feed_stream(
       for (const auto& s : req.lease_segments().segments()) {
         LeaseSegMeta m;
         m.device_id = s.device_id();
-        m.handle_bytes = s.cuda_ipc_handle();
+        if (!s.cuda_ipc_handle().empty()) {
+          m.handle_bytes = s.cuda_ipc_handle();
+        }
         m.base_offset = s.base_addr();
         m.length = s.length();
         m.dst_offset = s.dst_offset();
+        if (!s.storage_id().empty())
+          m.storage_id = s.storage_id();
+        if (m.handle_bytes.empty() && m.storage_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage reference"};
+        }
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
@@ -300,18 +357,60 @@ grpc::Status RegistrationController::feed_stream(
       return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
     }
     if (!req.storage_entries().empty()) {
+      if (!have_meta) {
+        auto meta_opt = d_.reg.get_meta(reg_id);
+        if (!meta_opt.has_value()) {
+          return {StatusCode::NOT_FOUND, "registration metadata missing"};
+        }
+        current_meta = *meta_opt;
+        have_meta = true;
+      }
+      RegionPinGuard pin_guard(d_.regions);
       std::vector<RegisterStorageMeta> storages;
       storages.reserve(req.storage_entries().size());
       for (const auto& entry : req.storage_entries()) {
         RegisterStorageMeta meta;
         meta.storage_id = entry.storage_id();
         meta.device_id = entry.device_id();
-        meta.handle_bytes = entry.cuda_ipc_handle();
+        if (!entry.cuda_ipc_handle().empty())
+          meta.handle_bytes = entry.cuda_ipc_handle();
         meta.storage_length = entry.storage_length();
+        const bool has_region = !entry.vram_region_id().empty();
+        if (has_region)
+          meta.region_id = entry.vram_region_id();
+        const bool has_region_offset = entry.has_region_base_offset();
+        if (has_region_offset)
+          meta.region_base_offset = entry.region_base_offset();
+        if (meta.handle_bytes.empty() == meta.region_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "storage entry must specify exactly one source"};
+        }
+        if (has_region && !has_region_offset) {
+          return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
+        }
+        if (has_region) {
+          auto desc_or = d_.regions.Acquire(meta.region_id, current_meta.owner_pid);
+          if (!desc_or.ok()) {
+            return to_grpc_status(desc_or.status());
+          }
+          const auto& desc = *desc_or;
+          if (desc.device_id != meta.device_id) {
+            return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
+          }
+          const uint64_t offset = meta.region_base_offset;
+          if (offset + meta.storage_length > desc.size_bytes) {
+            return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+          }
+          pin_guard.add(meta.region_id);
+        }
         storages.push_back(std::move(meta));
       }
-      if (!storages.empty())
+      if (!storages.empty()) {
         d_.reg.append_storage_entries(reg_id, std::move(storages));
+        for (const auto& [region_id, count] : pin_guard.refs()) {
+          d_.reg.add_region_reference(reg_id, region_id, count);
+        }
+        pin_guard.release();
+      }
     }
     if (!req.tensor_aliases().empty()) {
       std::vector<RegisterTensorAliasMeta> aliases;
@@ -341,13 +440,16 @@ grpc::Status RegistrationController::feed_stream(
 
 grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
+  RegistrationManager::RegMeta current_meta;
+  bool have_meta = false;
   for (const auto& req : reqs) {
     if (reg_id.empty()) {
       reg_id = req.registration_id();
       if (!d_.reg.has_meta(reg_id)) {
         return {StatusCode::NOT_FOUND, "registration_id not found"};
       }
-      if (d_.reg.expire_if_ttl_elapsed(reg_id)) {
+      absl::flat_hash_map<std::string, uint32_t> expired_refs;
+      if (d_.reg.expire_if_ttl_elapsed(reg_id, &expired_refs)) {
         try {
           static auto meter =
               opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -356,8 +458,15 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         } catch (...) {
           VLOG(1) << "metrics counter tc_register_ttl_expired_feed_total unavailable";
         }
+        ReleaseRegionRefs(d_.regions, expired_refs);
         return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
       }
+      auto meta_opt = d_.reg.get_meta(reg_id);
+      if (!meta_opt.has_value()) {
+        return {StatusCode::NOT_FOUND, "registration metadata missing"};
+      }
+      current_meta = *meta_opt;
+      have_meta = true;
     } else if (req.registration_id() != reg_id) {
       return {StatusCode::INVALID_ARGUMENT, "registration_id changed in stream"};
     }
@@ -383,10 +492,16 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
       for (const auto& s : req.lease_segments().segments()) {
         LeaseSegMeta m;
         m.device_id = s.device_id();
-        m.handle_bytes = s.cuda_ipc_handle();
+        if (!s.cuda_ipc_handle().empty())
+          m.handle_bytes = s.cuda_ipc_handle();
         m.base_offset = s.base_addr();
         m.length = s.length();
         m.dst_offset = s.dst_offset();
+        if (!s.storage_id().empty())
+          m.storage_id = s.storage_id();
+        if (m.handle_bytes.empty() && m.storage_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage reference"};
+        }
         to_add.push_back(std::move(m));
       }
       d_.reg.append_lease_segments(reg_id, std::move(to_add));
@@ -408,18 +523,60 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
       return {StatusCode::INVALID_ARGUMENT, "missing feed payload"};
     }
     if (!req.storage_entries().empty()) {
+      if (!have_meta) {
+        auto meta_opt = d_.reg.get_meta(reg_id);
+        if (!meta_opt.has_value()) {
+          return {StatusCode::NOT_FOUND, "registration metadata missing"};
+        }
+        current_meta = *meta_opt;
+        have_meta = true;
+      }
+      RegionPinGuard pin_guard(d_.regions);
       std::vector<RegisterStorageMeta> storages;
       storages.reserve(req.storage_entries().size());
       for (const auto& entry : req.storage_entries()) {
         RegisterStorageMeta meta;
         meta.storage_id = entry.storage_id();
         meta.device_id = entry.device_id();
-        meta.handle_bytes = entry.cuda_ipc_handle();
+        if (!entry.cuda_ipc_handle().empty())
+          meta.handle_bytes = entry.cuda_ipc_handle();
         meta.storage_length = entry.storage_length();
+        const bool has_region = !entry.vram_region_id().empty();
+        if (has_region)
+          meta.region_id = entry.vram_region_id();
+        const bool has_region_offset = entry.has_region_base_offset();
+        if (has_region_offset)
+          meta.region_base_offset = entry.region_base_offset();
+        if (meta.handle_bytes.empty() == meta.region_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "storage entry must specify exactly one source"};
+        }
+        if (has_region && !has_region_offset) {
+          return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
+        }
+        if (has_region) {
+          auto desc_or = d_.regions.Acquire(meta.region_id, current_meta.owner_pid);
+          if (!desc_or.ok()) {
+            return to_grpc_status(desc_or.status());
+          }
+          const auto& desc = *desc_or;
+          if (desc.device_id != meta.device_id) {
+            return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
+          }
+          const uint64_t offset = meta.region_base_offset;
+          if (offset + meta.storage_length > desc.size_bytes) {
+            return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+          }
+          pin_guard.add(meta.region_id);
+        }
         storages.push_back(std::move(meta));
       }
-      if (!storages.empty())
+      if (!storages.empty()) {
         d_.reg.append_storage_entries(reg_id, std::move(storages));
+        for (const auto& [region_id, count] : pin_guard.refs()) {
+          d_.reg.add_region_reference(reg_id, region_id, count);
+        }
+        pin_guard.release();
+      }
     }
     if (!req.tensor_aliases().empty()) {
       std::vector<RegisterTensorAliasMeta> aliases;
@@ -496,7 +653,8 @@ grpc::Status RegistrationController::commit(
       return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
     }
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
-      d_.reg.erase_all_for(req.registration_id());
+      auto refs = d_.reg.erase_all_for(req.registration_id());
+      ReleaseRegionRefs(d_.regions, refs);
       try {
         static auto meter =
             opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -595,7 +753,8 @@ grpc::Status RegistrationController::commit(
     // Log lease-in-place registration summary including plan.
     LOG(INFO) << "Registered memory replica: " << out.artifact_id
               << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
-    d_.reg.erase_all_for(req.registration_id());
+    auto refs = d_.reg.erase_all_for(req.registration_id());
+    ReleaseRegionRefs(d_.regions, refs);
     rctx.mark_success();
     return Status::OK;
   }
@@ -689,6 +848,8 @@ grpc::Status RegistrationController::abort(
   auto st = d_.engine.abort_registered_artifact(req.registration_id());
   if (!st.ok())
     return to_grpc_status(st);
+  auto refs = d_.reg.erase_all_for(req.registration_id());
+  ReleaseRegionRefs(d_.regions, refs);
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateDoubleCounter("tc_register_abort_total");
@@ -708,15 +869,19 @@ grpc::Status RegistrationController::revoke(
   auto meta_opt = d_.reg.get_meta(req.registration_id());
   {
     auto st = d_.lip.revoke_by_registration_id(req.registration_id());
-    if (st.ok())
+    if (st.ok()) {
+      auto refs = d_.reg.erase_all_for(req.registration_id());
+      ReleaseRegionRefs(d_.regions, refs);
       goto REVOKE_DONE;
+    }
   }
   {
     absl::Status _st = d_.engine.abort_registered_artifact(req.registration_id());
     if (!_st.ok()) {
       LOG(WARNING) << "revoke: abort_registered_artifact failed for id=" << req.registration_id() << ": " << _st;
     }
-    d_.reg.erase_all_for(req.registration_id());
+    auto refs = d_.reg.erase_all_for(req.registration_id());
+    ReleaseRegionRefs(d_.regions, refs);
   }
 REVOKE_DONE:
   if (meta_opt.has_value() && meta_opt->joined_existing) {

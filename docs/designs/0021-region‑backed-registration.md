@@ -1,179 +1,222 @@
-### 0020-Region‑Backed Registration
+---
+slug: 0021-region-backed-registration
+title: Region-Backed Registration (Design)
+links:
+  plan: ../plans/0021-region‑backed-registration.md
+areas: ["core","daemon","sdk","global_store","proto"]
+related_code:
+  - proto/tensorcast/daemon/v1/**
+  - daemon/**
+  - core/store/**
+  - tensorcast/api/**
+  - tensorcast/global_store/**
+created: 2025-09-24
+last_updated: 2025-09-24
+status: proposed
+---
 
-— Provide first‑class, low‑overhead support for paged‑attention KVCache by: 1) pre‑registering large VRAM regions for zero‑copy reuse, 2) registering KV pages as CGID artifacts via in‑place leases that reference those regions (no per‑page IPC export), and 3) adding explicit deregister with safe quiesce semantics so replicas are discoverable/serving between register→deregister, but never torn down while transfers are active.
+# Summary
 
-## Summary
-- Introduce `register_vram_region` so frameworks can pre‑register one or more large VRAM slabs (per device) using a single CUDA IPC export. KV pages within the slab reuse that export with relative offsets.
-- Register KV pages as CGID artifacts (`cgid:kv:<block_hash>`) via LIP; storage/segment metadata references the region + offset/length rather than exporting a new IPC handle per page.
-- Add `deregister_artifact` with “quiesce + wait for active transfers to drain” semantics, then drop the replica and de‑advertise it from Global Store (GS).
-- Keep the API surface simple by extending 0014’s Store verbs with small, optional parameters; reuse existing lock + staged‑export for transfer safety; leverage 0017’s CGID path to avoid hashing in hot paths.
+Lease-in-place (LIP) registration currently exports a CUDA IPC handle for every page of the paged-attention KV cache. That per-page export dominates registration latency, wastes daemon-side mapping work, and offers no clean way to quiesce replicas before teardown. Region-backed registration introduces three capabilities:
 
-## Goals / Non‑Goals
-- Goals
-  - Minimize registration overhead for many short‑lived KV pages (no per‑page IPC export, no hashing).
-  - Preserve simple caller contract: per‑page `register`/`get/get_into` + explicit `deregister`.
-  - Ensure correctness: source stability during transfer, no partial teardown while reads are active, fast local alias when possible.
-- Non‑Goals
-  - No new transport protocols; reuse current P2P/TCP/RDMA pipeline.
-  - No change to view/variant system (0016) for KV; KV remains canonical byte‑space.
-  - No requirement to persist leaves/digests for CGID.
+- **Region registration**: clients pre-register large VRAM slabs once per device, yielding a reusable region identifier while the daemon tracks handle ownership and TTL.
+- **Region-referenced leases**: LIP payloads reference a region identifier plus offsets and lengths, removing per-page handle exports without changing the existing CGID and lease model.
+- **Quiesced deregistration**: an explicit `deregister_artifact` flow blocks new staged exports, waits for active transfers to drain, and then synchronizes replica removal with Global Store metadata.
 
-## Architecture & Interfaces
+Together these changes cut KV registration CPU cost, align daemon/runtime ownership of CUDA mappings with region lifetime, and provide an operator-friendly teardown story while remaining backward compatible with legacy clients.
 
-### Identity policy (0017)
-- KV pages use CGID: `artifact_id = "cgid:kv:<block_hash_hex>"`.
-- Both `artifact_id` and `key` are supported; keys should simply mirror CGID where convenient.
-- GS supports `id_kind=CGID` with nullable digests (0017).
+# Goals
 
-### SDK: New/Extended APIs (0014‑compatible)
-- New
-  - `store.register_vram_region(name, *, base: torch.Tensor|int, size_bytes: int, device: str|torch.device|int, ttl_ms: int|None=None) -> VramRegion`
-  - `store.unregister_vram_region(region_id: str) -> None`
-  - `store.deregister_artifact(*, artifact_id: str|None=None, key: str|None=None, wait: bool=True, drain_timeout_s: float=30.0) -> None`
-- Extended (optional params)
-  - `store.register(tensors, *, artifact_id: str|None=None, key: str|None=None, ttl_ms: int|None=None) -> RegisteredArtifact`
-    - When `artifact_id.startswith("cgid:")`, use CGID path (0017); skip hashing.
-    - On LIP path, if tensors’ storages fall inside a registered region, reuse region reference + offset instead of per‑storage IPC export.
-  - `store.get/get_into(..., *, transport_hold_ms: int|None=None)` forwards a “hold/extend suggestion” to the lock RPC (see Daemon), lowering TTL race risk on long transfers.
+- Reduce registration latency for workloads that register thousands of KV segments by reusing a single CUDA IPC export per VRAM slab.
+- Preserve the LIP client contract (register → get/get_into → deregister) while adding optional knobs for region reuse and TTL extension.
+- Guarantee correctness: never tear down storage that is in use, maintain GS ↔ daemon replica consistency, and fail clearly when region preconditions are violated.
+- Provide observability for region reuse, TTL extension, and deregister drain timing to support rollout and on-call debugging.
 
-### Daemon: New/Extended RPCs
-- New
-  - `RegisterVramRegion(name, device_id, cuda_ipc_handle, size_bytes, ttl_ms?) -> region_id`
-  - `UnregisterVramRegion(region_id) -> ok`
-  - `DeregisterArtifact(artifact_id, wait, drain_timeout_ms) -> ok`
-- Extended
-  - `BeginRegisterArtifact(client_artifact_id?)` (already in 0017): CGID when present.
-  - `FeedRegisterArtifactLeaseSegments(...)` to accept region‑based storage/segment metadata (see Proto below).
-  - `LockTransportChunks(artifact_id, chunk_indices, device_id?, extend_ttl_ms?) -> lock_token`:
-    - `extend_ttl_ms` is optional; when provided and the artifact is LIP, perform a one‑shot keepalive to reduce TTL expiry races.
+# Non-Goals
 
-### Proto (additions; minimal diff)
-- Vram Region
-  - `RegisterVramRegionRequest { string name; int32 device_id; bytes cuda_ipc_handle; uint64 size_bytes; uint32 ttl_ms; }`
-  - `RegisterVramRegionResponse { string region_id; }`
-  - `UnregisterVramRegionRequest { string region_id; }`
-  - `UnregisterVramRegionResponse { bool ok; }`
-- LIP metadata (region reuse; storage precision)
-  - In `RegisterStorageMeta` add:
-    - `oneof storage_source { bytes cuda_ipc_handle = 10; string vram_region_id = 11; }`
-    - `uint64 region_base_offset = 12;` // storage begins at this offset within region
-  - In `LeaseSegMeta` add:
-    - `string storage_id = 1;` // switch matching from handle‑bytes to storage_id
-    - existing `base_offset/length/dst_offset` remain; `handle_bytes` becomes optional/legacy
-- Transport lock
-  - `LockTransportChunksRequest { ...; uint32 extend_ttl_ms = 6; }`
-- Deregister
-  - `DeregisterArtifactRequest { string artifact_id; bool wait; uint32 drain_timeout_ms; }`
-  - `DeregisterArtifactResponse { bool ok; }`
+- Introduce new transport protocols or change staged export semantics; existing P2P/TCP/RDMA stacks remain untouched.
+- Alter the UMA/VAS memory model or replicator path beyond accepting region identifiers.
+- Require schema changes in Global Store; existing replica tables continue to model residency.
+- Force immediate adoption: legacy clients that only send CUDA handles must continue to work unchanged.
 
-### Server‑side components
-- `IpcRegionRegistry` (daemon‑local):
-  - `region_id -> { device_id, size_bytes, handle_bytes, opened_map(optional) }`.
-  - Open map lazily; reuse across segments; guard lifetimes with refcounts.
-- `LipManager` updates:
-  - Accept region‑backed storages; open map from `IpcRegionRegistry` when segment references a region; compute `src = region.map + region_base_offset + segment.local_offset`.
-  - Switch segment validation from “handle→storage_length” to precise `storage_id` matching; keep chunk alignment enforcement.
-- Deregistration flow:
-  - Mark artifact as “quiescing” (denies new locks).
-  - Wait for active transfers to drain:
-    - No tokens in `TransportLockManager` for this artifact.
-    - No staged exports in `LipManager` for this artifact.
-  - Revoke leases/free coalesced replicas.
-  - Inform GS to drop replica rows / key mapping (if any).
-- Lock flow:
-  - Reject locks for quiescing artifacts.
-  - If `extend_ttl_ms` set and LIP lease found, use existing keepalive to extend expiry once.
+# Architecture & Interfaces
 
-### Client execution model (hot path)
-- Pre‑allocation: framework allocates large `torch.empty(size, device="cuda:X", dtype=torch.uint8")` and calls `register_vram_region(...)`.
-- Per‑page registration:
-  - Build `TensorStorageGraph` → detect that each K/V storage base_ptr ∈ region range → compute `region_base_offset`.
-  - Register via LIP with CGID `cgid:kv:<block_hash>` and storages referencing `region_id` + relative offsets; alias list indexes into these storages.
-- Retrieval:
-  - `get_into` on target device; source daemon locks; LIP path either IPC alias (same GPU) or staged P2P; unlock on completion.
-- Deregistration:
-  - `deregister_artifact(cgid)` marks quiescing → waits for active transfers → drops lease/replica → GS update. Errors if owner mismatch.
+## Flow Overview
 
-## Schema Changes (GS)
-- 0017 already extended `artifacts` with `id_kind` and `replicas` with `expires_at`. For KV:
-  - No further mandatory changes; deregister removes the replica row(s) for the (artifact_id, device), and optional key mapping rows.
-  - Optional: add `replicas.state = {READY|QUIESCING|REMOVED}` if external observability of quiesce is desired (not required for correctness).
-
-## Invariants & Error Model
-- Invariants
-  - Region map must precede any registration that references it; unregister region only after all referencing artifacts are deregistered or expired.
-  - KV blocks are immutable by contract (CGID implies caller‑managed integrity).
-  - Lock is required for any P2P read; quiescing denies new locks; teardown waits for locks to drain.
-- Errors
-  - `INVALID_ARGUMENT`: region not found/size mismatch, CGID grammar invalid.
-  - `FAILED_PRECONDITION`: lock denied (quiescing), region unregistered while in use, LIP segment misaligned.
-  - `NOT_FOUND`: artifact or region missing.
-  - `UNAVAILABLE`: no resident replica; fallbacks disabled.
-  - `PERMISSION_DENIED`: deregister by non‑owner when policy requires ownership.
-
-## Compatibility
-- 0014 verbs remain; new APIs are additive.
-- 0017 CGID support is leveraged; MI2 unchanged.
-- Existing LIP and transport code paths stay intact; region reuse is an optimization and a new capability, not a breaking change.
-
-## Alternatives considered
-- Per‑page IPC export (status quo): too expensive for high‑churn KV.
-- Global Store‑managed page table for KV: out of scope; page table stays engine‑local; TensorCast provides per‑page replica serviceability only.
-- Implicit deregistration by TTL only: insufficient control for cache eviction under load; explicit `deregister` required.
-
-## Risks & mitigations
-- Region lifetime leaks: tie `register_vram_region` to process session; auto‑unregister on exit; warn on lingering references.
-- TTL races on long transfers: `extend_ttl_ms` on lock plus reasonable default TTL on register alleviate.
-- Cardinality explosion (CGID space): allow deployment policy to namespace (`cgid:kv:<tenant>:<hash>`) and impose TTL/cardinality limits.
-
-## Acceptance Criteria
-- Register KV page using CGID with LIP referencing a pre‑registered region returns quickly (no hashing, no per‑page IPC export).
-- `get_into` across nodes succeeds; source uses staged export under lock; unlock frees staged resources; performance on par or better than current LIP.
-- `deregister_artifact(wait=True)` blocks new locks, waits for active locks to drain, then removes daemon replica and GS entry; concurrent gets either complete or fail cleanly if started after quiesce.
-- Unregistering a region while any referencing artifact exists fails with clear `FAILED_PRECONDITION`.
-
-## Key code references (current capabilities that this design builds on)
-```118:132:daemon/lip_manager.cc
-std::vector<Opened> opened;
-opened.reserve(segments.size());
-for (const auto& seg : segments) {
-  auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
-  if (!map_or.ok())
-    return map_or.status();
-  opened.push_back(Opened{.device_id = seg.device_id, .map = std::move(*map_or),
-                          .base = seg.base_offset, .len = seg.length, .dst = seg.dst_offset});
-}
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Daemon
+    participant GlobalStore as Global Store
+    Client->>Daemon: RegisterVramRegion
+    Daemon->>Daemon: IpcRegionRegistry.store(handle, ttl, owner)
+    Client->>Daemon: RegisterArtifact (region-backed leases)
+    Daemon->>Daemon: LipManager.bind(region_id, offsets)
+    Daemon->>GlobalStore: Register replica metadata
+    Client->>Daemon: LockTransportChunks(extend_ttl_ms?)
+    Daemon->>Daemon: LipManager.extend_ttl()
+    Client->>Daemon: DeregisterArtifact(wait=true)
+    Daemon->>Daemon: Quiesce + drain active locks
+    Daemon->>GlobalStore: Remove replica, mark drained
 ```
 
-```19:43:daemon/service/controllers/transport_controller.cc
-if (auto lip_opt = d_.lip.find_active_by_artifact_id(req.artifact_id()); lip_opt.has_value()) {
-  std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
-  auto tok_or = d_.lip.create_staged_export(lip, absl::MakeSpan(indices), d_.engine);
-  if (!tok_or.ok()) return to_grpc_status(tok_or.status());
-  resp.set_lock_token(*tok_or);
-  ...
-  return Status::OK;
-}
-```
+## Protocol Additions (`proto/tensorcast/daemon/v1/store_daemon.proto`)
 
-```869:907:tensorcast/api/_register.py
-for storage_id in sorted(graph.storages.keys()):
-  entry = graph.storages[storage_id]
-  ...
-  handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
-  segments.append(LeaseSegment(device_id=int(ctx.device_id),
-                               cuda_ipc_handle=handle_bytes,
-                               base_addr=0, length=length_bytes,
-                               dst_offset=int(dst_offset)))
-```
+- New RPCs:
+  - `RegisterVramRegion`: name, device ordinal, CUDA handle bytes, size, owner PID, ttl_ms → `region_id`.
+  - `UnregisterVramRegion`: releases a region once no active references remain.
+  - `DeregisterArtifact`: initiates a quiesce phase, waits for active locks (bounded by `drain_timeout_ms`), tears down lease state, and acknowledges completion.
+- Existing RPC updates:
+  - `RegisterStorageMeta`: add `oneof storage_source { bytes cuda_ipc_handle; string vram_region_id; }`, `uint64 region_base_offset`, and `string storage_id`. Handle bytes remain for legacy clients.
+  - `LeaseSegment`: reference `storage_id` rather than raw handle bytes.
+  - `LockTransportChunksRequest`: add optional `extend_ttl_ms` to let clients request a TTL bump while a transfer is in flight.
+- Messages include explicit `FAILED_PRECONDITION` error codes when region ownership or offsets are invalid, and `INVALID_ARGUMENT` when both sources are supplied.
 
-## Rollout Plan (high‑level)
-- Phase 1: Proto + daemon
-  - Add region RPCs and registry; extend LIP to accept region‑backed storages; quiesce+deregister flow; lock’s `extend_ttl_ms`.
-- Phase 2: SDK
-  - Expose `register_vram_region`/`unregister_vram_region`/`deregister_artifact`; modify LIP uploader to prefer region reuse; add `transport_hold_ms`.
-  - Provide `register_kv_block({"k","v"}, block_hash, ttl_ms=...)` convenience wrapper that sets `artifact_id=f"cgid:kv:{block_hash}"`.
-- Phase 3: GS
-  - Ensure `id_kind=CGID` flows are fully supported (0017); add simple “drop replica” path used by deregister; optional quiesce state if desired.
-- Phase 4: Tests & perf
-  - Unit + integration for region reuse, lock/extend, deregister drains; KV microbenchmarks.
+Regeneration requirements:
+
+- `bash tools/build_proto_python.sh`
+- `bazel build //proto/...`
+
+The design maintains backward compatibility by marking new fields as optional and leaving legacy handle fields untouched when `storage_source` is not set.
+
+## Identity Policy (0017 alignment)
+
+- Region-backed registration continues to rely on client-generated IDs for KV pages: `artifact_id = "cgid:kv:<block_hash_hex>"`.
+- Both daemon and Global Store honour `artifact_id` and `key` fields, mirroring the guidance from `docs/designs/0017-client-generated-artifact-id.md`.
+- Legacy keyed registrations remain accepted; when both are provided, the daemon asserts they resolve to the same CGID.
+
+## Daemon Runtime (`daemon/`)
+
+### IpcRegionRegistry
+
+- Tracks `{region_id, device_id, owner_pid, ttl_deadline, size_bytes, handle_bytes, refcount, opened_map}`.
+- Lazily opens CUDA mappings on first use, pinning them until refcount drops to zero.
+- Validates that the registering PID matches the session emitting leases; mismatches fail with `FAILED_PRECONDITION`.
+- Enforces TTL by evicting expired regions and refusing new references.
+- Integrates with OpenTelemetry counters:
+  - `tensorcast.daemon.region.registered_total`
+  - `tensorcast.daemon.region.reuse_total`
+  - `tensorcast.daemon.region.evicted_total`
+  - `tensorcast.daemon.region.ttl_extension_total`
+
+### LIP Manager Enhancements
+
+- Accepts region-backed storages; resolves region metadata via the registry, validates `region_base_offset + length` against `size_bytes`, and shares the opened mapping across segments.
+- Maintains compatibility by falling back to the existing CUDA handle opening path when `storage_source` is unset.
+- Stores a per-lease reference list so `deregister_artifact` can decrement region refcounts.
+- Adds TTL bookkeeping that tracks the furthest expiration for all storages backing a lease. `extend_ttl_ms` is applied atomically to both lease metadata and each referenced region.
+
+### Quiesced Deregistration
+
+- `deregister_artifact(wait=true)` transitions the lease into a `QUIESCE_PENDING` state:
+  - Block new staged exports and transport locks.
+  - Wait for existing locks to finish, bounded by `drain_timeout_ms`. On timeout, return `DEADLINE_EXCEEDED` but keep the lease quiesced; operators may retry or force delete.
+  - After drain, release staged exports, decrement region references, and notify Global Store to remove the replica.
+- `wait=false` is a best-effort fire-and-forget option for emergencies; it skips waiting but still schedules background cleanup.
+- Lip manager emits histograms for wait duration and counters for forced/timeout cases.
+- `TransportController::lock` uses the new `extend_ttl_ms` hint when producing staged exports, ensuring TTL extensions apply before remote readers begin consuming data.
+
+## SDK (`tensorcast/api/`, `tensorcast/api/_register.py`, `tensorcast/store.py`)
+
+- Introduce `VramRegion` data class capturing `region_id`, `device`, `size_bytes`, `ttl_ms`.
+- New API surface:
+  - `Store.register_vram_region(...) -> VramRegion`
+  - `Store.unregister_vram_region(region_id: str) -> None`
+  - `Store.deregister_artifact(..., wait: bool = True, drain_timeout_s: float = 30.0)`
+- Extended APIs:
+  - `Store.register(..., artifact_id: str | None = None, key: str | None = None, ttl_ms: int | None = None)`:
+    - When `artifact_id.startswith("cgid:")`, skip hashing and send the CGID path introduced in design 0017.
+    - Lease uploads reference regions when storages fall inside registered slabs, otherwise fall back to legacy handle exports.
+  - `Store.get` / `Store.get_into` gain `transport_hold_ms` to request TTL extensions.
+- `_LeaseUploader` inspects tensor storages:
+  - Maintains a local index of registered regions keyed by `(device, base_ptr, size_bytes)`.
+  - When `base_ptr` and `length` fall inside a known region, emit `storage_source = vram_region_id` plus `region_base_offset`; skip handle export.
+  - Falls back to per-storage handle export when no region covers the storage.
+- `Store.get` and `Store.get_into` accept `transport_hold_ms`; values are passed to the transport lock RPC as `extend_ttl_ms`.
+- Errors from the daemon bubble up as typed Python exceptions with actionable context.
+- Capability negotiation:
+  - During session establishment, clients detect whether the daemon advertises `region_registration_capability`.
+  - When absent, SDK silently keeps the legacy handle path and hides region APIs behind a runtime check (raising `UnsupportedFeatureError` if invoked).
+- Convenience helper: expose `Store.register_kv_block(kv_pair, block_hash, ttl_ms=...)` that enforces `artifact_id=f"cgid:kv:{block_hash}"`, registers backing regions first when needed, and emits metrics for reuse.
+
+## Global Store (`tensorcast/global_store/`)
+
+- Daemon RPC client adds a `deregister_artifact` call that carries quiesce outcomes.
+- `ArtifactService` marks replicas as `draining` during quiesce, prevents new registrations while draining, and drops the replica after confirmation.
+- Metrics:
+  - `tensorcast.global_store.artifact.deregister_started_total`
+  - `tensorcast.global_store.artifact.deregister_completed_total`
+  - `tensorcast.global_store.artifact.deregister_failed_total`
+- No schema changes are required; existing columns (`id_kind`, TTL) remain sufficient.
+
+## Observability
+
+- OpenTelemetry counters/histograms on both daemon and SDK error paths.
+- Structured logs:
+  - Region register/unregister success/failure with owner PID.
+  - Deregister state transitions with artifact identifiers.
+  - TTL extension rejections.
+
+# Schema Changes
+
+None. Existing Global Store tables and daemon metadata structures accommodate the new state. The design requires validation-only updates to confirm CGID handling and TTL semantics.
+
+# Invariants & Error Model
+
+- A region is owned by exactly one session (enforced by owner PID). Attempts to reuse by a different PID fail.
+- `region_base_offset + segment_length <= size_bytes` must hold; violations raise `FAILED_PRECONDITION`.
+- Deregistration may only complete when:
+  - No active transport locks exist.
+  - All referenced regions have decremented to zero refcount.
+  - Global Store acknowledges replica removal.
+- TTL extension requests shorter than the existing deadline are ignored; longer requests update both region and lease expiration.
+- Region unregister attempts fail with `FAILED_PRECONDITION` when refcount > 0 or when the region is mid-deregister.
+
+# Compatibility & Migration
+
+- Proto changes rely on optional fields; older daemons will ignore new fields, and older clients can continue to send CUDA handles.
+- SDK detects daemon capability before exposing region APIs. If unsupported, it raises `UnsupportedFeatureError`.
+- Rolling upgrade path:
+  1. Upgrade Global Store (new deregister flows).
+  2. Upgrade daemon; region-backed RPCs are available immediately.
+  3. Upgrade SDK; clients negotiate capability and fall back to handle-based flow when unavailable.
+
+# Trade-offs & Alternatives
+
+- **Canonical region registry vs. per-lease caching**: chosen to centralize handle ownership, simplify TTL enforcement, and avoid memory duplication. Alternative (cache per lease) would duplicate CUDA mappings and complicate eviction.
+- **TTL extension via lock RPC**: avoids a new RPC and keeps semantics close to existing staged export lifecycle. Alternative (separate keepalive RPC) increases surface area without functional benefit.
+- **Capability gating**: runtime negotiation avoids version skew-induced failures. Alternative (hard fail when daemon lacks support) would block staged rollouts.
+- **Region identifiers scoped to session**: we prefer session scoping to avoid stale references after crash/restart. A global namespace would require cross-daemon coordination and complicate GC.
+
+# Risks & Mitigations
+
+- **Dangling regions after client crash**: TTL enforcement plus owner PID checks ensure regions expire; daemon periodically sweeps expired regions and emits alerts.
+- **Transport stall if TTL extension fails**: SDK surfaces rejection immediately; operators can tune `transport_hold_ms`. Daemon logs warnings with root cause.
+- **Global Store divergence**: deregister API uses transactional removal, and retries keep draining state consistent. Metrics and alerts on stalled drains provide visibility.
+- **Daemon memory pressure**: registry enforces per-device refcount caps and optional LRU eviction (oldest idle region). Pressure triggers `RESOURCE_EXHAUSTED` errs instead of silent failure.
+
+# Acceptance Criteria
+
+- Region-backed registration shows ≥5× reduction in daemon CUDA IPC open operations for KV workloads measured by benchmark.
+- Deregistration with `wait=true` blocks new locks, drains existing locks, and removes replicas from both daemon and Global Store within configured timeout.
+- Legacy clients continue to register artifacts via CUDA handles without code changes.
+- Telemetry dashboards include region reuse counters, deregister latency, and TTL extension outcomes.
+
+# Rollout Plan
+
+1. Merge proto, daemon, and SDK changes.
+2. Regenerate protobuf stubs and ensure both Python and C++ builds pass.
+3. Land unit and integration tests (Catch2 for daemon, pytest for SDK).
+4. Register KV slabs in staging and monitor metrics.
+5. Run microbenchmark comparing per-page and region-backed registration; document results in `docs/internals/model-loading.md`.
+6. Update operator runbooks and module READMEs (Store Engine, daemon, API).
+
+# References
+
+- `docs/plans/0021-region‑backed-registration.md`
+- `docs/designs/0014-lease-in-place-registration.md`
+- `docs/designs/0017-client-generated-artifact-id.md`
+- `tensorcast/api/_register.py`
+- `daemon/lip_manager.cc`
+- `tensorcast/global_store/services/artifact_service.py`
+- `proto/tensorcast/daemon/v1/store_daemon.proto`

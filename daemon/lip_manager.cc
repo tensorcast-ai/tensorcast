@@ -24,6 +24,83 @@
 
 namespace tensorcast::daemon {
 
+namespace {
+
+class RegionAcquireGuard {
+ public:
+  explicit RegionAcquireGuard(IpcRegionRegistry* registry) : registry_(registry) {}
+
+  absl::StatusOr<IpcRegionRegistry::RegionDescriptor> acquire(const std::string& region_id, int owner_pid) {
+    if (registry_ == nullptr) {
+      return absl::FailedPreconditionError("region registry unavailable");
+    }
+    auto desc_or = registry_->Acquire(region_id, owner_pid);
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    ++refs_[region_id];
+    return desc_or;
+  }
+
+  ~RegionAcquireGuard() {
+    if (registry_ == nullptr)
+      return;
+    for (const auto& [region_id, count] : refs_) {
+      for (uint32_t i = 0; i < count; ++i) {
+        absl::Status st = registry_->Release(region_id);
+        if (!st.ok()) {
+          LOG(WARNING) << "RegionAcquireGuard: release failed for region_id=" << region_id << ": " << st;
+        }
+      }
+    }
+  }
+
+ private:
+  IpcRegionRegistry* registry_;
+  absl::flat_hash_map<std::string, uint32_t> refs_;
+};
+
+absl::StatusOr<CudaIpcMapping*> GetOrOpenMappingForStorage(
+    const RegisterStorageMeta& storage,
+    absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>>& cache,
+    RegionAcquireGuard& guard,
+    IpcRegionRegistry* registry,
+    int owner_pid) {
+  auto it = cache.find(storage.storage_id);
+  if (it != cache.end()) {
+    return it->second.get();
+  }
+
+  std::unique_ptr<CudaIpcMapping> mapping;
+  if (storage.has_handle()) {
+    auto map_or = CudaIpcMapping::open(storage.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+    if (!map_or.ok())
+      return map_or.status();
+    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+  } else if (storage.has_region()) {
+    auto desc_or = guard.acquire(storage.region_id, owner_pid);
+    if (!desc_or.ok())
+      return desc_or.status();
+    if (registry == nullptr) {
+      return absl::FailedPreconditionError("region registry unavailable");
+    }
+    auto handle_or = registry->GetHandleBytes(storage.region_id);
+    if (!handle_or.ok())
+      return handle_or.status();
+    auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+    if (!map_or.ok())
+      return map_or.status();
+    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+  } else {
+    return absl::InvalidArgumentError("storage entry missing source handle or region");
+  }
+
+  auto [insert_it, _] = cache.emplace(storage.storage_id, std::move(mapping));
+  return insert_it->second.get();
+}
+
+} // namespace
+
 absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     int target_device_id,
     const std::string& canonical_index_json,
@@ -33,25 +110,44 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   if (storages.empty()) {
     return absl::InvalidArgumentError("lip copy requires storage metadata");
   }
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  storage_by_id.reserve(storages.size());
   absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
   storage_by_handle.reserve(storages.size());
   for (const auto& storage : storages) {
-    storage_by_handle.emplace(storage.handle_bytes, &storage);
+    storage_by_id.emplace(storage.storage_id, &storage);
+    if (storage.has_handle()) {
+      storage_by_handle.emplace(storage.handle_bytes, &storage);
+    }
   }
   for (const auto& seg : segments) {
-    auto it = storage_by_handle.find(seg.handle_bytes);
-    if (it == storage_by_handle.end()) {
-      return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+    const RegisterStorageMeta* storage = nullptr;
+    if (!seg.storage_id.empty()) {
+      auto it = storage_by_id.find(seg.storage_id);
+      if (it == storage_by_id.end()) {
+        return absl::InvalidArgumentError("segment references unknown storage_id");
+      }
+      storage = it->second;
+    } else {
+      auto it = storage_by_handle.find(seg.handle_bytes);
+      if (it == storage_by_handle.end()) {
+        return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+      }
+      storage = it->second;
     }
-    if (seg.length != it->second->storage_length) {
+    if (seg.length != storage->storage_length) {
       return absl::InvalidArgumentError(
           absl::StrFormat(
               "segment length (%llu) does not match storage_length (%llu) for storage_id=%s",
               static_cast<uint64_t>(seg.length),
-              static_cast<uint64_t>(it->second->storage_length),
-              it->second->storage_id));
+              static_cast<uint64_t>(storage->storage_length),
+              storage->storage_id));
     }
   }
+
+  RegionAcquireGuard region_guard(region_registry_);
+  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  mapping_cache.reserve(storages.size());
   // Begin destination allocation on target device
   store::StoreEngine::ArtifactRegistration areg;
   areg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()));
@@ -109,7 +205,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
 
   struct Opened {
     int device_id;
-    CudaIpcMapping map;
+    CudaIpcMapping* map;
     uint64_t base;
     uint64_t len;
     uint64_t dst;
@@ -118,13 +214,28 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   std::vector<Opened> opened;
   opened.reserve(segments.size());
   for (const auto& seg : segments) {
-    auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
-    if (!map_or.ok())
+    const RegisterStorageMeta* storage = nullptr;
+    if (!seg.storage_id.empty()) {
+      auto it = storage_by_id.find(seg.storage_id);
+      if (it == storage_by_id.end()) {
+        return absl::InvalidArgumentError("segment references unknown storage_id");
+      }
+      storage = it->second;
+    } else {
+      auto it = storage_by_handle.find(seg.handle_bytes);
+      if (it == storage_by_handle.end()) {
+        return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+      }
+      storage = it->second;
+    }
+    auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, 0);
+    if (!map_or.ok()) {
       return map_or.status();
+    }
     opened.push_back(
         Opened{
             .device_id = seg.device_id,
-            .map = std::move(*map_or),
+            .map = *map_or,
             .base = seg.base_offset,
             .len = seg.length,
             .dst = seg.dst_offset});
@@ -153,7 +264,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     }
     auto st = cuda::memcpy(
         static_cast<uint8_t*>(dst_dev) + o.dst,
-        static_cast<uint8_t*>(o.map.get()) + o.base,
+        static_cast<uint8_t*>(o.map->get()) + o.base,
         static_cast<size_t>(o.len),
         cudaMemcpyDeviceToDevice);
     if (!st.ok())
@@ -176,6 +287,12 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     const LipLeaseEntry& lip,
     absl::Span<const uint32_t> chunk_indices,
     store::StoreEngine& engine) {
+  {
+    absl::MutexLock l(&mu_);
+    if (quiesced_.contains(lip.artifact_id)) {
+      return absl::FailedPreconditionError("artifact is quiesced; staging new exports is blocked");
+    }
+  }
   const auto now = std::chrono::steady_clock::now();
   if (lip.expiry.time_since_epoch().count() > 0 && now > lip.expiry) {
     return absl::DeadlineExceededError("lease expired (TTL)");
@@ -214,7 +331,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
 
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping map;
+    CudaIpcMapping* map; // non-owning; lifetime held by owned_maps or mapping_cache/export record
     uint64_t base;
     uint64_t len;
     uint64_t dst;
@@ -222,17 +339,62 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
 
   std::vector<OpenedSeg> opened;
   opened.reserve(lip.segments.size());
+  // When storage metadata is present, prefer region-backed or cached mappings via registry.
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+  storage_by_id.reserve(lip.storages.size());
+  storage_by_handle.reserve(lip.storages.size());
+  for (const auto& s : lip.storages) {
+    storage_by_id.emplace(s.storage_id, &s);
+    if (s.has_handle()) {
+      storage_by_handle.emplace(s.handle_bytes, &s);
+    }
+  }
+  RegionAcquireGuard region_guard(region_registry_);
+  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  std::vector<std::unique_ptr<CudaIpcMapping>> owned_maps;
+  mapping_cache.reserve(lip.storages.size());
   for (const auto& seg : lip.segments) {
-    auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
-    if (!map_or.ok())
-      return map_or.status();
-    opened.push_back(
-        OpenedSeg{
+    std::optional<OpenedSeg> opened_seg;
+    if (!lip.storages.empty()) {
+      const RegisterStorageMeta* storage = nullptr;
+      if (!seg.storage_id.empty()) {
+        auto it = storage_by_id.find(seg.storage_id);
+        if (it == storage_by_id.end())
+          return absl::InvalidArgumentError("staged export: unknown storage_id in segment");
+        storage = it->second;
+      } else if (!seg.handle_bytes.empty()) {
+        auto it = storage_by_handle.find(seg.handle_bytes);
+        if (it == storage_by_handle.end())
+          return absl::InvalidArgumentError("staged export: segment handle missing matching storage entry");
+        storage = it->second;
+      }
+      if (storage != nullptr) {
+        auto map_or =
+            GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, lip.owner_pid);
+        if (!map_or.ok())
+          return map_or.status();
+        opened_seg = OpenedSeg{
             .device_id = seg.device_id,
-            .map = std::move(*map_or),
+            .map = *map_or,
             .base = seg.base_offset,
             .len = seg.length,
-            .dst = seg.dst_offset});
+            .dst = seg.dst_offset};
+      }
+    }
+    if (!opened_seg.has_value()) {
+      auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+      if (!map_or.ok())
+        return map_or.status();
+      owned_maps.push_back(std::make_unique<CudaIpcMapping>(std::move(*map_or)));
+      opened_seg = OpenedSeg{
+          .device_id = seg.device_id,
+          .map = owned_maps.back().get(),
+          .base = seg.base_offset,
+          .len = seg.length,
+          .dst = seg.dst_offset};
+    }
+    opened.push_back(std::move(*opened_seg));
   }
   // Enforce alignment of LIP segments to artifact_chunk_bytes
   auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
@@ -295,7 +457,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     if (!seg) {
       return absl::UnimplementedError("LIP chunk crosses segment boundary (unsupported)");
     }
-    uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg->map.get()) + (seg->base + (off - seg->dst)));
+    uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg->map->get()) + (seg->base + (off - seg->dst)));
     std::string tkey = absl::StrCat(lip.artifact_id, "_GPU_chunk_", idx);
     communicator::engine::Communicator::RegisterTensorOptions ro;
     ro.register_mr = comm_engine.is_rdma_enabled();
@@ -313,8 +475,15 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     LipExportRecord rec;
     rec.artifact_id = lip.artifact_id;
     rec.device_id = lip.device_id;
-    for (auto& o : opened)
-      rec.opened_maps.push_back(std::move(o.map));
+    // Transfer ownership of new opens
+    for (auto& up : owned_maps) {
+      rec.opened_maps.push_back(std::move(*up));
+    }
+    owned_maps.clear();
+    // Transfer ownership of cached mappings so they outlive this function
+    for (auto& kv : mapping_cache) {
+      rec.opened_maps.push_back(std::move(*kv.second));
+    }
     rec.tensor_keys = std::move(tensor_keys);
     exports_.emplace(token, std::move(rec));
   }
@@ -460,6 +629,60 @@ bool LipManager::revoke_commit_lease_if_owner_matches(const std::string& artifac
   VLOG(2) << "revoke_commit_lease_if_owner_matches: erased lease for artifact_id=" << artifact_id
           << " device_id=" << device_id;
   return true;
+}
+
+absl::Status LipManager::extend_ttl_for_artifact(const std::string& artifact_id, uint32_t extend_ttl_ms) {
+  if (extend_ttl_ms == 0)
+    return absl::OkStatus();
+  std::optional<LipLeaseEntry> found;
+  {
+    absl::MutexLock l(&mu_);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& kv : leases_) {
+      if (kv.first.artifact_id != artifact_id)
+        continue;
+      auto& e = kv.second;
+      // Update TTL/expiry
+      e.ttl_ms = extend_ttl_ms;
+      e.expiry = now + std::chrono::milliseconds(extend_ttl_ms);
+      found = e; // copy for region bump below
+      break;
+    }
+  }
+  if (!found.has_value())
+    return absl::NotFoundError("no active lease for artifact");
+  // Opportunistically bump region TTLs referenced by the lease
+  if (region_registry_ != nullptr && extend_ttl_ms > 0) {
+    for (const auto& s : found->storages) {
+      if (s.has_region()) {
+        (void)region_registry_->RefreshTtl(s.region_id, extend_ttl_ms);
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+void LipManager::quiesce_artifact(const std::string& artifact_id) {
+  absl::MutexLock l(&mu_);
+  quiesced_.insert(artifact_id);
+}
+
+bool LipManager::wait_exports_drained(const std::string& artifact_id, absl::Time deadline) {
+  // Simple polling with backoff; exports_ rarely large
+  while (absl::Now() < deadline) {
+    size_t active = 0;
+    {
+      absl::MutexLock lk(&exp_mu_);
+      for (const auto& kv : exports_) {
+        if (kv.second.artifact_id == artifact_id)
+          ++active;
+      }
+    }
+    if (active == 0)
+      return true;
+    absl::SleepFor(absl::Milliseconds(5));
+  }
+  return false;
 }
 
 absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(

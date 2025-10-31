@@ -33,6 +33,7 @@ struct LeaseSegMeta {
   uint64_t base_offset{0}; // offset within mapped handle
   uint64_t length{0};
   uint64_t dst_offset{0}; // destination offset in coalesced buffer
+  std::string storage_id; // optional ref to RegisterStorageMeta
 };
 
 struct RegisterStorageMeta {
@@ -40,6 +41,16 @@ struct RegisterStorageMeta {
   int device_id{0};
   std::string handle_bytes;
   uint64_t storage_length{0};
+  std::string region_id;
+  uint64_t region_base_offset{0};
+
+  [[nodiscard]] bool has_region() const {
+    return !region_id.empty();
+  }
+
+  [[nodiscard]] bool has_handle() const {
+    return !handle_bytes.empty();
+  }
 };
 
 struct RegisterTensorAliasMeta {

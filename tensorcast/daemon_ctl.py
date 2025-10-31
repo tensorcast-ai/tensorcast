@@ -6,6 +6,7 @@ import os
 import random
 import time
 from contextlib import contextmanager, suppress
+from datetime import timezone
 from threading import RLock
 from typing import Any, Iterator, Tuple, cast
 
@@ -30,12 +31,14 @@ from tensorcast.types import (
     CanonicalRange,
     CoalescedHandshake,
     CommitResult,
+    DeregisterArtifactOutcome,
     LeaseHandshake,
     LeaseSegment,
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
     ServerConfig,
+    VramRegionHandle,
 )
 
 logger = init_logger(__name__)
@@ -897,17 +900,25 @@ class DaemonCtl:
             for s in segments:
                 seg = req.lease_segments.segments.add()
                 seg.device_id = int(s.device_id)
-                seg.cuda_ipc_handle = s.cuda_ipc_handle
+                if s.cuda_ipc_handle is not None:
+                    seg.cuda_ipc_handle = s.cuda_ipc_handle
                 seg.base_addr = int(s.base_addr)
                 seg.length = int(s.length)
                 seg.dst_offset = int(s.dst_offset)
+                if s.storage_id:
+                    seg.storage_id = s.storage_id
             if storages:
                 for storage in storages:
                     entry = req.storage_entries.add()
                     entry.storage_id = storage.storage_id
                     entry.device_id = int(storage.device_id)
-                    entry.cuda_ipc_handle = storage.cuda_ipc_handle
+                    if storage.cuda_ipc_handle is not None:
+                        entry.cuda_ipc_handle = storage.cuda_ipc_handle
+                    if storage.vram_region_id:
+                        entry.vram_region_id = storage.vram_region_id
                     entry.storage_length = int(storage.storage_length)
+                    if storage.region_base_offset is not None:
+                        entry.region_base_offset = int(storage.region_base_offset)
             if tensor_aliases:
                 for alias in tensor_aliases:
                     dst = req.tensor_aliases.add()
@@ -929,6 +940,199 @@ class DaemonCtl:
         except grpc.RpcError as e:  # noqa: BLE001
             logger.error(f"FeedRegisterArtifactStream(lease) failed: {e}")
             return False
+
+    def register_vram_region(
+        self,
+        *,
+        device_id: int,
+        size_bytes: int,
+        ttl_ms: int,
+        cuda_ipc_handle: bytes,
+        session_id: str | None = None,
+        region_name: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> VramRegionHandle:
+        if device_id < 0:
+            raise ValueError("device_id must be non-negative")
+        if size_bytes <= 0:
+            raise ValueError("size_bytes must be positive")
+        if ttl_ms <= 0:
+            raise ValueError("ttl_ms must be positive")
+        if not cuda_ipc_handle:
+            raise ValueError("cuda_ipc_handle must not be empty")
+
+        req = store_daemon_pb2.RegisterVramRegionRequest(
+            device_id=int(device_id),
+            cuda_ipc_handle=bytes(cuda_ipc_handle),
+            size_bytes=int(size_bytes),
+            ttl_ms=int(ttl_ms),
+            owner_pid=int(self._get_effective_pid()),
+        )
+        if session_id:
+            req.session_id = session_id
+        if region_name:
+            req.region_name = region_name
+
+        with self._client_span("Client/RegisterVramRegion") as span:
+            set_span_attributes(
+                {
+                    "tc.device.id": int(device_id),
+                    "tc.region.size_bytes": int(size_bytes),
+                    "tc.region.ttl_ms": int(ttl_ms),
+                }
+            )
+            try:
+                resp = self._unary_call(
+                    self.stub.RegisterVramRegion,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.FAILED_PRECONDITION:
+                    raise RuntimeError(str(e)) from e
+                if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                    raise MemoryError(str(e)) from e
+                raise RuntimeError(f"RegisterVramRegion failed: {e}") from e
+
+        expires_at = None
+        if resp.HasField("expires_at"):
+            expires_at = resp.expires_at.ToDatetime(tz=timezone.utc)
+        return VramRegionHandle(
+            region_id=str(resp.region_id),
+            ttl_ms=int(resp.ttl_ms),
+            expires_at=expires_at,
+        )
+
+    def unregister_vram_region(
+        self,
+        region_id: str,
+        *,
+        session_id: str | None = None,
+        force: bool | None = None,
+        timeout_s: float = 10.0,
+    ) -> bool:
+        if not region_id:
+            raise ValueError("region_id is required")
+        req = store_daemon_pb2.UnregisterVramRegionRequest(
+            region_id=region_id,
+            owner_pid=int(self._get_effective_pid()),
+        )
+        if session_id:
+            req.session_id = session_id
+        if force is not None:
+            req.force = bool(force)
+
+        with self._client_span("Client/UnregisterVramRegion") as span:
+            set_span_attributes({"tc.region.id": region_id})
+            try:
+                resp = self._unary_call(
+                    self.stub.UnregisterVramRegion,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    return False
+                if code == grpc.StatusCode.FAILED_PRECONDITION:
+                    raise RuntimeError(str(e)) from e
+                raise RuntimeError(f"UnregisterVramRegion failed: {e}") from e
+
+        return bool(resp.released)
+
+    def deregister_artifact(
+        self,
+        artifact_id: str,
+        *,
+        session_id: str | None = None,
+        wait_for_drain: bool = True,
+        drain_timeout_ms: int | None = None,
+        extend_ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        device_id: int | None = None,
+        release_regions: bool | None = None,
+        timeout_s: float = 60.0,
+    ) -> DeregisterArtifactOutcome:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        req = store_daemon_pb2.DeregisterArtifactRequest(
+            artifact_id=artifact_id,
+            wait_for_drain=bool(wait_for_drain),
+        )
+        req.owner_pid = (
+            int(owner_pid) if owner_pid is not None else int(self._get_effective_pid())
+        )
+        if session_id:
+            req.session_id = session_id
+        if drain_timeout_ms is not None:
+            req.drain_timeout_ms = int(drain_timeout_ms)
+        if extend_ttl_ms is not None:
+            req.extend_ttl_ms = int(extend_ttl_ms)
+        if device_id is not None:
+            req.device_id = int(device_id)
+        if release_regions is not None:
+            req.release_regions = bool(release_regions)
+
+        with self._client_span("Client/DeregisterArtifact") as span:
+            set_span_attributes(
+                {
+                    "tc.artifact.id": artifact_id,
+                    "tc.deregister.wait": bool(wait_for_drain),
+                }
+            )
+            try:
+                resp = self._unary_call(
+                    self.stub.DeregisterArtifact,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    return DeregisterArtifactOutcome(
+                        drained=True,
+                        removed=False,
+                        released_region_ids=(),
+                        message=str(e),
+                    )
+                if code == grpc.StatusCode.FAILED_PRECONDITION:
+                    raise RuntimeError(str(e)) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"DeregisterArtifact failed: {e}") from e
+
+        return DeregisterArtifactOutcome(
+            drained=bool(resp.drained),
+            removed=bool(resp.removed),
+            released_region_ids=tuple(resp.released_region_ids),
+            message=resp.message or None,
+        )
 
     def feed_register_artifact_view_chunks(
         self,

@@ -1843,6 +1843,16 @@ absl::Status StoreEngine::register_replica_with_global_store(
   return register_status;
 }
 
+absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view artifact_id, int device_id) {
+  if (!global_store_client_ || !global_store_client_->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  const std::string wid = worker_id_.empty() ? std::string("local") : worker_id_;
+  // Only GPU replicas are relevant for LIP deregistration in this flow.
+  return global_store_client_->unregister_replica_by_worker(
+      artifact_id, wid, common::memory::MemoryLocation::GPU, static_cast<uint32_t>(device_id));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // RFC-0014: Key-mapping wrappers
 // ═══════════════════════════════════════════════════════════════════════════

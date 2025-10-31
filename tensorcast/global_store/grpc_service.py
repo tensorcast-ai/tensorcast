@@ -754,6 +754,60 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
+    def UnregisterReplicaByWorker(
+        self,
+        request: global_store_pb2.UnregisterReplicaByWorkerRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UnregisterReplicaByWorkerResponse:
+        """Unregister a replica by (artifact_id, worker_id[, device_id, memory_type])."""
+        try:
+            artifact_id = request.artifact_id
+            worker_id = request.worker_id
+            if not artifact_id or not worker_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("artifact_id and worker_id are required")
+                return global_store_pb2.UnregisterReplicaByWorkerResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
+            mem_type = None
+            if request.HasField("memory_type"):
+                # Map proto enum to domain enum
+                from tensorcast.global_store.models import MemoryType
+
+                mt = request.memory_type
+                mem_type = (
+                    MemoryType.GPU
+                    if mt == common_pb2.MEMORY_TYPE_GPU
+                    else MemoryType.RAM
+                    if mt == common_pb2.MEMORY_TYPE_RAM
+                    else MemoryType.DISK
+                )
+
+            device_id = request.device_id if request.HasField("device_id") else None
+
+            success = self.artifact_service.unregister_by_worker(
+                worker_id=worker_id,
+                artifact_id=artifact_id,
+                memory_type=mem_type,
+                device_id=device_id,
+            )
+
+            status = (
+                global_store_pb2.Status.STATUS_OK
+                if success
+                else global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+            return global_store_pb2.UnregisterReplicaByWorkerResponse(status=status)
+
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in UnregisterReplicaByWorker")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.UnregisterReplicaByWorkerResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
     # Legacy ListReplicas removed in favor of ListReplicasV2
 
     def ListReplicasV2(

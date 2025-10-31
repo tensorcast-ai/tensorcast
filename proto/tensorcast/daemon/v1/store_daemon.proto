@@ -50,6 +50,9 @@ service StoreDaemonService {
   rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
   rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
   rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
+  rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
+  rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
+  rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
 
   // ========== RFC-0014: Key-based materialization and publish ==========
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
@@ -370,6 +373,8 @@ message LockTransportChunksRequest {
   // on multiple GPUs. When absent, the daemon attempts to infer a unique
   // device from residency; if ambiguous, the RPC returns INVALID_ARGUMENT.
   optional int32 device_id = 3;
+  // Optional TTL extension hint (milliseconds) applied to active leases if granted.
+  optional uint32 extend_ttl_ms = 4;
 }
 
 // Lock chunks response
@@ -485,13 +490,21 @@ message LeasedSegment {
   // Destination offset in the coalesced VRAM buffer (bytes).
   // This locates the DATA interval within the SegmentPlan; PAD is handled by the daemon.
   uint64 dst_offset = 5;
+  // Optional reference to a RegisterStorage entry. When set, the daemon reuses the
+  // associated storage metadata (region-backed or cuda handle) instead of the inline handle.
+  optional string storage_id = 6;
 }
 
 message StorageEntry {
   string storage_id = 1;
   int32 device_id = 2;
-  bytes cuda_ipc_handle = 3;
+  oneof storage_source {
+    bytes cuda_ipc_handle = 3;
+    string vram_region_id = 5;
+  }
   uint64 storage_length = 4;
+  // Base offset into the referenced region. When unset, defaults to zero.
+  optional uint64 region_base_offset = 6;
 }
 
 message TensorAlias {
@@ -548,6 +561,60 @@ message RevokeRegisteredArtifactRequest {
   string reason = 2;
 }
 message RevokeRegisteredArtifactResponse {}
+
+message RegisterVramRegionRequest {
+  // Client session identifier (best-effort) used for diagnostics and ownership.
+  optional string session_id = 1;
+  int32 device_id = 2;
+  bytes cuda_ipc_handle = 3;
+  uint64 size_bytes = 4;
+  uint32 ttl_ms = 5;
+  int32 owner_pid = 6;
+  // Optional human-readable tag for operator diagnostics.
+  optional string region_name = 7;
+}
+
+message RegisterVramRegionResponse {
+  string region_id = 1;
+  uint32 ttl_ms = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message UnregisterVramRegionRequest {
+  optional string session_id = 1;
+  string region_id = 2;
+  int32 owner_pid = 3;
+  // When true, the daemon attempts best-effort release even if TTL expired.
+  optional bool force = 4;
+}
+
+message UnregisterVramRegionResponse {
+  bool released = 1;
+}
+
+message DeregisterArtifactRequest {
+  string artifact_id = 1;
+  optional string session_id = 2;
+  // When true, the daemon blocks until all active staged exports drain or timeout.
+  bool wait_for_drain = 3;
+  // Drain timeout in milliseconds; 0 uses daemon policy.
+  optional uint32 drain_timeout_ms = 4;
+  // Optional lease TTL extension applied before entering quiesce.
+  optional uint32 extend_ttl_ms = 5;
+  // Optional owner PID verification.
+  optional int32 owner_pid = 6;
+  // Optional explicit device identifier when replicas span devices.
+  optional int32 device_id = 7;
+  // When true, release region references once deregistration completes.
+  optional bool release_regions = 8;
+}
+
+message DeregisterArtifactResponse {
+  bool drained = 1;
+  bool removed = 2;
+  repeated string released_region_ids = 3;
+  optional string message = 4;
+}
 
 // RFC-0014
 message MaterializeByKeyRequest {

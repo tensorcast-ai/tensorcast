@@ -36,6 +36,11 @@ grpc::Status TransportController::lock(
   // LIP staged export path
   if (auto lip_opt = d_.lip.find_active_by_artifact_id(req.artifact_id()); lip_opt.has_value()) {
     const auto& lip = *lip_opt;
+    if (req.has_extend_ttl_ms() && req.extend_ttl_ms() > 0) {
+      auto st = d_.lip.extend_ttl_for_artifact(req.artifact_id(), req.extend_ttl_ms());
+      if (!st.ok())
+        return to_grpc_status(st);
+    }
     std::vector<uint32_t> indices(req.chunk_indices().begin(), req.chunk_indices().end());
     auto tok_or = d_.lip.create_staged_export(lip, absl::MakeSpan(indices), d_.engine);
     if (!tok_or.ok())

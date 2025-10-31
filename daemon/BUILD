@@ -28,6 +28,7 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":grpc_metrics_hdr",
         ":grpc_span_hdr",
+        ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
         ":materialization_controller_lib",
@@ -53,6 +54,7 @@ sc_cc_library(
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
@@ -106,6 +108,7 @@ sc_cc_library(
     ],
     deps = [
         ":cuda_ipc_raii_hdr",
+        ":ipc_region_registry_lib",
         ":types_hdr",
         "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
@@ -113,10 +116,34 @@ sc_cc_library(
         "//core/store/loader:segment_plan_source",
         "//core/store/loader:source_hash",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
         "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "ipc_region_registry_lib",
+    srcs = ["ipc_region_registry.cc"],
+    hdrs = ["ipc_region_registry.h"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/random:random",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+cc_test(
+    name = "ipc_region_registry_test",
+    srcs = ["ipc_region_registry_test.cc"],
+    deps = [
+        ":ipc_region_registry_lib",
+        "@abseil-cpp//absl/time:time",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -253,6 +280,7 @@ sc_header_only_library(
     hdrs = ["sweep_tasks.h"],
     deps = [
         ":background_scheduler_hdr",
+        ":ipc_region_registry_lib",
         ":lip_manager_lib",
         ":ref_tracker_hdr",
         ":session_lifecycle_hdr",

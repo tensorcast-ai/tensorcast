@@ -19,8 +19,10 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/session_lifecycle.h"
 #include "daemon/transport_lock_manager.h"
@@ -60,6 +62,29 @@ class LockTtlTask final : public IBackgroundTask {
  private:
   TransportLockManager& locks_;
   store::StoreEngine& engine_;
+};
+
+class RegionRegistrySweepTask final : public IBackgroundTask {
+ public:
+  explicit RegionRegistrySweepTask(IpcRegionRegistry& registry) : registry_(registry) {}
+
+  void run_once() override {
+    auto expired = registry_.SweepExpired(absl::Now());
+    if (expired.empty()) {
+      return;
+    }
+    for (const auto& d : expired) {
+      VLOG(1) << "RegionRegistrySweepTask: expired region id=" << d.region_id << " owner_pid=" << d.owner_pid
+              << " device=" << d.device_id;
+    }
+  }
+
+  [[nodiscard]] std::string name() const override {
+    return "RegionRegistrySweepTask";
+  }
+
+ private:
+  IpcRegionRegistry& registry_;
 };
 
 // Shared struct used by verification auto-registration queue

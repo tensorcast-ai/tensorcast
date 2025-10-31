@@ -10,18 +10,21 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "core/store/store_engine.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/types.h"
 
 namespace tensorcast::daemon {
 
 class LipManager {
  public:
-  explicit LipManager(std::shared_ptr<store::StoreEngine> engine) : engine_(std::move(engine)) {}
+  LipManager(std::shared_ptr<store::StoreEngine> engine, IpcRegionRegistry* regions)
+      : engine_(std::move(engine)), region_registry_(regions) {}
 
   // Copy from LIP segments on source GPU(s) into a freshly allocated
   // coalesced destination buffer on target_device_id. Returns CUDA IPC handle bytes.
@@ -57,6 +60,18 @@ class LipManager {
   // Best-effort: returns true on removal, false if not found or owner mismatch.
   bool revoke_commit_lease_if_owner_matches(const std::string& artifact_id, int device_id, int owner_pid);
 
+  // Extend TTL for an active lease by artifact_id and optionally bump TTL on
+  // any region-backed storages referenced by the lease. Returns OK if lease
+  // found and updated, NOT_FOUND if no active lease, or another status.
+  absl::Status extend_ttl_for_artifact(const std::string& artifact_id, uint32_t extend_ttl_ms);
+
+  // Quiesce a LIP artifact to block new staged exports.
+  void quiesce_artifact(const std::string& artifact_id);
+
+  // Wait for staged exports to drain for a given artifact until deadline.
+  // Returns true if drained, false on timeout.
+  bool wait_exports_drained(const std::string& artifact_id, absl::Time deadline);
+
   // Commit a LIP (lease in-place) registration into a persistent lease entry,
   // computing the artifact descriptor using index/data multihashes streamed
   // from the leased GPU segments. Stores the lease for keepalive/revoke and
@@ -78,6 +93,7 @@ class LipManager {
 
  private:
   std::shared_ptr<store::StoreEngine> engine_;
+  IpcRegionRegistry* region_registry_;
 
   absl::Mutex exp_mu_;
   absl::flat_hash_map<std::string, LipExportRecord> exports_ ABSL_GUARDED_BY(exp_mu_);
@@ -86,6 +102,7 @@ class LipManager {
   mutable absl::Mutex mu_;
   absl::flat_hash_map<ArtifactDeviceKey, LipLeaseEntry> leases_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, ArtifactDeviceKey> reg_to_key_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_set<std::string> quiesced_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/status_utils.h"
 #include "daemon/sweep_tasks.h"
@@ -178,6 +180,155 @@ Status StoreDaemonServiceImpl::LockTransportChunks(
   return transport_controller_->lock(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::RegisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v1::RegisterVramRegionRequest* req,
+    v1::RegisterVramRegionResponse* resp) {
+  RpcContext rctx{"RegisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
+  span->SetAttribute("tc.region.size_bytes", static_cast<int64_t>(req->size_bytes()));
+  span->SetAttribute("tc.region.ttl_ms", static_cast<int64_t>(req->ttl_ms()));
+
+  if (is_shutting_down_.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->owner_pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
+  }
+  if (req->device_id() < 0) {
+    return {StatusCode::INVALID_ARGUMENT, "device_id must be >= 0"};
+  }
+  if (req->size_bytes() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "size_bytes must be > 0"};
+  }
+  if (req->ttl_ms() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "ttl_ms must be > 0"};
+  }
+  if (req->cuda_ipc_handle().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
+  }
+
+  IpcRegionRegistry::RegisterParams params;
+  params.device_id = req->device_id();
+  params.owner_pid = req->owner_pid();
+  params.size_bytes = req->size_bytes();
+  params.ttl_ms = req->ttl_ms();
+  if (req->has_session_id()) {
+    params.session_id = req->session_id();
+  }
+  if (req->has_region_name()) {
+    params.region_name = req->region_name();
+  }
+  params.handle_bytes = std::string(req->cuda_ipc_handle());
+
+  auto desc_or = region_registry_->Register(params);
+  if (!desc_or.ok()) {
+    return to_grpc_status(desc_or.status());
+  }
+  const auto& desc = *desc_or;
+  resp->set_region_id(desc.region_id);
+  resp->set_ttl_ms(desc.ttl_ms);
+  if (desc.expires_at != absl::InfiniteFuture()) {
+    const int64_t micros = absl::ToUnixMicros(desc.expires_at);
+    auto* ts = resp->mutable_expires_at();
+    ts->set_seconds(micros / 1'000'000);
+    ts->set_nanos(static_cast<int32_t>((micros % 1'000'000) * 1'000));
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::UnregisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v1::UnregisterVramRegionRequest* req,
+    v1::UnregisterVramRegionResponse* resp) {
+  RpcContext rctx{"UnregisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.region.id", req->region_id());
+
+  if (req->region_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "region_id is required"};
+  }
+  if (req->owner_pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
+  }
+
+  const bool force = req->has_force() ? req->force() : false;
+  auto released_or = region_registry_->Unregister(req->region_id(), req->owner_pid(), force);
+  if (!released_or.ok()) {
+    return to_grpc_status(released_or.status());
+  }
+  resp->set_released(*released_or);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::DeregisterArtifact(
+    grpc::ServerContext* ctx,
+    const v1::DeregisterArtifactRequest* req,
+    v1::DeregisterArtifactResponse* resp) {
+  RpcContext rctx{"DeregisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  if (!req->artifact_id().empty()) {
+    rctx.span()->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (is_shutting_down_.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  const std::string artifact_id = req->artifact_id();
+  auto lip_opt = lip_mgr_->find_active_by_artifact_id(artifact_id);
+  if (!lip_opt.has_value()) {
+    return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+  }
+  const auto& lip = *lip_opt;
+  if (req->has_owner_pid() && lip.owner_pid != req->owner_pid()) {
+    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for active lease"};
+  }
+  // Optional TTL extension before quiesce
+  if (req->has_extend_ttl_ms() && req->extend_ttl_ms() > 0) {
+    auto st = lip_mgr_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms());
+    if (!st.ok())
+      return to_grpc_status(st);
+  }
+  // Quiesce new staged exports
+  lip_mgr_->quiesce_artifact(artifact_id);
+  bool drained = true;
+  if (req->wait_for_drain()) {
+    const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
+    absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
+    drained = lip_mgr_->wait_exports_drained(artifact_id, deadline);
+    if (!drained) {
+      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+    }
+  }
+  // Remove active lease if owner matches (or no owner provided)
+  bool removed = lip_mgr_->revoke_commit_lease_if_owner_matches(artifact_id, lip.device_id, lip.owner_pid);
+  resp->set_drained(drained);
+  resp->set_removed(removed);
+  if (removed) {
+    // Best-effort: synchronize removal with Global Store
+    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, lip.device_id);
+    if (!gs_st.ok()) {
+      // Do not fail the RPC; attach message for observability
+      resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+    }
+  }
+  // Return referenced region ids for observability
+  absl::flat_hash_set<std::string> unique_regions;
+  for (const auto& s : lip.storages) {
+    if (s.has_region())
+      unique_regions.insert(s.region_id);
+  }
+  for (const auto& rid : unique_regions) {
+    resp->add_released_region_ids(rid);
+  }
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
     const v1::UnlockTransportChunksRequest* req,
@@ -301,6 +452,14 @@ void StoreDaemonServiceImpl::start_sweepers() {
     auto t = std::make_shared<LockTtlTask>(locks_, *engine_);
     scheduler_->add_task(
         TaskKind::kLockTTL, std::chrono::duration_cast<milliseconds>(opts_.locks_sweep_interval), [t]() {
+          t->run_once();
+        });
+  }
+  // Region registry sweep
+  {
+    auto t = std::make_shared<RegionRegistrySweepTask>(*region_registry_);
+    scheduler_->add_task(
+        TaskKind::kRegionRegistry, std::chrono::duration_cast<milliseconds>(opts_.region_sweep_interval), [t]() {
           t->run_once();
         });
   }
