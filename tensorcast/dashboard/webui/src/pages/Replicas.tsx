@@ -209,13 +209,13 @@ export default function Replicas() {
             </TableRow>
           ) : (
             rows.map((r) => (
-              <TableRow key={r.replica_id}>
+              <TableRow key={`${r.artifact_id}|${r.node_id}|${r.device_id ?? '-'}|${r.memory_type}`}>
                 <TableCell className="font-mono">
                   <NavLink className="underline-offset-2 hover:underline" to={`/artifacts/${encodeURIComponent(r.artifact_id)}`}>
                     {r.artifact_id}
                   </NavLink>
                 </TableCell>
-                <TableCell className="font-mono">{r.replica_id}</TableCell>
+                <TableCell className="font-mono">{`${r.node_id}:${r.memory_type}:${r.device_id ?? '-'}`}</TableCell>
                 <TableCell>
                   {r.node_address} <span className="text-muted-foreground">({r.node_id})</span>
                 </TableCell>
@@ -223,7 +223,7 @@ export default function Replicas() {
                 <TableCell>{r.memory_type}</TableCell>
                 <TableCell>{formatBytes(r.bytes)}</TableCell>
                 <TableCell>
-                  <Badge>{r.state}</Badge>
+                  <Badge>{r.state ?? '—'}</Badge>
                 </TableCell>
               </TableRow>
             ))

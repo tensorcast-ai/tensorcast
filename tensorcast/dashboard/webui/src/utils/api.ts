@@ -19,14 +19,13 @@ export type WorkersResponse = {
 export type ReplicasResponse = {
   replicas: Array<{
     artifact_id: string;
-    replica_id: string;
     node_id: string;
     node_address: string;
     device_id: number | null;
     memory_type: 'RAM' | 'GPU' | 'DISK' | string;
     bytes: number;
-    state: string; // READY|...
-    created_ts: string; // RFC3339
+    state?: string | null; // READY|... (may be null/absent)
+    created_ts?: string | null; // RFC3339 (may be null)
   }>;
   page_info?: { next_page_token?: string | null } | null;
 };
