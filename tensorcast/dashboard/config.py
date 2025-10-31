@@ -89,9 +89,9 @@ class DashboardSettings:
 
 
 def _read_env(environ: Mapping[str, str]) -> DashboardSettings:
-    gs_endpoint = environ.get("TENSORCAST_GS_ADDR")
-    if not gs_endpoint:
-        raise ValueError("TENSORCAST_GS_ADDR environment variable is required")
+    # Default to localhost for tests/dev when not explicitly configured.
+    # The app will still attempt to connect during lifespan; failures are logged.
+    gs_endpoint = environ.get("TENSORCAST_GS_ADDR", "127.0.0.1:50051")
 
     gs_secure = _parse_bool(environ.get("TENSORCAST_GS_SECURE"), default=False)
     ca_cert = environ.get("TENSORCAST_GS_CA_CERT")

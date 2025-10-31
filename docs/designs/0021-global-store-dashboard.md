@@ -316,7 +316,12 @@ Future (non‑MVP)
 
 Environment variables
 - Global Store
-  - `TENSORCAST_GS_ADDR` (required): `host:port` of the GS gRPC endpoint.
+  - `TENSORCAST_GS_ADDR` (optional, default `127.0.0.1:50051`): `host:port` of the GS gRPC endpoint.
+  - `TENSORCAST_GS_SECURE` (optional, default `false`): enable TLS for GS.
+  - `TENSORCAST_GS_CA_CERT` (optional): CA certificate path for GS mTLS.
+Environment variables
+- Global Store
+  - `TENSORCAST_GS_ADDR` (optional, default `127.0.0.1:50051`): `host:port` of the GS gRPC endpoint.
   - `TENSORCAST_GS_SECURE` (optional, default `false`): enable TLS for GS.
   - `TENSORCAST_GS_CA_CERT` (optional): CA certificate path for GS mTLS.
 - Dashboard server

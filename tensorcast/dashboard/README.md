@@ -25,7 +25,7 @@ Architecture
 Quickstart
 ----------
 
-1) Set the Global Store endpoint (required):
+1) Optionally set the Global Store endpoint (defaults to `127.0.0.1:50051`):
 
 ```bash
 export TENSORCAST_GS_ADDR="<host>:<port>"
@@ -52,7 +52,7 @@ Configuration
 Environment variables:
 
 - Global Store
-  - `TENSORCAST_GS_ADDR` (required): `host:port` of the GS gRPC endpoint
+  - `TENSORCAST_GS_ADDR` (optional, default `127.0.0.1:50051`): `host:port` of the GS gRPC endpoint
   - `TENSORCAST_GS_SECURE` (optional, default `false`): enable TLS for GS
   - `TENSORCAST_GS_CA_CERT` (optional): CA certificate path for GS mTLS
   - `TENSORCAST_GS_TIMEOUT_SEC` (optional, default `5.0`): per‑RPC timeout (seconds)
