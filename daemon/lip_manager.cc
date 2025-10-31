@@ -353,6 +353,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   RegionAcquireGuard region_guard(region_registry_);
   absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
   std::vector<std::unique_ptr<CudaIpcMapping>> owned_maps;
+  absl::flat_hash_map<std::string, uint32_t> region_hold_counts; // region_id -> refcount to hold beyond this scope
   mapping_cache.reserve(lip.storages.size());
   for (const auto& seg : lip.segments) {
     std::optional<OpenedSeg> opened_seg;
@@ -370,6 +371,10 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
         storage = it->second;
       }
       if (storage != nullptr) {
+        // Track first-time region-backed mapping per storage to hold registry refs
+        if (storage->has_region() && mapping_cache.find(storage->storage_id) == mapping_cache.end()) {
+          ++region_hold_counts[storage->region_id];
+        }
         auto map_or =
             GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, lip.owner_pid);
         if (!map_or.ok())
@@ -411,6 +416,22 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
               s.len,
               ", chunk=",
               chunk_size));
+    }
+  }
+  // Reacquire region refs we need to hold for the lifetime of this export.
+  if (!region_hold_counts.empty()) {
+    if (region_registry_ == nullptr) {
+      return absl::FailedPreconditionError("region registry unavailable");
+    }
+    for (const auto& kv : region_hold_counts) {
+      const std::string& region_id = kv.first;
+      const uint32_t count = kv.second;
+      for (uint32_t i = 0; i < count; ++i) {
+        auto desc_or = region_registry_->acquire(region_id, lip.owner_pid);
+        if (!desc_or.ok()) {
+          return desc_or.status();
+        }
+      }
     }
   }
   auto find_covering = [&](uint64_t off, uint64_t len) -> const OpenedSeg* {
@@ -475,6 +496,8 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     LipExportRecord rec;
     rec.artifact_id = lip.artifact_id;
     rec.device_id = lip.device_id;
+    rec.region_registry = region_registry_;
+    rec.held_region_refs = std::move(region_hold_counts);
     // Transfer ownership of new opens
     for (auto& up : owned_maps) {
       rec.opened_maps.push_back(std::move(*up));
@@ -507,7 +530,22 @@ absl::Status LipManager::release_staged_export(const std::string& token, store::
       }
     }
   }
+  // Preserve region lease info, then erase to release CUDA mappings before releasing region refs
+  IpcRegionRegistry* registry = it->second.region_registry;
+  absl::flat_hash_map<std::string, uint32_t> held = std::move(it->second.held_region_refs);
   exports_.erase(it);
+  if (registry != nullptr) {
+    for (const auto& kv : held) {
+      const std::string& region_id = kv.first;
+      const uint32_t count = kv.second;
+      for (uint32_t i = 0; i < count; ++i) {
+        absl::Status st = registry->release(region_id);
+        if (!st.ok()) {
+          LOG(WARNING) << "release_staged_export: region release failed for region_id=" << region_id << ": " << st;
+        }
+      }
+    }
+  }
   return absl::OkStatus();
 }
 

@@ -388,7 +388,8 @@ grpc::Status RegistrationController::feed_stream(
           return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
-          auto desc_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
+          // Validate using describe() first to avoid leaking a ref on failure
+          auto desc_or = d_.regions.describe(meta.region_id);
           if (!desc_or.ok()) {
             return to_grpc_status(desc_or.status());
           }
@@ -397,8 +398,14 @@ grpc::Status RegistrationController::feed_stream(
             return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
           }
           const uint64_t offset = meta.region_base_offset;
-          if (offset + meta.storage_length > desc.size_bytes) {
+          const uint64_t length = meta.storage_length;
+          if (length > desc.size_bytes || offset > (desc.size_bytes - length)) {
             return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+          }
+          // Only acquire after validation succeeds; immediately track in pin_guard
+          auto acq_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
+          if (!acq_or.ok()) {
+            return to_grpc_status(acq_or.status());
           }
           pin_guard.add(meta.region_id);
         }
@@ -554,7 +561,8 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
           return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
-          auto desc_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
+          // Validate using describe() first to avoid leaking a ref on failure
+          auto desc_or = d_.regions.describe(meta.region_id);
           if (!desc_or.ok()) {
             return to_grpc_status(desc_or.status());
           }
@@ -563,8 +571,14 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
             return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
           }
           const uint64_t offset = meta.region_base_offset;
-          if (offset + meta.storage_length > desc.size_bytes) {
+          const uint64_t length = meta.storage_length;
+          if (length > desc.size_bytes || offset > (desc.size_bytes - length)) {
             return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+          }
+          // Only acquire after validation succeeds; immediately track in pin_guard
+          auto acq_or = d_.regions.acquire(meta.region_id, current_meta.owner_pid);
+          if (!acq_or.ok()) {
+            return to_grpc_status(acq_or.status());
           }
           pin_guard.add(meta.region_id);
         }

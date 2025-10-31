@@ -23,6 +23,7 @@ Deliver the region-backed lease-in-place flow described in the design so paged-a
 - tensorcast/types.py models `LeaseSegment`/`RegisterStorage` with `storage_source` oneof and region fields.
 - proto/tensorcast/daemon/v1/store_daemon.proto includes `RegisterVramRegion`/`UnregisterVramRegion`/`DeregisterArtifact`, `storage_source` oneof, and `extend_ttl_ms` on `LockTransportChunksRequest`.
 - daemon/lip_manager.cc reuses region-backed mappings via `IpcRegionRegistry` and validates offsets/lengths.
+- LipManager staged exports now retain region registry references for the duration of the export (held in `LipExportRecord`) and release them on `release_staged_export`, preventing premature region ref release while CUDA mappings remain active.
 - daemon/service/controllers/transport_controller.cc applies `extend_ttl_ms` before staging exports; quiesce and drain are handled by `DeregisterArtifact`.
 - tensorcast/global_store/services/artifact_service.py adds `unregister_by_worker` to support daemon-triggered deregister; server exposes `UnregisterReplicaByWorker` RPC.
 - LIP data paths and region registry are integrated; region mappings are cached and reused.

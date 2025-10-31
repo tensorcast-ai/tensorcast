@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "daemon/cuda_ipc_raii.h"
+#include "daemon/ipc_region_registry.h"
 
 #include "absl/container/flat_hash_map.h"
 #include "core/common/artifact_identity.h"
@@ -88,6 +89,11 @@ struct LipExportRecord {
   int device_id{0};
   std::vector<CudaIpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
+  // Region lease ownership for region-backed storages used by this export.
+  // These references are acquired explicitly at staging time and must be
+  // released when the staged export is released.
+  IpcRegionRegistry* region_registry{nullptr};
+  absl::flat_hash_map<std::string, uint32_t> held_region_refs; // region_id -> refcount
 };
 
 // Result of committing a LIP in-place registration: descriptor fields and
