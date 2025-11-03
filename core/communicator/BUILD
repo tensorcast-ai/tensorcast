@@ -163,6 +163,7 @@ sc_cc_library(
         ":metric_lib",
         ":queue_lib",
         ":utils_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
     ],
 )
 
@@ -215,6 +216,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":base_transport_lib",
+        ":constants_lib",
         ":ibv_wrap_lib",
         ":net_dev_lib",
         ":request_lib",

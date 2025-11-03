@@ -5,7 +5,9 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/communicator/transport/net_dev.h"
 
 namespace tensorcast::communicator::transport {
@@ -18,16 +20,26 @@ class PartitionTensor {
   PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t bytes, int mem_type, net_dev_t dev = nullptr);
   ~PartitionTensor();
 
-  void register_mr();
+  void add_dev_and_register(const net_dev_t& dev);
+  void add_dev(const net_dev_t& dev);
+  void add_dev_list(const std::vector<net_dev_t>& devs);
+
+  void register_mr(const net_dev_t& dev);
   void set_read_ready();
   void wait_read_ready();
 
+  uint64_t get_regmr_cost(const net_dev_t& dev);
   uint64_t get_regmr_cost() const;
 
   std::string get_key();
   uint64_t get_bytes() const;
-  struct ibv_mr* get_mr();
+  struct ibv_mr* get_mr(const net_dev_t& dev);
+  struct ibv_mr* get_mr_by_rail(int16_t rail_id);
+  std::vector<net_dev_t> get_devs();
+
   net_dev_t get_dev();
+
+  net_dev_t get_dev_by_rail(int rail_id);
   uint64_t get_uint64_addr() const;
   int get_mem_type() const;
 
@@ -35,6 +47,7 @@ class PartitionTensor {
   [[nodiscard]] bool needs_staging() const {
     return needs_staging_;
   }
+
   void set_needs_staging(bool value) {
     needs_staging_ = value;
   }
@@ -48,6 +61,7 @@ class PartitionTensor {
   [[nodiscard]] int get_device_id() const {
     return device_id_;
   }
+
   void set_device_id(int id) {
     device_id_ = id;
   }
@@ -57,15 +71,16 @@ class PartitionTensor {
 
   uint64_t addr_;
   uint64_t bytes_;
-  std::atomic_bool registered_;
+  absl::flat_hash_map<std::string, std::shared_ptr<std::atomic_bool>> registered_;
   std::atomic_bool ready_;
-  struct ibv_mr* mr_;
-  net_dev_t dev_;
-  uint64_t regmr_cost_;
+  absl::flat_hash_map<std::string, struct ibv_mr*> mrs_;
+  std::vector<net_dev_t> devs_;
+  absl::flat_hash_map<std::string, uint64_t> regmr_costs_;
   int mem_type_;
   bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
   int device_id_ = -1; // GPU device ID (-1 for CPU)
 };
+
 typedef std::shared_ptr<PartitionTensor> tensor_t;
 
 class RemotePartitionTensor {
@@ -86,6 +101,7 @@ class RemotePartitionTensor {
   uint64_t bytes_;
   uint32_t rkey_;
 };
+
 typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
 
 } // namespace tensorcast::communicator::transport

@@ -113,6 +113,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     hdr->transport_type = ENGINE_TRANSPORT_RDMA;
     hdr->staged = 1;
     misc::STRNCPY(hdr->nic_name, session.dev ? session.dev->get_name().c_str() : "", kMaxDevName);
+    hdr->rail_id = session.dev ? session.dev->get_rail_id() : 0;
     hdr->num_segments = seg_count;
     hdr->window_seq = staged_window.window_seq;
     hdr->credit_granted = static_cast<uint32_t>(staged_window.granted_credit);
@@ -349,7 +350,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
   if (enable_rdma_) {
     rdma_context_ = std::make_shared<RdmaContext>();
-    mr_cache_ = std::make_unique<MrCache>();
+    meta_mr_cache_ = std::make_unique<MrCache>();
     // Apply typed RDMA QP tuning
     rdma_context_->set_qp_params(
         config_.rdma().traffic_class(), config_.rdma().qp_timeout(), config_.rdma().qp_retry());
@@ -388,7 +389,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
       for (auto& pool : pools) {
         auto buffers = pool->list_buffers();
         for (auto ptr : buffers) {
-          auto* mr = mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->slice_bytes(), access);
+          auto* mr = meta_mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->slice_bytes(), access);
           if (mr == nullptr) {
             LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
           }
@@ -736,7 +737,7 @@ future_read_result_t Communicator::read_tensor(
     uint64_t addr,
     uint64_t bytes,
     int dev_type,
-    int dev_id,
+    int dev_id, // gpu_id
     const std::string& dst_ip,
     uint16_t dst_port,
     uint64_t remote_offset) {
@@ -746,7 +747,8 @@ future_read_result_t Communicator::read_tensor(
   }
   net_dev_t net_dev = nullptr;
   if (enable_rdma_) {
-    net_dev = get_net_dev(dev_type, dev_id);
+    // with rail
+    net_dev = get_net_dev(dev_type, dev_id, key);
     if (net_dev == nullptr) {
       return transport::ReadRequest::get_read_result_future("failed to get net dev for the rdma connection");
     }
@@ -776,7 +778,8 @@ future_read_result_t Communicator::read_tensor(
     store_.register_tensor(local_tensor);
   }
 
-  auto req = std::make_shared<transport::ReadRequest>(key, dst_ip, dst_port, local_tensor, remote_offset);
+  auto req = std::make_shared<transport::ReadRequest>(
+      key, dst_ip, dst_port, local_tensor, remote_offset, net_dev->get_rail_id());
   LOG(INFO) << "[read_tensor] Creating request: key=" << key << " dst=" << dst_ip << ":" << dst_port
             << " req_key=" << req->get_key();
   request_queue_.push(req);
@@ -798,7 +801,7 @@ absl::Status Communicator::register_tensor_ex(
 
   net_dev_t net_dev = nullptr;
   if (enable_rdma_) {
-    net_dev = get_net_dev(dev_type, dev_id);
+    net_dev = get_net_dev(dev_type, dev_id, tensor_key);
     if (net_dev == nullptr) {
       return absl::InternalError("failed to get net dev");
     }
@@ -831,7 +834,7 @@ absl::Status Communicator::register_tensor_ex(
   if (enable_rdma_ && opts.register_mr) {
     net_dev->reg_async(tensor);
     if (!opts.async) {
-      if (tensor->get_mr() == nullptr) {
+      if (tensor->get_mr(net_dev) == nullptr) {
         return absl::InternalError("failed to register mr");
       }
     }
@@ -844,7 +847,7 @@ absl::Status Communicator::register_tensor_ex(
 absl::Status Communicator::handle_rdma_read_request(
     const channel_t& channel,
     const tcp_transport_t& control_transport,
-    const ProtoReadRequest& request,
+    ProtoReadRequest& request,
     const std::shared_ptr<PartitionTensor>& tensor) {
   if (!enable_rdma_) {
     return absl::FailedPreconditionError("RDMA transport disabled");
@@ -856,11 +859,25 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   tensor->wait_read_ready();
+  int16_t src_rail_id = request.rail_id;
   auto dev = tensor->get_dev();
   if (dev == nullptr) {
     return absl::InternalError("tensor missing RDMA device");
   }
-
+  if (dev->get_rail_id() != src_rail_id) {
+    auto dev_by_rail = rdma_context_->get_dev_by_rail(src_rail_id);
+    if (dev_by_rail == nullptr) {
+      LOG(WARNING) << "failed to get net dev by rail: rail_id=" << src_rail_id
+                   << "use the default dev with rail_id=" << dev->get_rail_id();
+      // use default rail dev
+      request.rail_id = dev->get_rail_id();
+    } else {
+      tensor->add_dev(dev_by_rail);
+      // reg tensor to the new rail
+      dev_by_rail->reg_async(tensor);
+      dev = dev_by_rail;
+    }
+  }
   const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
   std::shared_ptr<MemoryStager> stager =
       tensor_on_cpu ? get_cpu_stager_for_nic(dev->get_name()) : get_gpu_mem_stager_for_id(tensor->get_device_id());
@@ -877,7 +894,7 @@ absl::Status Communicator::handle_rdma_read_request(
   const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
   const std::string request_key = transport::get_request_key(tensor_key, start_offset);
   FlowCreditLedger* ledger_ptr = &flow_state->ledger;
-  MrCache* mr_cache_ptr = mr_cache_.get();
+  MrCache* mr_cache_ptr = meta_mr_cache_.get();
 
   auto stage_fn = [stager, tensor, dev, ledger_ptr, mr_cache_ptr, tensor_key](
                       uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
@@ -1253,6 +1270,8 @@ void Communicator::do_read_request_loop() {
     request->transport_type = enable_rdma_ ? ENGINE_TRANSPORT_RDMA : ENGINE_TRANSPORT_MTCP;
     request->offset = req->remote_offset_;
     request->bytes = req->get_local_tensor()->get_bytes();
+
+    request->rail_id = req->get_rail_id();
 
     VLOG(1) << "[do_read_request_loop] Sending READ_REQUEST: key=" << req->tensor_key_ << " to " << req->get_dst_url()
             << " transport_type=" << (request->transport_type == ENGINE_TRANSPORT_MTCP ? "MTCP" : "RDMA");
@@ -2155,18 +2174,13 @@ void Communicator::start_pending_rdma_handshake(
   }
 }
 
-net_dev_t Communicator::get_net_dev(int dev_type, int dev_id) {
+net_dev_t Communicator::get_net_dev(int dev_type, int dev_id, const std::string& key, int rail_id) {
   net_dev_t net_dev(nullptr);
   if (enable_rdma_) {
     CHECK(rdma_context_ != nullptr) << "rdma context is not initialized";
-    if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
-      net_dev = rdma_context_->get_best_dev(dev_id);
-    } else {
-      // CPU: choose the first available RDMA device when not specified via policy/mapping.
-      const auto& devs = rdma_context_->list_devs();
-      if (!devs.empty())
-        net_dev = devs.front();
-    }
+
+    net_dev = rdma_context_->get_best_dev(dev_type, dev_id, -1, key);
+
     if (net_dev == nullptr) {
       LOG(WARNING) << "failed to select RDMA device (dev_type=" << dev_type
                    << ") — ensure CommunicatorConfig specifies device mapping";

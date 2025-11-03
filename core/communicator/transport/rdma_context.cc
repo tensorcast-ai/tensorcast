@@ -15,6 +15,9 @@
 
 namespace tensorcast::communicator::transport {
 
+using base::COMMUNICATE_ENGINE_DEV_CPU;
+using base::COMMUNICATE_ENGINE_DEV_GPU;
+
 RdmaContext::RdmaContext() {
   ABSL_CHECK(ibv_init() == misc::SUCCESS) << "failed to init";
   for (int i = 0; i < 16; i++) {
@@ -75,6 +78,7 @@ misc::result_t RdmaContext::ibv_init() {
 
       if (dev->get_best_gid_index() > 0) {
         devs_.push_back(dev);
+        rail_devs_[dev->get_rail_id()] = dev;
       }
     }
   }
@@ -97,6 +101,26 @@ net_dev_t RdmaContext::get_dev(const std::string& name) {
     }
   }
   return nullptr;
+}
+
+net_dev_t RdmaContext::get_dev_by_rail(int rail_id) {
+  if (rail_devs_.find(rail_id) == rail_devs_.end()) {
+    return nullptr;
+  }
+  return rail_devs_[rail_id];
+}
+
+net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const std::string& key) {
+  if (dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    if (rail_id == -1) {
+      int index = std::hash<std::string>{}(key) % devs_.size();
+      return devs_[index];
+    } else {
+      return rail_devs_[rail_id];
+    }
+  } else {
+    return get_best_dev(dev_id);
+  }
 }
 
 net_dev_t RdmaContext::get_best_dev(int gpu_id) {

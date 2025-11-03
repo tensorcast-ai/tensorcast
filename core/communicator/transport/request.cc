@@ -15,14 +15,16 @@ ReadRequest::ReadRequest(
     std::string dst_ip,
     uint16_t dst_port,
     tensor_t local,
-    uint64_t remote_offset)
+    uint64_t remote_offset,
+    int rail_id)
     : local_tensor_(std::move(local)),
       tensor_key_(std::move(tensor_key)),
       dst_ip_(std::move(dst_ip)),
       dst_port_(dst_port),
       result_set_(false),
       timer_(true),
-      remote_offset_(remote_offset) {
+      remote_offset_(remote_offset),
+      rail_id_(rail_id) {
   status_.tensor_key = tensor_key_;
 }
 

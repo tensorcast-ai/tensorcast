@@ -234,10 +234,6 @@ def ensure_external_symlink() -> None:
         root_dir: Path = get_root_dir()
         link_path: Path = root_dir / "external"
 
-        # Only act if link/dir doesn't exist
-        if link_path.exists():
-            return
-
         if BAZEL_EXE is None:
             return
 
@@ -246,6 +242,23 @@ def ensure_external_symlink() -> None:
         )
         target_path = Path(output_base) / "external"
 
+        # If link_path exists but is not a symlink, or is a symlink pointing to wrong location
+        if link_path.exists():
+            if link_path.is_symlink():
+                current_target = link_path.readlink()
+                if current_target == target_path or str(current_target.resolve()) == str(target_path.resolve()):
+                    # Already correctly linked
+                    return
+                else:
+                    # Wrong target, remove and recreate
+                    link_path.unlink()
+            else:
+                # It's a directory, remove it
+                import shutil
+                shutil.rmtree(link_path)
+                print(f"Removed existing directory: {link_path}")
+
+        # Create the symlink
         os.symlink(str(target_path), str(link_path))
         print(f"Created symlink: {link_path} -> {target_path}")
     except Exception as e:

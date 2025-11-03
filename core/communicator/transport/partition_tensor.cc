@@ -12,17 +12,40 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
     : tensor_key_(std::move(tensor_key)),
       addr_(addr),
       bytes_(bytes),
-      registered_(false),
+      // registered_(false),
       ready_(false),
-      mr_(nullptr),
-      dev_(std::move(dev)),
-      mem_type_(mem_type) {}
+      // mr_(nullptr),
+      // dev_(std::move(dev)),
+      mem_type_(mem_type) {
+  if (dev != nullptr) {
+    add_dev(dev);
+  }
+}
 
 PartitionTensor::~PartitionTensor() {
-  if (registered_.load()) {
-    CHECK_WARN(misc::wrap_ibv_dereg_mr(mr_), "failed to dereg mr");
-    registered_.store(false);
-    ready_.store(false);
+  for (auto dev : devs_) {
+    if (registered_[dev->get_name()]->load()) {
+      CHECK_WARN(misc::wrap_ibv_dereg_mr(mrs_[dev->get_name()]), "failed to dereg mr");
+      registered_[dev->get_name()]->store(false);
+      ready_.store(false);
+    }
+  }
+}
+
+void PartitionTensor::add_dev_and_register(const net_dev_t& dev) {
+  add_dev(dev);
+  dev->reg_async(std::shared_ptr<PartitionTensor>(this));
+}
+
+void PartitionTensor::add_dev(const net_dev_t& dev) {
+  devs_.push_back(std::move(dev));
+  registered_[dev->get_name()] = std::make_shared<std::atomic_bool>(false);
+  mrs_[dev->get_name()] = nullptr;
+}
+
+void PartitionTensor::add_dev_list(const std::vector<net_dev_t>& devs) {
+  for (const auto& dev : devs) {
+    add_dev(dev);
   }
 }
 
@@ -40,15 +63,40 @@ std::string PartitionTensor::get_key() {
   return tensor_key_;
 }
 
-struct ibv_mr* PartitionTensor::get_mr() {
-  while (!registered_.load()) {
-    std::this_thread::yield();
+net_dev_t PartitionTensor::get_dev() {
+  if (devs_.empty()) {
+    return nullptr;
   }
-  return mr_;
+  return devs_.front();
 }
 
-net_dev_t PartitionTensor::get_dev() {
-  return dev_;
+struct ibv_mr* PartitionTensor::get_mr(const net_dev_t& dev) {
+  while (!registered_[dev->get_name()]->load()) {
+    std::this_thread::yield();
+  }
+  return mrs_[dev->get_name()];
+}
+
+struct ibv_mr* PartitionTensor::get_mr_by_rail(int16_t rail_id) {
+  for (const auto& dev : devs_) {
+    if (dev->get_rail_id() == rail_id) {
+      return get_mr(dev);
+    }
+  }
+  return nullptr;
+}
+
+net_dev_t PartitionTensor::get_dev_by_rail(int rail_id) {
+  for (const auto& dev : devs_) {
+    if (dev->get_rail_id() == rail_id) {
+      return dev;
+    }
+  }
+  return nullptr;
+}
+
+std::vector<net_dev_t> PartitionTensor::get_devs() {
+  return devs_;
 }
 
 uint64_t PartitionTensor::get_bytes() const {
@@ -59,23 +107,27 @@ uint64_t PartitionTensor::get_uint64_addr() const {
   return addr_;
 }
 
+uint64_t PartitionTensor::get_regmr_cost(const net_dev_t& dev) {
+  return regmr_costs_[dev->get_name()];
+}
+
 uint64_t PartitionTensor::get_regmr_cost() const {
-  return regmr_cost_;
+  return regmr_costs_.empty() ? 0 : regmr_costs_.begin()->second;
 }
 
 int PartitionTensor::get_mem_type() const {
   return mem_type_;
 }
 
-void PartitionTensor::register_mr() {
+void PartitionTensor::register_mr(const net_dev_t& dev) {
   misc::Timer timer(true);
   int flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-
   auto addr = get_addr<void>();
   auto nb_bytes = get_bytes();
-  CHECK_WARN(dev_->reg_mr(&mr_, addr, nb_bytes, flags), "failed to register mr");
-  registered_.store(true);
-  regmr_cost_ = timer.record();
+  CHECK_WARN(dev->reg_mr(&mrs_[dev->get_name()], addr, nb_bytes, flags), "failed to register mr");
+
+  registered_[dev->get_name()]->store(true);
+  regmr_costs_[dev->get_name()] = timer.record();
 }
 
 RemotePartitionTensor::RemotePartitionTensor(

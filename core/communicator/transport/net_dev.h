@@ -6,6 +6,10 @@
 #include <memory>
 #include <string>
 
+#include <fstream>
+#include <regex>
+#include <sstream>
+
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/misc/queue.h"
@@ -29,6 +33,14 @@ class NetDev {
 
   int get_port() const;
   int get_link() const;
+  int16_t get_rail_id() const;
+  uint8_t get_numa_id() const;
+  misc::result_t read_numa_id();
+
+  int get_dev_id() {
+    return dev_id_;
+  }
+
   ibv_pd* get_pd() const;
   ibv_cq* get_cq() const;
   misc::result_t reg_async(const tensor_t& tensor);
@@ -40,6 +52,7 @@ class NetDev {
 
  private:
   misc::result_t read_pci_path();
+  void read_rail_id();
   void register_loop();
 
  protected:
@@ -54,10 +67,12 @@ class NetDev {
   int real_port_;
   int max_qp_num_;
   int gid_tbl_len_;
+  uint8_t numa_id_;
 
   ibv_pd* pd_ = nullptr;
   ibv_cq* cq_ = nullptr;
 
+  int16_t rail_id_;
   std::atomic_bool stop_;
   std::thread register_thread_;
   misc::Queue<tensor_t> register_queue_;
@@ -65,6 +80,7 @@ class NetDev {
   int gid_idx_ = -1;
   ibv_gid gid_;
 };
+
 typedef std::shared_ptr<NetDev> net_dev_t;
 
 } // namespace tensorcast::communicator::transport

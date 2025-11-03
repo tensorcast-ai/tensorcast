@@ -137,7 +137,7 @@ class Communicator {
  private:
   friend class CommunicatorTestPeer;
 
-  transport::net_dev_t get_net_dev(int dev_type, int dev_id);
+  transport::net_dev_t get_net_dev(int dev_type, int dev_id, const std::string& key = "", int rail_id = -1);
 
   misc::result_t on_receive_request(
       const channel_t& channel,
@@ -158,7 +158,7 @@ class Communicator {
   absl::Status handle_rdma_read_request(
       const channel_t& channel,
       const transport::tcp_transport_t& control_transport,
-      const ProtoReadRequest& request,
+      ProtoReadRequest& request,
       const std::shared_ptr<transport::PartitionTensor>& tensor);
   absl::Status handle_mtcp_read_request(
       const channel_t& channel,
@@ -242,7 +242,9 @@ class Communicator {
 
   // Unified memory stager (CPU staging in TCP path)
   std::shared_ptr<engine::MemoryStager> memory_stager_;
-  std::unique_ptr<MrCache> mr_cache_;
+
+  // MR cache for meta data on CPU
+  std::unique_ptr<MrCache> meta_mr_cache_;
 
   // Serialize channel creation to avoid duplicate control connections to same peer
   mutable absl::Mutex create_channel_mu_;

@@ -199,7 +199,7 @@ misc::result_t RdmaTransport::do_post_send() {
   read_wr.next = nullptr;
   read_wr.num_sge = 1;
 
-  auto* mr = local_tensor->get_mr();
+  auto* mr = local_tensor->get_mr_by_rail(req->get_rail_id());
 
   req->record_rdma_regmr();
 
@@ -236,7 +236,7 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
   std::vector<ibv_sge> sges(segs.size());
   struct ibv_send_wr* bad_wr = nullptr;
 
-  auto* mr = request->get_local_tensor()->get_mr();
+  auto* mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
   request->record_rdma_queue_done();
 
   for (size_t i = 0; i < segs.size(); ++i) {

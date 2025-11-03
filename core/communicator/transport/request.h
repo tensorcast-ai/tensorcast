@@ -36,7 +36,13 @@ static inline std::string get_request_key(std::string key, uint64_t offset) {
 
 class ReadRequest {
  public:
-  ReadRequest(std::string tensor_key, std::string dst_ip, uint16_t dst_port, tensor_t local, uint64_t remote_offset);
+  ReadRequest(
+      std::string tensor_key,
+      std::string dst_ip,
+      uint16_t dst_port,
+      tensor_t local,
+      uint64_t remote_offset,
+      int rail_id = -1);
   ~ReadRequest() = default;
 
   [[nodiscard]] tensor_t get_local_tensor() const;
@@ -49,6 +55,10 @@ class ReadRequest {
   std::string get_dst_url();
 
   std::string get_key();
+
+  int16_t get_rail_id() const {
+    return rail_id_;
+  }
 
   void record_request_response();
   void record_rdma_regmr();
@@ -128,6 +138,7 @@ class ReadRequest {
   misc::Timer timer_;
   read_result_t status_;
   uint64_t remote_offset_;
+  int16_t rail_id_;
 
   // Number of expected RDMA READ completions for this request
   std::atomic<int> expected_completions_{0};
