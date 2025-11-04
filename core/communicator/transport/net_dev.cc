@@ -82,7 +82,7 @@ ibv_cq* NetDev::get_cq() const {
   return cq_;
 }
 
-std::string NetDev::get_name() {
+std::string NetDev::get_name() const {
   return dev_name_;
 }
 
@@ -236,7 +236,7 @@ void NetDev::register_loop() {
     }
 
     auto start = misc::get_us();
-    t->register_mr(std::shared_ptr<NetDev>(this));
+    t->register_mr(this);
     LOG(INFO) << "register done: dev=" << dev_name_ << ", cost=" << misc::get_us() - start;
   }
 }

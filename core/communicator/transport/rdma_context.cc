@@ -4,10 +4,13 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_split.h"
 #include "core/common/cuda_api.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
@@ -30,6 +33,16 @@ RdmaContext::~RdmaContext() {
 }
 
 misc::result_t RdmaContext::ibv_init() {
+  const char* mlx_dev_name = std::getenv("TENSORCAST_IB_HCA");
+  std::unordered_set<std::string> mlx_dev_names = {};
+  if (mlx_dev_name != nullptr) {
+    LOG(INFO) << "using IB HCA Config: " << mlx_dev_name;
+    std::vector<std::string> mlx_dev_names_vec = absl::StrSplit(mlx_dev_name, ',');
+    for (const auto& dev_name : mlx_dev_names_vec) {
+      mlx_dev_names.insert(dev_name);
+    }
+  }
+
   if (misc::wrap_ibv_symbols() != misc::SUCCESS) {
     LOG(WARNING) << "failed to init ibv symbols";
     return misc::SYS_ERROR;
@@ -77,6 +90,10 @@ misc::result_t RdmaContext::ibv_init() {
       dev = std::make_shared<NetDev>(context, d, devices[d], port, port_attr);
 
       if (dev->get_best_gid_index() > 0) {
+        if (mlx_dev_names.size() > 0 && !mlx_dev_names.contains(dev->get_name())) {
+          continue;
+        }
+        LOG(INFO) << "Dev: " << dev->get_name() << " added, rail_id: " << dev->get_rail_id();
         devs_.push_back(dev);
         rail_devs_[dev->get_rail_id()] = dev;
       }

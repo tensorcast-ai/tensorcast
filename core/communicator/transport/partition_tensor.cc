@@ -53,6 +53,10 @@ void PartitionTensor::set_read_ready() {
   ready_.store(true);
 }
 
+void PartitionTensor::set_read_unready() {
+  ready_.store(false);
+}
+
 void PartitionTensor::wait_read_ready() {
   while (!ready_.load()) {
     std::this_thread::yield();
@@ -83,6 +87,7 @@ struct ibv_mr* PartitionTensor::get_mr_by_rail(int16_t rail_id) {
       return get_mr(dev);
     }
   }
+  LOG(WARNING) << "No MR found for rail_id: " << rail_id << "dev";
   return nullptr;
 }
 
@@ -119,7 +124,11 @@ int PartitionTensor::get_mem_type() const {
   return mem_type_;
 }
 
-void PartitionTensor::register_mr(const net_dev_t& dev) {
+bool PartitionTensor::is_registered(const net_dev_t& dev) {
+  return registered_[dev->get_name()]->load();
+}
+
+void PartitionTensor::register_mr(const NetDev* dev) {
   misc::Timer timer(true);
   int flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
   auto addr = get_addr<void>();

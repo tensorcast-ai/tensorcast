@@ -24,10 +24,12 @@ class PartitionTensor {
   void add_dev(const net_dev_t& dev);
   void add_dev_list(const std::vector<net_dev_t>& devs);
 
-  void register_mr(const net_dev_t& dev);
+  void register_mr(const NetDev* dev);
   void set_read_ready();
+  void set_read_unready();
   void wait_read_ready();
 
+  bool is_registered(const net_dev_t& dev);
   uint64_t get_regmr_cost(const net_dev_t& dev);
   uint64_t get_regmr_cost() const;
 

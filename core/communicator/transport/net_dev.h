@@ -47,7 +47,7 @@ class NetDev {
   misc::result_t reg_mr(struct ibv_mr** ret, void* addr, size_t length, int access) const;
   misc::result_t create_qp(struct ibv_qp** ret, struct ibv_qp_init_attr* qp_init_attr) const;
 
-  std::string get_name();
+  std::string get_name() const;
   char* get_pci_path();
 
  private:

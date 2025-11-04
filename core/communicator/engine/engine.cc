@@ -76,6 +76,7 @@ struct RdmaDriveResult {
   bool completed = false;
 };
 
+// TODO: Is rdma really need this application layer windows control?
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -762,26 +763,35 @@ future_read_result_t Communicator::read_tensor(
             << ", net_dev=" << (net_dev == nullptr ? "none" : net_dev->get_name());
 
   auto local_tensor = store_.get_tensor(key);
+
   const bool needs_new_tensor = local_tensor == nullptr || local_tensor->get_uint64_addr() != addr ||
       local_tensor->get_bytes() != bytes || local_tensor->get_mem_type() != dev_type ||
       (dev_type == COMMUNICATE_ENGINE_DEV_GPU && local_tensor->get_device_id() != dev_id);
 
   if (needs_new_tensor) {
     local_tensor = std::make_shared<PartitionTensor>(key, addr, bytes, dev_type, net_dev);
+    local_tensor->set_read_unready();
     if (dev_type == COMMUNICATE_ENGINE_DEV_GPU) {
       local_tensor->set_device_id(dev_id);
     }
-    if (enable_rdma_ && net_dev != nullptr) {
-      net_dev->reg_async(local_tensor);
-    }
-    local_tensor->set_read_ready();
     store_.register_tensor(local_tensor);
   }
 
+  if (enable_rdma_ && net_dev != nullptr) {
+    local_tensor->set_read_unready();
+    if (local_tensor->get_dev_by_rail(net_dev->get_rail_id()) == nullptr) {
+      local_tensor->add_dev(net_dev);
+    }
+    if (!local_tensor->is_registered(net_dev)) {
+      net_dev->reg_async(local_tensor);
+    }
+  }
+  local_tensor->set_read_ready();
+
   auto req = std::make_shared<transport::ReadRequest>(
-      key, dst_ip, dst_port, local_tensor, remote_offset, net_dev->get_rail_id());
+      key, dst_ip, dst_port, local_tensor, remote_offset, net_dev != nullptr ? net_dev->get_rail_id() : -1);
   LOG(INFO) << "[read_tensor] Creating request: key=" << key << " dst=" << dst_ip << ":" << dst_port
-            << " req_key=" << req->get_key();
+            << " req_key=" << req->get_key() << "req_rail" << req->get_rail_id();
   request_queue_.push(req);
   LOG(INFO) << "[read_tensor] Request pushed to queue successfully for key=" << key;
   return req->get_future();
@@ -873,14 +883,28 @@ absl::Status Communicator::handle_rdma_read_request(
       request.rail_id = dev->get_rail_id();
     } else {
       tensor->add_dev(dev_by_rail);
-      // reg tensor to the new rail
-      dev_by_rail->reg_async(tensor);
-      dev = dev_by_rail;
     }
+
+    dev = dev_by_rail;
+
+    if (!tensor->is_registered(dev_by_rail)) {
+      // sync or async?
+      tensor->register_mr(dev_by_rail.get());
+      // dev_by_rail->reg_async(tensor);
+    }
+    // reg tensor to the new rail
   }
+
   const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
-  std::shared_ptr<MemoryStager> stager =
-      tensor_on_cpu ? get_cpu_stager_for_nic(dev->get_name()) : get_gpu_mem_stager_for_id(tensor->get_device_id());
+
+  std::shared_ptr<MemoryStager> stager;
+  if (tensor_on_cpu) {
+    stager = get_cpu_stager_for_nic(dev->get_name());
+  } else {
+    // TODO: need to check
+    stager = get_gpu_mem_stager_for_id(tensor->get_device_id());
+  }
+
   if (!stager) {
     stager = tensor_on_cpu ? memory_stager_ : gpu_memory_stager_;
   }
@@ -1703,7 +1727,7 @@ misc::result_t Communicator::on_receive_response(
             endpoint->mu.Unlock();
             LOG(INFO) << "[rdma_handshake] queueing read while awaiting connect: request=" << read_request->get_key()
                       << " local_dev=" << local_dev_name << " peer_dev=" << peer_dev_name
-                      << " queue_depth=" << queue_depth;
+                      << " queue_depth=" << queue_depth << " rail_id=" << read_request->get_rail_id();
             break;
           }
 

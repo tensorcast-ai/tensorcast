@@ -234,6 +234,9 @@ def ensure_external_symlink() -> None:
         root_dir: Path = get_root_dir()
         link_path: Path = root_dir / "external"
 
+        if link_path.exists():
+            return
+
         if BAZEL_EXE is None:
             return
 
@@ -241,22 +244,6 @@ def ensure_external_symlink() -> None:
             subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
         )
         target_path = Path(output_base) / "external"
-
-        # If link_path exists but is not a symlink, or is a symlink pointing to wrong location
-        if link_path.exists():
-            if link_path.is_symlink():
-                current_target = link_path.readlink()
-                if current_target == target_path or str(current_target.resolve()) == str(target_path.resolve()):
-                    # Already correctly linked
-                    return
-                else:
-                    # Wrong target, remove and recreate
-                    link_path.unlink()
-            else:
-                # It's a directory, remove it
-                import shutil
-                shutil.rmtree(link_path)
-                print(f"Removed existing directory: {link_path}")
 
         # Create the symlink
         os.symlink(str(target_path), str(link_path))
@@ -478,6 +465,8 @@ class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
     def initialize_options(self):
         BuildExtension.initialize_options(self)
+        # 禁用自动清理，避免每次编译都清理构建产物
+        self.clean = False
     def finalize_options(self):
         BuildExtension.finalize_options(self)
     def run(self):

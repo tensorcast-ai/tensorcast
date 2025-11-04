@@ -223,7 +223,8 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
   }
 
   LOG(INFO) << "[rdma_transport] read_multi request=" << request->get_key() << " segs=" << segs.size()
-            << " ready=" << ready_.load() << " dev=" << (dev_ ? dev_->get_name() : "<null>");
+            << " ready=" << ready_.load() << " rail_id=" << request->get_rail_id()
+            << " dev=" << (dev_ ? dev_->get_name() : "<null>");
 
   // Ensure QP is ready
   if (!ready_.load()) {
