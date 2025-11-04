@@ -17,7 +17,7 @@ using tensorcast::daemon::SessionLifecycleManager;
 TEST_CASE("PID guards removed on last UseLease retire", "[daemon][lifecycle][pid]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
   RegistrationManager reg;
   SessionLifecycleManager mgr(sessions, refs, *lip);
 

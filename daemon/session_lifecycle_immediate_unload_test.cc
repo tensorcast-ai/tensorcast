@@ -59,7 +59,7 @@ TEST_CASE("Immediate unload on last UseLease with no pins", "[daemon][lifecycle]
   // Build lifecycle manager wired to engine for immediate reclaim
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  LipManager lip(engine_ptr);
+  LipManager lip(engine_ptr, nullptr);
   RegistrationManager regmgr;
   SessionLifecycleManager mgr(sessions, refs, lip, *engine_ptr);
 

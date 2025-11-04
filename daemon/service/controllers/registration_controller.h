@@ -9,6 +9,7 @@
 
 #include <gsl/pointers>
 #include "core/store/store_engine.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
@@ -27,6 +28,7 @@ class RegistrationController {
     LipManager& lip;
     RefTracker& refs;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
+    IpcRegionRegistry& regions;
   };
 
   explicit RegistrationController(Dep d) : d_(std::move(d)) {}

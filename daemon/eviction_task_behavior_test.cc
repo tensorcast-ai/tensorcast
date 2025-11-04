@@ -56,7 +56,7 @@ TEST_CASE("EvictionTask skips when UseLease is active", "[daemon][eviction]") {
 
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  tensorcast::daemon::LipManager lip(engine);
+  tensorcast::daemon::LipManager lip(engine, nullptr);
   // lifecycle without immediate reclaim
   SessionLifecycleManager mgr(sessions, refs, lip);
   // Create UseLease
@@ -79,7 +79,7 @@ TEST_CASE("EvictionTask skips when Placement pin is active", "[daemon][eviction]
 
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  tensorcast::daemon::LipManager lip(engine);
+  tensorcast::daemon::LipManager lip(engine, nullptr);
   SessionLifecycleManager mgr(sessions, refs, lip);
   SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
   auto pin_id = mgr.create_placement_lease(subj, absl::Minutes(10));

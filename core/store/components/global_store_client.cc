@@ -548,6 +548,36 @@ absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id,
   return absl::OkStatus();
 }
 
+absl::Status GlobalStoreClient::unregister_replica_by_worker(
+    std::string_view artifact_id,
+    std::string_view worker_id,
+    std::optional<common::memory::MemoryLocation> memory_type,
+    std::optional<uint32_t> device_id) {
+  global_store::UnregisterReplicaByWorkerRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_worker_id(std::string(worker_id));
+  if (memory_type.has_value()) {
+    request.set_memory_type(convert_to_proto_memory_type(*memory_type));
+  }
+  if (device_id.has_value()) {
+    request.set_device_id(*device_id);
+  }
+
+  global_store::UnregisterReplicaByWorkerResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UnregisterReplicaByWorker(ctx, req, resp); },
+      "UnregisterReplicaByWorker");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(absl::StrFormat("UnregisterReplicaByWorker failed with status: %d", response.status()));
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     std::string_view artifact_id,
     std::string_view source_node_id,

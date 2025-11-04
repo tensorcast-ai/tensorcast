@@ -153,6 +153,13 @@ class IGlobalStoreClient {
 
   virtual absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) = 0;
 
+  // Deregister a replica using worker identity and optional selectors.
+  virtual absl::Status unregister_replica_by_worker(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
+      std::optional<uint32_t> device_id = std::nullopt) = 0;
+
   virtual absl::StatusOr<TransportSession> request_replica_transport(
       std::string_view artifact_id,
       std::string_view source_node_id,
@@ -286,6 +293,12 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::optional<std::string>& verification_json = std::nullopt) override;
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override;
+
+  absl::Status unregister_replica_by_worker(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
+      std::optional<uint32_t> device_id = std::nullopt) override;
 
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_replica_transport(

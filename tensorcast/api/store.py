@@ -37,6 +37,12 @@ from tensorcast.api._materialize import (
     MaterializedArtifact,
     materialize_artifact,
 )
+from tensorcast.api._region_cache import (
+    register_region as _cache_register_region,
+)
+from tensorcast.api._region_cache import (
+    unregister_region as _cache_unregister_region,
+)
 from tensorcast.api._register import (
     RegisteredArtifact as _RegisterHandle,
 )
@@ -51,11 +57,12 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
+from tensorcast.cuda import get_cuda_memory_handle
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.store_session_registry import StoreSessionRecord, write_record
-from tensorcast.types import ServerConfig
+from tensorcast.types import DeregisterArtifactOutcome, ServerConfig, VramRegionHandle
 
 T = TypeVar("T")
 
@@ -2640,6 +2647,67 @@ class Store:
         finally:
             self._release_materialized(materialized, client)
 
+    # ---------------------- Region-backed Registration ----------------------
+    def register_vram_region(
+        self,
+        *,
+        device_id: int,
+        base_ptr: int,
+        size_bytes: int,
+        ttl_ms: int,
+        name: str | None = None,
+    ) -> VramRegionHandle:
+        client = self._ensure_client()
+        handle_bytes = get_cuda_memory_handle(int(device_id), int(base_ptr))
+        handle = client.register_vram_region(
+            device_id=int(device_id),
+            size_bytes=int(size_bytes),
+            ttl_ms=int(ttl_ms),
+            cuda_ipc_handle=handle_bytes,
+            region_name=name,
+        )
+        # Update client-side region cache for region-backed registration
+        try:
+            _cache_register_region(
+                region_id=handle.region_id,
+                device_id=int(device_id),
+                base_ptr=int(base_ptr),
+                size_bytes=int(size_bytes),
+                ttl_ms=int(ttl_ms),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("store.region_cache_register_failed", exc_info=True)
+        return handle
+
+    def unregister_vram_region(
+        self, region_id: str, *, force: bool | None = None
+    ) -> bool:
+        client = self._ensure_client()
+        released = client.unregister_vram_region(region_id, force=force)
+        if released:
+            with contextlib.suppress(Exception):
+                _cache_unregister_region(region_id)
+        return released
+
+    def deregister_artifact(
+        self,
+        artifact_id: str,
+        *,
+        wait: bool = True,
+        drain_timeout_s: float | None = None,
+        extend_ttl_ms: int | None = None,
+        device_id: int | None = None,
+    ) -> DeregisterArtifactOutcome:
+        client = self._ensure_client()
+        drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
+        return client.deregister_artifact(
+            artifact_id,
+            wait_for_drain=bool(wait),
+            drain_timeout_ms=drain_ms,
+            extend_ttl_ms=extend_ttl_ms,
+            device_id=device_id,
+        )
+
 
 _GLOBAL_STORE_LOCK = threading.RLock()
 _GLOBAL_STORE: Store | None = None
@@ -2773,6 +2841,27 @@ def register_async(
         key=key,
         options=options,
         ttl_ms=ttl_ms,
+    )
+
+
+def register_kv_block(
+    tensor: torch.Tensor,
+    block_hash: str,
+    *,
+    ttl_ms: int | None = None,
+) -> RegisteredArtifact:
+    """Register a single KV block using region-backed LIP under cgid:kv:<hash>.
+
+    This convenience helper ensures the client-provided artifact id format and
+    uses lease-in-place for optimal KV cache registration.
+    """
+    artifact_id = f"cgid:kv:{block_hash}"
+    opts = RegisterArtifactOptions(
+        plan=PlanType.VRAM_LEASED,
+        lease_in_place=True,
+    )
+    return _coerce_store().register(
+        {"kv": tensor}, artifact_id=artifact_id, options=opts, ttl_ms=ttl_ms
     )
 
 

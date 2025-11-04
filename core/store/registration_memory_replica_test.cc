@@ -124,6 +124,14 @@ class RecordingViewGlobalStoreClient final : public tensorcast::store::component
     return absl::UnimplementedError("unregister_replica not supported in test stub");
   }
 
+  absl::Status unregister_replica_by_worker(
+      std::string_view,
+      std::string_view,
+      std::optional<tensorcast::common::memory::MemoryLocation>,
+      std::optional<uint32_t>) override {
+    return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
+  }
+
   absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate& update) override {
     view_updates.push_back(update);
     return absl::OkStatus();

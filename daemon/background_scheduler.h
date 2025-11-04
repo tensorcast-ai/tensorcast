@@ -20,6 +20,7 @@ enum class TaskKind : std::uint8_t {
   kLockTTL,
   kVerification,
   kEviction,
+  kRegionRegistry,
   // Unified lifecycle task replaces SessionTTL, RegJoinTTL, and PidWatch
   kSessionLifecycle,
 };

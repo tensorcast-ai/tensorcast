@@ -99,6 +99,8 @@ class GetArtifactOptions:
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     wait_for_completion: bool = True
     enable_verification: bool = True
+    # Hint for P2P transport lock TTL extension; forwarded by daemons
+    transport_hold_ms: int | None = None
 
 
 __all__ = [
