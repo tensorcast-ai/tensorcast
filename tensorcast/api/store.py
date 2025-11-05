@@ -23,6 +23,7 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
+from tensorcast._C import get_cuda_memory_handle
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
@@ -57,7 +58,6 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
-from tensorcast.cuda import get_cuda_memory_handle
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
