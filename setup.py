@@ -465,7 +465,6 @@ class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
     def initialize_options(self):
         BuildExtension.initialize_options(self)
-        # 禁用自动清理，避免每次编译都清理构建产物
         self.clean = False
     def finalize_options(self):
         BuildExtension.finalize_options(self)
