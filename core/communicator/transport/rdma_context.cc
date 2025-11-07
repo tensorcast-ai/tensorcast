@@ -33,9 +33,11 @@ RdmaContext::~RdmaContext() {
 }
 
 misc::result_t RdmaContext::ibv_init() {
-  const char* mlx_dev_name = std::getenv("TENSORCAST_IB_HCA");
+  const char* mlx_dev_name_env = std::getenv("TENSORCAST_IB_HCA");
   std::unordered_set<std::string> mlx_dev_names = {};
-  if (mlx_dev_name != nullptr) {
+  if (mlx_dev_name_env != nullptr) {
+    // remove "=" in mlx_dev_names
+    std::string mlx_dev_name = std::regex_replace(mlx_dev_name_env, std::regex("="), "");
     LOG(INFO) << "using IB HCA Config: " << mlx_dev_name;
     std::vector<std::string> mlx_dev_names_vec = absl::StrSplit(mlx_dev_name, ',');
     for (const auto& dev_name : mlx_dev_names_vec) {
@@ -131,6 +133,9 @@ net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const
   if (dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
     if (rail_id == -1) {
       int index = std::hash<std::string>{}(key) % devs_.size();
+      LOG(INFO) << "get_best_dev: dev_type=" << dev_type << " dev_id=" << dev_id << " rail input=" << rail_id
+                << " key=" << key << " index=" << index << " dev=" << devs_[index]->get_name()
+                << " dev rail_id=" << devs_[index]->get_rail_id();
       return devs_[index];
     } else {
       return rail_devs_[rail_id];

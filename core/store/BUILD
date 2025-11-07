@@ -365,7 +365,10 @@ cc_test(
 cc_test(
     name = "store_engine_p2p_rdma_loader_test",
     srcs = ["store_engine_p2p_rdma_loader_test.cc"],
-    tags = ["requires_cuda"],
+    tags = [
+        "rdma",
+        "requires_cuda",
+    ],
     deps = [
         ":store_engine",
         "//core/common",

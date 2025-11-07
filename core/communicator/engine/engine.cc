@@ -791,7 +791,7 @@ future_read_result_t Communicator::read_tensor(
   auto req = std::make_shared<transport::ReadRequest>(
       key, dst_ip, dst_port, local_tensor, remote_offset, net_dev != nullptr ? net_dev->get_rail_id() : -1);
   LOG(INFO) << "[read_tensor] Creating request: key=" << key << " dst=" << dst_ip << ":" << dst_port
-            << " req_key=" << req->get_key() << "req_rail" << req->get_rail_id();
+            << " req_key=" << req->get_key() << " req_rail=" << req->get_rail_id();
   request_queue_.push(req);
   LOG(INFO) << "[read_tensor] Request pushed to queue successfully for key=" << key;
   return req->get_future();
@@ -920,6 +920,8 @@ absl::Status Communicator::handle_rdma_read_request(
   FlowCreditLedger* ledger_ptr = &flow_state->ledger;
   MrCache* mr_cache_ptr = meta_mr_cache_.get();
 
+  LOG(INFO) << "handle_rdma_read_request: request_key=" << request_key << " offset=" << start_offset
+            << " bytes=" << total_bytes << " dev=" << dev->get_name() << " rail_id=" << dev->get_rail_id();
   auto stage_fn = [stager, tensor, dev, ledger_ptr, mr_cache_ptr, tensor_key](
                       uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
     constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
@@ -930,7 +932,6 @@ absl::Status Communicator::handle_rdma_read_request(
     void* host_ptr = *staged_or;
     ibv_mr* staged_mr = nullptr;
     bool deregister_mr = false;
-
     gsl::not_null<void*> host_ptr_nn{host_ptr};
     if (mr_cache_ptr) {
       staged_mr = mr_cache_ptr->get_or_register(dev->get_pd(), host_ptr_nn, bytes, kAccess);

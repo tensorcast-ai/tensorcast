@@ -332,3 +332,42 @@ observability:
 ```
 
 - Enum fields accept friendly values: `exporter_protocol: grpc | http/protobuf`, `logging.level: debug|info|warn|error` (case-insensitive). Loaders normalize these to the canonical protobuf enum names for both C++ and Python.
+
+
+## RDMA Environment Variables
+
+### `TENSORCAST_IB_HCA`
+
+Specifies the InfiniBand HCA (Host Channel Adapter) device names to use for RDMA communication. Multiple device names can be specified, separated by commas. The "=" character in the value will be automatically removed.
+
+**Usage:**
+```bash
+# Single device
+export TENSORCAST_IB_HCA="mlx5_bond0"
+
+# Multiple devices (comma-separated)
+export TENSORCAST_IB_HCA="mlx5_bond0,mlx5_bond1"
+```
+
+If not set, TensorCast will automatically discover and use available InfiniBand devices.
+
+#### `TENSORCAST_LLDP_FILE_NAME`
+
+Specifies the path to an LLDP-style configuration file for Rail ID mapping. This file maps network interface names to PCI paths, mlx5 device names, and rail IDs for multi-rail RDMA configurations.
+
+**File Format:**
+
+```
+eth1=0000:19:00.0,mlx5_bond100,1
+```
+
+**Usage:**
+```bash
+export TENSORCAST_LLDP_FILE_NAME="/path/to/lldp_config.txt"
+```
+
+**Notes:**
+- Lines starting with `#` are treated as comments and ignored
+- Empty lines are ignored
+- Each non-comment line should follow the format: `eth_name=pci_path,mlx5_name,rail_id`
+- If the environment variable is not set, Rail ID will be automatically derived from the mlx5 device name (e.g., `mlx5_0` → rail_id `0`, `mlx5_1` → rail_id `1`)
