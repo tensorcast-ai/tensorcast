@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
+#include "core/communicator/base/constants.h"
 #include "core/communicator/transport/partition_tensor.h"
 
 namespace tensorcast::communicator::engine {
@@ -275,6 +276,38 @@ TEST_CASE("StagingWindow surfaces unavailable while credit inflight") {
   for (auto& seg : third->segments) {
     seg.lease.release();
   }
+}
+
+TEST_CASE("PartitionTensor direct RDMA flag toggles") {
+  auto tensor = std::make_shared<transport::PartitionTensor>(
+      "tensor",
+      /*addr=*/0x1000,
+      /*bytes=*/1024,
+      communicator::base::COMMUNICATE_ENGINE_DEV_CPU,
+      nullptr);
+  CHECK_FALSE(tensor->direct_rdma_enabled());
+  tensor->set_direct_rdma_enabled(true);
+  CHECK(tensor->direct_rdma_enabled());
+  CHECK_FALSE(tensor->has_registered_mr());
+}
+
+TEST_CASE("StageLease metadata preserves zero_copy flag") {
+  FlowCreditLedger ledger(/*total_credit=*/1);
+  DummyStage helper;
+
+  auto lease_or = ledger.acquire(1);
+  REQUIRE(lease_or.ok());
+  lease_or->mark_consumed();
+  StageLease lease = helper.make(reinterpret_cast<void*>(0x1), ledger, StageTransport::kRdma);
+  REQUIRE_FALSE(lease.metadata().zero_copy);
+
+  auto metadata = lease.metadata();
+  metadata.zero_copy = true;
+  lease.set_metadata(metadata);
+  CHECK(lease.metadata().zero_copy);
+
+  lease.release();
+  lease_or->release_unused();
 }
 
 } // namespace tensorcast::communicator::engine

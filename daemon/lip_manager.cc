@@ -484,6 +484,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     ro.register_mr = comm_engine.is_rdma_enabled();
     ro.needs_staging = (!comm_engine.is_rdma_enabled());
     ro.async = false;
+    ro.direct_rdma_enabled = comm_engine.is_rdma_enabled();
     auto st = comm_engine.register_tensor_ex(
         tkey, addr, static_cast<size_t>(len), communicator::base::COMMUNICATE_ENGINE_DEV_GPU, seg->device_id, ro);
     if (!st.ok())

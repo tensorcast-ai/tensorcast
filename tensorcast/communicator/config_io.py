@@ -20,6 +20,8 @@ def _normalize_defaults(cfg: pb.CommunicatorConfig) -> None:
         cfg.stager.stage_chunk_mb_gpu = 16
     if cfg.stager.buffers_per_flow <= 0:
         cfg.stager.buffers_per_flow = 4
+    if cfg.stager.direct_chunk_mb <= 0:
+        cfg.stager.direct_chunk_mb = cfg.stager.stage_chunk_mb_gpu
 
     # RDMA
     if cfg.rdma.outstanding_wr <= 0:

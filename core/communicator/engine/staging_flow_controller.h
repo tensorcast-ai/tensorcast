@@ -124,6 +124,7 @@ class StageLease {
     uint32_t segment_idx = 0;
     uint64_t offset = 0;
     size_t bytes = 0;
+    bool zero_copy = false;
   };
 
   StageLease(

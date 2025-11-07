@@ -11,6 +11,7 @@ message StagerConfig {
   int32 buffers_per_flow = 4; // default: 4
   uint32 max_window_segments = 5; // default: 0 (auto = buffers_per_flow)
   uint32 expected_gpu_channels = 6; // default: 0 (auto)
+  uint32 direct_chunk_mb = 7; // default: stage_chunk_mb_gpu
 }
 
 message RdmaConfig {
