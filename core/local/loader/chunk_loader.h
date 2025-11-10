@@ -17,8 +17,8 @@ class ChunkLoader {
   // Load data into the associated DataChunk. No parameters.
   virtual absl::Status load() = 0;
 
-  // Async load version, returns a future for completion status.
-  virtual std::future<absl::Status> load_async() = 0;
+  // // Async load version, returns a future for completion status.
+  // virtual std::future<absl::Status> load_async() = 0;
 
  protected:
   DataChunk* data_chunk_{nullptr};

@@ -5,8 +5,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cerrno>
-#include <cstdint>
-#include <stdexcept>
 
 #include "absl/log/log.h"
 #include "core/local/chunk/chunk.h"
@@ -26,20 +24,32 @@ bool DataChunk::is_locked() const {
   return lock_state_.locked;
 }
 
-void DataChunk::register_loader(ChunkLoader* loader, LoaderPriority priority) {
-  if (loader == nullptr) {
+void DataChunk::register_loader(std::shared_ptr<ChunkLoader> loader, LoaderPriority priority) {
+  if (!loader) {
     return;
   }
   if (priority == LoaderPriority::High) {
-    high_priority_loaders_.push_back(loader);
+    high_priority_loaders_.push_back(std::move(loader));
   } else {
-    low_priority_loaders_.push_back(loader);
+    low_priority_loaders_.push_back(std::move(loader));
   }
 }
 
 size_t DataChunk::get_size() const {
   return chunk_->get_size();
 };
+
+void* DataChunk::get_base_addr() const {
+  return base_addr_;
+}
+
+bool DataChunk::is_loaded() const {
+  return loaded_;
+}
+
+int DataChunk::get_preempt_level() const {
+  return preempt_level_;
+}
 
 ChunkPinLease::~ChunkPinLease() {
   release();
@@ -109,13 +119,32 @@ void ChunkPinLease::release() noexcept {
   impl_.reset();
 }
 
-ChunkPinLease ChunkPinLease::pin_chunks(
-    std::vector<std::shared_ptr<DataChunk>>&& data_chunks,
-    std::optional<std::chrono::steady_clock::time_point> expiry_time) {
-  Impl impl;
-  impl.data_chunks = std::move(data_chunks);
-  impl.expiry_time = expiry_time;
-  return ChunkPinLease(std::move(impl));
+ChunkPinLease::ChunkPinLease(
+    const std::vector<DataChunk*>& data_chunks,
+    std::optional<std::chrono::steady_clock::time_point> expiry_time)
+    : ChunkPinLease(Impl{.data_chunks = data_chunks, .expiry_time = expiry_time}) {}
+
+ChunkPinLease::ChunkPinLease(std::optional<std::chrono::steady_clock::time_point> expiry_time)
+    : ChunkPinLease(Impl{.data_chunks = {}, .expiry_time = expiry_time}) {}
+
+// {
+//   // Impl impl;
+//   impl_->data_chunks = std::move(data_chunks);
+//   impl_->expiry_time = expiry_time;
+//   // return ChunkPinLease(std::move(impl));
+// }
+
+absl::Status ChunkPinLease::pin(DataChunk* data_chunk) {
+  if (!data_chunk) {
+    return absl::InvalidArgumentError("DataChunk pointer is null");
+  }
+  if (std::find(impl_->data_chunks.begin(), impl_->data_chunks.end(), data_chunk) != impl_->data_chunks.end()) {
+    return absl::AlreadyExistsError("DataChunk is already pinned in this lease");
+  }
+  std::lock_guard<std::mutex> guard(data_chunk->lock_state_.mutex);
+  data_chunk->lock_state_.lock_refcnt += 1;
+  data_chunk->lock_state_.locked = true;
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::local::data

@@ -3,14 +3,18 @@ load("//core:BUILD.bzl", "sc_cc_library")
 sc_cc_library(
     name = "local_meta_lib",
     srcs = [
-        "artifact/artifact.cc",
         "chunk/chunk.cc",
-        "view/view.cc",
+        "meta/artifact.cc",
+        "meta/local_manager.cc",
+        "meta/replica.cc",
+        "meta/view.cc",
     ],
     hdrs = [
-        "artifact/artifact.h",
         "chunk/chunk.h",
-        "view/view.h",
+        "meta/artifact.h",
+        "meta/local_manager.h",
+        "meta/replica.h",
+        "meta/view.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -25,12 +29,14 @@ sc_cc_library(
         "chunk/cpu_data_chunk.cc",
         "chunk/data_chunk.cc",
         "loader/disk_chunk_loader.cc",
+        "loader/dram_chunk_loader.cc",
     ],
     hdrs = [
         "chunk/chunk.h",
         "chunk/data_chunk.h",
         "loader/chunk_loader.h",
         "loader/disk_chunk_loader.h",
+        "loader/dram_chunk_loader.h",
     ],
     visibility = ["//visibility:public"],
     deps = [

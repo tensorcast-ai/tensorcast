@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 
@@ -14,20 +16,36 @@
 namespace tensorcast::local::meta {
 
 class Artifact;
+class Replica;
 
 class View {
  public:
+  // using ChunksMap = std::map<off_t, std::shared_ptr<Chunk>>;
+  enum class ViewType : uint8_t { Vanilla, Slice, Transpose, Others = 255 };
   View(
       std::string view_id,
       std::string view_spec_json,
       std::size_t view_size,
       std::string view_data_hash,
+      Artifact* artifact,
+      ViewType view_type,
+      const std::vector<std::shared_ptr<Chunk>>& chunks);
+
+  View(
+      std::string view_id,
+      std::string view_spec_json,
+      std::size_t view_size,
+      std::string view_data_hash,
+      // ViewType view_type,
       Artifact* artifact)
-      : view_id_(std::move(view_id)),
-        view_spec_json_(std::move(view_spec_json)),
-        view_size_(view_size),
-        view_data_hash_(std::move(view_data_hash)),
-        artifact_(artifact) {}
+      : View(
+            std::move(view_id),
+            std::move(view_spec_json),
+            view_size,
+            std::move(view_data_hash),
+            artifact,
+            ViewType::Vanilla,
+            std::vector<std::shared_ptr<Chunk>>{}) {};
 
   ~View() = default;
 
@@ -41,7 +59,10 @@ class View {
   std::string view_spec_json_;
   std::size_t view_size_;
   std::string view_data_hash_;
-  std::unordered_map<off_t, std::shared_ptr<Chunk>> chunks_map_;
+  ViewType view_type_;
+  std::map<off_t, std::shared_ptr<Chunk>> chunks_map_;
   Artifact* artifact_;
+
+  friend class Replica;
 };
 } // namespace tensorcast::local::meta

@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
   chunks.reserve(chunk_count_size_t);
   std::vector<uint64_t> offsets;
   offsets.reserve(chunk_count_size_t);
-  std::vector<std::unique_ptr<tensorcast::local::data::DiskChunkLoader>> loaders;
+  std::vector<std::shared_ptr<tensorcast::local::data::DiskChunkLoader>> loaders;
   loaders.reserve(chunk_count_size_t);
 
   absl::Status init_status = absl::OkStatus();
@@ -199,11 +199,11 @@ int main(int argc, char** argv) {
     for (uint64_t i = 0; i < chunk_count; ++i) {
       const uint64_t offset = i * chunk_bytes;
       auto chunk = std::make_shared<DataChunk>(nullptr, /*replica_offset=*/0, chunk_bytes_size_t);
-      auto loader = std::make_unique<tensorcast::local::data::DiskChunkLoader>(
+      auto loader = std::make_shared<tensorcast::local::data::DiskChunkLoader>(
           chunk.get(), temp_path, static_cast<off_t>(offset));
-      chunk->register_loader(loader.get(), DataChunk::LoaderPriority::High);
+      chunk->register_loader(loader, DataChunk::LoaderPriority::High);
       offsets.push_back(offset);
-      loaders.push_back(std::move(loader));
+      loaders.push_back(loader);
       chunks.push_back(std::move(chunk));
     }
   } catch (const std::exception& ex) {
@@ -213,8 +213,8 @@ int main(int argc, char** argv) {
   if (!init_status.ok()) {
     LOG(ERROR) << "Failed to initialize DataChunk vector: " << init_status;
     for (const auto& chunk : chunks) {
-      if (chunk && chunk->base_addr != nullptr) {
-        ::munmap(chunk->base_addr, chunk->get_size());
+      if (chunk && chunk->get_base_addr() != nullptr) {
+        ::munmap(chunk->get_base_addr(), chunk->get_size());
       }
     }
     std::filesystem::remove(temp_path);
@@ -236,8 +236,8 @@ int main(int argc, char** argv) {
         if (!drop_status.ok()) {
           LOG(WARNING) << "drop during cleanup failed at offset " << offsets[j] << ": " << drop_status;
         }
-        if (prev_chunk->base_addr != nullptr) {
-          ::munmap(prev_chunk->base_addr, prev_chunk->get_size());
+        if (prev_chunk->get_base_addr() != nullptr) {
+          ::munmap(prev_chunk->get_base_addr(), prev_chunk->get_size());
         }
       }
       std::filesystem::remove(temp_path);
@@ -258,11 +258,11 @@ int main(int argc, char** argv) {
 
   for (size_t i = 0; i < chunks.size(); ++i) {
     const auto& chunk = chunks[i];
-    if (chunk->base_addr != nullptr && chunk->get_size() > 0) {
-      if (::munmap(chunk->base_addr, chunk->get_size()) != 0) {
+    if (chunk->get_base_addr() != nullptr && chunk->get_size() > 0) {
+      if (::munmap(chunk->get_base_addr(), chunk->get_size()) != 0) {
         PLOG(WARNING) << "munmap failed for chunk at offset " << offsets[i];
       }
-      chunk->base_addr = nullptr;
+      // chunk->get_base_addr() = nullptr;
     }
   }
 

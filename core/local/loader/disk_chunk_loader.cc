@@ -60,10 +60,11 @@ absl::Status BackendFile::read(void* dst, size_t size, off_t offset) const {
     PLOG(ERROR) << "pread failed for " << path_;
     return absl::ErrnoToStatus(err, "pread failed in BackendFile::read");
   }
-  if (static_cast<size_t>(n) != size) {
-    LOG(ERROR) << "pread read " << n << " bytes, requested " << size;
-    return absl::InternalError("partial read in BackendFile::read");
-  }
+  // if (static_cast<size_t>(n) != size) {
+  //   LOG(ERROR) << "pread read " << n << " bytes, requested " << size;
+  //   return absl::InternalError("partial read in BackendFile::read");
+  // }
+  // TODO: partial read is OK, when this is the last chunk of the file
   return absl::OkStatus();
 }
 
@@ -96,7 +97,7 @@ absl::StatusOr<BackendFile::Ptr> BackendFile::get_or_create(const std::filesyste
 
 // -------------------- DiskChunkLoader --------------------
 
-absl::Status DiskChunkLoader::_load() {
+absl::Status DiskChunkLoader::load() {
   if (data_chunk_ == nullptr) {
     return absl::FailedPreconditionError("DataChunk pointer is null");
   }
@@ -109,7 +110,7 @@ absl::Status DiskChunkLoader::_load() {
     return absl::InvalidArgumentError("DataChunk size must be non-zero");
   }
 
-  if (data_chunk_->base_addr == nullptr) {
+  if (data_chunk_->get_base_addr() == nullptr) {
     return absl::FailedPreconditionError("DataChunk CPU base not mapped");
   }
 
@@ -121,15 +122,15 @@ absl::Status DiskChunkLoader::_load() {
     backend_file_ = *bf_or;
   }
 
-  return backend_file_->read(data_chunk_->base_addr, data_chunk_->get_size(), f_offset_);
+  return backend_file_->read(data_chunk_->get_base_addr(), data_chunk_->get_size(), f_offset_);
 }
 
-absl::Status DiskChunkLoader::load() {
-  return this->_load();
-}
+// absl::Status DiskChunkLoader::load() {
+//   return this->load_();
+// }
 
-std::future<absl::Status> DiskChunkLoader::load_async() {
-  return std::async(std::launch::async, [this]() { return this->_load(); });
-}
+// std::future<absl::Status> DiskChunkLoader::load_async() {
+//   return std::async(std::launch::async, [this]() { return this->load_(); });
+// }
 
 } // namespace tensorcast::local::data

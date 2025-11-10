@@ -7,6 +7,7 @@
 3. 数据切块：TensorCast在单机上将数据切块管理，类似操作系统的 Page。对于同一个 Artifact 的不同 View，其底层数据组织可能并不相同（例如 vanilla 和 transpose），也可能相同（例如 vanilla 和 slice），因此不同 View 会根据实际情况创建/引用 Chunk。
 4. Chunk（类）：Artifact（View）的一个数据切块的**描述**（数据块的元数据而非实际数据）。
 5. DataChunk（类）：Chunk 在一个特定设备上的物化。例如，如果系统存在 CPU、GPU0、GPU1 三个设备，则每个 Chunk 会持有三个不同的 DataChunk 对象，分别对应这三个设备上存储的该 Chunk 的数据。
+6. Replica: 一个View在一个具体的设备上的存在。View是一系列Chunk的集合，Replica可以被视为是一系列DataChunk的集合（但实际实现上并不是，只会通过View访问特定Device的DataChunk）。轻量级实现，无实体。
 
 ## 类图
 
@@ -29,6 +30,9 @@ classDiagram
   View <|.. VanillaView
   View <|.. SliceView
   View <|.. TransposeView
+
+  Replica ..> View
+  Device <.. Replica
 ```
 <!-- ```
 class Artifact {

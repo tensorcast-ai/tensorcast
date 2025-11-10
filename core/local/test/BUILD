@@ -23,3 +23,15 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
+
+cc_test(
+    name = "local_manager_test",
+    srcs = ["local_manager_test.cc"],
+    deps = [
+        "//core/local:local_data_lib",
+        "//core/local:local_meta_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)

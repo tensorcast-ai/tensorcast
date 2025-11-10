@@ -1,11 +1,48 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/local/view/view.h"
+#include "core/local/meta/view.h"
+#include <cassert>
 #include <memory>
 #include "absl/log/absl_check.h"
 #include "absl/strings/str_format.h"
+#include "core/local/meta/local_manager.h"
 
 namespace tensorcast::local::meta {
+
+View::View(
+    std::string view_id,
+    std::string view_spec_json,
+    std::size_t view_size,
+    std::string view_data_hash,
+    Artifact* artifact,
+    ViewType view_type,
+    const std::vector<std::shared_ptr<Chunk>>& chunks)
+    : view_id_(std::move(view_id)),
+      view_spec_json_(std::move(view_spec_json)),
+      view_size_(view_size),
+      view_data_hash_(std::move(view_data_hash)),
+      view_type_(view_type),
+      artifact_(artifact) {
+  int chunk_num = view_size_ / LocalManager::kLocalConfig.chunk_size;
+  // assert(chunks.size() == chunk_num || (chunks.empty() && view_type_ == ViewType::Vanilla));
+  if (!chunks.empty()) {
+    assert(chunks.size() == chunk_num);
+    for (int i = 0; i < chunk_num; i++) {
+      auto s = bind_chunk_at(i * LocalManager::kLocalConfig.chunk_size, chunks[i]);
+      assert(s.ok());
+    }
+  }
+  // else if (view_type_ == ViewType::Vanilla) {
+  //   for (off_t i = 0; i < view_size_; i += LocalManager::kLocalConfig.chunk_size) {
+  //     auto chunk = std::make_shared<Chunk>(LocalManager::kLocalConfig.chunk_size, artifact_);
+  //     auto s = bind_chunk_at(i, chunk);
+  //     assert(s.ok());
+  //   }
+  // }
+  // else {
+  //   assert(false);
+  // }
+}
 
 std::shared_ptr<Chunk> View::get_chunk_at(off_t offset) const {
   auto it = chunks_map_.find(offset);
@@ -30,15 +67,7 @@ absl::Status View::bind_chunk_at(off_t offset, std::shared_ptr<Chunk> chunk, boo
     }
 
     // Case 2: inconsistent state - only one present, should not happen
-    if ((chunks_it != chunks_map_.end()) != (offset_it != chunk->offset_in_view_.end())) {
-      ABSL_CHECK(false) << "Inconsistent chunk/view mapping detected at offset " << offset << " for view '" << view_id_
-                        << "'";
-      return absl::FailedPreconditionError(
-          absl::StrFormat(
-              "Inconsistent mapping: chunks_map_ and offset_in_view_ out of sync at offset %lld view '%s'",
-              static_cast<long long>(offset),
-              view_id_.c_str()));
-    }
+    assert((chunks_it != chunks_map_.end()) == (offset_it != chunk->offset_in_view_.end()));
   }
 
   // Case 3: neither present or force_replace, OK to insert

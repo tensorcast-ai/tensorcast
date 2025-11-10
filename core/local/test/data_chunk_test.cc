@@ -121,8 +121,13 @@ std::vector<std::shared_ptr<DataChunk>> MakeDataChunks(size_t count, size_t chun
   return chunks;
 }
 
-std::vector<std::shared_ptr<DataChunk>> CopyRefs(const std::vector<std::shared_ptr<DataChunk>>& chunks) {
-  return chunks;
+std::vector<DataChunk*> ToRawPtrs(const std::vector<std::shared_ptr<DataChunk>>& chunks) {
+  std::vector<DataChunk*> raw_chunks;
+  raw_chunks.reserve(chunks.size());
+  for (const auto& chunk : chunks) {
+    raw_chunks.push_back(chunk.get());
+  }
+  return raw_chunks;
 }
 
 } // namespace
@@ -132,7 +137,7 @@ TEST_CASE("ChunkPinLease sets and clears lock state for single lease", "[data_ch
   auto chunks = MakeDataChunks(3, chunk_size);
 
   {
-    auto lease = ChunkPinLease::pin_chunks(CopyRefs(chunks));
+    auto lease = ChunkPinLease(ToRawPtrs(chunks));
     for (const auto& chunk : chunks) {
       REQUIRE(chunk->lock_refcnt() == 1);
       REQUIRE(chunk->is_locked());
@@ -150,14 +155,14 @@ TEST_CASE("ChunkPinLease tracks nested leases via refcount", "[data_chunk]") {
   auto chunks = MakeDataChunks(2, chunk_size);
 
   {
-    auto lease_a = ChunkPinLease::pin_chunks(CopyRefs(chunks));
+    auto lease_a = ChunkPinLease(ToRawPtrs(chunks));
     for (const auto& chunk : chunks) {
       REQUIRE(chunk->lock_refcnt() == 1);
       REQUIRE(chunk->is_locked());
     }
 
     {
-      auto lease_b = ChunkPinLease::pin_chunks(CopyRefs(chunks));
+      auto lease_b = ChunkPinLease(ToRawPtrs(chunks));
       for (const auto& chunk : chunks) {
         REQUIRE(chunk->lock_refcnt() == 2);
         REQUIRE(chunk->is_locked());
@@ -200,11 +205,11 @@ TEST_CASE("DataChunk constructor enforces page alignment", "[data_chunk]") {
     auto chunk_with_data = builder.make();
     auto* data_chunk = chunk_with_data.data_chunk.get();
 
-    REQUIRE(data_chunk->base_addr != nullptr);
+    REQUIRE(data_chunk->get_base_addr() != nullptr);
     REQUIRE(data_chunk->get_size() == len);
 
-    REQUIRE(::munmap(data_chunk->base_addr, len) == 0);
-    data_chunk->base_addr = nullptr;
+    REQUIRE(::munmap(data_chunk->get_base_addr(), len) == 0);
+    // data_chunk->get_base_addr() = nullptr;
   }
 }
 
@@ -223,18 +228,18 @@ TEST_CASE("DataChunk load reads backing file and drop releases pin", "[data_chun
   DataChunkBuilder builder(len);
   auto chunk_with_data = builder.make();
   auto* chunk = chunk_with_data.data_chunk.get();
-  REQUIRE(chunk->base_addr != nullptr);
+  REQUIRE(chunk->get_base_addr() != nullptr);
   REQUIRE(chunk->get_size() == len);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->get_base_addr());
   std::memset(mapped_bytes, 0, len);
 
   // Register a disk loader (high priority) to read from the file
-  DiskChunkLoader disk_loader(chunk, fixture.file_path(), file_offset);
-  chunk->register_loader(&disk_loader, DataChunk::LoaderPriority::High);
+  auto disk_loader = std::make_shared<DiskChunkLoader>(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(disk_loader, DataChunk::LoaderPriority::High);
 
   auto status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk->loaded);
+  REQUIRE(chunk->is_loaded());
 
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
@@ -245,13 +250,13 @@ TEST_CASE("DataChunk load reads backing file and drop releases pin", "[data_chun
 
   status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk->loaded);
+  REQUIRE(chunk->is_loaded());
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
   drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
 
-  REQUIRE(::munmap(chunk->base_addr, len) == 0);
+  REQUIRE(::munmap(chunk->get_base_addr(), len) == 0);
 }
 
 TEST_CASE("DataChunk load priority fallback works", "[data_chunk]") {
@@ -269,29 +274,29 @@ TEST_CASE("DataChunk load priority fallback works", "[data_chunk]") {
   DataChunkBuilder builder(len);
   auto chunk_with_data = builder.make();
   auto* chunk = chunk_with_data.data_chunk.get();
-  REQUIRE(chunk->base_addr != nullptr);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
+  REQUIRE(chunk->get_base_addr() != nullptr);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->get_base_addr());
   //   std::memset(mapped_bytes, 0, len);
 
   // Register a bad high-priority loader first (should fail)
   std::filesystem::path bad_path = fixture.file_path();
   bad_path += ".missing";
-  DiskChunkLoader bad_loader(chunk, bad_path, file_offset);
-  chunk->register_loader(&bad_loader, DataChunk::LoaderPriority::High);
+  auto bad_loader = std::make_shared<DiskChunkLoader>(chunk, bad_path, file_offset);
+  chunk->register_loader(bad_loader, DataChunk::LoaderPriority::High);
 
   // Register a valid low-priority loader
-  DiskChunkLoader good_loader(chunk, fixture.file_path(), file_offset);
-  chunk->register_loader(&good_loader, DataChunk::LoaderPriority::Low);
+  auto good_loader = std::make_shared<DiskChunkLoader>(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(good_loader, DataChunk::LoaderPriority::Low);
 
   auto status = chunk->load();
   REQUIRE(status.ok());
-  REQUIRE(chunk->loaded);
+  REQUIRE(chunk->is_loaded());
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
   auto drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
 
-  REQUIRE(::munmap(chunk->base_addr, len) == 0);
+  REQUIRE(::munmap(chunk->get_base_addr(), len) == 0);
 }
 
 TEST_CASE("DataChunk load_async loads data correctly", "[data_chunk]") {
@@ -309,22 +314,22 @@ TEST_CASE("DataChunk load_async loads data correctly", "[data_chunk]") {
   DataChunkBuilder builder(len);
   auto chunk_with_data = builder.make();
   auto* chunk = chunk_with_data.data_chunk.get();
-  REQUIRE(chunk->base_addr != nullptr);
-  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->base_addr);
+  REQUIRE(chunk->get_base_addr() != nullptr);
+  auto* mapped_bytes = static_cast<std::uint8_t*>(chunk->get_base_addr());
   std::memset(mapped_bytes, 0, len);
 
-  DiskChunkLoader loader(chunk, fixture.file_path(), file_offset);
-  chunk->register_loader(&loader, DataChunk::LoaderPriority::High);
+  auto loader = std::make_shared<DiskChunkLoader>(chunk, fixture.file_path(), file_offset);
+  chunk->register_loader(loader, DataChunk::LoaderPriority::High);
 
   auto fut = chunk->load_async();
   auto status = fut.get();
   REQUIRE(status.ok());
-  REQUIRE(chunk->loaded);
+  REQUIRE(chunk->is_loaded());
   REQUIRE(std::memcmp(mapped_bytes, fixture.data().data() + file_offset, len) == 0);
 
   auto drop_status = chunk->drop();
   REQUIRE(drop_status.ok());
-  REQUIRE(::munmap(chunk->base_addr, len) == 0);
+  REQUIRE(::munmap(chunk->get_base_addr(), len) == 0);
 }
 
 TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data_chunk]") {
@@ -352,9 +357,9 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   auto* b = bwd.data_chunk.get();
   auto* c = cwd.data_chunk.get();
 
-  auto* bytes_a = static_cast<std::uint8_t*>(a->base_addr);
-  auto* bytes_b = static_cast<std::uint8_t*>(b->base_addr);
-  auto* bytes_c = static_cast<std::uint8_t*>(c->base_addr);
+  auto* bytes_a = static_cast<std::uint8_t*>(a->get_base_addr());
+  auto* bytes_b = static_cast<std::uint8_t*>(b->get_base_addr());
+  auto* bytes_c = static_cast<std::uint8_t*>(c->get_base_addr());
   REQUIRE(bytes_a != nullptr);
   REQUIRE(bytes_b != nullptr);
   REQUIRE(bytes_c != nullptr);
@@ -362,12 +367,12 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   std::memset(bytes_b, 0, len);
   std::memset(bytes_c, 0, len);
 
-  DiskChunkLoader loader_a(a, fixture.file_path(), offset_a);
-  DiskChunkLoader loader_b(b, fixture.file_path(), offset_b);
-  DiskChunkLoader loader_c(c, fixture.file_path(), offset_c);
-  a->register_loader(&loader_a, DataChunk::LoaderPriority::High);
-  b->register_loader(&loader_b, DataChunk::LoaderPriority::High);
-  c->register_loader(&loader_c, DataChunk::LoaderPriority::High);
+  auto loader_a = std::make_shared<DiskChunkLoader>(a, fixture.file_path(), offset_a);
+  auto loader_b = std::make_shared<DiskChunkLoader>(b, fixture.file_path(), offset_b);
+  auto loader_c = std::make_shared<DiskChunkLoader>(c, fixture.file_path(), offset_c);
+  a->register_loader(loader_a, DataChunk::LoaderPriority::High);
+  b->register_loader(loader_b, DataChunk::LoaderPriority::High);
+  c->register_loader(loader_c, DataChunk::LoaderPriority::High);
 
   auto f1 = a->load_async();
   auto f2 = b->load_async();
@@ -385,7 +390,7 @@ TEST_CASE("DataChunk load_async supports concurrent loads across chunks", "[data
   REQUIRE(b->drop().ok());
   REQUIRE(c->drop().ok());
 
-  REQUIRE(::munmap(a->base_addr, len) == 0);
-  REQUIRE(::munmap(b->base_addr, len) == 0);
-  REQUIRE(::munmap(c->base_addr, len) == 0);
+  REQUIRE(::munmap(a->get_base_addr(), len) == 0);
+  REQUIRE(::munmap(b->get_base_addr(), len) == 0);
+  REQUIRE(::munmap(c->get_base_addr(), len) == 0);
 }

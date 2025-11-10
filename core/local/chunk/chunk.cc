@@ -1,16 +1,28 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/local/chunk/chunk.h"
+#include <cassert>
 
-#include "core/local/artifact/artifact.h"
 #include "core/local/chunk/data_chunk.h"
+#include "core/local/meta/artifact.h"
 
 namespace tensorcast::local::meta {
 
 void Chunk::generate_data_chunks(const std::vector<store::DeviceKey>& device_keys) {
   for (const auto& key : device_keys) {
-    auto chunk = std::make_unique<data::CPUDataChunk>(this);
-    dev_data_chunks_.emplace(key, std::move(chunk));
+    std::unique_ptr<data::DataChunk> dchunk;
+    if (key.type == DeviceType::CPU) {
+      dchunk = std::make_unique<data::CPUDataChunk>(this, key);
+    }
+    // TODO: implement GPU data chunk
+    // else if (key.type == DeviceType::GPU) {
+    //   dchunk = std::make_unique<data::GPUDataChunk>(this, key);
+    // }
+    else {
+      assert(false);
+      throw std::invalid_argument("Invalid device type");
+    }
+    dev_data_chunks_.emplace(key, std::move(dchunk));
   }
 }
 

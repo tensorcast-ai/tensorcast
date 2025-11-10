@@ -57,14 +57,14 @@ class DiskChunkLoader : public ChunkLoader {
   }
 
   absl::Status load() override;
-  std::future<absl::Status> load_async() override;
+  // std::future<absl::Status> load_async() override;
 
  private:
   std::filesystem::path f_path_;
   off_t f_offset_{0};
   BackendFile::Ptr backend_file_{nullptr};
 
-  absl::Status _load();
+  // absl::Status load_();
 };
 
 } // namespace tensorcast::local::data
