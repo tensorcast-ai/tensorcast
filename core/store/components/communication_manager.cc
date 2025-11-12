@@ -86,6 +86,7 @@ absl::StatusOr<ExportRegistration> CommunicationManager::register_memory(
     opts.register_mr = comm_engine_->is_rdma_enabled();
     opts.needs_staging = (!comm_engine_->is_rdma_enabled() && device_id >= 0);
     opts.async = false;
+    opts.direct_rdma_enabled = comm_engine_->is_rdma_enabled() && !opts.needs_staging;
     auto status = comm_engine_->register_tensor_ex(
         key,
         reinterpret_cast<uint64_t>(buffer_addresses[i]),

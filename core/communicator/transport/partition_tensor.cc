@@ -4,6 +4,7 @@
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/communicator/misc/metric.h"
 
+#include <thread>
 #include <utility>
 
 namespace tensorcast::communicator::transport {
@@ -20,7 +21,9 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
 
 PartitionTensor::~PartitionTensor() {
   if (registered_.load()) {
-    CHECK_WARN(misc::wrap_ibv_dereg_mr(mr_), "failed to dereg mr");
+    if (mr_ != nullptr) {
+      CHECK_WARN(misc::wrap_ibv_dereg_mr(mr_), "failed to dereg mr");
+    }
     registered_.store(false);
     ready_.store(false);
   }
@@ -32,6 +35,12 @@ void PartitionTensor::set_read_ready() {
 
 void PartitionTensor::wait_read_ready() {
   while (!ready_.load()) {
+    std::this_thread::yield();
+  }
+}
+
+void PartitionTensor::wait_mr_ready() {
+  while (!registered_.load()) {
     std::this_thread::yield();
   }
 }
@@ -73,9 +82,14 @@ void PartitionTensor::register_mr() {
 
   auto addr = get_addr<void>();
   auto nb_bytes = get_bytes();
-  CHECK_WARN(dev_->reg_mr(&mr_, addr, nb_bytes, flags), "failed to register mr");
+  misc::result_t res = dev_->reg_mr(&mr_, addr, nb_bytes, flags);
+  if (res != misc::SUCCESS) {
+    LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " failed to register mr";
+    mr_ = nullptr;
+  } else {
+    regmr_cost_ = timer.record();
+  }
   registered_.store(true);
-  regmr_cost_ = timer.record();
 }
 
 RemotePartitionTensor::RemotePartitionTensor(

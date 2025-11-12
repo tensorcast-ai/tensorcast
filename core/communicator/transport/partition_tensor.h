@@ -3,6 +3,7 @@
 #ifndef COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 #define COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -21,6 +22,7 @@ class PartitionTensor {
   void register_mr();
   void set_read_ready();
   void wait_read_ready();
+  void wait_mr_ready();
 
   uint64_t get_regmr_cost() const;
 
@@ -35,8 +37,21 @@ class PartitionTensor {
   [[nodiscard]] bool needs_staging() const {
     return needs_staging_;
   }
+
   void set_needs_staging(bool value) {
     needs_staging_ = value;
+  }
+
+  void set_direct_rdma_enabled(bool value) {
+    direct_rdma_enabled_.store(value, std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] bool direct_rdma_enabled() const {
+    return direct_rdma_enabled_.load(std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] bool has_registered_mr() const {
+    return registered_.load(std::memory_order_acquire) && mr_ != nullptr;
   }
 
   template <class T>
@@ -48,6 +63,7 @@ class PartitionTensor {
   [[nodiscard]] int get_device_id() const {
     return device_id_;
   }
+
   void set_device_id(int id) {
     device_id_ = id;
   }
@@ -65,7 +81,9 @@ class PartitionTensor {
   int mem_type_;
   bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
   int device_id_ = -1; // GPU device ID (-1 for CPU)
+  std::atomic_bool direct_rdma_enabled_{false};
 };
+
 typedef std::shared_ptr<PartitionTensor> tensor_t;
 
 class RemotePartitionTensor {
@@ -86,6 +104,7 @@ class RemotePartitionTensor {
   uint64_t bytes_;
   uint32_t rkey_;
 };
+
 typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
 
 } // namespace tensorcast::communicator::transport

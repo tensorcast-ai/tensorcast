@@ -214,6 +214,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       opts.needs_staging =
           (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::base::COMMUNICATE_ENGINE_DEV_GPU);
       opts.async = false;
+      opts.direct_rdma_enabled = comm_engine.is_rdma_enabled() && !opts.needs_staging;
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
         return absl::InternalError("Failed to register GPU chunk-range tensor");
