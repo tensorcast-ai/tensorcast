@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/base/call_once.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -192,26 +193,37 @@ opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_fallback_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_rdma_direct_window_bytes_hist;
 
-inline void EnsureCommunicatorMeter() {
-  if (!g_comm_meter) {
+absl::once_flag g_comm_meter_once;
+absl::once_flag g_rdma_direct_window_metrics_once;
+absl::once_flag g_rdma_direct_fallback_metric_once;
+
+inline void ensure_communicator_meter() {
+  absl::call_once(g_comm_meter_once, []() {
     g_comm_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.communicator", "1.0.0");
-  }
+  });
 }
 
-void RecordDirectWindowMetrics(int device_id, uint64_t segments, uint64_t bytes) {
+inline void ensure_rdma_direct_window_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_direct_window_metrics_once, []() {
+    g_rdma_direct_segments_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_segments_total");
+    g_rdma_direct_bytes_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_bytes_total");
+    g_rdma_direct_window_bytes_hist = g_comm_meter->CreateDoubleHistogram("tc_rdma_direct_window_bytes");
+  });
+}
+
+inline void ensure_rdma_direct_fallback_metric() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_direct_fallback_metric_once, []() {
+    g_rdma_direct_fallback_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_fallback_total");
+  });
+}
+
+void record_direct_window_metrics(int device_id, uint64_t segments, uint64_t bytes) {
   if (segments == 0 && bytes == 0) {
     return;
   }
-  EnsureCommunicatorMeter();
-  if (!g_rdma_direct_segments_total) {
-    g_rdma_direct_segments_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_segments_total");
-  }
-  if (!g_rdma_direct_bytes_total) {
-    g_rdma_direct_bytes_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_bytes_total");
-  }
-  if (!g_rdma_direct_window_bytes_hist) {
-    g_rdma_direct_window_bytes_hist = g_comm_meter->CreateDoubleHistogram("tc_rdma_direct_window_bytes");
-  }
+  ensure_rdma_direct_window_metrics();
   std::map<std::string, opentelemetry::common::AttributeValue> attrs;
   attrs.emplace("device_id", opentelemetry::common::AttributeValue(device_id));
   auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
@@ -226,14 +238,11 @@ void RecordDirectWindowMetrics(int device_id, uint64_t segments, uint64_t bytes)
   }
 }
 
-void RecordDirectFallbackMetric(DirectFallbackReason reason) {
+void record_direct_fallback_metric(DirectFallbackReason reason) {
   if (reason == DirectFallbackReason::kNone) {
     return;
   }
-  EnsureCommunicatorMeter();
-  if (!g_rdma_direct_fallback_total) {
-    g_rdma_direct_fallback_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_fallback_total");
-  }
+  ensure_rdma_direct_fallback_metric();
   std::map<std::string, opentelemetry::common::AttributeValue> attrs;
   attrs.emplace("reason", opentelemetry::common::AttributeValue(DirectFallbackReasonToString(reason)));
   auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
@@ -271,7 +280,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
     }
     if (zero_copy_segments > 0) {
       const int device_id = session.tensor ? session.tensor->get_device_id() : -1;
-      RecordDirectWindowMetrics(device_id, zero_copy_segments, zero_copy_bytes);
+      record_direct_window_metrics(device_id, zero_copy_segments, zero_copy_bytes);
     }
 
     result.made_progress = true;
@@ -395,10 +404,6 @@ void log_handshake_transition(
 }
 
 } // namespace
-
-// Engine is fully typed-config driven; no environment-variable reads here.
-
-// No legacy constructors; typed CommunicatorConfig is required.
 
 Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
     : stop_(false),
@@ -1094,7 +1099,7 @@ absl::Status Communicator::handle_rdma_read_request(
   if (direct_requested && !use_direct && fallback_reason != DirectFallbackReason::kNone) {
     LOG_FIRST_N(WARNING, 1) << "RDMA zero-copy fallback for tensor=" << tensor_key
                             << " reason=" << DirectFallbackReasonToString(fallback_reason);
-    RecordDirectFallbackMetric(fallback_reason);
+    record_direct_fallback_metric(fallback_reason);
   }
 
   const uint64_t chunk_size = use_direct
