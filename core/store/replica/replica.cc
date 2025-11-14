@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <memory>
+#include <numeric>
 #include <variant>
 
 #include "absl/functional/overload.h"
@@ -126,7 +127,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.artifact_identifier,
       config.local_device_id,
       config.pinned_buffer_pool,
-      config.virtual_addr_space,
+      config.artifact_chunk_bytes,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
       effective_size,
@@ -553,13 +554,10 @@ absl::StatusOr<ExportRegistration> Replica::enable_remote_memory_access(
     tensorcast::communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
-  // Build full chunk list using VS metadata snapshot.
-  absl::Span<const ChunkMeta> meta = memory_manager_->chunk_telemetry_snapshot();
-  std::vector<uint32_t> chunks;
-  chunks.reserve(meta.size());
-  for (uint32_t i = 0; i < meta.size(); ++i) {
-    chunks.push_back(i);
-  }
+  // Build full chunk list using UMA snapshot size as the authoritative chunk count.
+  const auto chunk_states = memory_manager_->get_chunk_states_uma(common::memory::MemoryLocation::CPU);
+  std::vector<uint32_t> chunks(chunk_states.size());
+  std::iota(chunks.begin(), chunks.end(), 0);
 
   // Delegate to chunk-scoped export (also handles GPU with coalesced ranges)
   return memory_manager_->export_chunks_for_p2p(location, chunks, comm_engine);

@@ -16,7 +16,6 @@
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
-using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -69,9 +68,6 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create VS
-  auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
-
   // Create DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -84,7 +80,6 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
-      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 

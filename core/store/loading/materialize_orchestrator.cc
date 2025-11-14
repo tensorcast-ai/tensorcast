@@ -142,15 +142,14 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
                                                                  : common::memory::MemoryLocation::CPU;
   target.location.device_id = target_device.ordinal;
 
-  auto disk_or = store_->ingest_from_disk_internal(hints.disk_path, disk_src, target, hints);
+  auto disk_or = store_->ingest_from_disk_internal(std::string(artifact_id), disk_src, target, hints);
   if (disk_or.ok()) {
     // Register with Global Store using the engine helper, overriding the
-    // artifact id with the disk path for legacy visibility.
+    // canonical artifact id for downstream discovery.
     const auto& handle = *disk_or;
-    absl::Status reg_status =
-        store_->register_replica_with_global_store(handle.key(), /*artifact_id_override=*/hints.disk_path);
+    absl::Status reg_status = store_->register_replica_with_global_store(handle.key());
     if (!reg_status.ok()) {
-      LOG(WARNING) << "register_replica_with_global_store (disk path) returned error: " << reg_status;
+      LOG(WARNING) << "register_replica_with_global_store (disk fallback) returned error: " << reg_status;
     }
   }
   return disk_or;

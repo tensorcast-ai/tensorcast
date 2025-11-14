@@ -9,18 +9,19 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loader/sink.h"
+#include "core/store/loading/loading_spec.h"
+#include "core/store/replica/unified_memory_authority.h"
 
 namespace tensorcast::store::loader {
 
-// Writes directly into the VirtualAddressSpace-reserved CPU region at a given offset.
-// Uses VA write_at to ensure chunk metadata is updated.
+// Writes directly into the UMA-reserved CPU region at a given offset.
+// Uses UMA write helpers to keep chunk metadata in sync.
 class CpuVaSink : public Sink, public PositionedSink, public DirectWriteCapable {
  public:
   struct Options {
-    // Per‑replica VA region handle (preferred for writes)
-    common::memory::VirtualAddressSpace::VaRegion region;
+    std::shared_ptr<replica::UnifiedMemoryAuthority> uma;
+    loading::ReplicaKey replica_key;
     // Replace ReplicaLoadController dependency with an injected callback to avoid cycles
     std::function<absl::StatusOr<DirectWriteGrant>(absl::Span<const VaRange>)> plan_direct_write_fn;
     uint64_t total_size = 0;

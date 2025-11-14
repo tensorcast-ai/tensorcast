@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include "absl/hash/hash.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/replica/chunk_state.h"
 
 namespace tensorcast::store::replica {
 

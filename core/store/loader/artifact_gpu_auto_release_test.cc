@@ -12,14 +12,12 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
-using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -58,9 +56,6 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   REQUIRE(pool != nullptr);
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
-    // Create VS
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
-
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -73,7 +68,6 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = size0 + size1,
         .max_buffer_bytes = pool_total};
 
@@ -169,9 +163,6 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
   SECTION("Sequential GPU loading with CPU auto-release") {
     // First GPU load
     {
-      // Create VS
-      auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
-
       // Use new DiskSource
       DiskSource disk_src;
       disk_src.path = base / artifact_dir_name;
@@ -184,7 +175,6 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 0,
           .pinned_buffer_pool = pool,
-          .virtual_addr_space = virtual_addr_space,
           .expected_artifact_size = total_size};
 
       auto mstatus = Replica::create(cfg);
@@ -210,9 +200,6 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
 
     // Second GPU load (different device)
     {
-      // Create VS
-      auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
-
       // Use new DiskSource
       DiskSource disk_src;
       disk_src.path = base / artifact_dir_name;
@@ -225,7 +212,6 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 1,
           .pinned_buffer_pool = pool,
-          .virtual_addr_space = virtual_addr_space,
           .expected_artifact_size = total_size2};
 
       auto mstatus = Replica::create(cfg);
@@ -282,8 +268,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path, artifact_size, 'T'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create VS
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
+    // UMA is internal; no external CPU arena injection required.
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -296,7 +281,6 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -331,9 +315,6 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path2, artifact_size, 'C'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create VS
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
-
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -346,7 +327,6 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -380,8 +360,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(create_dummy_file(data_file_path3, artifact_size, 'O'));
     REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
 
-    // Create VS
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
+    // UMA is internal; CPU arena handling no longer needs manual injection.
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir_name;
@@ -394,7 +373,6 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 

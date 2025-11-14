@@ -3,15 +3,22 @@
 #include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
 
+#include <sys/mman.h>
+#include <unistd.h>
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cmath>
-#include <cstdlib>
+#include <cstring>
 #include <map>
+#include <numeric>
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
+#include "core/common/const/granularity.h"
+#include "core/common/system_capabilities.h"
 #include "core/store/device_registry.h"
-#include "core/store/replica/chunk_meta.h" // For chunk_state_to_string
 
 // OpenTelemetry metrics (optional)
 #include "opentelemetry/common/attribute_value.h"
@@ -20,10 +27,12 @@
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::store::replica {
+using tensorcast::common::SystemCapabilities;
 
-UnifiedMemoryAuthority::UnifiedMemoryAuthority(
-    gsl::not_null<std::shared_ptr<tensorcast::common::memory::VirtualAddressSpace>> virtual_addr_space)
-    : va_space_(std::move(virtual_addr_space)) {}
+UnifiedMemoryAuthority::UnifiedMemoryAuthority(size_t artifact_chunk_bytes)
+    : chunk_size_bytes_(
+          artifact_chunk_bytes == 0 ? tensorcast::common::consts::kArtifactChunkDefault : artifact_chunk_bytes),
+      cpu_arena_(chunk_size_bytes_) {}
 
 absl::Status UnifiedMemoryAuthority::allocate(const loading::ReplicaKey& key, size_t bytes) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -33,25 +42,13 @@ absl::Status UnifiedMemoryAuthority::allocate(const loading::ReplicaKey& key, si
     return absl::AlreadyExistsError(absl::StrFormat("Replica %s already has unified allocation", key.artifact_id));
   }
 
-  // Allocate DRAM via VirtualAddressSpace (VS)
-  auto region_or = va_space_->allocate(key.artifact_id, bytes);
   ReplicaAllocation alloc;
-  if (region_or.ok()) {
-    alloc.dram_region = *region_or;
-  } else if (region_or.status().code() == absl::StatusCode::kAlreadyExists) {
-    // Region already reserved elsewhere. Query region info to populate base pointer.
-    auto info_or = va_space_->region_info(key.artifact_id);
-    if (!info_or.ok()) {
-      return info_or.status();
-    }
-    alloc.dram_region = *info_or;
-  } else {
-    return region_or.status();
+  auto region_status = cpu_arena_.allocate_region(alloc, bytes);
+  if (!region_status.ok()) {
+    return region_status;
   }
   alloc.total_bytes = bytes;
-  // Derive number of chunks from the actual VA chunk size to avoid drift
-  const size_t va_chunk = va_space_->artifact_chunk_bytes();
-  alloc.num_chunks = (bytes + va_chunk - 1) / va_chunk;
+  alloc.num_chunks = (bytes + chunk_size_bytes_ - 1) / chunk_size_bytes_;
   // Pre-initialise loaded chunk counters to 0 for all devices – counters grow
   // lazily on first GPU allocation.
 
@@ -70,12 +67,9 @@ absl::Status UnifiedMemoryAuthority::allocate(const loading::ReplicaKey& key, si
     rec.version = 0;
     alloc.chunk_records.push_back(std::move(rec));
   }
+  alloc.mlock_refcnt.assign(alloc.num_chunks, 0);
 
   allocations_[key] = std::move(alloc);
-
-  // Register VS write hook to update UMA last_access telemetry
-  va_space_->register_write_hook(
-      key.artifact_id, [this, key](uint64_t off, uint64_t len) { this->record_cpu_write(key, off, len); });
 
   VLOG(1) << "UnifiedMemoryAuthority: allocated " << bytes << " bytes for replica " << key.artifact_id << " with "
           << alloc.num_chunks << " chunks";
@@ -205,7 +199,7 @@ std::unordered_map<common::memory::MemoryLocation, size_t> UnifiedMemoryAuthorit
   }
 
   // Check DRAM allocation
-  if (it->second.dram_region.cpu_base != nullptr) {
+  if (it->second.cpu_region.base != nullptr) {
     stats[common::memory::MemoryLocation::CPU] = it->second.total_bytes;
   }
 
@@ -215,6 +209,28 @@ std::unordered_map<common::memory::MemoryLocation, size_t> UnifiedMemoryAuthorit
   }
 
   return stats;
+}
+
+std::vector<UnifiedMemoryAuthority::ChunkRecordView> UnifiedMemoryAuthority::snapshot_cpu_chunks(
+    const loading::ReplicaKey& key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<ChunkRecordView> out;
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return out;
+  }
+  out.reserve(it->second.chunk_records.size());
+  for (const auto& rec : it->second.chunk_records) {
+    out.push_back(
+        ChunkRecordView{
+            .chunk_idx = rec.chunk_idx,
+            .cpu = rec.cpu,
+            .exported_cpu = rec.exported_cpu,
+            .pin_refcnt = rec.pin_refcnt,
+            .last_access_ns = rec.last_access_ns,
+            .version = rec.version});
+  }
+  return out;
 }
 
 bool UnifiedMemoryAuthority::has_allocation(const loading::ReplicaKey& key) const {
@@ -241,7 +257,7 @@ void* UnifiedMemoryAuthority::get_cpu_base_ptr(const loading::ReplicaKey& key) c
     return nullptr;
   }
 
-  return it->second.dram_region.cpu_base;
+  return it->second.cpu_region.base;
 }
 
 void* UnifiedMemoryAuthority::get_gpu_base_ptr(const loading::ReplicaKey& key, int device_id) const {
@@ -269,6 +285,7 @@ absl::Status UnifiedMemoryAuthority::release(const loading::ReplicaKey& key) {
     return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
   }
 
+  cpu_arena_.release_region(it->second);
   // GPU memory will be released automatically when shared_ptrs are destroyed
   allocations_.erase(it);
 
@@ -314,7 +331,7 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
 }
 
 size_t UnifiedMemoryAuthority::get_artifact_chunk_bytes() const {
-  return va_space_->artifact_chunk_bytes();
+  return chunk_size_bytes_;
 }
 
 absl::StatusOr<ChunkState> UnifiedMemoryAuthority::get_cpu_chunk_state(
@@ -377,8 +394,7 @@ absl::Status UnifiedMemoryAuthority::mark_cpu_chunks_preemptible(const loading::
     indices.push_back(i);
   }
 
-  // Delegate to VS
-  auto status = va_space_->mark_preemptible(key.artifact_id, indices);
+  auto status = cpu_arena_.mark_preemptible(it->second, indices);
   if (!status.ok()) {
     return status;
   }
@@ -454,12 +470,22 @@ void UnifiedMemoryAuthority::record_cpu_write(const loading::ReplicaKey& key, ui
   if (it == allocations_.end()) {
     return;
   }
-  const size_t chunk_size = va_space_->artifact_chunk_bytes();
+  record_cpu_write_locked_(it->second, va_offset, bytes);
+}
+
+void UnifiedMemoryAuthority::record_cpu_write_locked_(ReplicaAllocation& alloc, uint64_t va_offset, uint64_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
+  const size_t chunk_size = chunk_size_bytes_;
+  if (chunk_size == 0) {
+    return;
+  }
   const uint64_t first = va_offset / chunk_size;
   const uint64_t last = (va_offset + bytes - 1) / chunk_size;
   uint64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
-  for (uint64_t i = first; i <= last && i < it->second.chunk_records.size(); ++i) {
-    it->second.chunk_records[static_cast<size_t>(i)].last_access_ns = now;
+  for (uint64_t i = first; i <= last && i < alloc.chunk_records.size(); ++i) {
+    alloc.chunk_records[static_cast<size_t>(i)].last_access_ns = now;
   }
 }
 
@@ -472,7 +498,7 @@ absl::StatusOr<UnifiedMemoryAuthority::ArtifactLayout> UnifiedMemoryAuthority::g
   }
   ArtifactLayout layout;
   layout.artifact_bytes = it->second.total_bytes;
-  layout.artifact_chunk_bytes = va_space_->artifact_chunk_bytes();
+  layout.artifact_chunk_bytes = chunk_size_bytes_;
   // UMA does not own tx_slice_bytes; report 0 and let callers use pool slice size.
   layout.transfer_slice_bytes = 0;
   return layout;
@@ -533,7 +559,7 @@ absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::pla
   chunks.erase(std::unique(chunks.begin(), chunks.end()), chunks.end());
 
   // Build byte ranges (chunk-aligned)
-  const size_t chunk_size = va_space_->artifact_chunk_bytes();
+  const size_t chunk_size = chunk_size_bytes_;
   const uint64_t total_bytes = it->second.total_bytes;
   std::vector<std::pair<uint64_t, size_t>> ranges;
   for (const auto& [start_idx, end_idx] : coalesce_runs_(absl::MakeSpan(chunks))) {
@@ -546,7 +572,7 @@ absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::pla
   // Create session record
   const uint64_t sid = next_session_id_++;
   sessions_[sid] =
-      SessionRecord{.key = key, .target = target, .device_id = device_id, .chunks = chunks, .cpu_leases = {}};
+      SessionRecord{.key = key, .target = target, .device_id = device_id, .chunks = chunks, .cpu_keepalives = {}};
   // Final: do not acquire plan-time CPU pin leases.
   // Sliding-window direct-write leases are obtained per-window by the pump when needed.
 
@@ -754,39 +780,22 @@ absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthorit
   ExportRegistration reg;
   reg.chunk_ranges = ranges;
 
-  // For CPU export enable: acquire VS pin leases over the VA ranges and attach keepalive
+  // For CPU export enable: acquire UMA pin leases over the VA ranges and attach keepalive
   if (location == common::memory::MemoryLocation::CPU && on) {
-    struct Keep {
-      std::vector<common::memory::VirtualAddressSpace::CpuPinLease> leases;
-    };
-
-    auto keep = std::make_shared<Keep>();
-    const uint64_t total_bytes = it->second.total_bytes;
-    const uint64_t chunk_sz = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
-    size_t lease_count = 0;
-    for (const auto& [start_idx, end_idx] : ranges) {
-      const uint64_t off = static_cast<uint64_t>(start_idx) * chunk_sz;
-      const uint64_t end_off = static_cast<uint64_t>(end_idx + 1) * chunk_sz;
-      const uint64_t len64 = (end_off > total_bytes) ? (total_bytes - off) : (end_off - off);
-      if (len64 == 0)
-        continue;
-      auto lease_or = va_space_->pin_range(key.artifact_id, off, len64, "Export");
-      if (!lease_or.ok()) {
-        return lease_or.status();
-      }
-      keep->leases.emplace_back(std::move(*lease_or));
-      lease_count += 1;
+    auto keep_or = cpu_arena_.pin_chunks(it->second, absl::MakeSpan(idx), "Export", std::nullopt);
+    if (!keep_or.ok()) {
+      return keep_or.status();
     }
-    reg.keepalive = keep; // RAII: caller holds to keep leases alive
+    reg.keepalive = *keep_or; // RAII: caller holds to keep leases alive
 
     // Metrics: tc_va_pin_leases_total{reason=Export}
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto leases_total = meter->CreateDoubleCounter("tc_va_pin_leases_total");
-    if (lease_count > 0) {
+    if (!idx.empty()) {
       std::map<std::string, opentelemetry::common::AttributeValue> attrs;
       attrs.emplace("reason", opentelemetry::common::AttributeValue("Export"));
       leases_total->Add(
-          static_cast<double>(lease_count),
+          static_cast<double>(idx.size()),
           opentelemetry::common::KeyValueIterableView(attrs),
           opentelemetry::context::Context{});
     }
@@ -803,7 +812,7 @@ absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthorit
     }
   }
 
-  // For CPU export disable: UMA drops ledger; VS pin leases are released when keepalive is dropped by caller.
+  // For CPU export disable: UMA drops ledger; pin leases are released when keepalive is dropped by caller.
   return reg;
 }
 
@@ -816,36 +825,46 @@ absl::StatusOr<DirectWriteGrant> UnifiedMemoryAuthority::grant_direct_write(
     return absl::FailedPreconditionError("UMA allocation not found for replica");
   }
   const auto& alloc = it->second;
-  if (alloc.dram_region.cpu_base == nullptr) {
+  if (alloc.cpu_region.base == nullptr) {
     return absl::FailedPreconditionError("CPU base not available for direct write");
   }
-
-  struct DwKeep {
-    std::vector<common::memory::VirtualAddressSpace::CpuPinLease> leases;
-  };
-
-  auto keep = std::make_shared<DwKeep>();
 
   DirectWriteGrant grant;
   grant.windows.reserve(ranges.size());
 
+  std::vector<uint32_t> chunk_indices;
+  chunk_indices.reserve(ranges.size() * 2);
   for (const auto& r : ranges) {
+    if (r.length == 0) {
+      continue;
+    }
     if (r.offset + r.length > alloc.total_bytes) {
       return absl::OutOfRangeError("Direct write range exceeds replica bounds");
     }
-    auto lease_or = va_space_->pin_range(key.artifact_id, r.offset, r.length, "DirectWrite");
-    if (!lease_or.ok()) {
-      return lease_or.status();
+    const uint64_t first_chunk = r.offset / chunk_size_bytes_;
+    const uint64_t last_chunk = (r.offset + r.length - 1) / chunk_size_bytes_;
+    for (uint64_t c = first_chunk; c <= last_chunk && c < alloc.num_chunks; ++c) {
+      chunk_indices.push_back(static_cast<uint32_t>(c));
     }
-    keep->leases.emplace_back(std::move(*lease_or));
-    gsl::not_null<void*> base{alloc.dram_region.cpu_base};
+  }
+  std::sort(chunk_indices.begin(), chunk_indices.end());
+  chunk_indices.erase(std::unique(chunk_indices.begin(), chunk_indices.end()), chunk_indices.end());
+
+  absl::StatusOr<std::shared_ptr<void>> keep_or =
+      cpu_arena_.pin_chunks(it->second, absl::MakeSpan(chunk_indices), "DirectWrite", std::nullopt);
+  if (!keep_or.ok()) {
+    return keep_or.status();
+  }
+
+  for (const auto& r : ranges) {
+    gsl::not_null<void*> base{alloc.cpu_region.base};
     grant.windows.push_back(
         DirectWriteGrant::Window{
             .va_offset = r.offset,
             .local_addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + r.offset),
             .length = r.length});
   }
-  grant.keepalive = keep;
+  grant.keepalive = *keep_or;
   return grant;
 }
 
@@ -860,7 +879,7 @@ absl::Status UnifiedMemoryAuthority::post_gpu_load_policy(
   }
   switch (policy) {
     case PostGpuLoadPolicy::EvictCPU: {
-      size_t freed = va_space_->evict_tail_bytes(key.artifact_id, bytes);
+      size_t freed = cpu_arena_.evict_tail_bytes(it->second, bytes);
       VLOG(2) << "EvictCPU policy: requested=" << bytes << " freed=" << freed
               << " bytes for artifact=" << key.artifact_id;
       return absl::OkStatus();
@@ -871,11 +890,282 @@ absl::Status UnifiedMemoryAuthority::post_gpu_load_policy(
       std::vector<uint32_t> all(chunks);
       for (uint32_t i = 0; i < chunks; ++i)
         all[i] = i;
-      return va_space_->mark_preemptible(key.artifact_id, all);
+      return cpu_arena_.mark_preemptible(it->second, all);
     }
     case PostGpuLoadPolicy::Keep:
     default:
       return absl::OkStatus();
+  }
+}
+
+absl::Status UnifiedMemoryAuthority::write_cpu_span(
+    const loading::ReplicaKey& key,
+    uint64_t va_offset,
+    const void* src,
+    size_t bytes) {
+  if (bytes == 0) {
+    return absl::OkStatus();
+  }
+  if (src == nullptr) {
+    return absl::InvalidArgumentError("write_cpu_span: src is null");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+  auto status = cpu_arena_.write_span(it->second, va_offset, src, bytes);
+  if (!status.ok()) {
+    return status;
+  }
+  record_cpu_write_locked_(it->second, va_offset, bytes);
+  return absl::OkStatus();
+}
+
+UnifiedMemoryAuthority::CpuArena::CpuArena(size_t chunk_bytes) : chunk_bytes_(chunk_bytes) {}
+
+absl::Status UnifiedMemoryAuthority::CpuArena::allocate_region(ReplicaAllocation& alloc, size_t bytes) const {
+  if (alloc.cpu_region.base != nullptr) {
+    return absl::AlreadyExistsError("CPU region already allocated");
+  }
+  if (bytes == 0) {
+    alloc.cpu_region.base = nullptr;
+    alloc.cpu_region.bytes = 0;
+    return absl::OkStatus();
+  }
+  void* addr = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (addr == MAP_FAILED) {
+    return absl::ErrnoToStatus(errno, "mmap failed while reserving UMA CPU arena");
+  }
+  alloc.cpu_region.base = addr;
+  alloc.cpu_region.bytes = bytes;
+  return absl::OkStatus();
+}
+
+void UnifiedMemoryAuthority::CpuArena::release_region(ReplicaAllocation& alloc) const {
+  if (alloc.cpu_region.base != nullptr && alloc.cpu_region.bytes > 0) {
+    if (::munmap(alloc.cpu_region.base, alloc.cpu_region.bytes) != 0) {
+      PLOG(WARNING) << "munmap failed while releasing UMA CPU arena";
+    }
+  }
+  alloc.cpu_region.base = nullptr;
+  alloc.cpu_region.bytes = 0;
+}
+
+absl::Status UnifiedMemoryAuthority::CpuArena::ensure_bounds(
+    const ReplicaAllocation& alloc,
+    uint64_t va_offset,
+    size_t bytes) const {
+  if (alloc.cpu_region.base == nullptr || alloc.cpu_region.bytes == 0) {
+    return absl::FailedPreconditionError("CPU region not allocated");
+  }
+  if (va_offset >= alloc.cpu_region.bytes) {
+    return absl::OutOfRangeError("offset beyond CPU arena bounds");
+  }
+  if (va_offset + bytes > alloc.cpu_region.bytes) {
+    return absl::InvalidArgumentError("write would exceed CPU arena bounds");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status UnifiedMemoryAuthority::CpuArena::write_span(
+    ReplicaAllocation& alloc,
+    uint64_t va_offset,
+    const void* src,
+    size_t bytes) const {
+  if (bytes == 0) {
+    return absl::OkStatus();
+  }
+  if (auto st = ensure_bounds(alloc, va_offset, bytes); !st.ok()) {
+    return st;
+  }
+
+  const long page = sysconf(_SC_PAGESIZE);
+  uint64_t page_aligned_off = (va_offset / page) * page;
+  uint64_t end_off = va_offset + bytes;
+  uint64_t page_aligned_end = ((end_off + page - 1) / page) * page;
+  size_t aligned_len = static_cast<size_t>(page_aligned_end - page_aligned_off);
+  void* aligned_addr = static_cast<char*>(alloc.cpu_region.base) + page_aligned_off;
+  if (::mprotect(aligned_addr, aligned_len, PROT_READ | PROT_WRITE) != 0) {
+    void* mapped =
+        ::mmap(aligned_addr, aligned_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (mapped == MAP_FAILED || mapped != aligned_addr) {
+      return absl::ErrnoToStatus(errno, "UMA write: failed to ensure writable mapping");
+    }
+  }
+
+  if (SystemCapabilities::instance().madv_willneed_available()) {
+    int rc = ::madvise(aligned_addr, aligned_len, MADV_WILLNEED);
+    if (rc != 0 && errno != EINVAL) {
+      PLOG(WARNING) << "madvise WILLNEED failed in UMA write";
+    }
+  }
+
+  void* dst = static_cast<char*>(alloc.cpu_region.base) + va_offset;
+  std::memcpy(dst, src, bytes);
+  return absl::OkStatus();
+}
+
+absl::Status UnifiedMemoryAuthority::CpuArena::mark_preemptible(
+    ReplicaAllocation& alloc,
+    absl::Span<const uint32_t> idx) const {
+  if (alloc.cpu_region.base == nullptr) {
+    return absl::FailedPreconditionError("CPU region not allocated");
+  }
+  for (uint32_t i : idx) {
+    if (i >= alloc.num_chunks) {
+      return absl::OutOfRangeError("Chunk index out of range");
+    }
+    auto& rec = alloc.chunk_records[i];
+    if (rec.pin_refcnt > 0) {
+      continue;
+    }
+    if (rec.cpu == ChunkState::LOCKED_TX || rec.cpu == ChunkState::EVICTED) {
+      continue;
+    }
+    void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(i) * chunk_bytes_;
+    int rc = 0;
+    if (SystemCapabilities::instance().madv_free_available()) {
+      rc = ::madvise(addr, chunk_bytes_, MADV_FREE);
+      if (rc != 0 && errno == EINVAL) {
+        rc = ::madvise(addr, chunk_bytes_, MADV_DONTNEED);
+      }
+    } else {
+      rc = ::madvise(addr, chunk_bytes_, MADV_DONTNEED);
+    }
+    if (rc != 0) {
+      PLOG(WARNING) << "madvise FREE/DONTNEED failed";
+    }
+  }
+  return absl::OkStatus();
+}
+
+size_t UnifiedMemoryAuthority::CpuArena::evict_tail_bytes(ReplicaAllocation& alloc, size_t bytes) const {
+  if (alloc.cpu_region.base == nullptr || bytes == 0) {
+    return 0;
+  }
+  size_t freed = 0;
+  for (ssize_t idx = static_cast<ssize_t>(alloc.num_chunks) - 1; idx >= 0 && freed < bytes; --idx) {
+    auto& rec = alloc.chunk_records[static_cast<size_t>(idx)];
+    if (rec.pin_refcnt > 0) {
+      continue;
+    }
+    if (rec.cpu == ChunkState::LOCKED_TX || rec.cpu == ChunkState::EVICTED) {
+      continue;
+    }
+    void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(idx) * chunk_bytes_;
+    size_t advise_len = chunk_bytes_;
+    int madv_flag = MADV_DONTNEED;
+#ifdef MADV_PAGEOUT
+    if (SystemCapabilities::instance().madv_pageout_available()) {
+      madv_flag = MADV_PAGEOUT;
+    }
+#endif
+    int rc = ::madvise(addr, advise_len, madv_flag);
+    if (rc != 0) {
+      PLOG(WARNING) << "madvise PAGEOUT failed";
+    }
+    freed += chunk_bytes_;
+  }
+  return freed;
+}
+
+absl::StatusOr<std::shared_ptr<void>> UnifiedMemoryAuthority::CpuArena::pin_chunks(
+    ReplicaAllocation& alloc,
+    absl::Span<const uint32_t> chunk_indices,
+    std::string_view reason,
+    std::optional<std::chrono::milliseconds> /*timeout*/) const {
+  if (chunk_indices.empty()) {
+    return std::shared_ptr<void>{};
+  }
+  if (alloc.cpu_region.base == nullptr) {
+    return absl::FailedPreconditionError("CPU region not allocated");
+  }
+
+  std::vector<uint32_t> unique_chunks(chunk_indices.begin(), chunk_indices.end());
+  std::sort(unique_chunks.begin(), unique_chunks.end());
+  unique_chunks.erase(std::unique(unique_chunks.begin(), unique_chunks.end()), unique_chunks.end());
+
+  for (uint32_t idx : unique_chunks) {
+    if (idx >= alloc.num_chunks) {
+      return absl::OutOfRangeError("Chunk index out of range");
+    }
+    alloc.chunk_records[idx].pin_refcnt += 1;
+    if (SystemCapabilities::instance().mlock_enabled()) {
+      void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(idx) * chunk_bytes_;
+      if (::mlock(addr, chunk_bytes_) == 0) {
+        if (idx >= alloc.mlock_refcnt.size()) {
+          alloc.mlock_refcnt.resize(alloc.num_chunks);
+        }
+        alloc.mlock_refcnt[idx] += 1;
+      } else {
+        const int err = errno;
+        if (err == ENOMEM || err == EPERM) {
+          static std::atomic<bool> warned{false};
+          if (!warned.exchange(true, std::memory_order_acq_rel)) {
+            PLOG(WARNING) << "mlock failed (" << err << ") — disabling UMA page pinning";
+          }
+          SystemCapabilities::instance().set_mlock_enabled(false);
+        }
+      }
+    }
+  }
+
+  auto handle = std::make_shared<PinHandle>();
+  handle->arena = this;
+  handle->alloc = &alloc;
+  handle->chunks = std::move(unique_chunks);
+  std::shared_ptr<void> keepalive(handle, handle.get());
+
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_va_pin_leases_total");
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("reason", opentelemetry::common::AttributeValue(std::string(reason)));
+    counter->Add(
+        static_cast<double>(handle->chunks.size()),
+        opentelemetry::common::KeyValueIterableView(attrs),
+        opentelemetry::context::Context{});
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_va_pin_leases_total unavailable";
+  }
+
+  return keepalive;
+}
+
+UnifiedMemoryAuthority::CpuArena::PinHandle::~PinHandle() {
+  if (arena != nullptr && alloc != nullptr) {
+    arena->release_pins(*alloc, absl::MakeSpan(chunks));
+  }
+}
+
+void UnifiedMemoryAuthority::CpuArena::release_pins(ReplicaAllocation& alloc, absl::Span<const uint32_t> chunk_indices)
+    const {
+  if (alloc.cpu_region.base == nullptr) {
+    return;
+  }
+  for (uint32_t idx : chunk_indices) {
+    if (idx >= alloc.num_chunks) {
+      continue;
+    }
+    auto& rec = alloc.chunk_records[idx];
+    if (rec.pin_refcnt > 0) {
+      rec.pin_refcnt -= 1;
+    }
+    if (idx < alloc.mlock_refcnt.size()) {
+      auto& mlock_count = alloc.mlock_refcnt[idx];
+      if (mlock_count > rec.pin_refcnt && SystemCapabilities::instance().mlock_enabled()) {
+        if (mlock_count > 0) {
+          mlock_count -= 1;
+        }
+        if (mlock_count == 0) {
+          void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(idx) * chunk_bytes_;
+          if (::munlock(addr, chunk_bytes_) != 0) {
+            PLOG(WARNING) << "munlock failed during UMA pin release";
+          }
+        }
+      }
+    }
   }
 }
 

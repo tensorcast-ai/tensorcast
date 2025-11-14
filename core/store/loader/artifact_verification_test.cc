@@ -10,7 +10,6 @@
 #include "absl/time/time.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -20,7 +19,6 @@ using tensorcast::common::ArtifactVerificationInfo;
 using tensorcast::common::VerificationLevel;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
-using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
@@ -62,8 +60,7 @@ TEST_CASE("Replica Verification System", "[replica][verification]") {
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create VS
-  auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
+  // UMA is internal to ReplicaLoadController; no VS injection required.
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir;
@@ -76,7 +73,6 @@ TEST_CASE("Replica Verification System", "[replica][verification]") {
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
-      .virtual_addr_space = virtual_addr_space,
       .max_buffer_bytes = pool_total};
 
   auto mstatus = Replica::create(cfg);

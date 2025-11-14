@@ -16,7 +16,6 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loader/file_partition_source.h"
 #include "core/store/loader/source_hash.h"
 #include "core/store/loading/loading_spec.h"
@@ -168,8 +167,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create VA
-  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
+  // Unified UMA is managed internally; no manual CPU arena injection needed.
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -181,7 +179,6 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
       .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
-      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = std::nullopt,
       .max_buffer_bytes = 1024 * 2 // 2 KB buffer to force streaming
   };

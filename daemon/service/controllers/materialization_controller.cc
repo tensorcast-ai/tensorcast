@@ -286,7 +286,8 @@ grpc::Status MaterializationController::materialize_replica(
     resp.set_disk_path(req.disk_path());
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
   }
   if (handle.view_index_json.has_value()) {
     resp.set_view_index_json(*handle.view_index_json);
@@ -416,7 +417,8 @@ grpc::Status MaterializationController::materialize_by_key(
     }
   }
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle.cuda_ipc_handle.to_string());
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(
+        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);

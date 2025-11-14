@@ -5,7 +5,6 @@
 #include <cstring>
 
 #include "absl/log/log.h"
-#include "core/common/memory/virtual_address_space.h"
 
 namespace tensorcast::store::loader {
 
@@ -28,7 +27,10 @@ absl::Status CpuVaSink::write_at(uint64_t offset, const void* src, size_t bytes)
     return absl::InvalidArgumentError("CpuVaSink: write would exceed total size");
   }
 
-  return options_.region.write_at(offset, src, bytes);
+  if (!options_.uma) {
+    return absl::FailedPreconditionError("CpuVaSink: UMA handle is null");
+  }
+  return options_.uma->write_cpu_span(options_.replica_key, offset, src, bytes);
 }
 
 } // namespace tensorcast::store::loader

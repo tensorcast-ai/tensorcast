@@ -53,7 +53,6 @@ graph TB
 
     subgraph "Memory Pools"
         PMP[PinnedBufferPool]
-        VS[VirtualAddressSpace]
         SPB[StreamingPinnedBuffer]
     end
 
@@ -87,7 +86,6 @@ graph TB
     MM --> MS
     MM --> ML
     MM --> PMP
-    MM --> VS
     MM --> SPB
     MM --> CM
 
@@ -258,8 +256,7 @@ stateDiagram-v2
 
 The memory implementation layer provides the low-level memory management and data transfer mechanisms:
 
-- CPU Memory: `core/common/memory/pinned_buffer_pool.h`, `core/common/memory/pinned_buffer_pool.cc`, `core/common/memory/streaming_pinned_buffer.{h,cc}`
-- VS: `core/common/memory/virtual_address_space.{h,cc}`
+- CPU Memory: `core/common/memory/pinned_buffer_pool.h`, `core/common/memory/pinned_buffer_pool.cc`, `core/common/memory/streaming_pinned_buffer.{h,cc}`, orchestrated via `core/store/replica/unified_memory_authority.{h,cc}`
 - GPU Memory: `core/common/memory/cuda_memory.{h,cc}`
 - Sinks/Sources: `core/store/loader/cpu_va_sink.{h,cc}`, `core/store/loader/gpu_memory_sink.{h,cc}`
 - Pump: `core/store/loader/pump.{h,cc}` (`pump_ranges`), `core/store/loader/buffer_pool.h`
@@ -268,11 +265,9 @@ The memory implementation layer provides the low-level memory management and dat
 graph TB
     subgraph "CPU Memory Management"
         PMP[PinnedBufferPool]
-        VS[VirtualAddressSpace]
         SPB[StreamingPinnedBuffer]
 
         PMP -->|Allocates chunks| SPB
-        VS -->|Virtual pages| UMA[UMA Space]
     end
 
     subgraph "GPU Memory Management"
@@ -304,6 +299,7 @@ graph TB
         TS -->|Orchestrates| P
         CES -->|Manages| ER[ExportRegistration]
         UMA -->|Authorizes & Coordinates| TS
+        UMA -->|Owns CPU arena| PMP
     end
 ```
 

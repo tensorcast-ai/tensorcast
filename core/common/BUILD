@@ -191,25 +191,6 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
-# Virtual Address Space (VS)
-sc_cc_library(
-    name = "virtual_address_space_lib",
-    srcs = ["memory/virtual_address_space.cc"],
-    hdrs = ["memory/virtual_address_space.h"],
-    includes = ["memory"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
-        ":system_capabilities_lib",
-        "//core/store/replica:chunk_meta",
-        "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/types:span",
-        "@gsl",
-        "@opentelemetry-cpp//api:api",
-    ],
-)
-
 # Memory management - Streaming pinned buffer
 sc_cc_library(
     name = "streaming_pinned_buffer_lib",
@@ -378,31 +359,6 @@ sc_cc_library(
     ],
 )
 
-# Tests for memory components
-cc_test(
-    name = "virtual_address_space_test",
-    srcs = ["memory/virtual_address_space_test.cc"],
-    tags = ["requires_cuda"],
-    deps = [
-        ":virtual_address_space_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
-    name = "cpu_va_region_handle_test",
-    srcs = ["memory/cpu_va_region_handle_test.cc"],
-    tags = ["requires_cuda"],
-    deps = [
-        ":virtual_address_space_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "@catch2//:catch2_main",
-    ],
-)
-
 cc_test(
     name = "streaming_pinned_buffer_test",
     srcs = ["memory/streaming_pinned_buffer_test.cc"],
@@ -467,7 +423,6 @@ sc_cc_library(
         ":trace_macros_lib",
         ":trace_manager_lib",
         ":trace_scope_lib",
-        ":virtual_address_space_lib",
         "@gsl",
     ],
     alwayslink = True,

@@ -50,7 +50,6 @@ graph TB
   end
 
   subgraph Memory
-    VS[VirtualAddressSpace]
     PMP[PinnedBufferPool]
     SPB[StreamingPinnedBuffer]
     CUMEM[GpuDeviceMemory]
@@ -75,7 +74,6 @@ graph TB
   RR --> REP
   REP --> MM
   MM --> UMA
-  MM --> VS
   MM --> PMP
   MM --> SPB
   MM --> CUMEM
@@ -88,10 +86,10 @@ graph TB
   TS --> PUMP
 ```
 
-## UMA V3 Cutover (aliases and flags)
+## UMA V3 Cutover (single ledger)
 
-- Final cutover (V3): alias headers removed; UnifiedMemoryAuthority/VirtualAddressSpace are the canonical names. Incremental rollout flags are removed; transactional Plan→Execute→Commit path and UMA-ledger authority are always enabled.
-- Canonical Bazel targets: `//core/store/replica:unified_memory_authority`, `//core/common:virtual_address_space_lib`, and `//core/store/replica:memory_export_registry`.
+- Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
+- Canonical Bazel targets: `//core/store/replica:unified_memory_authority` and `//core/store/replica:memory_export_registry`.
 
 ### Release & Eviction (GPU)
 
@@ -100,13 +98,13 @@ graph TB
 ## Public API Surface (StoreEngine)
 
 - Construction: `StoreEngine::StoreEngine(const StoreEngineOptions& opts)`
-  - Configures `storage_path`, pinned pool size/chunk size, VS chunk size, and optional `CommunicationManager` and `GlobalStore` address.
+  - Configures `storage_path`, pinned pool size/chunk size, UMA chunk size, and optional `CommunicationManager` and `GlobalStore` address.
 
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
     - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
-    - `LOAD_ONLY`: Loads from disk only (rejects content-addressed IDs without `hints.disk_path`).
+    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path` (rejects content-addressed IDs without that path).
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
@@ -123,8 +121,8 @@ graph TB
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
   - `get_resident_devices(artifact_id)`, `list_device_replicas(DeviceKey)`
-  - VS telemetry (read-only, non-authoritative): `get_chunk_states_telemetry(artifact_id)` returns VS `ChunkMeta.state`
-  - UMA states (authoritative):
+  - UMA telemetry (authoritative):
+    - `get_chunk_states_telemetry(artifact_id)` returns the UMA CPU snapshot (identical to `get_chunk_states_cpu_uma`)
     - GPU: `get_chunk_states_for_device(artifact_id, device_id)`
     - CPU (artifact-level convenience): `get_chunk_states_cpu_uma(artifact_id)`
       - Selection rule when multiple replicas exist: prefer a CPU instance if present; otherwise choose the GPU instance with the smallest device ordinal.
@@ -136,7 +134,7 @@ graph TB
 
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`
-  - `register_replica_with_global_store(ReplicaKey, artifact_id_override)`
+  - `register_replica_with_global_store(ReplicaKey[, canonical_mi2_override])`
 
 ### Variant-Aware Views (v1)
 
@@ -237,7 +235,7 @@ sequenceDiagram
 
 ## Memory Model and State Machines
 
-Store Engine uses VS (VirtualAddressSpace) for contiguous per-replica CPU virtual address space and UMA (UnifiedMemoryAuthority) for unified CPU/GPU chunk bookkeeping. ReplicaLoadController orchestrates allocation, state transitions, and transfers.
+Store Engine relies on UMA (UnifiedMemoryAuthority) for contiguous per-replica CPU virtual address space, chunk bookkeeping, and export management. ReplicaLoadController orchestrates allocation, state transitions, and transfers.
 
 ### ReplicaLoadController Location States
 

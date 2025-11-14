@@ -15,7 +15,6 @@
 #include "gsl/pointers"
 
 #include "core/common/memory/memory_location.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/communication_types.h"
 // no direct write token needed in export service
 #include "core/store/replica/unified_memory_authority.h"
@@ -27,9 +26,7 @@ namespace tensorcast::store::replica {
 
 class MemoryExportRegistry {
  public:
-  MemoryExportRegistry(
-      gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma,
-      gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space);
+  explicit MemoryExportRegistry(gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma);
 
   absl::StatusOr<ExportRegistration> export_chunks(
       const loading::ReplicaKey& key,
@@ -76,7 +73,6 @@ class MemoryExportRegistry {
   };
 
   gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma_;
-  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_;
 
   // Cache per (ReplicaKey, Location) to support precise unexport and lease lifetime
   std::unordered_map<ExportKey, ExportRecord, ExportKeyHash> records_;

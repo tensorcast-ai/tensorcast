@@ -11,7 +11,6 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -80,9 +79,6 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
     auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
     REQUIRE(pool != nullptr);
 
-    // Create VS
-    auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
-
     // Use new DiskSource
     DiskSource disk_src;
     disk_src.path = base / artifact_dir;
@@ -95,7 +91,6 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dev,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = total,
         .max_buffer_bytes = pool_total};
 

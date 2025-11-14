@@ -8,7 +8,6 @@
 
 #include "absl/status/status.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -34,9 +33,6 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create VS
-  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
-
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource
     DiskSource disk_src;
@@ -50,7 +46,6 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Replica::create(cfg);
@@ -79,7 +74,6 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = 1024 // wrong expected size
     };
 

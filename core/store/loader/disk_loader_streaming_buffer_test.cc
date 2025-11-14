@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "absl/status/status.h"
+#include "core/common/const/granularity.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loader/disk_loader.h"
 #include "core/store/loader/source.h"
 #include "core/store/loading/loading_spec.h"
@@ -78,12 +78,12 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
-  auto virtual_addr_space = std::make_shared<tensorcast::common::memory::VirtualAddressSpace>();
+  const size_t artifact_chunk_bytes = tensorcast::common::consts::kArtifactChunkDefault;
   auto memmgr = std::make_shared<ReplicaLoadController>(
       "loader_stream_artifact",
       /*device=*/0,
       pool,
-      virtual_addr_space,
+      artifact_chunk_bytes,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming
       std::chrono::milliseconds::zero(),
       artifact_size);

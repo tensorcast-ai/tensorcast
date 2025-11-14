@@ -2,15 +2,13 @@
 
 #pragma once
 
-#include <atomic>
 #include <cstdint>
-#include "absl/status/status.h"
 
 namespace tensorcast::store::replica {
 
 // clang-format off
 /**
- * @brief Chunk life-cycle state used by VS (telemetry) and memory subsystems.
+ * @brief Chunk life-cycle state used by UMA for residency/telemetry.
  *
  *  PREEMPTIBLE indicates that the underlying CPU pages have been
  *  marked with MADV_FREE / MADV_PAGEOUT and can be reclaimed by the
@@ -25,10 +23,6 @@ enum class ChunkState : uint8_t {
     PREEMPTIBLE  ///< Resident pages are preemptible via MADV_FREE/PAGEOUT
 };
 // clang-format on
-
-// -------------------------------------------------------------------------
-// Human-readable representation helper
-// -------------------------------------------------------------------------
 
 inline const char* chunk_state_to_string(ChunkState s) noexcept {
   switch (s) {
@@ -48,10 +42,5 @@ inline const char* chunk_state_to_string(ChunkState s) noexcept {
       return "UNKNOWN";
   }
 }
-
-struct ChunkMeta {
-  std::atomic<ChunkState> state{ChunkState::COLD};
-  std::atomic<uint32_t> last_touch_s{0}; ///< Last access heartbeat (seconds)
-};
 
 } // namespace tensorcast::store::replica

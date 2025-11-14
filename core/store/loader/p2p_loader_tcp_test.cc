@@ -10,8 +10,8 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/common/artifact_verification.h"
+#include "core/common/const/granularity.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 
 #include "core/communicator/engine/engine.h"
 #include "core/store/loader/p2p_loader.h"
@@ -21,7 +21,6 @@
 
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
-using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 using tensorcast::communicator::engine::Communicator;
@@ -31,6 +30,8 @@ using namespace tensorcast::store;
 using namespace tensorcast::testing;
 
 namespace {
+
+constexpr size_t kArtifactChunkBytes = tensorcast::common::consts::kArtifactChunkDefault;
 
 int randomized_port_hint(int canonical_base) {
   constexpr int kMinPort = 1024;
@@ -118,12 +119,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 1 * 1024 * 1024; // 1MB chunks for streaming
     const std::size_t pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedBufferPool>(pool_size, chunk_size);
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "test_artifact", // artifact_identifier
         0, // local_device_id (GPU device 0)
         pinned_pool, // pinned_pool (needed for streaming buffer)
-        virtual_addr_space, // distributed virtual memory pool
+        kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
         artifact_size);
@@ -221,12 +221,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
     const std::size_t total_pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedBufferPool>(total_pool_size, chunk_size);
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "test_artifact", // artifact_identifier
         -1, // local_device_id (-1 for CPU)
         pinned_pool, // pinned_pool
-        virtual_addr_space, // distributed virtual memory pool
+        kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
         artifact_size);
@@ -346,12 +345,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t pool_buffers = 20; // ensure enough slices for MTCP receive without exhausting host memory
     const std::size_t pool_size = pool_chunk_size * pool_buffers;
     auto pinned_pool = std::make_shared<PinnedBufferPool>(pool_size, pool_chunk_size);
-    auto virtual_addr_space = std::make_shared<VirtualAddressSpace>();
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "sub_chunk_artifact",
         0,
         pinned_pool,
-        virtual_addr_space,
+        kArtifactChunkBytes,
         pool_size,
         std::chrono::milliseconds::zero(),
         artifact_size);
@@ -460,12 +458,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       // (TransferService defaults to 16 chunks when credit is saturated). Keep the pool large enough
       // so we validate the intended MTCP behaviour instead of exercising OOM fallbacks.
       auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 16, stage_chunk_bytes);
-      auto va_space = std::make_shared<VirtualAddressSpace>();
       auto mem_manager = std::make_shared<ReplicaLoadController>(
           "credit_artifact",
           0,
           pinned_pool,
-          va_space,
+          kArtifactChunkBytes,
           1024 * 1024 * 1024,
           std::chrono::milliseconds::zero(),
           artifact_size);
@@ -572,12 +569,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
       // ReplicaLoadController pool intentionally remains undersized to trigger pinned OOM behaviour.
       auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 2, stage_chunk_bytes);
-      auto va_space = std::make_shared<VirtualAddressSpace>();
       auto mem_manager = std::make_shared<ReplicaLoadController>(
           "credit_artifact_small_pool",
           0,
           pinned_pool,
-          va_space,
+          kArtifactChunkBytes,
           stage_chunk_bytes * 2,
           std::chrono::milliseconds::zero(),
           artifact_size);

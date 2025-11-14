@@ -14,7 +14,7 @@
 #include "absl/time/time.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/replica/chunk_state.h"
 #include "grpcpp/grpcpp.h"
 #include "gsl/pointers"
 #include "tensorcast/common/v1/common.pb.h"
