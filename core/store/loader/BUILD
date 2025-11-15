@@ -298,6 +298,8 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":sink",
+        "//core/store:loading_spec",
+        "//core/store/replica:unified_memory_authority",
         "@abseil-cpp//absl/types:span",
     ],
 )
