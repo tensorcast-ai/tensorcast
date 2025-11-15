@@ -16,14 +16,13 @@
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
 #include "core/store/store_engine_options.h"
@@ -252,8 +251,9 @@ class StoreEngine {
       common::memory::MemoryLocation location);
 
   // Register a loaded replica with the Global Store if connected. When
-  // artifact_id_override is provided, it is used as the identifier (e.g.,
-  // content-addressed mi2:...); otherwise key.artifact_id is used.
+  // artifact_id_override is provided it must be a canonical `mi2:` identifier
+  // (e.g., disk-ingested replicas that computed hashes locally); otherwise the
+  // `ReplicaKey.artifact_id` is published.
   [[nodiscard]] absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override = {});
@@ -291,7 +291,7 @@ class StoreEngine {
   // UMA/VS artifact chunk size (bytes). Public read-only accessor for daemon status APIs
   // and controllers that need the authoritative artifact granularity.
   [[nodiscard]] size_t get_artifact_chunk_bytes() const {
-    return va_space_->artifact_chunk_bytes();
+    return artifact_chunk_bytes_;
   }
 
   [[nodiscard]] size_t get_available_memory() const;
@@ -339,6 +339,7 @@ class StoreEngine {
   const StoreEngineOptions options_;
   const std::filesystem::path storage_path_;
   const size_t memory_pool_size_;
+  const size_t artifact_chunk_bytes_;
   const int num_thread_;
   const size_t tx_slice_bytes_;
   const std::chrono::milliseconds pinned_memory_timeout_;
@@ -353,7 +354,6 @@ class StoreEngine {
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
-  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_; // System-wide VS instance
   // ═══════════════════════════════════════════════════════════════════════════
   // Internal Helper Methods
   // ═══════════════════════════════════════════════════════════════════════════

@@ -17,7 +17,6 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/transfer_constants.h"
 #include "core/store/replica/unified_memory_authority.h"
@@ -36,7 +35,6 @@ class TransferService {
 
   TransferService(
       const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
-      const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
       const gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>& uma,
       loading::ReplicaKey replica_key,
       Config cfg);
@@ -87,7 +85,6 @@ class TransferService {
       uint64_t total_bytes);
 
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_pool_;
-  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_;
   gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma_;
   loading::ReplicaKey replica_key_;
   Config cfg_;

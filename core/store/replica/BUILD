@@ -7,16 +7,15 @@ config_setting(
     define_values = {"use_fake_cuda": "true"},
 )
 
-# Basic type definitions
 sc_header_only_library(
-    name = "chunk_meta",
-    hdrs = ["chunk_meta.h"],
+    name = "memory_state",
+    hdrs = ["memory_state.h"],
     visibility = ["//visibility:public"],
 )
 
 sc_header_only_library(
-    name = "memory_state",
-    hdrs = ["memory_state.h"],
+    name = "chunk_state",
+    hdrs = ["chunk_state.h"],
     visibility = ["//visibility:public"],
 )
 
@@ -25,7 +24,7 @@ sc_header_only_library(
     hdrs = ["chunk_directory.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_meta",
+        ":chunk_state",
     ],
 )
 
@@ -36,7 +35,6 @@ sc_header_only_library(
     deps = [
         "//core/common:device_types_lib",
         "//core/common:pinned_buffer_pool_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/store:loading_spec",
     ],
 )
@@ -55,12 +53,13 @@ sc_cc_library(
     hdrs = ["unified_memory_authority.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_meta",
+        ":chunk_state",
         ":direct_write",
+        "//core/common:const_granularity_lib",
         "//core/common:cuda_memory_lib",
         "//core/common:error_handling_lib",
         "//core/common:memory_location_lib",
-        "//core/common:virtual_address_space_lib",
+        "//core/common:system_capabilities_lib",
         "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:loading_spec",
@@ -79,14 +78,13 @@ sc_cc_library(
     hdrs = ["transfer_helpers.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_meta",
+        ":chunk_state",
         ":unified_memory_authority",
         "//core/common:async_copy_manager_lib",
         "//core/common:cuda_api_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/store:device_types",
         "@opentelemetry-cpp//api:api",
     ],
@@ -111,7 +109,6 @@ sc_cc_library(
         ":unified_memory_authority",
         "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/store:device_types",
         "//core/store:loading_spec",
         "//core/store/loader:cpu_va_sink",
@@ -137,7 +134,6 @@ sc_cc_library(
         ":unified_memory_authority",
         ":transfer_constants",
         "//core/common:cuda_api_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         # UMA lease provider bridge removed; UMA keepalive is held within ExportRegistration
@@ -155,7 +151,7 @@ sc_cc_library(
     hdrs = ["replica_load_controller.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_meta",
+        ":chunk_state",
         ":direct_write",
         ":memory_export_registry",
         ":memory_state",
@@ -167,7 +163,6 @@ sc_cc_library(
         "//core/common:device_types_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_pinned_buffer_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:device_types",
         "//core/store:loading_spec",
@@ -195,12 +190,11 @@ sc_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":chunk_meta",
+        ":chunk_state",
         ":memory_state",
         ":replica_load_controller",
         "//core/common:cuda_api_lib",
         "//core/common:memory_location_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         "//core/store:device_types",
@@ -228,7 +222,6 @@ cc_test(
     srcs = ["unified_memory_authority_plan_commit_test.cc"],
     deps = [
         ":unified_memory_authority",
-        "//core/common:virtual_address_space_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -277,7 +270,6 @@ cc_test(
     deps = [
         ":unified_memory_authority",
         "//core/common:pinned_buffer_pool_lib",
-        "//core/common:virtual_address_space_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",

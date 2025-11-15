@@ -11,7 +11,6 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -68,8 +67,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
 
-  // Create VS
-  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
+  // UMA is managed internally by ReplicaLoadController.
   // Use new DiskSource
   DiskSource disk_src;
   disk_src.path = base / artifact_dir_name;
@@ -82,7 +80,6 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
-      .virtual_addr_space = virtual_addr_space,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -104,7 +101,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
     REQUIRE(wait_status.ok());
     REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 
-    // With VS, get_data_pointer returns a single pointer to the contiguous memory block
+    // UMA returns a single pointer to the contiguous CPU memory block
     auto ptrs = replica->get_data_pointer(MemoryLocation::CPU);
     REQUIRE(ptrs.size() == 1);
     REQUIRE(ptrs[0] != nullptr);

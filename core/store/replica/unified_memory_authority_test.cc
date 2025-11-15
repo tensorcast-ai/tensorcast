@@ -10,19 +10,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "absl/status/statusor.h"
+#include "core/common/const/granularity.h"
 
 using tensorcast::common::memory::MemoryLocation;
-using tensorcast::common::memory::VirtualAddressSpace;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::replica::UnifiedMemoryAuthority;
 
-static std::shared_ptr<VirtualAddressSpace> make_vs() {
-  return std::make_shared<VirtualAddressSpace>(VirtualAddressSpace::kDefaultChunkSize);
-}
-
 TEST_CASE("UMA allocate + mappings + get_missing_chunks", "[uma]") {
-  auto vs = make_vs();
-  UnifiedMemoryAuthority uma(gsl::not_null<std::shared_ptr<VirtualAddressSpace>>{vs});
+  UnifiedMemoryAuthority uma(tensorcast::common::consts::kArtifactChunkDefault);
 
   ReplicaKey key{
       .artifact_id = std::string("uma_unit_test"),
@@ -31,7 +26,7 @@ TEST_CASE("UMA allocate + mappings + get_missing_chunks", "[uma]") {
       .replica = 0};
 
   // Allocate 2 chunks worth of CPU memory via UMA (through VS)
-  auto st = uma.allocate(key, VirtualAddressSpace::kDefaultChunkSize * 2);
+  auto st = uma.allocate(key, tensorcast::common::consts::kArtifactChunkDefault * 2);
   REQUIRE(st.ok());
 
   // Initially, CPU missing chunks for target GPU should be all chunks

@@ -30,7 +30,6 @@ namespace tensorcast::store::replica {
 
 using common::memory::MemoryLocation;
 using common::memory::PinnedBufferPool;
-using common::memory::VirtualAddressSpace;
 using loading::ReplicaKey;
 
 // V3 final cutover: plan/execute/commit path is always enabled (no flags)
@@ -39,7 +38,7 @@ ReplicaLoadController::ReplicaLoadController(
     std::string artifact_identifier,
     int local_device_id,
     const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
-    const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
+    size_t artifact_chunk_bytes,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
     uint64_t artifact_size,
@@ -48,12 +47,11 @@ ReplicaLoadController::ReplicaLoadController(
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
-      va_space_(virtual_addr_space),
-      memory_coordinator_(std::make_shared<UnifiedMemoryAuthority>(virtual_addr_space)),
+      artifact_chunk_bytes_(artifact_chunk_bytes),
+      memory_coordinator_(std::make_shared<UnifiedMemoryAuthority>(artifact_chunk_bytes_)),
       transfer_service_(
           std::make_shared<TransferService>(
               pinned_pool_,
-              va_space_,
               memory_coordinator_,
               ReplicaKey{
                   .artifact_id = artifact_identifier,
@@ -65,8 +63,7 @@ ReplicaLoadController::ReplicaLoadController(
                   .pinned_memory_timeout = pinned_memory_timeout_})),
       export_service_(
           std::make_shared<MemoryExportRegistry>(
-              gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_},
-              va_space_)) {
+              gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_})) {
   // Populate replica_key_ using constructor inputs
   replica_key_.artifact_id = std::move(artifact_identifier);
   replica_key_.view_id = std::move(view_id);
@@ -758,11 +755,6 @@ absl::Status ReplicaLoadController::capture_copy_context_(
   }
 
   out->cuda_mem = gpu_.cuda_mem;
-  if (src_is_host || dst_is_host) {
-    out->virtual_addr_space = va_space_;
-    // Get VS base from UMA (single source of truth)
-    out->va_space_base = memory_coordinator_->get_cpu_base_ptr(replica_key_);
-  }
   out->total_size = artifact_size_;
   out->stream = gpu_.stream;
   out->device_id = replica_key_.device.ordinal;
@@ -1115,15 +1107,6 @@ absl::Status ReplicaLoadController::unexport_chunks_for_p2p(
   return absl::OkStatus();
 }
 
-// --- VS accessor implementation ---
-gsl::not_null<common::memory::VirtualAddressSpace*> ReplicaLoadController::get_va_space() {
-  return gsl::not_null<common::memory::VirtualAddressSpace*>{va_space_.get().get()};
-}
-
-gsl::not_null<const common::memory::VirtualAddressSpace*> ReplicaLoadController::get_va_space() const {
-  return gsl::not_null<const common::memory::VirtualAddressSpace*>{va_space_.get().get()};
-}
-
 absl::StatusOr<DirectWriteGrant> ReplicaLoadController::plan_direct_write(absl::Span<const VaRange> ranges) {
   {
     absl::MutexLock lock(&mutex_);
@@ -1135,17 +1118,6 @@ absl::StatusOr<DirectWriteGrant> ReplicaLoadController::plan_direct_write(absl::
 }
 
 // finalize_load removed — UMA plan/commit is authoritative in final cutover.
-
-// --- VS metadata snapshot ---------------------------------------------------
-// Provides a lightweight, read-only view of per-chunk metadata stored inside
-// the VirtualAddressSpace (VS).  The span remains valid as long as the
-// VS instance itself lives.  Callers must treat the returned ChunkMeta
-// objects as immutable and use the atomic accessors defined inside ChunkMeta
-// for state inspection.
-absl::Span<const ChunkMeta> ReplicaLoadController::chunk_telemetry_snapshot() const noexcept {
-  // No expensive operations here – simply delegate to VS (telemetry view).
-  return va_space_->chunk_telemetry_snapshot(replica_key_.artifact_id);
-}
 
 // --- NEW: Unified Memory Management implementations ---
 

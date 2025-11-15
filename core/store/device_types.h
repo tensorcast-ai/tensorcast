@@ -80,19 +80,6 @@ struct CudaIpcHandle {
   static constexpr size_t kHandleSize = 64;
   std::array<char, kHandleSize> bytes{{}};
 
-  // Convert to/from string for compatibility
-  [[nodiscard]] std::string to_string() const {
-    return std::string(bytes.data(), kHandleSize);
-  }
-
-  static CudaIpcHandle from_string(const std::string& str) {
-    CudaIpcHandle handle;
-    if (str.size() == kHandleSize) {
-      std::copy(str.begin(), str.end(), handle.bytes.begin());
-    }
-    return handle;
-  }
-
   [[nodiscard]] bool is_valid() const {
     return std::any_of(bytes.begin(), bytes.end(), [](char c) { return c != 0; });
   }

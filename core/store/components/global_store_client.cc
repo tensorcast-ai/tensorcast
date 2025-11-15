@@ -514,9 +514,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   }
 
   // Enrich log with plan type and basic context. We infer plan from device type:
-  // - CPU device ⇒ VS (UMA)
+  // - CPU device ⇒ UMA single ledger
   // - GPU device ⇒ VRAM_COALESCED (including materialized Lease)
-  const char* plan_str = (device.type == DeviceType::CPU) ? "virtual_addr_space" : "vram_coalesced";
+  const char* plan_str = (device.type == DeviceType::CPU) ? "uma_single_ledger" : "vram_coalesced";
   const char* dev_kind = (device.type == DeviceType::CPU) ? "cpu" : "gpu";
   LOG(INFO) << "Registered memory replica: " << artifact_id << " plan=" << plan_str << " device=" << dev_kind << ":"
             << device.ordinal;

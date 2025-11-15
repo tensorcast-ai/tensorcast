@@ -15,7 +15,6 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/replica.h"
@@ -82,10 +81,6 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   const size_t pool_chunk_size = 64UL * 1024; // 64 KiB chunk size
   std::shared_ptr<PinnedBufferPool> pinned_pool = std::make_shared<PinnedBufferPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
-  // Create VS and StreamingPinnedBuffer required by ReplicaConfig
-  auto virtual_addr_space = std::make_shared<::tensorcast::common::memory::VirtualAddressSpace>();
-  REQUIRE(virtual_addr_space != nullptr);
-
   // --- Test GPU Registration --- (Requires CUDA device)
   SECTION("Load to GPU and Register for Communication") {
     // Skip section if no CUDA devices are available
@@ -120,7 +115,6 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = device_id,
         .pinned_buffer_pool = pinned_pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -227,7 +221,6 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dummy_device_id,
         .pinned_buffer_pool = pinned_pool,
-        .virtual_addr_space = virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 

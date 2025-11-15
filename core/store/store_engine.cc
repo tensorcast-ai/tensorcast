@@ -194,9 +194,9 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       memory_pool_(
           gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>(
               std::make_shared<common::memory::PinnedBufferPool>(memory_pool_size_, tx_slice_bytes_))),
-      va_space_(
-          gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>(
-              std::make_shared<common::memory::VirtualAddressSpace>(opts.artifact_chunk_bytes))) {
+      artifact_chunk_bytes_(
+          opts.artifact_chunk_bytes == 0 ? tensorcast::common::consts::kArtifactChunkDefault
+                                         : opts.artifact_chunk_bytes) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
@@ -381,16 +381,14 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
   SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_disk_internal");
 
-  // Convert Location to legacy MemoryLocation
-  common::memory::MemoryLocation target_location = common::memory::MemoryLocation::CPU;
-  if (target.location.type == common::memory::MemoryLocation::GPU) {
-    target_location = common::memory::MemoryLocation::GPU;
-  }
+  DeviceKey target_device = target.location.to_device_key();
+  const bool target_is_gpu = target_device.type == DeviceType::GPU;
+  const common::memory::MemoryLocation target_location =
+      target_is_gpu ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
 
-  // Resolve device ID if GPU target
-  int target_device_id = target.location.device_id;
-  if (target_location == common::memory::MemoryLocation::GPU && !target.location.device_uuid.empty()) {
-    auto device_result = device_manager_->find_device_by_uuid(target.location.device_uuid);
+  int target_device_id = target_device.ordinal;
+  if (target_is_gpu && !target_device.uuid.empty()) {
+    auto device_result = device_manager_->find_device_by_uuid(target_device.uuid);
     if (!device_result.ok()) {
       return device_result.status();
     }
@@ -398,25 +396,25 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
   }
 
   // Defensive check: ensure GPU ordinal is valid before proceeding.
-  if (target_location == common::memory::MemoryLocation::GPU) {
+  if (target_is_gpu) {
     const int num_gpus = device_manager_->get_num_gpus();
     if (target_device_id < 0 || target_device_id >= num_gpus) {
       return absl::InvalidArgumentError(std::string("Invalid GPU device ordinal: ") + std::to_string(target_device_id));
     }
   }
 
-  // If StoreEngine was initialised with a non-empty storage_path_ and the
-  // incoming DiskSource path is *not* absolute, we interpret it as a
-  // sub-directory under the configured storage root (the behaviour expected by
-  // unit-tests).  This mirrors the semantics of the legacy Python
-  // implementation and avoids surprises when the current working directory is
-  // different from storage_path_.
-  loading::DiskSource resolved_source = source;
-  if (!storage_path_.empty() && !source.path.is_absolute()) {
-    resolved_source.path = storage_path_ / source.path;
+  std::filesystem::path artifact_path;
+  if (source.path.is_absolute()) {
+    artifact_path = source.path;
+  } else if (!storage_path_.empty()) {
+    artifact_path = storage_path_ / source.path;
+  } else {
+    artifact_path = std::filesystem::absolute(source.path);
   }
+  artifact_path = artifact_path.lexically_normal();
 
-  std::filesystem::path artifact_path = resolved_source.path;
+  loading::DiskSource resolved_source = source;
+  resolved_source.path = artifact_path;
   std::error_code fs_error;
   const bool artifact_exists = std::filesystem::exists(artifact_path, fs_error);
   if (fs_error) {
@@ -550,7 +548,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
       .pinned_buffer_pool = memory_pool_,
-      .virtual_addr_space = va_space_,
+      .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size =
           resolved_view_plan.has_value() ? std::optional<uint64_t>(resolved_view_plan->view_size_bytes) : std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
@@ -1038,7 +1036,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p_internal(
       .device_type = (target_location == common::memory::MemoryLocation::GPU ? DeviceType::GPU : DeviceType::CPU),
       .local_device_id = target.location.device_id,
       .pinned_buffer_pool = memory_pool_,
-      .virtual_addr_space = va_space_,
+      .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size =
           resolved_view_plan.has_value() ? std::optional<uint64_t>(resolved_view_plan->view_size_bytes) : std::nullopt};
   config.pinned_memory_timeout = hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : pinned_memory_timeout_;
@@ -1368,12 +1366,13 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
       return absl::FailedPreconditionError(
           "LOAD_ONLY/disk fallback disabled for content-addressed artifact_id; Global Store routing required");
     }
-    loading::DiskSource disk_src;
-    if (!hints.disk_path.empty()) {
-      disk_src.path = std::filesystem::path(hints.disk_path);
-    } else {
-      disk_src.path = std::filesystem::path(canonical_artifact_id);
+    if (hints.disk_path.empty()) {
+      return absl::InvalidArgumentError(
+          "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
     }
+
+    loading::DiskSource disk_src;
+    disk_src.path = std::filesystem::path(hints.disk_path);
 
     loading::ReplicaTarget target;
     target.location.type =
@@ -1433,7 +1432,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
             .device_type = DeviceType::GPU,
             .local_device_id = target_device.ordinal,
             .pinned_buffer_pool = memory_pool_,
-            .virtual_addr_space = va_space_,
+            .artifact_chunk_bytes = artifact_chunk_bytes_,
             .expected_artifact_size = expected_size};
         cfg.pinned_memory_timeout = pinned_memory_timeout_;
         cfg.view_id = requested_view_id;
@@ -1806,6 +1805,9 @@ absl::Status StoreEngine::register_replica_with_global_store(
     VLOG(1) << "register_replica_with_global_store variant view_id=" << *key.view_id
             << " (canonical_artifact_id=" << key.artifact_id << ")";
   }
+  if (!artifact_id_override.empty() && !absl::StartsWith(artifact_id_override, "mi2:")) {
+    return absl::InvalidArgumentError("artifact_id_override must be a canonical mi2: identifier");
+  }
   // Determine memory location based on device type
   MemoryLocation loc = (key.device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::CPU;
 
@@ -1970,7 +1972,7 @@ absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register
       .device_type = DeviceType::GPU,
       .local_device_id = reg.device_id,
       .pinned_buffer_pool = memory_pool_,
-      .virtual_addr_space = va_space_,
+      .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
 
@@ -2225,12 +2227,15 @@ absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_regist
     // 2) data_multihash via SegmentPlan linearization (PAD=0).
     absl::StatusOr<std::string> data_mh_or;
     if (entry->plan == PendingRegistrationEntry::Plan::CPU) {
-      auto region_or = va_space_->region_info(entry->artifact_id);
-      if (!region_or.ok()) {
-        return region_or.status();
+      if (!entry->replica) {
+        return absl::FailedPreconditionError("CPU registration missing backing replica");
       }
-      auto mh_or = loader::compute_data_multihash_from_cpu_memory(
-          gsl::not_null<const void*>{region_or->cpu_base}, entry->size_bytes);
+      const auto cpu_ptrs = entry->replica->get_data_pointer(MemoryLocation::CPU);
+      if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+        return absl::FailedPreconditionError("CPU data pointer unavailable for hashing");
+      }
+      gsl::not_null<const void*> cpu_base{static_cast<const void*>(cpu_ptrs[0])};
+      auto mh_or = loader::compute_data_multihash_from_cpu_memory(cpu_base, entry->size_bytes);
       if (!mh_or.ok()) {
         return mh_or.status();
       }
@@ -2681,13 +2686,7 @@ absl::Status StoreEngine::abort_registered_artifact(std::string_view registratio
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_telemetry(std::string_view artifact_id) const {
-  std::vector<replica::ChunkState> out;
-  auto span = va_space_->chunk_telemetry_snapshot(artifact_id);
-  out.reserve(span.size());
-  for (const auto& meta : span) {
-    out.push_back(meta.state.load(std::memory_order_acquire));
-  }
-  return out;
+  return get_chunk_states_cpu_uma(artifact_id);
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_for_device(std::string_view artifact_id, int device_id)
