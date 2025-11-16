@@ -116,6 +116,8 @@ Exposed via the unified metrics system:
   - tc_register_feed_cpu_bytes_total
   - tc_register_feed_lease_segments_total
   - tc_register_feed_lease_bytes_total
+  - tc_register_pending_gauge (current number of in-flight registrations per daemon)
+  - tc_register_commit_seconds (latency histogram with `result` label: ok/aborted/expired)
 - Request latencies
 - Error rates
 
