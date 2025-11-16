@@ -7,10 +7,8 @@
 #include <string>
 #include <vector>
 
-#include <mutex>
 #include <optional>
 #include <string_view>
-#include <unordered_map>
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -20,6 +18,7 @@
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
+#include "core/store/components/registration/artifact_registration_manager.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/loading/loading_spec.h"
 #include "core/store/replica/chunk_state.h"
@@ -109,43 +108,16 @@ class StoreEngine {
       const loader::ViewPlan& plan,
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
-  enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
-
-  using CanonicalRange = view::CanonicalRange;
-
-  struct ViewRegistration {
-    std::string view_id;
-    loader::ViewSpec spec;
-    ViewPlacement placement{ViewPlacement::kUnspecified};
-    uint64_t canonical_size_bytes{0};
-    std::vector<CanonicalRange> canonical_ranges;
-    bool allow_partial{false};
-  };
+  using ViewPlacement = components::ViewPlacement;
+  using CanonicalRange = components::CanonicalRange;
+  using ViewRegistration = components::ViewRegistration;
 
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
 
-  struct ArtifactRegistration {
-    std::string artifact_id; // Logical artifact identifier (old artifact_id)
-    std::string tensor_index_key; // Canonical JSON SHA-256 hex (lowercase)
-    std::optional<std::string> tensor_index_data; // Optional canonical JSON bytes for UPSERT
-    std::string schema_version{"v3"}; // Data-format schema version
-    std::string encoding{"json"}; // Encoding of index_data (if provided)
-    int device_id{0}; // Local CUDA device ordinal
-    uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
-    bool enable_p2p{true}; // Whether to enable remote access
-    uint32_t ttl_ms{0}; // Optional TTL for Begin→Commit (0 = no TTL)
-    std::optional<std::string> client_artifact_id; // Optional CGID supplied by client
-    std::optional<ViewRegistration> view;
-  };
-
-  struct RegistrationBeginResult {
-    std::string registration_id; // Opaque id for Commit/Abort
-    std::array<std::byte, sizeof(cudaIpcMemHandle_t)> cuda_ipc_handle_bytes{}; // CUDA IPC handle
-    int device_id{0};
-    uint64_t size_bytes{0};
-  };
+  using ArtifactRegistration = components::ArtifactRegistration;
+  using RegistrationBeginResult = components::RegistrationBeginResult;
 
   /**
    * @brief Begin registering an in-memory tensor dict replica.
@@ -162,25 +134,7 @@ class StoreEngine {
    * registering the memory replica with Global Store.  On success, memory
    * ownership remains with the daemon and becomes discoverable by peers.
    */
-  struct RegistrationCommitResult {
-    std::string registration_id;
-    std::string artifact_id;
-    int device_id{0};
-    uint64_t size_bytes{0};
-    bool existed{false};
-    // RFC-0007: Expose content-address components for callers who need
-    // authoritative descriptor details without recomputation.
-    std::string index_multihash; // multibase(base32)-encoded multihash of canonical index
-    std::string data_multihash; // multibase(base32)-encoded multihash of tree-hash root
-    std::string schema_version; // e.g. "v3"
-    std::string encoding; // e.g. "json" or "cbor"
-    std::optional<std::string> view_id;
-    std::optional<std::string> view_data_multihash;
-    std::optional<std::string> view_index_json;
-    std::vector<CanonicalRange> canonical_ranges;
-    bool allow_partial{false};
-    common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
-  };
+  using RegistrationCommitResult = components::RegistrationCommitResult;
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
 
@@ -391,41 +345,7 @@ class StoreEngine {
   // Utility methods
   [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Pending Memory Registration State (RFC-0006)
-  // ═══════════════════════════════════════════════════════════════════════════
-  struct PendingRegistrationEntry {
-    std::string registration_id;
-    std::string artifact_id;
-    std::string client_artifact_id;
-    int device_id{0};
-    uint64_t size_bytes{0};
-    std::string tensor_index_key;
-    std::optional<std::string> tensor_index_data;
-    std::string schema_version;
-    std::string encoding;
-    bool enable_p2p{true};
-    common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
-    std::shared_ptr<replica::Replica> replica; // Backing replica for memory ownership
-    void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
-    cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
-    std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
-    enum class Plan : uint8_t { COALESCED = 0, CPU = 1 } plan{Plan::COALESCED};
-
-    struct ViewState {
-      ViewRegistration options;
-      loader::BidirectionalViewPlan plan;
-      std::unique_ptr<loader::ViewIngestExecutor> executor;
-      uint64_t expected_view_bytes{0};
-      uint64_t ingested_bytes{0};
-      bool finalized{false};
-    };
-
-    std::unique_ptr<ViewState> view_state;
-  };
-
-  std::mutex pending_mutex_;
-  std::unordered_map<std::string, std::shared_ptr<PendingRegistrationEntry>> pending_regs_;
+  std::unique_ptr<components::ArtifactRegistrationManager> registration_manager_;
 
   // Worker identity (for Global Store registrations)
   std::string worker_id_;
@@ -449,6 +369,15 @@ class StoreEngine {
     p2p_port_ = p2p_port;
     if (global_store_client_) {
       global_store_client_->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
+    }
+    if (registration_manager_) {
+      components::WorkerIdentity identity{
+          .worker_id = worker_id_,
+          .node_id = node_id_,
+          .node_address = node_address_,
+          .grpc_port = grpc_port_,
+          .p2p_port = p2p_port_};
+      registration_manager_->set_worker_identity(std::move(identity));
     }
   }
 };

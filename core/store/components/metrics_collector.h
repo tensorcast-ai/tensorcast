@@ -72,6 +72,16 @@ class MetricsCollector {
   void record_p2p_transfer(size_t bytes_transferred, bool success);
 
   /**
+   * @brief Record the number of in-flight registrations managed by ARM.
+   */
+  void record_registration_pending(size_t pending_count);
+
+  /**
+   * @brief Record the latency of registration commits along with the result state.
+   */
+  void record_registration_commit(double duration_seconds, std::string_view result);
+
+  /**
    * @brief Record a memory eviction event.
    */
   void record_memory_eviction();
@@ -102,6 +112,7 @@ class MetricsCollector {
  private:
   // ObservableGauge callback trampoline
   static void cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void registration_pending_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
 
   // OTel Meter
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
@@ -109,11 +120,14 @@ class MetricsCollector {
   // Synchronous instruments
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> p2p_bytes_total_;
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> artifact_load_seconds_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> registration_commit_seconds_;
 
   // Async gauge for CPU memory available (exposes last observed value)
   // We keep the latest snapshot here; the ObservableGauge callback reads it.
   double cpu_available_bytes_last_ = 0.0;
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> cpu_memory_available_gauge_;
+  double registration_pending_last_ = 0.0;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> registration_pending_gauge_;
 };
 
 } // namespace tensorcast::store::components

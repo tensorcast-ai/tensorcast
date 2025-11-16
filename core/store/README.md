@@ -117,6 +117,7 @@ graph TB
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
     - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, and registers with Global Store.
   - `abort_registered_artifact(string_view registration_id)`
+  - Implementation is provided by `components::ArtifactRegistrationManager`, which owns pending registration state, TTL enforcement, view ingestion, and Global Store publication so `StoreEngine` only orchestrates dependencies.
 
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
