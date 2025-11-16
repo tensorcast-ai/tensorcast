@@ -20,7 +20,6 @@
 #include "core/common/trace/trace_macros.h"
 #include "core/store/components/eviction_service.h"
 #include "core/store/device_types.h"
-#include "core/store/loader/canonical_index.h"
 #include "core/store/loader/segment_plan_source.h"
 #include "core/store/loader/source_hash.h"
 #include "core/store/loader/verification_utils.h"
@@ -34,7 +33,7 @@ namespace tensorcast::store::components {
 
 namespace {
 
-uint64_t SumViewWriteBytes(const loader::ViewWritePlan& write_plan) {
+uint64_t sum_view_write_bytes(const loader::ViewWritePlan& write_plan) {
   uint64_t total = 0;
   for (const auto& chunk : write_plan.chunks) {
     total += chunk.length;
@@ -42,7 +41,7 @@ uint64_t SumViewWriteBytes(const loader::ViewWritePlan& write_plan) {
   return total;
 }
 
-std::vector<CanonicalRange> CanonicalRangesFromWritePlan(const loader::ViewWritePlan& write_plan) {
+std::vector<CanonicalRange> canonical_ranges_from_write_plan(const loader::ViewWritePlan& write_plan) {
   std::vector<CanonicalRange> ranges;
   ranges.reserve(write_plan.chunks.size());
   for (const auto& chunk : write_plan.chunks) {
@@ -76,7 +75,7 @@ std::vector<CanonicalRange> CanonicalRangesFromWritePlan(const loader::ViewWrite
   return merged;
 }
 
-std::string MakeRegistrationId() {
+std::string make_registration_id() {
   std::random_device rd;
   std::mt19937_64 gen(rd());
   std::uniform_int_distribution<uint64_t> dis;
@@ -199,8 +198,8 @@ absl::StatusOr<RegistrationBeginResult> ArtifactRegistrationManager::begin(const
       return plan_or.status();
     }
     view_plan = std::move(*plan_or);
-    expected_view_bytes = SumViewWriteBytes(view_plan->write);
-    canonical_ranges = CanonicalRangesFromWritePlan(view_plan->write);
+    expected_view_bytes = sum_view_write_bytes(view_plan->write);
+    canonical_ranges = canonical_ranges_from_write_plan(view_plan->write);
     uint64_t covered_bytes = 0;
     for (const auto& range : canonical_ranges) {
       covered_bytes += range.length;
@@ -287,7 +286,7 @@ absl::StatusOr<RegistrationBeginResult> ArtifactRegistrationManager::begin(const
   }
 
   auto entry = std::make_shared<PendingRegistrationContext>();
-  entry->registration_id = MakeRegistrationId();
+  entry->registration_id = make_registration_id();
   entry->artifact_id = reg.artifact_id;
   if (reg.client_artifact_id.has_value()) {
     entry->client_artifact_id = *reg.client_artifact_id;
@@ -528,19 +527,53 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
     data_multihash.clear();
   }
 
-  {
-    DeviceKey dev_key{
-        .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
-        .uuid = ""};
-    loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
+  DeviceKey dev_key{
+      .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
+      .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
+      .uuid = ""};
+  loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
+  const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
+  bool reuse_existing = false;
+  if (allow_idempotent) {
+    if (auto existing_or = replica_registry_->find(mi2_key); existing_or.ok()) {
+      reuse_existing = true;
+    }
+  }
+  if (!reuse_existing) {
     absl::Status emplace_status =
         replica_registry_->emplace(mi2_key, gsl::not_null<std::shared_ptr<replica::Replica>>{entry->replica});
     if (absl::IsAlreadyExists(emplace_status)) {
-      VLOG(1) << "mi2 mapping already present for artifact_id=" << entry->artifact_id;
+      if (allow_idempotent) {
+        reuse_existing = true;
+      } else {
+        VLOG(1) << "mi2 mapping already present for artifact_id=" << entry->artifact_id;
+      }
     } else if (!emplace_status.ok()) {
       return emplace_status;
     }
+  }
+
+  if (reuse_existing) {
+    const auto location = entry->plan == PendingRegistrationContext::Plan::kCpu ? common::memory::MemoryLocation::CPU
+                                                                                : common::memory::MemoryLocation::GPU;
+    release_replica_memory(entry->replica, location);
+    size_t pending_size_after = 0;
+    erase_pending(registration_id, &pending_size_after);
+    record_pending_gauge(pending_size_after);
+
+    RegistrationCommitResult result;
+    result.registration_id = std::string(registration_id);
+    result.artifact_id = entry->artifact_id;
+    result.device_id = entry->device_id;
+    result.size_bytes = entry->size_bytes;
+    result.existed = true;
+    result.index_multihash = index_multihash;
+    result.data_multihash = data_multihash;
+    result.schema_version = entry->schema_version;
+    result.encoding = entry->encoding;
+    result.id_kind = entry->id_kind;
+    record_commit_latency(*entry, "existed");
+    return result;
   }
 
   std::vector<std::string> remote_keys;
@@ -697,11 +730,7 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
   }
 
   size_t pending_size_after = 0;
-  {
-    std::lock_guard<std::mutex> lock(pending_mutex_);
-    pending_regs_.erase(std::string(registration_id));
-    pending_size_after = pending_regs_.size();
-  }
+  erase_pending(registration_id, &pending_size_after);
   record_pending_gauge(pending_size_after);
 
   RegistrationCommitResult result;

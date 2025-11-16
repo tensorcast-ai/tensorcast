@@ -40,11 +40,15 @@
 #include "core/store/loader/canonical_index.h"
 #include "core/store/loader/index_reader.h"
 #include "core/store/loader/safetensors_util.h"
+#include "core/store/loader/view_plan_source.h"
 #include "core/store/loader/view_planner.h"
+#include "core/store/loader/view_transform_executor.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
 #include "core/store/loader/source_hash.h"
 #include "core/store/loader/verification_utils.h"
-#include "core/store/loading/materialize_orchestrator.h"
+#include "core/store/loading/materialization/materialization_request.h"
+#include "core/store/loading/materialization/materialization_service.h"
+#include "core/store/loading/materialization/materialize_orchestrator.h"
 #include "core/store/loading/replica_registration_helper.h"
 #include "gsl/pointers"
 #include "opentelemetry/trace/provider.h"
@@ -62,8 +66,6 @@ using loading::ReplicaKey;
 using loading::ReplicaRegistrationHelper;
 using replica::MemoryState;
 using replica::Replica;
-
-namespace {
 
 std::optional<std::string> ComputeViewDataHash(
     replica::Replica& replica,
@@ -109,8 +111,6 @@ std::optional<std::string> ComputeViewDataHash(
   (void)gpu_guard;
   return *hash_or;
 }
-
-} // namespace
 
 // (hashing utilities moved to core/common/artifact_hash.*)
 // GPU eviction helper kept internal to this translation unit.
@@ -686,7 +686,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk_internal(
       if (index_bytes_or.ok()) {
         canonical_index_json = index_bytes_or.value();
         if (!computed_index_mh.has_value()) {
-          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+          auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(*canonical_index_json), "");
           if (index_mh_or.ok()) {
             computed_index_mh = *index_mh_or;
           } else {
@@ -1148,6 +1148,37 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
+loading::MaterializationDeps StoreEngine::make_materialization_deps() {
+  auto* registry_ptr = replica_registry_.get().get();
+  ABSL_CHECK_NE(registry_ptr, nullptr);
+  loading::MaterializationDeps deps(gsl::not_null<components::ReplicaRegistry*>{registry_ptr}, memory_pool_);
+  deps.artifact_chunk_bytes = artifact_chunk_bytes_;
+  deps.pinned_memory_timeout = pinned_memory_timeout_;
+  deps.num_threads = num_thread_;
+  deps.ingest_from_disk = [this](
+                              const std::string& artifact_identifier,
+                              const loading::DiskSource& source,
+                              const loading::ReplicaTarget& target,
+                              const loading::MaterializeHints& hints) {
+    return this->ingest_from_disk_internal(artifact_identifier, source, target, hints);
+  };
+  deps.compute_view_hash = [](replica::Replica& replica,
+                              MemoryLocation location,
+                              uint64_t view_size_bytes,
+                              std::optional<int> gpu_device_id) {
+    return ComputeViewDataHash(replica, location, view_size_bytes, std::move(gpu_device_id));
+  };
+  if (global_store_client_ && global_store_client_->is_connected()) {
+    deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
+      loading::MaterializeOrchestrator orchestrator(
+          gsl::not_null<loading::MaterializationBackend*>{this},
+          gsl::not_null<components::IGlobalStoreClient*>{global_store_client_.get()});
+      return orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
+    };
+  }
+  return deps;
+}
+
 std::shared_ptr<replica::Replica> StoreEngine::get_or_create_replica(
     const std::string& artifact_identifier,
     const replica::ReplicaConfig& config) {
@@ -1239,264 +1270,29 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
     const MaterializeHints& hints) {
-  const std::optional<loading::VariantIdentity>& variant = hints.variant;
-
-  std::string canonical_artifact_id;
-  if (variant.has_value()) {
-    if (variant->canonical_artifact_id.empty()) {
-      return absl::InvalidArgumentError("VariantIdentity must provide canonical_artifact_id when present");
-    }
-    if (!hints.artifact_id.empty() && hints.artifact_id != variant->canonical_artifact_id) {
-      return absl::InvalidArgumentError(
-          "MaterializeHints.artifact_id must match VariantIdentity.canonical_artifact_id");
-    }
-    canonical_artifact_id = variant->canonical_artifact_id;
-  } else {
-    canonical_artifact_id = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
+  auto request_or = loading::MaterializationRequest::Create(target_device, mode, hints, *device_manager_);
+  if (!request_or.ok()) {
+    return request_or.status();
   }
 
-  if (canonical_artifact_id.empty() && mode != MaterializeMode::COPY_ONLY) {
-    return absl::InvalidArgumentError("MaterializeHints must provide artifact_id or disk_path for LOAD modes");
-  }
+  loading::MaterializationService service(make_materialization_deps());
+  return service.Execute(request_or.value());
+}
 
-  const std::optional<std::string> requested_view_id =
-      variant.has_value() ? variant->view_id : std::optional<std::string>{};
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
+    const std::string& artifact_identifier,
+    const P2PSource& source,
+    const loading::ReplicaTarget& target,
+    const loading::MaterializeHints& hints) {
+  return ingest_from_p2p_internal(artifact_identifier, source, target, hints);
+}
 
-  // ────────────────────────────────────────────────────────────────────
-  // Validate target device early to avoid entering CUDA paths with
-  // invalid ordinals or unsupported device types.
-  // ────────────────────────────────────────────────────────────────────
-  if (target_device.type == DeviceType::GPU) {
-    const int num_gpus = device_manager_->get_num_gpus();
-    if (target_device.ordinal < 0 || target_device.ordinal >= num_gpus) {
-      return absl::InvalidArgumentError(
-          std::string("Invalid GPU device ordinal: ") + std::to_string(target_device.ordinal));
-    }
-  } else if (target_device.type == DeviceType::CPU) {
-    // CPU is supported – no additional validation required.
-  } else {
-    // For REMOTE/NONE/DISK etc. reject in this implementation.
-    return absl::InvalidArgumentError("Unsupported target device type for materialize_replica()");
-  }
-
-  // ────────────────────────────────────────────────────────────────────
-  // Fast-path: instance already present on the requested device.
-  // ────────────────────────────────────────────────────────────────────
-  const ReplicaKey dst_key{
-      .artifact_id = canonical_artifact_id,
-      .view_id = requested_view_id,
-      .device = target_device,
-      /*replica=*/.replica = 0};
-  if (auto existing_or = replica_registry_->find(dst_key); existing_or.ok()) {
-    const auto& replica = existing_or.value();
-
-    MemoryLocation dst_loc = (target_device.type == DeviceType::GPU) ? MemoryLocation::GPU : MemoryLocation::CPU;
-    std::optional<int> opt_dev;
-    if (dst_loc == MemoryLocation::GPU) {
-      opt_dev = target_device.ordinal;
-    }
-
-    auto fut = replica->ensure_loaded_async(dst_loc, num_thread_, opt_dev);
-
-    ReplicaHandle handle;
-    handle.replica_key = dst_key;
-    handle.ready_future = fut;
-    handle.cpu_state = replica->get_memory_state(MemoryLocation::CPU);
-    handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
-
-    if (dst_loc == MemoryLocation::GPU) {
-      const auto gpu_ptrs = replica->get_data_pointer(MemoryLocation::GPU);
-      handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
-
-      auto ipc_or = replica->get_memory_manager().get_ipc_handle();
-      if (ipc_or.ok()) {
-        std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
-      }
-    }
-    const auto& replica_view_plan = replica->view_plan();
-    if (replica_view_plan.has_value() && !replica_view_plan->is_identity) {
-      handle.view_index_json = replica_view_plan->view_index_json;
-      const uint64_t view_size = replica_view_plan->view_size_bytes;
-      if (view_size > 0) {
-        const bool target_is_gpu = (dst_loc == MemoryLocation::GPU);
-        const bool target_loaded = target_is_gpu ? handle.gpu_state == replica::MemoryState::LOADED
-                                                 : handle.cpu_state == replica::MemoryState::LOADED;
-        std::optional<int> gpu_device = target_is_gpu ? std::optional<int>(target_device.ordinal) : std::nullopt;
-        if (target_loaded) {
-          auto hash = ComputeViewDataHash(*replica, dst_loc, view_size, gpu_device);
-          if (hash.has_value()) {
-            handle.view_data_hash = std::move(hash);
-          }
-        }
-      }
-    }
-    return handle;
-  }
-
-  // Helper lambda: minimal disk-loading path.
-  auto load_from_disk = [&](const DeviceKey& dev_key) -> absl::StatusOr<loading::ReplicaHandle> {
-    // Guard: content-addressed IDs (mi2:...) are not paths.
-    if (absl::StartsWith(canonical_artifact_id, "mi2:")) {
-      return absl::FailedPreconditionError(
-          "LOAD_ONLY/disk fallback disabled for content-addressed artifact_id; Global Store routing required");
-    }
-    if (hints.disk_path.empty()) {
-      return absl::InvalidArgumentError(
-          "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
-    }
-
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
-
-    loading::ReplicaTarget target;
-    target.location.type =
-        (dev_key.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
-    target.location.device_id = dev_key.ordinal;
-
-    return ingest_from_disk_internal(canonical_artifact_id, disk_src, target, hints);
-  };
-
-  // ────────────────────────────────────────────────────────────────────
-  // Mode-specific handling
-  // ────────────────────────────────────────────────────────────────────
-  switch (mode) {
-    case MaterializeMode::COPY_ONLY: {
-      // COPY_ONLY is only meaningful for GPU targets – perform a local GPU→GPU copy.
-      if (target_device.type != DeviceType::GPU) {
-        return absl::InvalidArgumentError("COPY_ONLY mode requires a GPU target device");
-      }
-
-      // Require an explicit artifact identifier so we can locate a source instance.
-      // This avoids implicit coupling to disk_path or other hints and keeps COPY_ONLY semantics clear.
-      if (canonical_artifact_id.empty()) {
-        return absl::InvalidArgumentError("COPY_ONLY requires hints.artifact_id (canonical artifact identifier)");
-      }
-
-      const auto candidates = replica_registry_->find_by_artifact(canonical_artifact_id);
-      for (const auto& cand_key : candidates) {
-        if (cand_key.device.type != DeviceType::GPU) {
-          continue;
-        }
-        if (cand_key.view_id != requested_view_id) {
-          continue;
-        }
-
-        auto src_or = replica_registry_->find(cand_key);
-        if (!src_or.ok()) {
-          continue;
-        }
-        const auto& src_replica = src_or.value();
-        if (src_replica->get_memory_state(common::memory::MemoryLocation::GPU) != replica::MemoryState::LOADED) {
-          continue;
-        }
-
-        // Create destination replica configuration using an inline buffer source to
-        // avoid any dependency on on-disk paths when performing GPU→GPU copy.
-        // The inline buffer loader requires a known total size.
-        uint64_t expected_size = 0;
-        if (auto sz_or = src_replica->get_artifact_size(); sz_or.ok()) {
-          expected_size = *sz_or;
-        } else {
-          return sz_or.status();
-        }
-        loading::InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
-        replica::ReplicaConfig cfg{
-            .source = ib_source,
-            .artifact_identifier = canonical_artifact_id,
-            .device_type = DeviceType::GPU,
-            .local_device_id = target_device.ordinal,
-            .pinned_buffer_pool = memory_pool_,
-            .artifact_chunk_bytes = artifact_chunk_bytes_,
-            .expected_artifact_size = expected_size};
-        cfg.pinned_memory_timeout = pinned_memory_timeout_;
-        cfg.view_id = requested_view_id;
-        cfg.view_plan = src_replica->view_plan();
-        cfg.transform_placement = hints.variant ? hints.variant->placement : loading::TransformPlacement::kServer;
-
-        auto dst_or = replica::Replica::create(cfg);
-        if (!dst_or.ok()) {
-          return dst_or.status();
-        }
-        auto dst_replica = std::shared_ptr<replica::Replica>(std::move(dst_or.value()));
-        {
-          absl::Status emplace_status =
-              replica_registry_->emplace(dst_key, gsl::not_null<std::shared_ptr<replica::Replica>>{dst_replica});
-          if (absl::IsAlreadyExists(emplace_status)) {
-            VLOG(1) << "Replica already present for COPY_ONLY dst_key (will reuse existing instance): " << dst_key;
-          } else if (!emplace_status.ok()) {
-            return emplace_status;
-          }
-        }
-
-        absl::Status copy_st = dst_replica->copy_from(*src_replica);
-
-        std::promise<absl::Status> p;
-        p.set_value(copy_st);
-
-        ReplicaHandle handle;
-        handle.replica_key = dst_key;
-        handle.ready_future = p.get_future().share();
-        handle.cpu_state = dst_replica->get_memory_state(MemoryLocation::CPU);
-        handle.gpu_state = dst_replica->get_memory_state(MemoryLocation::GPU);
-        if (handle.gpu_state == MemoryState::LOADED) {
-          const auto gpu_ptrs = dst_replica->get_data_pointer(MemoryLocation::GPU);
-          handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
-
-          auto ipc_or = dst_replica->get_memory_manager().get_ipc_handle();
-          if (ipc_or.ok()) {
-            std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
-          }
-        }
-        const auto& dst_view_plan = dst_replica->view_plan();
-        if (dst_view_plan.has_value() && !dst_view_plan->is_identity) {
-          handle.view_index_json = dst_view_plan->view_index_json;
-          auto hash = ComputeViewDataHash(
-              *dst_replica,
-              MemoryLocation::GPU,
-              dst_view_plan->view_size_bytes,
-              std::optional<int>(target_device.ordinal));
-          if (hash.has_value()) {
-            handle.view_data_hash = std::move(hash);
-          }
-        }
-        return handle;
-      }
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "No suitable source instance for COPY_ONLY mode (artifact_id=",
-              canonical_artifact_id,
-              ", view_id=",
-              requested_view_id.has_value() ? *requested_view_id : std::string("<none>"),
-              ")"));
-    }
-
-    case MaterializeMode::LOAD_ONLY: {
-      auto handle_or = load_from_disk(target_device);
-      if (!handle_or.ok()) {
-        VLOG(1) << "StoreEngine::materialize_replica LOAD_ONLY artifact=" << canonical_artifact_id
-                << " device=" << target_device.ordinal << " status=" << handle_or.status();
-      }
-      return handle_or;
-    }
-
-    case MaterializeMode::AUTO: {
-      if (global_store_client_ && global_store_client_->is_connected() && !canonical_artifact_id.empty()) {
-        loading::MaterializeOrchestrator orchestrator(
-            gsl::not_null<StoreEngine*>{this},
-            gsl::not_null<components::IGlobalStoreClient*>{global_store_client_.get()});
-        auto orchestrated_or = orchestrator.run(canonical_artifact_id, target_device, hints);
-        if (orchestrated_or.ok()) {
-          return *orchestrated_or;
-        }
-        LOG(WARNING) << "MaterializeOrchestrator failed: " << orchestrated_or.status() << "; falling back to disk load";
-      }
-      return absl::FailedPreconditionError(
-          "AUTO materialize_replica requires a canonical artifact identifier (mi2:...) with Global Store routing or an explicit hints.disk_path");
-    }
-  }
-
-  // Should be unreachable.
-  return absl::InternalError("Invalid MaterializeMode");
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk(
+    const std::string& artifact_identifier,
+    const loading::DiskSource& source,
+    const loading::ReplicaTarget& target,
+    const loading::MaterializeHints& hints) {
+  return ingest_from_disk_internal(artifact_identifier, source, target, hints);
 }
 
 // ---------------------------------------------------------------------------
@@ -1985,6 +1781,66 @@ std::vector<replica::ChunkState> StoreEngine::get_chunk_states_cpu_uma(std::stri
   auto& rep = *rep_or;
   auto& mm = rep->get_memory_manager();
   return mm.get_chunk_states_uma(common::memory::MemoryLocation::CPU);
+}
+
+absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
+    std::string_view canonical_index_json,
+    const loader::ViewSpec& spec) {
+  return loader::ViewPlanner::compute_view_plan(canonical_index_json, spec);
+}
+
+bool StoreEngine::view_plan_allows_alias(const loader::ViewPlan& plan) {
+  if (plan.selection.total_bytes == 0) {
+    return false;
+  }
+  if (plan.selection.requires_materialization) {
+    return false;
+  }
+  if (plan.transform.requires_materialization || !plan.transform.tensors.empty()) {
+    return false;
+  }
+  return plan.selection.is_contiguous && plan.selection.is_segment_aligned;
+}
+
+absl::StatusOr<std::string> StoreEngine::compute_view_data_hash_from_source(
+    loader::SeekableSource& base_source,
+    const loader::ViewPlan& plan,
+    size_t leaf_chunk_bytes) {
+  if (plan.selection.total_bytes == 0) {
+    return absl::InvalidArgumentError("view plan contains no data to hash");
+  }
+  if (leaf_chunk_bytes == 0) {
+    return absl::InvalidArgumentError("leaf_chunk_bytes must be > 0");
+  }
+  if (plan.selection.total_bytes > std::numeric_limits<size_t>::max()) {
+    return absl::OutOfRangeError("view plan exceeds host memory limits");
+  }
+
+  loader::ViewPlanSource view_source(gsl::not_null<loader::SeekableSource*>{&base_source}, plan.selection);
+  const size_t total_bytes = static_cast<size_t>(plan.selection.total_bytes);
+
+  if (!plan.transform.requires_materialization && plan.transform.tensors.empty()) {
+    return loader::compute_data_multihash_from_seekable_source(
+        view_source, plan.selection.total_bytes, leaf_chunk_bytes);
+  }
+
+  std::vector<uint8_t> staging(total_bytes);
+  auto read_or = view_source.read_at(0, staging.data(), staging.size());
+  if (!read_or.ok()) {
+    return read_or.status();
+  }
+  if (*read_or != staging.size()) {
+    return absl::DataLossError("short read while materializing view for hashing");
+  }
+
+  absl::Status transform_status =
+      loader::execute_transform(plan.transform, MemoryLocation::CPU, staging.data(), /*device_id=*/-1);
+  if (!transform_status.ok()) {
+    return transform_status;
+  }
+
+  return loader::compute_data_multihash_from_cpu_memory(
+      gsl::not_null<const void*>{staging.data()}, plan.selection.total_bytes, leaf_chunk_bytes);
 }
 
 } // namespace tensorcast::store

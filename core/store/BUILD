@@ -264,7 +264,23 @@ cc_test(
 
 # ========== Loading orchestration ==========
 
-# materialize_orchestrator is now part of store_engine target to avoid circular dependency
+# materialize_orchestrator now depends on MaterializationBackend to avoid circular dependencies.
+
+sc_cc_library(
+    name = "materialize_orchestrator",
+    srcs = ["loading/materialization/materialize_orchestrator.cc"],
+    hdrs = ["loading/materialization/materialize_orchestrator.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":global_store_client",
+        ":loading_spec",
+        ":materialization_backend",
+        ":replica_registration_helper",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+        "@gsl",
+    ],
+)
 
 sc_cc_library(
     name = "chunk_aware_loading_strategy",
@@ -299,6 +315,79 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "materialization_request",
+    srcs = ["loading/materialization/materialization_request.cc"],
+    hdrs = ["loading/materialization/materialization_request.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_manager",
+        ":device_types",
+        ":loading_spec",
+        "//core/common:memory_location_lib",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_service",
+    srcs = ["loading/materialization/materialization_service.cc"],
+    hdrs = ["loading/materialization/materialization_service.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_types",
+        ":loading_spec",
+        ":materialization_request",
+        ":replica_registration_helper",
+        ":replica_registry",
+        "//core/common:memory_location_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/replica",
+        "@abseil-cpp//absl/strings",
+        "@gsl",
+    ],
+)
+
+sc_header_only_library(
+    name = "materialization_backend",
+    hdrs = ["loading/materialization/materialization_backend.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":loading_spec",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "materialization_service_test",
+    srcs = ["loading/materialization/materialization_service_test.cc"],
+    deps = [
+        ":device_manager",
+        ":materialization_request",
+        ":materialization_service",
+        ":replica_registry",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
+
+cc_test(
+    name = "materialization_request_test",
+    srcs = ["loading/materialization/materialization_request_test.cc"],
+    deps = [
+        ":device_manager",
+        ":materialization_request",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+sc_cc_library(
     name = "view_utils",
     srcs = ["view_utils.cc"],
     hdrs = ["view_utils.h"],
@@ -315,14 +404,8 @@ sc_cc_library(
 
 sc_cc_library(
     name = "store_engine",
-    srcs = [
-        "loading/materialize_orchestrator.cc",
-        "store_engine.cc",
-    ],
-    hdrs = [
-        "loading/materialize_orchestrator.h",
-        "store_engine.h",
-    ],
+    srcs = ["store_engine.cc"],
+    hdrs = ["store_engine.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":artifact_registration_manager",
@@ -334,6 +417,10 @@ sc_cc_library(
         ":eviction_service",
         ":global_store_client",
         ":loading_spec",
+        ":materialization_backend",
+        ":materialization_request",
+        ":materialization_service",
+        ":materialize_orchestrator",
         ":metrics_collector",
         ":replica_registration_helper",
         ":replica_registry",
