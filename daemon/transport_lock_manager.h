@@ -11,7 +11,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
-#include "core/store/loading/loading_spec.h" // ReplicaKey
+#include "core/store/materialization/contracts/loading_spec.h" // ReplicaKey
 
 namespace tensorcast::daemon {
 
@@ -83,6 +83,7 @@ class TransportLockManager {
   static std::chrono::steady_clock::time_point now() {
     return std::chrono::steady_clock::now();
   }
+
   static bool expired(const LockEntry& e) {
     return now() >= e.expiry;
   }

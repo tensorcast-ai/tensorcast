@@ -3,7 +3,7 @@ slug: 0016-artifact-view-v1
 title: Variant-Aware Artifact Views (Narrow & Transpose)
 areas: ["core","daemon","global_store","sdk"]
 related_code:
-  - core/store/loader/**
+  - core/store/materialization/dataplane/**
   - daemon/**
   - tensorcast/api/**
 links:
@@ -149,7 +149,7 @@ Validation & Errors
 ## 2. Core Components
 
 ```
-core/store/loader/
+core/store/materialization/dataplane/
   canonical_index.{h,cc}        // v3 stabiliser (existing, bumped)
   segment_plan_source.{h,cc}    // DATA & PAD plan (existing)
   view_planner.{h,cc}           // NEW  – View → {TargetLayout,SelectionPlan,TransformPlan}

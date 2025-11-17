@@ -31,11 +31,11 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/common/artifact_verification.h"
-#include "core/store/loader/canonical_index.h"
-#include "core/store/loader/file_partition_source.h"
-#include "core/store/loader/safetensors_util.h"
-#include "core/store/loader/source_hash.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
+#include "core/store/materialization/dataplane/metadata/safetensors_util.h"
+#include "core/store/materialization/dataplane/metadata/source_hash.h"
+#include "core/store/materialization/dataplane/sources/file_partition_source.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 
 namespace py = pybind11;
 

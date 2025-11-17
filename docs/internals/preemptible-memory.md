@@ -23,7 +23,7 @@ areas: ["core", "daemon"]
   CPU/GPU 副本生命周期的权威账本，负责 `mmap`/`mlock`/`mprotect`/`madvise`、状态跟踪、Direct Write 授权、Pin Lease、选取可抢占 chunk 并更新 `ChunkState`。
 - **ReplicaLoadController (`core/store/replica/replica_load_controller.*`)**  
   面向加载策略和传输服务的统一入口，在 CPU/GPU 加载阶段调用 UMA，触发 `mark_cpu_preemptible`。
-- **ChunkAwareLoadingStrategy (`core/store/loading/chunk_aware_loading_strategy.cc`)**  
+- **ChunkAwareLoadingStrategy (`core/store/materialization/planning/chunk_aware_strategy.cc`)**  
   根据加载计划决定何时、以何种比例将 CPU chunk 标记为可抢占。
 - **Export Registry / Pin Lease (`UnifiedMemoryAuthority::set_exported` + VS `pin_range`)**  
   当 chunk 被导出给通信层（P2P、RDMA、CUDA IPC）时，会持有 pin lease，阻止 UMA 将其标记为可抢占。
@@ -34,7 +34,7 @@ areas: ["core", "daemon"]
 
 以下条目直接对应当前代码库（2025Q1）的行为，便于读者将文档与实现对照：
 
-- **加载触发点**：`core/store/loading/chunk_aware_loading_strategy.cc` 在 CPU 侧加载完成后固定调用 `mark_cpu_preemptible(0.5F)`，而当 GPU 目标加载完成且 `is_gpu_loading_complete()` 返回真时，再调用 `mark_cpu_preemptible(1.0F)`。`ReplicaLoadController::finalize_copy_state_` 还会以 `EvictCPU` 策略调用 `UnifiedMemoryAuthority::post_gpu_load_policy`，该策略最终通过 `CpuArena::evict_tail_bytes` 对尾部 chunk 调 `MADV_PAGEOUT`，并同步 UMA 账本。
+- **加载触发点**：`core/store/materialization/planning/chunk_aware_strategy.cc` 在 CPU 侧加载完成后固定调用 `mark_cpu_preemptible(0.5F)`，而当 GPU 目标加载完成且 `is_gpu_loading_complete()` 返回真时，再调用 `mark_cpu_preemptible(1.0F)`。`ReplicaLoadController::finalize_copy_state_` 还会以 `EvictCPU` 策略调用 `UnifiedMemoryAuthority::post_gpu_load_policy`，该策略最终通过 `CpuArena::evict_tail_bytes` 对尾部 chunk 调 `MADV_PAGEOUT`，并同步 UMA 账本。
 - **UMA 标记逻辑**：`ReplicaLoadController::mark_cpu_preemptible` 只检查 ratio 与分配是否存在，随后调用 `UnifiedMemoryAuthority::mark_cpu_chunks_preemptible`。UMA 将 `floor(ratio * total_chunks)` 的 **前缀 chunk** 打包成索引数组，交给 `CpuArena::mark_preemptible` 发出 `madvise`，最后把相应 `chunk_records[idx].cpu` 置为 `PREEMPTIBLE` 并递增版本。
 - **Arena 调用**：`CpuArena::mark_preemptible` 会在持有分配锁的同时逐个 chunk 执行 `madvise(MADV_FREE)`，若返回 `EINVAL` 或能力被禁用则切换到 `MADV_DONTNEED`。Ledger 更新由 UMA 直接完成，`snapshot_cpu_chunks()` 能立即看到状态。
 - **缺失检测**：`UnifiedMemoryAuthority::get_missing_chunks_locked_` 将 `ChunkState::PREEMPTIBLE` 视为“可用”，CPU 路径从不生成 `ChunkState::EVICTED`。因此即便页被内核实际释放，也不会自动重新加载；只有显式调用 `post_gpu_load_policy(EvictCPU)` 或 `release` 才会触发更激进的回收。
@@ -221,8 +221,8 @@ TensorCast 的 P2P 传输链路由 UMA、MemoryExportRegistry 与 Communicator �
 
 - 设计背景：`docs/designs/0002-vs-uma-transfer-architecture.md`、`docs/designs/0012-uma-dvmp-transactional-transfer.md`
 - UMA 核心逻辑：`core/store/replica/unified_memory_authority.cc`
-- 加载策略：`core/store/loading/chunk_aware_loading_strategy.cc`
-- Global Store 协同：`core/store/loading/materialization/materialize_orchestrator.cc`、`core/store/loading/replica_registration_helper.cc`
+- 加载策略：`core/store/materialization/planning/chunk_aware_strategy.cc`
+- Global Store 协同：`core/store/materialization/control/materialize_orchestrator.cc`、`core/store/materialization/control/replica_registration_helper.cc`
 - P2P 导出：`core/store/replica/memory_export_registry.cc`、`core/communicator/engine/engine.h`
 - 状态枚举定义：`core/store/replica/chunk_state.h`
 - Telemetry 访问：`StoreEngine::get_chunk_states_telemetry`、`UnifiedMemoryAuthority::snapshot_cpu_chunks`

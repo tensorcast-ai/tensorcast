@@ -4,7 +4,7 @@ title: 统一内存权威 V3 与内存系统重构（设计）
 related_code:
   - "core/common/memory/*"
   - "core/store/replica/*"
-  - "core/store/loader/*"
+  - "core/store/materialization/dataplane/*"
   - "core/communicator/*"
 links:
   plan: ../plans/0012-sub-0-unified-memory-architecture-v3.md

@@ -16,15 +16,15 @@ This document explains the internal implementation of the C++ Store Engine based
 Key files:
 - StoreEngine: core/store/store_engine.h, core/store/store_engine.cc
 - Replica + ReplicaLoadController: core/store/replica/*
-- Loaders and pump: core/store/loader/*
-- View planning + execution: core/store/loader/view_planner.{h,cc}, core/store/loader/view_plan_source.{h,cc}
+- Loaders and pump: core/store/materialization/dataplane/*
+- View planning + execution: core/store/materialization/dataplane/view/{view_planner,view_plan_source}.{h,cc}
 - Service helpers:
-  - IndexService: core/store/loader/index_reader.{h,cc}
-  - VerificationService: core/store/loader/verification_utils.{h,cc}
+  - IndexService: core/store/materialization/dataplane/metadata/index_reader.{h,cc}
+  - VerificationService: core/store/materialization/dataplane/verification/verification_utils.{h,cc}
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
 - Components: core/store/components/*
-- Types: core/store/loading/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
+- Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
 ## High-level Architecture
 
@@ -130,7 +130,7 @@ graph TB
       - Selection rule when multiple replicas exist: prefer a CPU instance if present; otherwise choose the GPU instance with the smallest device ordinal.
 
 - View registration (v1.5):
-  - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/loader::ViewPlanner`.
+  - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/materialization/dataplane/view::ViewPlanner`.
   - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
   - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
 
@@ -395,7 +395,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 ## Key Types and Contracts
 
 - `DeviceKey` (core/store/device_types.h): logical device id `{type, ordinal, uuid}` used across APIs.
-- `ReplicaKey` (core/store/loading/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
+- `ReplicaKey` (core/store/materialization/contracts/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
 - `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `CPU`, `DISK`, `REMOTE`.
 - `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, optional view metadata, and a `ready_future`.
 
@@ -403,7 +403,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 
 - Disk → GPU: core/store/store_engine_test.cc
 - P2P (TCP) → GPU with communicator: core/store/store_engine_p2p_loader_test.cc
-- Streaming and sinks: core/store/loader/*_test.cc
+- Streaming and sinks: core/store/materialization/dataplane/**/tests/*_test.cc
 - UMA/VS chunk semantics and locking: exercised through ReplicaLoadController and loaders
 
 ## Notes and Limitations

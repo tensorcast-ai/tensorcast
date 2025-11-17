@@ -17,7 +17,7 @@
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/cuda_api.h"
-#include "core/store/loader/source_hash.h"
+#include "core/store/materialization/dataplane/metadata/source_hash.h"
 
 namespace tc = tensorcast;
 

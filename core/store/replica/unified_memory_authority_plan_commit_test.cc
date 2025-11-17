@@ -11,7 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/common/const/granularity.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 
 namespace tensorcast::store::replica {
 using ::tensorcast::DeviceType;

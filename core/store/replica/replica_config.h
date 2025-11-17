@@ -9,8 +9,8 @@
 #include "core/common/const/granularity.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/store/loader/view_planner.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "gsl/pointers"
 
 // No forward declarations from unrelated namespaces here

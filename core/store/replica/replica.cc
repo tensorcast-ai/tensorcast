@@ -11,12 +11,12 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-#include "core/store/loader/disk_loader.h"
-#include "core/store/loader/inline_buffer_loader.h"
-#include "core/store/loader/loader.h"
-#include "core/store/loader/p2p_loader.h"
-#include "core/store/loader/view_plan_source.h"
-#include "core/store/loader/view_transform_executor.h"
+#include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
+#include "core/store/materialization/dataplane/loaders/disk_loader.h"
+#include "core/store/materialization/dataplane/loaders/p2p_loader.h"
+#include "core/store/materialization/dataplane/view/view_plan_source.h"
+#include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
 
 namespace tensorcast::store::replica {

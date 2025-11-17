@@ -17,12 +17,12 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/transfer_constants.h"
 #include "core/store/replica/unified_memory_authority.h"
 // Prefer explicit includes over forward declarations
-#include "core/store/loader/sink.h"
-#include "core/store/loader/source.h"
+#include "core/store/materialization/dataplane/contracts/sink.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
 
 namespace tensorcast::store::replica {
 

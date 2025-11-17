@@ -16,7 +16,7 @@
 #include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 #include "core/testing/common.h"
