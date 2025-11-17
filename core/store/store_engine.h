@@ -21,6 +21,7 @@
 #include "core/store/components/registration/artifact_registration_manager.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/loading/loading_spec.h"
+#include "core/store/loading/materialization/materialization_backend.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
@@ -31,7 +32,7 @@
 namespace tensorcast::store {
 
 namespace loading {
-class MaterializeOrchestrator;
+struct MaterializationDeps;
 } // namespace loading
 
 namespace loader {
@@ -43,9 +44,7 @@ class ViewIngestExecutor;
 class SeekableSource;
 } // namespace loader
 
-class StoreEngine {
-  friend class loading::MaterializeOrchestrator;
-
+class StoreEngine : public loading::MaterializationBackend {
  public:
   // ═══════════════════════════════════════════════════════════════════════════
   // Type Definitions (using new unified type system)
@@ -82,7 +81,7 @@ class StoreEngine {
   // New materialize_replica() API (multi-device binding)
   // ─────────────────────────────────────────────────────────────────────────
 
-  enum class MaterializeMode : uint8_t { AUTO, COPY_ONLY, LOAD_ONLY };
+  using MaterializeMode = loading::MaterializeMode;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Lightweight handle that callers receive from materialize_replica().
@@ -95,6 +94,19 @@ class StoreEngine {
       const DeviceKey& target_device,
       MaterializeMode mode = MaterializeMode::AUTO,
       const loading::MaterializeHints& hints = {});
+
+  // loading::MaterializationBackend
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
+      const std::string& artifact_identifier,
+      const P2PSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints) override;
+
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
+      const std::string& artifact_identifier,
+      const loading::DiskSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints) override;
 
   // View planning/execution helpers (variant-aware path)
   static absl::StatusOr<loader::ViewPlan> compute_view_plan(
@@ -210,7 +222,7 @@ class StoreEngine {
   // `ReplicaKey.artifact_id` is published.
   [[nodiscard]] absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
-      std::string_view artifact_id_override = {});
+      std::string_view artifact_id_override = {}) override;
 
   // Deregister a memory replica from Global Store using worker identity.
   [[nodiscard]] absl::Status unregister_replica_from_global_store(std::string_view artifact_id, int device_id);
@@ -335,6 +347,7 @@ class StoreEngine {
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
+  [[nodiscard]] loading::MaterializationDeps make_materialization_deps();
 
   // Memory management helpers
   absl::Status try_evict_memory_for_replica(size_t required_size);

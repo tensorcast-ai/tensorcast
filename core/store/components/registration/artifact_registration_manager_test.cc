@@ -19,6 +19,8 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/common/cuda_api.h"
+#include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/metrics_collector.h"
@@ -141,6 +143,18 @@ class RegistrationManagerTestHarness {
     return *manager_;
   }
 
+  void fill_last_replica_gpu(uint8_t pattern, size_t num_bytes) {
+    REQUIRE(last_replica_);
+    auto ptrs = last_replica_->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
+    REQUIRE_FALSE(ptrs.empty());
+    auto set_status = cuda::set_device(last_replica_->device().ordinal);
+    REQUIRE(set_status.ok());
+    auto status = cuda::memset(ptrs[0], pattern, num_bytes);
+    REQUIRE(status.ok());
+    auto sync_status = cuda::device_synchronize();
+    REQUIRE(sync_status.ok());
+  }
+
  private:
   static constexpr size_t kPoolBytes = 8ULL * 1024 * 1024;
   static constexpr size_t kSliceBytes = 1ULL * 1024 * 1024;
@@ -234,6 +248,29 @@ TEST_CASE("ArtifactRegistrationManager enforces TTL and honors keep-alive", "[re
   absl::SleepFor(absl::Milliseconds(20));
   auto keep_commit_or = harness.manager().commit(keep_begin_or->registration_id);
   REQUIRE(keep_commit_or.ok());
+}
+
+TEST_CASE("ArtifactRegistrationManager reports existed for duplicate commits", "[registration][dedupe]") {
+  RegistrationManagerTestHarness harness;
+  const std::string canonical_json = BuildCanonicalIndexJson("dup_tensor", /*element_count=*/4);
+  auto reg = MakeBaseRegistration("dedupe", canonical_json, /*total_bytes=*/16);
+
+  auto begin1 = harness.manager().begin(reg);
+  REQUIRE(begin1.ok());
+  harness.fill_last_replica_gpu(/*pattern=*/0x3C, reg.total_size_bytes);
+  auto commit1 = harness.manager().commit(begin1->registration_id);
+  REQUIRE(commit1.ok());
+  CHECK_FALSE(commit1->existed);
+
+  auto begin2 = harness.manager().begin(reg);
+  REQUIRE(begin2.ok());
+  harness.fill_last_replica_gpu(/*pattern=*/0x3C, reg.total_size_bytes);
+  auto commit2 = harness.manager().commit(begin2->registration_id);
+  REQUIRE(commit2.ok());
+  CHECK(commit2->existed);
+  CHECK(commit2->artifact_id == commit1->artifact_id);
+  CHECK(commit2->index_multihash == commit1->index_multihash);
+  CHECK(commit2->data_multihash == commit1->data_multihash);
 }
 
 TEST_CASE("ArtifactRegistrationManager abort removes pending context", "[registration][abort]") {

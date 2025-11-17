@@ -3,11 +3,12 @@
 #pragma once
 
 #include <string_view>
+
 #include "absl/status/statusor.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/store_engine.h"
+#include "core/store/loading/materialization/materialization_backend.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::loading {
@@ -18,7 +19,9 @@ namespace tensorcast::store::loading {
 // StoreEngine::materialize_replica() when mode == AUTO.
 class MaterializeOrchestrator {
  public:
-  MaterializeOrchestrator(gsl::not_null<StoreEngine*> store, gsl::not_null<components::IGlobalStoreClient*> gs_client);
+  MaterializeOrchestrator(
+      gsl::not_null<MaterializationBackend*> backend,
+      gsl::not_null<components::IGlobalStoreClient*> gs_client);
 
   // Execute the preparation logic.
   absl::StatusOr<ReplicaHandle> run(
@@ -27,7 +30,7 @@ class MaterializeOrchestrator {
       const MaterializeHints& hints);
 
  private:
-  gsl::not_null<StoreEngine*> store_;
+  gsl::not_null<MaterializationBackend*> backend_;
   gsl::not_null<components::IGlobalStoreClient*> gs_client_;
 };
 

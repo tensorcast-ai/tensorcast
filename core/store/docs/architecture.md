@@ -123,7 +123,7 @@ graph TB
 - Disk fallback when P2P unavailable
 - Replica registration after successful loading
 
-- Source: `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
+- Source: `core/store/loading/materialization/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
 
 ```cpp
 class StoreEngine {
@@ -508,7 +508,7 @@ sequenceDiagram
     CS->>User: ReplicaHandle{replica_key, ready_future}
 ```
 
-- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
+- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialization/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
 
 ### P2P Loading Flow with Communicator
 
@@ -646,7 +646,7 @@ The system is designed with multiple extension points to support future requirem
 ### Service Architecture
 - **TransferService**: Manages data transfers between locations — `core/store/replica/transfer_service.{h,cc}`
 - **MemoryExportRegistry**: Handles P2P memory registration/export — `core/store/replica/memory_export_registry.h`
-- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/loading/materialize_orchestrator.{h,cc}`
+- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/loading/materialization/materialize_orchestrator.{h,cc}`
 - **MetricsCollector**: Tracks performance and resource usage — `core/store/components/metrics_collector.{h,cc}`
 - **Verification Metadata Coordination**: `core/store/loader/verification_utils.{h,cc}` provides the per-artifact `VerificationMetadataGuard`, in-process metadata cache, atomic write helper (`open` → `write` → `fsync` → `rename` + directory sync), and structured logging hooks (`verification_metadata_write_{succeeded,failed}`). `core/store/replica/transfer_service.cc` synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so verification always runs on fully materialised GPU buffers. Regression coverage lives in `core/store/loader:verification_utils_test` and `core/store:multi_gpu_verification_race_test`.
 

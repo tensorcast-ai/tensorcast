@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/loading/materialize_orchestrator.h"
+#include "core/store/loading/materialization/materialize_orchestrator.h"
 
 #include <filesystem>
 #include "absl/log/log.h"
@@ -8,15 +8,13 @@
 #include "absl/strings/str_cat.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/loading/loading_spec.h"
-#include "core/store/loading/replica_registration_helper.h"
-#include "core/store/store_engine.h"
 
 namespace tensorcast::store::loading {
 
 MaterializeOrchestrator::MaterializeOrchestrator(
-    gsl::not_null<StoreEngine*> store,
+    gsl::not_null<MaterializationBackend*> backend,
     gsl::not_null<components::IGlobalStoreClient*> gs_client)
-    : store_(store), gs_client_(gs_client) {}
+    : backend_(backend), gs_client_(gs_client) {}
 
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     std::string_view artifact_id,
@@ -89,7 +87,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
                                                                    : common::memory::MemoryLocation::CPU;
     target.location.device_id = target_device.ordinal;
 
-    auto load_or = store_->ingest_from_p2p_internal(std::string(artifact_id), p2p_src, target, hints);
+    auto load_or = backend_->ingest_from_p2p(std::string(artifact_id), p2p_src, target, hints);
     if (load_or.ok()) {
       // Notify GS that transport finished
       absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
@@ -101,7 +99,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       // and computed key. This avoids placeholder worker IDs and keeps
       // registrations consistent with WorkerLifecycleManager.
       const auto& handle = *load_or;
-      absl::Status reg_status = store_->register_replica_with_global_store(handle.key());
+      absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
       if (!reg_status.ok()) {
         LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
       }
@@ -142,12 +140,12 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
                                                                  : common::memory::MemoryLocation::CPU;
   target.location.device_id = target_device.ordinal;
 
-  auto disk_or = store_->ingest_from_disk_internal(std::string(artifact_id), disk_src, target, hints);
+  auto disk_or = backend_->ingest_from_disk(std::string(artifact_id), disk_src, target, hints);
   if (disk_or.ok()) {
     // Register with Global Store using the engine helper, overriding the
     // canonical artifact id for downstream discovery.
     const auto& handle = *disk_or;
-    absl::Status reg_status = store_->register_replica_with_global_store(handle.key());
+    absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
     if (!reg_status.ok()) {
       LOG(WARNING) << "register_replica_with_global_store (disk fallback) returned error: " << reg_status;
     }

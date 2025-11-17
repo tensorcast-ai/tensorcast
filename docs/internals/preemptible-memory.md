@@ -222,7 +222,7 @@ TensorCast 的 P2P 传输链路由 UMA、MemoryExportRegistry 与 Communicator �
 - 设计背景：`docs/designs/0002-vs-uma-transfer-architecture.md`、`docs/designs/0012-uma-dvmp-transactional-transfer.md`
 - UMA 核心逻辑：`core/store/replica/unified_memory_authority.cc`
 - 加载策略：`core/store/loading/chunk_aware_loading_strategy.cc`
-- Global Store 协同：`core/store/loading/materialize_orchestrator.cc`、`core/store/loading/replica_registration_helper.cc`
+- Global Store 协同：`core/store/loading/materialization/materialize_orchestrator.cc`、`core/store/loading/replica_registration_helper.cc`
 - P2P 导出：`core/store/replica/memory_export_registry.cc`、`core/communicator/engine/engine.h`
 - 状态枚举定义：`core/store/replica/chunk_state.h`
 - Telemetry 访问：`StoreEngine::get_chunk_states_telemetry`、`UnifiedMemoryAuthority::snapshot_cpu_chunks`
