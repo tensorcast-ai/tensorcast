@@ -26,7 +26,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"

@@ -4,7 +4,7 @@ title: Deterministic Verification Metadata for Multi-GPU Loads
 status: implemented
 areas: ["core"]
 related_code:
-  - core/store/loader/**
+  - core/store/materialization/dataplane/**
   - core/store/replica/**
   - core/common/artifact_verification.cc
 links:
@@ -53,7 +53,7 @@ flowchart LR
     F --> G["Consumers<br>(subsequent loads / P2P)"]
 ```
 
-- `VerificationMetadataGuard` in `core/store/loader/verification_utils.{h,cc}` provides `ScopedLock` backed by an `absl::Mutex` keyed on canonical artifact identifiers (recovered from `artifact_descriptor.json` when present, otherwise the canonicalised artifact path). Guard instances warn once when wait time exceeds 100 ms.
+- `VerificationMetadataGuard` in `core/store/materialization/dataplane/verification/verification_utils.{h,cc}` provides `ScopedLock` backed by an `absl::Mutex` keyed on canonical artifact identifiers (recovered from `artifact_descriptor.json` when present, otherwise the canonicalised artifact path). Guard instances warn once when wait time exceeds 100 ms.
 - `reuse_or_generate_verification_json` acquires the guard before reads/writes so only one load manipulates metadata at a time. In-process cache entries (keyed by artifact + byte_space) eliminate redundant hashing inside a single process; `ClearVerificationMetadataCacheForTesting()` resets the cache for stress tests.
 - Atomic persistence uses a deterministic temp path `<name>.tmp.<pid>.<nonce>`, writes via POSIX `open`/`write`, flushes with `fsync`, closes the descriptor, and atomically renames to the final target. The parent directory is `fsync`-ed to guarantee durability. Guard RAII ensures readers either see the previous valid file or block until the new blob commits.
 
@@ -103,20 +103,20 @@ flowchart LR
 
 # Testing
 
-- `bazel test //core/store/loader:verification_utils_test` — adds atomic persistence stress, logging assertions, and cache-clear hooks.
+- `bazel test //core/store/materialization/dataplane:verification_utils_test` — adds atomic persistence stress, logging assertions, and cache-clear hooks.
 - `bazel test //core/store:multi_gpu_verification_race_test` — multi-threaded guard contention regression that mirrors concurrent GPU loads.
 
 # References
 
-- `core/store/loader/verification_utils.cc`
+- `core/store/materialization/dataplane/verification/verification_utils.cc`
 - `core/store/replica/transfer_service.cc`
-- `core/store/loader:verification_utils_test`
+- `core/store/materialization/dataplane:verification_utils_test`
 - `core/store:multi_gpu_verification_race_test`
 - `core/common/artifact_verification.cc`
 
 # References
 
-- `core/store/loader/verification_utils.cc`
+- `core/store/materialization/dataplane/verification/verification_utils.cc`
 - `core/store/replica/replica.cc`
 - `core/common/artifact_verification.cc`
 - `docs/designs/0019-store-engine-modularization.md`

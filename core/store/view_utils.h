@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "absl/types/span.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 
 namespace tensorcast::store::view {
 

@@ -31,25 +31,25 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/communicator/misc/common.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
 // RFC-0007 helpers for safetensors canonical index
 #include <nlohmann/json.hpp>
 #include "core/store/components/eviction_service.h"
-#include "core/store/loader/canonical_index.h"
-#include "core/store/loader/index_reader.h"
-#include "core/store/loader/safetensors_util.h"
-#include "core/store/loader/view_plan_source.h"
-#include "core/store/loader/view_planner.h"
-#include "core/store/loader/view_transform_executor.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
+#include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/materialization/dataplane/metadata/safetensors_util.h"
+#include "core/store/materialization/dataplane/view/view_plan_source.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_transform_executor.h"
 // Unified hashing over SeekableSource for CPU/GPU/P2P
-#include "core/store/loader/source_hash.h"
-#include "core/store/loader/verification_utils.h"
-#include "core/store/loading/materialization/materialization_request.h"
-#include "core/store/loading/materialization/materialization_service.h"
-#include "core/store/loading/materialization/materialize_orchestrator.h"
-#include "core/store/loading/replica_registration_helper.h"
+#include "core/store/materialization/contracts/materialization_request.h"
+#include "core/store/materialization/control/materialization_service.h"
+#include "core/store/materialization/control/materialize_orchestrator.h"
+#include "core/store/materialization/control/replica_registration_helper.h"
+#include "core/store/materialization/dataplane/metadata/source_hash.h"
+#include "core/store/materialization/dataplane/verification/verification_utils.h"
 #include "gsl/pointers"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/trace/scope.h"
@@ -63,7 +63,7 @@ using components::ReplicaRegistry;
 using loading::MaterializeHints;
 using loading::ReplicaHandle;
 using loading::ReplicaKey;
-using loading::ReplicaRegistrationHelper;
+using materialization::control::ReplicaRegistrationHelper;
 using replica::MemoryState;
 using replica::Replica;
 
@@ -1148,10 +1148,11 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
   return absl::UnimplementedError("InlineBufferSource loading not yet implemented");
 }
 
-loading::MaterializationDeps StoreEngine::make_materialization_deps() {
+materialization::control::MaterializationDeps StoreEngine::make_materialization_deps() {
   auto* registry_ptr = replica_registry_.get().get();
   ABSL_CHECK_NE(registry_ptr, nullptr);
-  loading::MaterializationDeps deps(gsl::not_null<components::ReplicaRegistry*>{registry_ptr}, memory_pool_);
+  materialization::control::MaterializationDeps deps(
+      gsl::not_null<components::ReplicaRegistry*>{registry_ptr}, memory_pool_);
   deps.artifact_chunk_bytes = artifact_chunk_bytes_;
   deps.pinned_memory_timeout = pinned_memory_timeout_;
   deps.num_threads = num_thread_;
@@ -1170,8 +1171,8 @@ loading::MaterializationDeps StoreEngine::make_materialization_deps() {
   };
   if (global_store_client_ && global_store_client_->is_connected()) {
     deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
-      loading::MaterializeOrchestrator orchestrator(
-          gsl::not_null<loading::MaterializationBackend*>{this},
+      materialization::control::MaterializeOrchestrator orchestrator(
+          gsl::not_null<materialization::control::MaterializationBackend*>{this},
           gsl::not_null<components::IGlobalStoreClient*>{global_store_client_.get()});
       return orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
     };
@@ -1275,7 +1276,7 @@ absl::StatusOr<ReplicaHandle> StoreEngine::materialize_replica(
     return request_or.status();
   }
 
-  loading::MaterializationService service(make_materialization_deps());
+  materialization::control::MaterializationService service(make_materialization_deps());
   return service.Execute(request_or.value());
 }
 

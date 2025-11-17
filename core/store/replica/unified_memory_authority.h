@@ -20,7 +20,7 @@
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 

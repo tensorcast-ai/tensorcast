@@ -13,7 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"

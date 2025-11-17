@@ -14,7 +14,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
 #include "tensorcast/common/v1/common.pb.h"

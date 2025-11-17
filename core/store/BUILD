@@ -72,17 +72,10 @@ sc_header_only_library(
 
 # ========== Loading specifications ==========
 
-sc_header_only_library(
+alias(
     name = "loading_spec",
-    hdrs = ["loading/loading_spec.h"],
+    actual = "//core/store/materialization/contracts:loading_spec",
     visibility = ["//visibility:public"],
-    deps = [
-        ":communication_types",
-        ":device_types",
-        "//core/store/loader:view_planner",
-        "//core/store/replica:memory_state",
-        "@abseil-cpp//absl/hash",
-    ],
 )
 
 # ========== Components subdirectory ==========
@@ -182,14 +175,14 @@ sc_cc_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:trace_macros_lib",
         "//core/store:device_types",
-        "//core/store:loading_spec",
-        "//core/store/loader:canonical_index",
-        "//core/store/loader:segment_plan_source",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:verification_utils",
-        "//core/store/loader:view_ingest_executor",
-        "//core/store/loader:view_plan_source",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:segment_plan_source",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:verification_utils",
+        "//core/store/materialization/dataplane:view_ingest_executor",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
         "//proto/tensorcast/global_store/v1:global_store_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -210,8 +203,8 @@ cc_test(
         ":replica_registry",
         "//core/common:artifact_hash_lib",
         "//core/common:pinned_buffer_pool_lib",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
         "//core/testing:catch_main",
         "@abseil-cpp//absl/status:statusor",
@@ -256,133 +249,8 @@ cc_test(
     name = "multi_gpu_verification_race_test",
     srcs = ["multi_gpu_verification_race_test.cc"],
     deps = [
-        "//core/store/loader:verification_utils",
+        "//core/store/materialization/dataplane:verification_utils",
         "//core/testing:catch_main",
-        "@catch2//:catch2_main",
-    ],
-)
-
-# ========== Loading orchestration ==========
-
-# materialize_orchestrator now depends on MaterializationBackend to avoid circular dependencies.
-
-sc_cc_library(
-    name = "materialize_orchestrator",
-    srcs = ["loading/materialization/materialize_orchestrator.cc"],
-    hdrs = ["loading/materialization/materialize_orchestrator.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":global_store_client",
-        ":loading_spec",
-        ":materialization_backend",
-        ":replica_registration_helper",
-        "//core/common:memory_location_lib",
-        "@abseil-cpp//absl/strings",
-        "@gsl",
-    ],
-)
-
-sc_cc_library(
-    name = "chunk_aware_loading_strategy",
-    srcs = ["loading/chunk_aware_loading_strategy.cc"],
-    hdrs = ["loading/chunk_aware_loading_strategy.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":global_store_client",
-        ":loading_spec",
-        "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
-        "//core/store/loader:disk_loader",
-        "//core/store/loader:p2p_loader",
-        "//core/store/replica:chunk_state",
-        "//core/store/replica:replica_load_controller",
-        "//core/store/replica:unified_memory_authority",
-        "@gsl",
-        "@opentelemetry-cpp//api:api",
-    ],
-)
-
-sc_cc_library(
-    name = "replica_registration_helper",
-    srcs = ["loading/replica_registration_helper.cc"],
-    hdrs = ["loading/replica_registration_helper.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_types",
-        ":global_store_client",
-        "@gsl",
-    ],
-)
-
-sc_cc_library(
-    name = "materialization_request",
-    srcs = ["loading/materialization/materialization_request.cc"],
-    hdrs = ["loading/materialization/materialization_request.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_manager",
-        ":device_types",
-        ":loading_spec",
-        "//core/common:memory_location_lib",
-        "@abseil-cpp//absl/strings",
-    ],
-)
-
-sc_cc_library(
-    name = "materialization_service",
-    srcs = ["loading/materialization/materialization_service.cc"],
-    hdrs = ["loading/materialization/materialization_service.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_types",
-        ":loading_spec",
-        ":materialization_request",
-        ":replica_registration_helper",
-        ":replica_registry",
-        "//core/common:memory_location_lib",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/store/replica",
-        "@abseil-cpp//absl/strings",
-        "@gsl",
-    ],
-)
-
-sc_header_only_library(
-    name = "materialization_backend",
-    hdrs = ["loading/materialization/materialization_backend.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":loading_spec",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:statusor",
-    ],
-)
-
-cc_test(
-    name = "materialization_service_test",
-    srcs = ["loading/materialization/materialization_service_test.cc"],
-    deps = [
-        ":device_manager",
-        ":materialization_request",
-        ":materialization_service",
-        ":replica_registry",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/store/replica",
-        "//core/testing:catch_main",
-        "@abseil-cpp//absl/status",
-        "@catch2//:catch2_main",
-        "@gsl",
-    ],
-)
-
-cc_test(
-    name = "materialization_request_test",
-    srcs = ["loading/materialization/materialization_request_test.cc"],
-    deps = [
-        ":device_manager",
-        ":materialization_request",
-        "//core/testing:catch_main",
-        "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
 )
@@ -393,7 +261,7 @@ sc_cc_library(
     hdrs = ["view_utils.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
@@ -416,13 +284,7 @@ sc_cc_library(
         ":device_types",
         ":eviction_service",
         ":global_store_client",
-        ":loading_spec",
-        ":materialization_backend",
-        ":materialization_request",
-        ":materialization_service",
-        ":materialize_orchestrator",
         ":metrics_collector",
-        ":replica_registration_helper",
         ":replica_registry",
         ":store_engine_options",
         ":view_utils",
@@ -434,17 +296,23 @@ sc_cc_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
-        "//core/store/loader",
-        "//core/store/loader:canonical_index",
-        "//core/store/loader:disk_loader",
-        "//core/store/loader:index_reader",
-        "//core/store/loader:p2p_loader",
-        "//core/store/loader:segment_plan_source",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:verification_utils",
-        "//core/store/loader:view_ingest_executor",
-        "//core/store/loader:view_plan_source",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:materialization_request",
+        "//core/store/materialization/control:materialization_backend",
+        "//core/store/materialization/control:materialization_service",
+        "//core/store/materialization/control:materialize_orchestrator",
+        "//core/store/materialization/control:replica_registration_helper",
+        "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:disk_loader",
+        "//core/store/materialization/dataplane:index_reader",
+        "//core/store/materialization/dataplane:loader",
+        "//core/store/materialization/dataplane:p2p_loader",
+        "//core/store/materialization/dataplane:segment_plan_source",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:verification_utils",
+        "//core/store/materialization/dataplane:view_ingest_executor",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
@@ -487,8 +355,8 @@ cc_test(
     deps = [
         ":store_engine",
         "//core/common",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",

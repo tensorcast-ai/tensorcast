@@ -119,7 +119,7 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 # Examples:
 bazel test //core/store:store_engine_test
 bazel test //core/communicator/engine:tcp_engine_test
-bazel test //core/store/loader:disk_loader_streaming_buffer_test
+bazel test //core/store/materialization/dataplane:disk_loader_streaming_buffer_test
 ```
 
 #### Bazel Quiet / Reduced Output

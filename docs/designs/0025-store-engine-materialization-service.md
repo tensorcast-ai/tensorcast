@@ -6,7 +6,7 @@ areas: ["core"]
 related_code:
   - core/store/store_engine.cc
   - core/store/store_engine.h
-  - core/store/loading/**
+  - core/store/materialization/**
 links:
   plan: ../plans/0025-store-engine-materialization-service.md
 ---
@@ -49,7 +49,7 @@ flowchart LR
 
 ## MaterializationRequest
 
-- **Location**: `core/store/loading/materialization/materialization_request.{h,cc}`.
+- **Location**: `core/store/materialization/contracts/materialization_request.{h,cc}`.
 - **Creation**: `absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(DeviceKey target, MaterializeMode mode, const loading::MaterializeHints& hints, const components::DeviceManager& device_manager)`.
 - **Contents**:
   - `ReplicaKey replica_key` with normalized artifact/view IDs (reuses `VariantIdentity` when provided).
@@ -60,7 +60,7 @@ flowchart LR
 
 ## MaterializationService
 
-- **Location**: `core/store/loading/materialization/materialization_service.{h,cc}` with Bazel target `//core/store/loading:materialization_service`.
+- **Location**: `core/store/materialization/control/materialization_service.{h,cc}` with Bazel target `//core/store/materialization/control:materialization_service`.
 - **Dependencies** (injected via `struct MaterializationDeps`):
   - `components::ReplicaRegistry&`
   - `components::DeviceManager&`

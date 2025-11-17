@@ -94,5 +94,5 @@ None. The refactor reuses existing data models and RPC payloads.
 
 - Existing implementation: `core/store/store_engine.cc:1898-2710`, `core/store/store_engine.h:395-454`.
 - Eviction helpers: `core/store/components/eviction_service.h`.
-- View planning/execution: `core/store/loader/view_planner.h`, `core/store/loader/view_ingest_executor.h`.
+- View planning/execution: `core/store/materialization/dataplane/view/view_planner.h`, `core/store/materialization/dataplane/view/view_ingest_executor.h`.
 - Doc system spec: `docs/designs/0001-docs-system-design.md`.

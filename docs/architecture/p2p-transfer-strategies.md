@@ -267,7 +267,7 @@ sequenceDiagram
   - `ingest_from_p2p_internal()`: Internal method for P2P transfers
   - `ingest_from_disk_internal()`: Internal method for disk loading
 
-- **MaterializeOrchestrator** (`core/store/loading/materialization/materialize_orchestrator.h/cc`)
+- **MaterializeOrchestrator** (`core/store/materialization/control/materialize_orchestrator.h/cc`)
   - `run()`: Implements the decision tree (P2P first, disk fallback)
   - Coordinates with GlobalStoreClient for transport management
   - Handles replica registration after successful load
@@ -277,7 +277,7 @@ sequenceDiagram
   - `complete_replica_transport()`: Mark transport as complete
   - `register_replica()`: Register local (disk/P2P-loaded) replica with Global Store
 
-- **ReplicaRegistrationHelper** (`core/store/loading/replica_registration_helper.h/cc`)
+- **ReplicaRegistrationHelper** (`core/store/materialization/control/replica_registration_helper.h/cc`)
   - `register_local_replica()`: Helper to register replicas with Global Store
 
 

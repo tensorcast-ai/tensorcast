@@ -5,7 +5,7 @@ areas: ["core"]
 related_code:
   - core/store/store_engine.cc
   - core/store/store_engine.h
-  - core/store/loader/**
+  - core/store/materialization/dataplane/**
   - core/store/components/**
 links:
 ---
@@ -49,11 +49,11 @@ flowchart LR
 ```
 
 Placement rationale
-- IndexService and VerificationService live under `core/store/loader/` to reuse `canonical_index`, `source_hash`, `segment_plan_source`, and `view_plan_source` without depending on `components/*`.
+- IndexService and VerificationService live under `core/store/materialization/dataplane/` to reuse `canonical_index`, `source_hash`, `segment_plan_source`, and `view_plan_source` without depending on `components/*`.
 - EvictionService lives under `core/store/components/` because it depends on `ReplicaRegistry`, `DeviceManager`, and `MetricsCollector`.
 - `StoreEngine` becomes a thin coordinator that wires these services with the registry and device/comm/global store clients.
 
-## IndexService (core/store/loader/index_reader.{h,cc})
+## IndexService (core/store/materialization/dataplane/metadata/index_reader.{h,cc})
 
 Purpose: single entry to obtain canonical index bytes, index multihash, and total size across formats.
 
@@ -87,7 +87,7 @@ Notes
 - Internally reuse: `loader/canonical_index.*`, `loader/safetensors_util.*`.
 - Consolidates currently duplicated logic in `ingest_from_disk_internal` and P2P paths.
 
-## VerificationService (core/store/loader/verification_utils.{h,cc})
+## VerificationService (core/store/materialization/dataplane/verification/verification_utils.{h,cc})
 
 Purpose: compute data/view hashes, reuse/generate verification metadata, and write descriptors when needed.
 
@@ -208,7 +208,7 @@ Mitigations
 
 Must‑pass checks
 - Bazel and `uv run setup.py build_ext` builds succeed.
-- All existing C++ tests in `core/store/loader/` and `components/` pass in both fake and real CUDA modes.
+- All existing C++ tests in `core/store/materialization/dataplane/` and `components/` pass in both fake and real CUDA modes.
 - Python tests that rely on `StoreEngine` behavior pass without changes.
 
 Targeted behavioral tests
@@ -220,8 +220,7 @@ Targeted behavioral tests
 # References
 
 - `core/store/store_engine.cc`, `core/store/store_engine.h` (current implementation)
-- `core/store/loader/canonical_index.*`, `safetensors_util.*`, `source_hash.*`, `segment_plan_source.*`, `view_plan_source.*`
+- `core/store/materialization/dataplane/metadata/canonical_index.*`, `core/store/materialization/dataplane/metadata/safetensors_util.*`, `core/store/materialization/dataplane/metadata/source_hash.*`, `core/store/materialization/dataplane/sources/segment_plan_source.*`, `core/store/materialization/dataplane/view/view_plan_source.*`
 - `core/store/components/{replica_registry,device_manager,metrics_collector}.h`
 - 0007‑content‑addressed‑artifact‑id, 0014‑store‑session‑api‑modernization, 0016‑artifact‑view‑v1, 0018‑artifact‑view‑registration
-
 

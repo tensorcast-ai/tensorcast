@@ -20,8 +20,8 @@
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/registration/artifact_registration_manager.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/loading/loading_spec.h"
-#include "core/store/loading/materialization/materialization_backend.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/control/materialization_backend.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
@@ -31,20 +31,11 @@
 
 namespace tensorcast::store {
 
-namespace loading {
+namespace materialization::control {
 struct MaterializationDeps;
-} // namespace loading
+} // namespace materialization::control
 
-namespace loader {
-struct ViewPlan;
-struct ViewSpec;
-struct ViewWritePlan;
-struct BidirectionalViewPlan;
-class ViewIngestExecutor;
-class SeekableSource;
-} // namespace loader
-
-class StoreEngine : public loading::MaterializationBackend {
+class StoreEngine : public materialization::control::MaterializationBackend {
  public:
   // ═══════════════════════════════════════════════════════════════════════════
   // Type Definitions (using new unified type system)
@@ -95,7 +86,7 @@ class StoreEngine : public loading::MaterializationBackend {
       MaterializeMode mode = MaterializeMode::AUTO,
       const loading::MaterializeHints& hints = {});
 
-  // loading::MaterializationBackend
+  // materialization::control::MaterializationBackend
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,
@@ -347,7 +338,7 @@ class StoreEngine : public loading::MaterializationBackend {
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
-  [[nodiscard]] loading::MaterializationDeps make_materialization_deps();
+  [[nodiscard]] materialization::control::MaterializationDeps make_materialization_deps();
 
   // Memory management helpers
   absl::Status try_evict_memory_for_replica(size_t required_size);

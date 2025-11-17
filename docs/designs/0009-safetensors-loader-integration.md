@@ -4,11 +4,11 @@ title: Safetensors Loader Integration (Design)
 links:
   plan: ../plans/0009-safetensors-loader-integration.md
 related_code:
-  - core/store/loader/safetensors_source.*
-  - core/store/loader/multi_safetensors_source.*
-  - core/store/loader/safetensors_util.*
-  - core/store/loader/disk_loader.*
-  - core/store/loader/BUILD
+  - core/store/materialization/dataplane/sources/safetensors_source.*
+  - core/store/materialization/dataplane/sources/multi_safetensors_source.*
+  - core/store/materialization/dataplane/metadata/safetensors_util.*
+  - core/store/materialization/dataplane/loaders/disk_loader.*
+  - core/store/materialization/dataplane/BUILD
   - core/store/replica/transfer_service.*
   - tensorcast/api/_indices.py
 created: 2025-09-09
@@ -126,5 +126,5 @@ Acceptance criteria
 # References
 
 - Architecture: docs/architecture/architecture-overview.md, docs/internals/model-loading.md.
-- Related code: `core/store/loader/*`, `core/store/replica/*`, `tensorcast/api/_indices.py`.
+- Related code: `core/store/materialization/dataplane/*`, `core/store/replica/*`, `tensorcast/api/_indices.py`.
  

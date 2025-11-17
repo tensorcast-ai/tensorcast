@@ -6,7 +6,7 @@ areas: ["core"]
 related_code:
   - core/store/store_engine.cc
   - core/store/store_engine.h
-  - core/store/loading/**
+  - core/store/materialization/**
 links:
   design: ../designs/0025-store-engine-materialization-service.md
 ---
@@ -48,13 +48,13 @@ Implement the design in 0025 by extracting the COPY / LOAD / AUTO logic out of `
 
 - Add Bazel BUILD entries for the new files (using `sc_cc_library`) and include them from `core/store/store_engine.cc`.
 - Ensure `MaterializationService` only includes what it needs (forward declare heavy components) to keep compile times low.
-- Provide dependency injection hooks for tests (mockable replica registry/device manager/memory pool). Consider using lightweight fakes similar to `core/store/loader/view_planner_test.cc`.
+- Provide dependency injection hooks for tests (mockable replica registry/device manager/memory pool). Consider using lightweight fakes similar to `core/store/materialization/dataplane/view/tests/view_planner_test.cc`.
 - Update AGENTS/README guidance to call out the requirement to route new materialization flows through the service.
 - Keep tracing/metrics semantics identical by moving the relevant `SC_TRACE_INIT_GUARD`, logging, and view hashing calls.
 
 # Test / Rollout / Backout
 
-- **Unit tests**: `bazel test //core/store/loading:materialization_request_test`, `bazel test //core/store/loading:materialization_service_test`.
+- **Unit tests**: `bazel test //core/store/materialization/contracts:materialization_request_test`, `bazel test //core/store/materialization/control:materialization_service_test`.
 - **Integration tests**: `bazel test //core/store:store_engine_test`, `bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=true`.
 - **Python smoke**: `uv run pytest tests/python/test_store_session_api.py -k materialize`.
 - **Rollout**: merge design + implementation in a single PR, monitor daemon metrics (materialize latency, replica cache hits).

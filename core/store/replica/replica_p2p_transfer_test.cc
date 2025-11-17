@@ -25,7 +25,7 @@
 #include "core/common/artifact_verification.h" // Add verification support
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/memory_types.h" // For MB definition
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"

@@ -123,7 +123,7 @@ graph TB
 - Disk fallback when P2P unavailable
 - Replica registration after successful loading
 
-- Source: `core/store/loading/materialization/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
+- Source: `core/store/materialization/control/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
 
 ```cpp
 class StoreEngine {
@@ -145,7 +145,7 @@ public:
 };
 ```
 
-- Definitions: `ReplicaKey`, `ReplicaHandle`, `MaterializeHints` in `core/store/loading/loading_spec.h`
+- Definitions: `ReplicaKey`, `ReplicaHandle`, `MaterializeHints` in `core/store/materialization/contracts/loading_spec.h`
 - Device key: `DeviceKey` in `core/store/device_types.h`
 
 ### 2. Replica Management Layer
@@ -172,7 +172,7 @@ graph LR
 
 **Design Features**:
 - Factory pattern with `Replica::create()` for instance creation
-- Each Replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
+- Each Replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/materialization/contracts/loading_spec.h`
 - Asynchronous operation management via `std::shared_future` — `Replica::ensure_loaded_async()` in `core/store/replica/replica.{h,cc}`
 - Supports device copies via `Replica::copy_from()` and `ReplicaLoadController::copy_from_peer()` — `core/store/replica/replica.h`, `core/store/replica/replica_load_controller.h`
 - Integrated replica verification — `core/common/artifact_verification.{h,cc}`, used by loaders and `Replica`
@@ -181,9 +181,9 @@ graph LR
 
 Adopts strategy pattern design with pump-based streaming architecture:
 
-- Sources: `core/store/loader/loader.h`, `core/store/loader/disk_loader.{h,cc}`, `core/store/loader/p2p_loader.{h,cc}`
-- Streaming: `core/store/loader/source.h`, `core/store/loader/pump.{h,cc}`, `core/store/loader/buffer_pool.h`
-- Remote: `core/store/loader/remote_key_source.{h,cc}`, `core/store/loader/mux_seekable_source.{h,cc}`
+- Sources: `core/store/materialization/dataplane/contracts/loader.h`, `core/store/materialization/dataplane/loaders/disk_loader.{h,cc}`, `core/store/materialization/dataplane/loaders/p2p_loader.{h,cc}`
+- Streaming: `core/store/materialization/dataplane/contracts/source.h`, `core/store/materialization/dataplane/runtime/pump.{h,cc}`, `core/store/materialization/dataplane/contracts/buffer_pool.h`
+- Remote: `core/store/materialization/dataplane/sources/remote_key_source.{h,cc}`, `core/store/materialization/dataplane/sources/mux_seekable_source.{h,cc}`
 
 ```mermaid
 classDiagram
@@ -209,16 +209,16 @@ classDiagram
 ```
 
 **DiskLoader Workflow**:
-1. Scan partition files (`tensor.data`, `tensor.data_<n>`) — `core/store/loader/disk_loader.cc`
-2. Create `FilePartitionSource` implementing `SeekableSource` — `core/store/loader/file_partition_source.{h,cc}`
+1. Scan partition files (`tensor.data`, `tensor.data_<n>`) — `core/store/materialization/dataplane/loaders/disk_loader.cc`
+2. Create `FilePartitionSource` implementing `SeekableSource` — `core/store/materialization/dataplane/sources/file_partition_source.{h,cc}`
 3. Return source handle for pump-based streaming — `DiskLoader::open_source()`
 4. Actual loading handled by `ReplicaLoadController::load_async_from_source()` using `TransferService` + `pump_ranges()`
 5. Data flows: FilePartitionSource → Pump → MemorySink (`CpuVaSink` for CPU or `GpuMemorySink` for GPU). For GPU targets, the pump detects sinks that implement `AsyncPositionedSink` and uses `AsyncCopyManager` to submit H2D copies. `TransferService` replays `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` before returning to ensure the GPU buffer is fully materialised prior to verification and metadata persistence.
 
 **P2PLoader Workflow**:
-1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/loader/p2p_loader.{h,cc}`
-2. Create `RemoteKeySource` that wraps remote memory via `Communicator` — `core/store/loader/remote_key_source.{h,cc}`
-3. Optional disk fallback via `MuxSeekableSource` — `core/store/loader/mux_seekable_source.{h,cc}`
+1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/materialization/dataplane/loaders/p2p_loader.{h,cc}`
+2. Create `RemoteKeySource` that wraps remote memory via `Communicator` — `core/store/materialization/dataplane/sources/remote_key_source.{h,cc}`
+3. Optional disk fallback via `MuxSeekableSource` — `core/store/materialization/dataplane/sources/mux_seekable_source.{h,cc}`
 4. Uses the same `load_async_from_source()` path to target CPU (CPU, previously CPU) or GPU
 5. Optional checksum or direct-write support depends on communicator — see `RemoteKeySource::supports_direct_write()`
 
@@ -258,8 +258,8 @@ The memory implementation layer provides the low-level memory management and dat
 
 - CPU Memory: `core/common/memory/pinned_buffer_pool.h`, `core/common/memory/pinned_buffer_pool.cc`, `core/common/memory/streaming_pinned_buffer.{h,cc}`, orchestrated via `core/store/replica/unified_memory_authority.{h,cc}`
 - GPU Memory: `core/common/memory/cuda_memory.{h,cc}`
-- Sinks/Sources: `core/store/loader/cpu_va_sink.{h,cc}`, `core/store/loader/gpu_memory_sink.{h,cc}`
-- Pump: `core/store/loader/pump.{h,cc}` (`pump_ranges`), `core/store/loader/buffer_pool.h`
+- Sinks/Sources: `core/store/materialization/dataplane/sinks/cpu_va_sink.{h,cc}`, `core/store/materialization/dataplane/sinks/gpu_memory_sink.{h,cc}`
+- Pump: `core/store/materialization/dataplane/runtime/pump.{h,cc}` (`pump_ranges`), `core/store/materialization/dataplane/contracts/buffer_pool.h`
 
 ```mermaid
 graph TB
@@ -306,7 +306,7 @@ graph TB
 **GPU Memory Features**:
 - CUDA allocation and stream management — `core/common/memory/cuda_memory.{h,cc}`
 - Cross-process memory sharing via `ReplicaLoadController::get_ipc_handle()` — `core/store/replica/replica_load_controller.h`
-- Device-bound memory management (via `ReplicaKey`) — `core/store/loading/loading_spec.h`
+- Device-bound memory management (via `ReplicaKey`) — `core/store/materialization/contracts/loading_spec.h`
 
 ## Memory Transfer Mechanism
 
@@ -434,7 +434,7 @@ graph TB
     end
 ```
 
-- Sources: `core/store/loader/remote_key_source.{h,cc}`, `core/store/loader/gpu_memory_sink.{h,cc}`, `core/store/loader/cpu_va_sink.{h,cc}`, `core/store/loader/pump.{h,cc}`
+- Sources: `core/store/materialization/dataplane/sources/remote_key_source.{h,cc}`, `core/store/materialization/dataplane/sinks/gpu_memory_sink.{h,cc}`, `core/store/materialization/dataplane/sinks/cpu_va_sink.{h,cc}`, `core/store/materialization/dataplane/runtime/pump.{h,cc}`
 
 ### Transfer Failure Handling
 
@@ -508,7 +508,7 @@ sequenceDiagram
     CS->>User: ReplicaHandle{replica_key, ready_future}
 ```
 
-- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialization/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
+- Sources: `core/store/store_engine.{h,cc}`, `core/store/materialization/control/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
 
 ### P2P Loading Flow with Communicator
 
@@ -544,7 +544,7 @@ sequenceDiagram
     M->>CS: return success/error
 ```
 
-- Sources: `core/store/loader/p2p_loader.{h,cc}`, `core/store/loader/remote_key_source.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
+- Sources: `core/store/materialization/dataplane/loaders/p2p_loader.{h,cc}`, `core/store/materialization/dataplane/sources/remote_key_source.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
 
 ### IPC Memory Sharing Flow
 
@@ -629,7 +629,7 @@ The system is designed with multiple extension points to support future requirem
 ## Key Implementation Details
 
 ### Multi-Device Binding
-- Each replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
+- Each replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/materialization/contracts/loading_spec.h`
 - Supports multiple replicas of the same replica on different devices
 - Device abstraction via `DeviceKey` for stable device references — `core/store/device_types.h`
 
@@ -640,15 +640,15 @@ The system is designed with multiple extension points to support future requirem
 - Enables efficient memory sharing across processes (stable VA + CUDA IPC)
 
 - ### Unified Type System
-- `ArtifactSource` / `ArtifactTarget` / `MaterializeHints` — `core/store/loading/loading_spec.h`
-- `ReplicaHandle`: returned from loading operations with instance info — `core/store/loading/loading_spec.h`
+- `ArtifactSource` / `ArtifactTarget` / `MaterializeHints` — `core/store/materialization/contracts/loading_spec.h`
+- `ReplicaHandle`: returned from loading operations with instance info — `core/store/materialization/contracts/loading_spec.h`
 
 ### Service Architecture
 - **TransferService**: Manages data transfers between locations — `core/store/replica/transfer_service.{h,cc}`
 - **MemoryExportRegistry**: Handles P2P memory registration/export — `core/store/replica/memory_export_registry.h`
-- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/loading/materialization/materialize_orchestrator.{h,cc}`
+- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/materialization/control/materialize_orchestrator.{h,cc}`
 - **MetricsCollector**: Tracks performance and resource usage — `core/store/components/metrics_collector.{h,cc}`
-- **Verification Metadata Coordination**: `core/store/loader/verification_utils.{h,cc}` provides the per-artifact `VerificationMetadataGuard`, in-process metadata cache, atomic write helper (`open` → `write` → `fsync` → `rename` + directory sync), and structured logging hooks (`verification_metadata_write_{succeeded,failed}`). `core/store/replica/transfer_service.cc` synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so verification always runs on fully materialised GPU buffers. Regression coverage lives in `core/store/loader:verification_utils_test` and `core/store:multi_gpu_verification_race_test`.
+- **Verification Metadata Coordination**: `core/store/materialization/dataplane/verification/verification_utils.{h,cc}` provides the per-artifact `VerificationMetadataGuard`, in-process metadata cache, atomic write helper (`open` → `write` → `fsync` → `rename` + directory sync), and structured logging hooks (`verification_metadata_write_{succeeded,failed}`). `core/store/replica/transfer_service.cc` synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so verification always runs on fully materialised GPU buffers. Regression coverage lives in `core/store/materialization/dataplane/verification/tests:verification_utils_test` and `core/store:multi_gpu_verification_race_test`.
 
 ## Related Guides
 

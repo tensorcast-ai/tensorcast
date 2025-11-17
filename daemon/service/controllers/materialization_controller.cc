@@ -12,7 +12,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
