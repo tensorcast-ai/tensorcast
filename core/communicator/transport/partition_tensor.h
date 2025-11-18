@@ -30,6 +30,7 @@ class PartitionTensor {
   void set_read_unready();
   void wait_read_ready();
   void wait_mr_ready();
+  void wait_mr_ready(const net_dev_t& dev);
 
   bool is_registered(const net_dev_t& dev);
   uint64_t get_regmr_cost(const net_dev_t& dev);
@@ -69,7 +70,8 @@ class PartitionTensor {
       return false;
     }
     for (const auto& [dev_name, mr] : mrs_) {
-      if (registered_[dev_name]->load() && mr != nullptr) {
+      auto it = registered_.find(dev_name);
+      if (it != registered_.end() && it->second->load() && mr != nullptr) {
         return true;
       }
     }
@@ -77,7 +79,11 @@ class PartitionTensor {
   }
 
   [[nodiscard]] bool has_registered_mr(net_dev_t dev) const {
-    return registered_[dev->get_name()]->load() && mrs_[dev->get_name()];
+    const std::string& dev_name = dev->get_name();
+    auto registered_it = registered_.find(dev_name);
+    auto mrs_it = mrs_.find(dev_name);
+    return registered_it != registered_.end() && registered_it->second->load() && mrs_it != mrs_.end() &&
+        mrs_it->second != nullptr;
   }
 
   template <class T>

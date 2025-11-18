@@ -24,10 +24,9 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
 }
 
 PartitionTensor::~PartitionTensor() {
-
   for (auto dev : devs_) {
     if (registered_[dev->get_name()]->load()) {
-      if(mrs_[dev->get_name()] != nullptr) {
+      if (mrs_[dev->get_name()] != nullptr) {
         CHECK_WARN(misc::wrap_ibv_dereg_mr(mrs_[dev->get_name()]), "failed to dereg mr");
       }
       registered_[dev->get_name()]->store(false);
@@ -50,7 +49,6 @@ void PartitionTensor::add_dev(const net_dev_t& dev) {
 void PartitionTensor::add_dev_list(const std::vector<net_dev_t>& devs) {
   for (const auto& dev : devs) {
     add_dev(dev);
-
   }
 }
 
@@ -69,7 +67,13 @@ void PartitionTensor::wait_read_ready() {
 }
 
 void PartitionTensor::wait_mr_ready() {
-  while (!registered_.load()) {
+  while (!registered_.begin()->second->load()) {
+    std::this_thread::yield();
+  }
+}
+
+void PartitionTensor::wait_mr_ready(const net_dev_t& dev) {
+  while (!registered_[dev->get_name()]->load()) {
     std::this_thread::yield();
   }
 }
@@ -145,7 +149,7 @@ void PartitionTensor::register_mr(const NetDev* dev) {
   auto addr = get_addr<void>();
   auto nb_bytes = get_bytes();
   misc::result_t res = dev->reg_mr(&mrs_[dev->get_name()], addr, nb_bytes, flags);
-  
+
   if (res != misc::SUCCESS) {
     LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " failed to register mr";
     mrs_[dev->get_name()] = nullptr;

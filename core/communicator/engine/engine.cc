@@ -1123,7 +1123,7 @@ absl::Status Communicator::handle_rdma_read_request(
       if (start_offset > tensor_bytes || total_bytes > (tensor_bytes - start_offset)) {
         fallback_reason = DirectFallbackReason::kOutOfRange;
       } else {
-        tensor->wait_mr_ready();
+        tensor->wait_mr_ready(dev);
         direct_mr = tensor->get_mr(dev);
         if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
           fallback_reason = DirectFallbackReason::kMrUnavailable;
