@@ -61,7 +61,7 @@ graph TD
 - **Technology**: C++ service with gRPC interface (high-performance StoreEngine core)
 - **Key Feature**: Zero-copy GPU memory sharing via CUDA IPC
 - **Implementation Notes**: Thin gRPC layer over `StoreEngine`; manages sessions, PID references, and transport locks; exports CUDA IPC handles to clients
-- **Registration Path**: The RFC-0006 lifecycle (Begin → TTL → Commit/Abort) lives in `components::ArtifactRegistrationManager`, which maintains pending state, view ingestion, hashes, and Global Store publication independent of the main `StoreEngine` orchestration logic.
+- **Registration Path**: The RFC-0006 lifecycle (Begin → TTL → Commit/Abort) lives in `components::RegistrationFacade`, which maintains pending state, view ingestion, hashes, and emits registration events. `components::runtime::GlobalStorePublisher` consumes those events (and the ingestion pipeline’s load events) to publish replicas and variant metadata to Global Store without routing through `StoreEngine`.
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
 
 > See also: [Store Daemon (C++) Internals](../../daemon/README.md) — thin gRPC layer over the StoreEngine with session/ref tracking, transport locks, lifecycle management, and background sweepers.

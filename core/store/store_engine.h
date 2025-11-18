@@ -7,26 +7,24 @@
 #include <string>
 #include <vector>
 
-#include <optional>
 #include <string_view>
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "core/common/artifact_identity.h"
-#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/components/metrics_collector.h"
-#include "core/store/components/registration/artifact_registration_manager.h"
-#include "core/store/components/replica_registry.h"
+#include "core/store/components/registration/registration_facade.h"
+#include "core/store/components/runtime/component_catalog.h"
+#include "core/store/components/runtime/global_store_publisher.h"
+#include "core/store/components/runtime/replica_info.h"
+#include "core/store/components/runtime/replica_service.h"
+#include "core/store/components/runtime/telemetry_service.h"
+#include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
-#include "core/store/materialization/control/materialization_backend.h"
+#include "core/store/materialization/control/materialization_coordinator.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
-#include "core/store/replica/replica.h"
 #include "core/store/store_engine_options.h"
-#include "core/store/view_utils.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store {
@@ -35,7 +33,11 @@ namespace materialization::control {
 struct MaterializationDeps;
 } // namespace materialization::control
 
-class StoreEngine : public materialization::control::MaterializationBackend {
+namespace materialization::runtime::pipeline {
+class IngestionPipeline;
+} // namespace materialization::runtime::pipeline
+
+class StoreEngine {
  public:
   // ═══════════════════════════════════════════════════════════════════════════
   // Type Definitions (using new unified type system)
@@ -44,17 +46,7 @@ class StoreEngine : public materialization::control::MaterializationBackend {
   // Legacy AsyncLoadResult and load() interface have been fully removed;
   // callers should use ReplicaHandle returned from materialize_replica().
 
-  struct ReplicaInfo {
-    std::string artifact_id;
-    uint64_t size_bytes;
-    common::memory::MemoryLocation cpu_state;
-    common::memory::MemoryLocation gpu_state;
-    int gpu_device_id;
-    std::string gpu_device_uuid;
-    bool is_registered_for_comm;
-    std::chrono::time_point<std::chrono::system_clock> last_access_time;
-    std::chrono::time_point<std::chrono::system_clock> load_time;
-  };
+  using ReplicaInfo = components::runtime::ReplicaInfo;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
@@ -86,18 +78,17 @@ class StoreEngine : public materialization::control::MaterializationBackend {
       MaterializeMode mode = MaterializeMode::AUTO,
       const loading::MaterializeHints& hints = {});
 
-  // materialization::control::MaterializationBackend
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,
       const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints) override;
+      const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,
       const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints) override;
+      const loading::MaterializeHints& hints);
 
   // View planning/execution helpers (variant-aware path)
   static absl::StatusOr<loader::ViewPlan> compute_view_plan(
@@ -175,7 +166,7 @@ class StoreEngine : public materialization::control::MaterializationBackend {
    *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
    *        when the artifact resides on multiple GPUs (ambiguous without a device).
    */
-  absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
 
   /**
    * @brief Inject a custom Global Store client (primarily for testing).
@@ -213,7 +204,7 @@ class StoreEngine : public materialization::control::MaterializationBackend {
   // `ReplicaKey.artifact_id` is published.
   [[nodiscard]] absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
-      std::string_view artifact_id_override = {}) override;
+      std::string_view artifact_id_override = {});
 
   // Deregister a memory replica from Global Store using worker identity.
   [[nodiscard]] absl::Status unregister_replica_from_global_store(std::string_view artifact_id, int device_id);
@@ -257,11 +248,11 @@ class StoreEngine : public materialization::control::MaterializationBackend {
 
   // GPU device queries (for status/health reporting)
   [[nodiscard]] int get_num_gpus() const {
-    return device_manager_->get_num_gpus();
+    return replica_service_->device_manager().get_num_gpus();
   }
 
-  absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
-  absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
+  [[nodiscard]] absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
+  [[nodiscard]] absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
 
   // VS chunk-state snapshot API for daemon observers (read-only, non-authoritative telemetry).
   [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_telemetry(std::string_view artifact_id) const;
@@ -284,9 +275,7 @@ class StoreEngine : public materialization::control::MaterializationBackend {
   // Expose the configured communication manager to daemon for P2P export paths
   // that are not bound to a loaded replica (e.g., LIP-backed staged transfers).
   // Always non-null; may be disabled (see is_enabled()).
-  [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const {
-    return comm_manager_;
-  }
+  [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const;
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -305,51 +294,18 @@ class StoreEngine : public materialization::control::MaterializationBackend {
   // Core Components
   // ═══════════════════════════════════════════════════════════════════════════
 
-  gsl::not_null<std::unique_ptr<components::DeviceManager>> device_manager_;
-  gsl::not_null<std::unique_ptr<components::ReplicaRegistry>> replica_registry_;
-  gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
-  std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
-  gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
-  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Internal Helper Methods
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // Constructor helpers
-  void initialize_components();
-  void initialize_global_store(const StoreEngineOptions& opts);
-  void initialize_communication_manager(const StoreEngineOptions& opts);
-
-  // Replica loading helpers - using new unified types
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk_internal(
-      const std::string& artifact_identifier,
-      const loading::DiskSource& source,
-      const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints);
-
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p_internal(
-      const std::string& artifact_identifier,
-      const P2PSource& source,
-      const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints);
-
+  std::unique_ptr<components::runtime::ComponentCatalog> component_catalog_;
+  std::unique_ptr<components::runtime::ReplicaService> replica_service_;
+  std::unique_ptr<components::runtime::GlobalStorePublisher> global_store_publisher_;
+  std::unique_ptr<components::runtime::TelemetryService> telemetry_service_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
-  [[nodiscard]] materialization::control::MaterializationDeps make_materialization_deps();
-
-  // Memory management helpers
-  absl::Status try_evict_memory_for_replica(size_t required_size);
-  std::shared_ptr<replica::Replica> get_or_create_replica(
-      const std::string& artifact_identifier,
-      const replica::ReplicaConfig& config);
-
-  // Utility methods
-  [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
-
-  std::unique_ptr<components::ArtifactRegistrationManager> registration_manager_;
+  std::unique_ptr<components::RegistrationFacade> registration_facade_;
+  std::unique_ptr<materialization::runtime::pipeline::IngestionPipeline> ingestion_pipeline_;
+  std::unique_ptr<materialization::control::MaterializationCoordinator> materialization_coordinator_;
 
   // Worker identity (for Global Store registrations)
   std::string worker_id_;
@@ -371,17 +327,19 @@ class StoreEngine : public materialization::control::MaterializationBackend {
     node_address_ = std::move(node_address);
     grpc_port_ = grpc_port;
     p2p_port_ = p2p_port;
-    if (global_store_client_) {
-      global_store_client_->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
+    component_catalog_->set_worker_identity(
+        components::WorkerIdentity{
+            .worker_id = worker_id_,
+            .node_id = node_id_,
+            .node_address = node_address_,
+            .grpc_port = grpc_port_,
+            .p2p_port = p2p_port_});
+    auto global_store_client = component_catalog_->global_store_client();
+    if (global_store_client) {
+      global_store_client->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
     }
-    if (registration_manager_) {
-      components::WorkerIdentity identity{
-          .worker_id = worker_id_,
-          .node_id = node_id_,
-          .node_address = node_address_,
-          .grpc_port = grpc_port_,
-          .p2p_port = p2p_port_};
-      registration_manager_->set_worker_identity(std::move(identity));
+    if (global_store_publisher_) {
+      global_store_publisher_->refresh_override_endpoint();
     }
   }
 };

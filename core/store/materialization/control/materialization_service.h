@@ -11,6 +11,7 @@
 #include "absl/status/statusor.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/contracts/materialization_request.h"
 #include "core/store/replica/replica.h"
@@ -44,12 +45,7 @@ struct MaterializationDeps {
       const ReplicaTarget& target,
       const MaterializeHints& hints)>
       ingest_from_disk;
-  std::function<std::optional<std::string>(
-      replica::Replica& replica,
-      common::memory::MemoryLocation location,
-      uint64_t view_size_bytes,
-      std::optional<int> gpu_device_id)>
-      compute_view_hash;
+  std::shared_ptr<ViewHashComputer> view_hash_computer;
 };
 
 class MaterializationService {
@@ -61,11 +57,11 @@ class MaterializationService {
  private:
   MaterializationDeps deps_;
 
-  absl::StatusOr<ReplicaHandle> TryReuseReplica(const MaterializationRequest& request) const;
-  absl::StatusOr<ReplicaHandle> CopyFromPeer(const MaterializationRequest& request) const;
-  absl::StatusOr<ReplicaHandle> LoadFromDisk(const MaterializationRequest& request) const;
-  absl::StatusOr<ReplicaHandle> RunAuto(const MaterializationRequest& request) const;
-  ReplicaHandle BuildHandle(
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> TryReuseReplica(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> CopyFromPeer(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> LoadFromDisk(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> RunAuto(const MaterializationRequest& request) const;
+  [[nodiscard]] ReplicaHandle BuildHandle(
       const MaterializationRequest& request,
       const std::shared_ptr<replica::Replica>& replica,
       std::shared_future<absl::Status> ready_future) const;

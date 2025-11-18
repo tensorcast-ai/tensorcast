@@ -19,16 +19,6 @@
 #include "core/store/replica/replica.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store {
-
-std::optional<std::string> ComputeViewDataHash(
-    replica::Replica& replica,
-    common::memory::MemoryLocation location,
-    uint64_t view_size_bytes,
-    std::optional<int> gpu_device_id);
-
-} // namespace tensorcast::store
-
 namespace tensorcast::store::materialization::control {
 
 namespace {
@@ -213,14 +203,15 @@ ReplicaHandle MaterializationService::BuildHandle(
   if (view_plan.has_value() && !view_plan->is_identity) {
     handle.view_index_json = view_plan->view_index_json;
     const uint64_t view_size = view_plan->view_size_bytes;
-    if (view_size > 0 && deps_.compute_view_hash) {
+    if (view_size > 0 && deps_.view_hash_computer) {
       const bool target_is_gpu = request.target_is_gpu();
       const bool target_loaded =
           target_is_gpu ? handle.gpu_state == MemoryState::LOADED : handle.cpu_state == MemoryState::LOADED;
       std::optional<int> gpu_device =
           target_is_gpu ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
       if (target_loaded) {
-        auto hash = deps_.compute_view_hash(*replica, request.target_location(), view_size, std::move(gpu_device));
+        auto hash = deps_.view_hash_computer->hash_replica_view(
+            *replica, request.target_location(), view_size, std::move(gpu_device));
         if (hash.has_value()) {
           handle.view_data_hash = std::move(hash);
         }

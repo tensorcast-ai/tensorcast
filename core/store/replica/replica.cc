@@ -467,7 +467,8 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
     if (gpu_state == MemoryState::LOADED) {
       return common::memory::MemoryLocation::GPU;
     } // Check if original source is valid for loading to CPU
-    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
+    if (original_source_type_ == common::memory::MemoryLocation::DISK ||
+        original_source_type_ == common::memory::MemoryLocation::CPU) {
       return common::memory::MemoryLocation::DISK;
     }
     if (original_source_type_ == common::memory::MemoryLocation::REMOTE) {
@@ -482,7 +483,8 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
       return common::memory::MemoryLocation::CPU;
     } // Can load from DISK (via CPU staging implicitly handled by DiskLoader->copy)
     // or directly from REMOTE if P2P->GPU is supported.
-    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
+    if (original_source_type_ == common::memory::MemoryLocation::DISK ||
+        original_source_type_ == common::memory::MemoryLocation::CPU) {
       // Need to ensure CPU is loaded first, then copy.
       // This logic is handled within ensure_loaded_async by calling itself recursively or chaining.
       // Let's simplify: if CPU not loaded, source is DISK (implying DISK->CPU->GPU path)
