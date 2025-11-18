@@ -192,9 +192,9 @@ cursor.execute("""
 ### Materialization Behavior (current implementation)
 
 - **AUTO mode orchestration**: `MaterializeOrchestrator::run()` first requests a transport from Global Store. If granted, it builds a `P2PSource` and calls the backend’s `ingest_from_p2p()` implementation (StoreEngine now implements the `loading::MaterializationBackend` interface); otherwise it falls back to disk via `ingest_from_disk()`.
-- **P2P path (synchronous in engine)**: `ingest_from_p2p()` delegates to `StoreEngine::ingest_from_p2p_internal()`, performing the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
-- **Disk path**: `ingest_from_disk()` forwards to `ingest_from_disk_internal()`, which starts an async load and waits until the target memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
-- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and registers the local replica via the StoreEngine helper.
+- **P2P path (synchronous in engine)**: `ingest_from_p2p()` now flows through `materialization::runtime::pipeline::IngestionPipeline`, performing the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
+- **Disk path**: `ingest_from_disk()` shares the same pipeline stages and starts an async load that blocks until the requested memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
+- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and the ingestion pipeline emits an event. `components::runtime::GlobalStorePublisher` consumes that event and registers the local replica, so the orchestrator/facade never invoke the registration helper directly.
 - **Lease-in-place payloads**: Registration feeds now include `storage_entries` and `tensor_aliases` so the daemon can rebuild the canonical tensor index without reopening CUDA IPC handles for every tensor. Metrics (`tc_register_storage_count`, `tc_register_tensor_count`) expose the number of unique storages and logical tensors processed per commit to validate deduplication.
 - **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
 
@@ -264,8 +264,7 @@ sequenceDiagram
 #### C++ Core Components
 - **StoreEngine** (`core/store/store_engine.h/cc`)
   - `materialize_replica()`: Entry point that delegates to MaterializeOrchestrator for AUTO mode
-  - `ingest_from_p2p_internal()`: Internal method for P2P transfers
-  - `ingest_from_disk_internal()`: Internal method for disk loading
+  - `materialization::runtime::pipeline::IngestionPipeline`: Consolidated staged flow for disk and P2P ingestion
 
 - **MaterializeOrchestrator** (`core/store/materialization/control/materialize_orchestrator.h/cc`)
   - `run()`: Implements the decision tree (P2P first, disk fallback)

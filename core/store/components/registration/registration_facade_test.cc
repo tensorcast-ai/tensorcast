@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/registration/artifact_registration_manager.h"
+#include "core/store/components/registration/registration_facade.h"
 
 #include <array>
 #include <chrono>
@@ -114,8 +114,7 @@ class RegistrationManagerTestHarness {
         .replica_registry = gsl::not_null<ReplicaRegistry*>{replica_registry_.get()},
         .metrics_collector = gsl::not_null<MetricsCollector*>{metrics_collector_.get()},
         .memory_pool = gsl::not_null<std::shared_ptr<PinnedBufferPool>>{memory_pool_},
-        .communication_manager = nullptr,
-        .global_store_client = nullptr};
+        .communication_manager = nullptr};
 
     ReplicaFactory factory =
         [this](const replica::ReplicaConfig& config) -> absl::StatusOr<std::shared_ptr<replica::Replica>> {
@@ -128,18 +127,11 @@ class RegistrationManagerTestHarness {
       return shared;
     };
 
-    manager_ = std::make_unique<ArtifactRegistrationManager>(
-        std::move(resources), std::move(factory), kArtifactChunkBytes, std::chrono::milliseconds(10));
-    manager_->set_worker_identity(
-        WorkerIdentity{
-            .worker_id = "worker-test",
-            .node_id = "node-1",
-            .node_address = "127.0.0.1",
-            .grpc_port = 50051,
-            .p2p_port = 50052});
+    manager_ = std::make_unique<RegistrationFacade>(
+        std::move(resources), std::move(factory), kArtifactChunkBytes, std::chrono::milliseconds(10), nullptr);
   }
 
-  ArtifactRegistrationManager& manager() {
+  RegistrationFacade& manager() {
     return *manager_;
   }
 
@@ -164,11 +156,11 @@ class RegistrationManagerTestHarness {
   std::unique_ptr<ReplicaRegistry> replica_registry_;
   std::unique_ptr<MetricsCollector> metrics_collector_;
   std::shared_ptr<PinnedBufferPool> memory_pool_;
-  std::unique_ptr<ArtifactRegistrationManager> manager_;
+  std::unique_ptr<RegistrationFacade> manager_;
   std::shared_ptr<replica::Replica> last_replica_;
 };
 
-TEST_CASE("ArtifactRegistrationManager ingests server view and computes hashes", "[registration][view]") {
+TEST_CASE("RegistrationFacade ingests server view and computes hashes", "[registration][view]") {
   RegistrationManagerTestHarness harness;
   const std::string canonical_json = BuildCanonicalIndexJson("weights", /*element_count=*/8);
   auto spec = MakeNarrowSpec("weights", /*start=*/2, /*length=*/4);
@@ -225,7 +217,7 @@ TEST_CASE("ArtifactRegistrationManager ingests server view and computes hashes",
   CHECK(commit.view_data_multihash.has_value());
 }
 
-TEST_CASE("ArtifactRegistrationManager enforces TTL and honors keep-alive", "[registration][ttl]") {
+TEST_CASE("RegistrationFacade enforces TTL and honors keep-alive", "[registration][ttl]") {
   RegistrationManagerTestHarness harness;
   const std::string canonical_json = BuildCanonicalIndexJson("ttl_tensor", /*element_count=*/4);
 
@@ -250,7 +242,7 @@ TEST_CASE("ArtifactRegistrationManager enforces TTL and honors keep-alive", "[re
   REQUIRE(keep_commit_or.ok());
 }
 
-TEST_CASE("ArtifactRegistrationManager reports existed for duplicate commits", "[registration][dedupe]") {
+TEST_CASE("RegistrationFacade reports existed for duplicate commits", "[registration][dedupe]") {
   RegistrationManagerTestHarness harness;
   const std::string canonical_json = BuildCanonicalIndexJson("dup_tensor", /*element_count=*/4);
   auto reg = MakeBaseRegistration("dedupe", canonical_json, /*total_bytes=*/16);
@@ -273,7 +265,7 @@ TEST_CASE("ArtifactRegistrationManager reports existed for duplicate commits", "
   CHECK(commit2->data_multihash == commit1->data_multihash);
 }
 
-TEST_CASE("ArtifactRegistrationManager abort removes pending context", "[registration][abort]") {
+TEST_CASE("RegistrationFacade abort removes pending context", "[registration][abort]") {
   RegistrationManagerTestHarness harness;
   const std::string canonical_json = BuildCanonicalIndexJson("abort_tensor", /*element_count=*/2);
   auto reg = MakeBaseRegistration("abort", canonical_json, /*total_bytes=*/8);

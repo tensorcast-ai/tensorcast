@@ -250,7 +250,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
-- Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
+- Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (sc_cc_library has already included the common dependencies of absl/log, absl/status, absl/status:statusor)
 - **Resolve missing headers via BUILD deps first** - When a header appears "missing", fix the Bazel BUILD dependencies by adding the precise library that exports the header to the target's `deps`. Do not rely on global include paths or accidental transitive includes; wire dependencies explicitly in BUILD files.
 
 ### Build & Dependencies

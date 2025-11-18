@@ -77,7 +77,7 @@ flowchart LR
   - `absl::StatusOr<ReplicaHandle> CopyFromPeer(const MaterializationRequest&)` — lines 1362-1469.
   - `absl::StatusOr<ReplicaHandle> LoadFromDisk(const MaterializationRequest&)` — lines 1336-1357, 1473-1480.
   - `absl::StatusOr<ReplicaHandle> RunAuto(const MaterializationRequest&)` — lines 1482-1494.
-  - View hashing helper (current `ComputeViewDataHash` call sites at 1321-1330, 1450-1459).
+  - View hashing helper (`core/store/materialization/common/view_hash_utils.{h,cc}` now exposes `ViewHashComputer`, which is reused by MaterializationService plus the ingestion pipeline's verification stage).
   - Reusable `BuildReplicaHandle(replica::Replica&, const ReplicaKey&, MemoryLocation, std::optional<int>)`.
 - **Tracing**: service methods continue to use `SC_TRACE_INIT_GUARD` via contexts passed from `StoreEngine`.
 

@@ -57,6 +57,7 @@ sc_cc_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:device_types",
         "//core/store:replica_registry",
+        "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:materialization_request",
         "//core/store/replica",
         "@abseil-cpp//absl/log:absl_log",
@@ -66,18 +67,25 @@ sc_cc_library(
 )
 
 sc_cc_library(
-    name = "loader_registry_adapter",
-    srcs = ["loader_registry_adapter.cc"],
-    hdrs = ["loader_registry_adapter.h"],
+    name = "materialization_coordinator",
+    srcs = ["materialization_coordinator.cc"],
+    hdrs = ["materialization_coordinator.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":materialization_backend",
+        ":materialization_service",
+        ":materialize_orchestrator",
+        ":replica_registration_helper",
+        "//core/common:memory_location_lib",
+        "//core/store:component_catalog",
+        "//core/store:device_types",
+        "//core/store:global_store_publisher",
+        "//core/store:replica_service",
+        "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:loading_spec",
-        "//core/store/materialization/contracts:registry",
-        "//core/store/materialization/dataplane:disk_loader",
-        "//core/store/materialization/dataplane:inline_buffer_loader",
-        "//core/store/materialization/dataplane:p2p_loader",
-        "@abseil-cpp//absl/functional:overload",
+        "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
         "@abseil-cpp//absl/strings",
+        "@gsl",
     ],
 )
 

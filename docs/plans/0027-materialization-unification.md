@@ -48,9 +48,11 @@ Deliver the layering described in design 0027 by splitting control logic, contra
   - [x] Milestone 2.5: Update Bazel targets so that `//core/store/loader` simply re-exports the new dataplane packages for downstream consumers that have not yet migrated.
 
 - [x] **Phase 3 – Compatibility Removal**
-  - [x] Milestone 3.1: Delete the deprecated `core/store/loading/**` headers and update all includes/Bazel deps to point directly at `core/store/materialization/{contracts,control,planning}`.
-  - [x] Milestone 3.2: Remove the `//core/store/loader` alias package, repoint every consumer (daemon, checkpoint tooling, replication tests, examples) to the narrow dataplane targets, and drop the shim BUILD file entirely.
-  - [x] Milestone 3.3: Sweep documentation (`AGENTS.md`, `core/store/materialization/README.md`, `docs/architecture/p2p-transfer-strategies.md`, plan/design 0027) so no guidance references the legacy directories.
+- [x] Milestone 3.1: Delete the deprecated `core/store/loading/**` headers and update all includes/Bazel deps to point directly at `core/store/materialization/{contracts,control,planning}`.
+- [x] Milestone 3.2: Remove the `//core/store/loader` alias package, repoint every consumer (daemon, checkpoint tooling, replication tests, examples) to the narrow dataplane targets, and drop the shim BUILD file entirely.
+- [x] Milestone 3.3: Sweep documentation (`AGENTS.md`, `core/store/materialization/README.md`, `docs/architecture/p2p-transfer-strategies.md`, plan/design 0027) so no guidance references the legacy directories.
+
+> **Plan 0028 follow-up:** The temporary `loader_registry_adapter` noted in Phase 1 has now been deleted. Disk and P2P ingestion flow exclusively through `materialization::runtime::pipeline::IngestionPipeline`, which emits events consumed by TelemetryService and GlobalStorePublisher. Successful loads are registered with Global Store automatically, so StoreEngine/MaterializeOrchestrator never call the old helper methods directly.
 
 - [x] **Phase 4 – Validation & Rollout**
   - [x] Milestone 4.1: Run `bazel test --define=use_fake_cuda=true //core/store/materialization/control:materialization_service_test` to ensure control-only deps rebuild cleanly after the directory deletions.

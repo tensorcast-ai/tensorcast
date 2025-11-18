@@ -24,9 +24,9 @@ Extract the RFC-0006 registration lifecycle from `StoreEngine` into `components:
 # Phases & Milestones
 
 - [x] **Phase 0 – Scaffolding & Interfaces**
-  - [x] Milestone 0.1: Create `core/store/components/registration/` with `artifact_registration_manager.{h,cc}`, define `RegistrationResources`, `WorkerIdentity`, `ReplicaFactory`, and stub methods (`Begin`, `Commit`, `Abort`, `KeepAlive`, `IngestViewChunk`, `GetViewIngestedBytes`).
+  - [x] Milestone 0.1: Create `core/store/components/registration/` with `registration_facade.{h,cc}` (formerly `artifact_registration_manager.{h,cc}`), define `RegistrationResources`, `WorkerIdentity`, `ReplicaFactory`, and stub methods (`Begin`, `Commit`, `Abort`, `KeepAlive`, `IngestViewChunk`, `GetViewIngestedBytes`).
   - [x] Milestone 0.2: Add BUILD targets (`sc_cc_library` + tests) and wire includes for loaders/hash utilities.
-  - [ ] Milestone 0.3: Write initial unit tests skeleton (`artifact_registration_manager_test.cc`) asserting constructor wiring and resource validation.
+  - [ ] Milestone 0.3: Write initial unit tests skeleton (`registration_facade_test.cc`) asserting constructor wiring and resource validation.
 
 - [x] **Phase 1 – Begin Flow Migration**
   - [x] Milestone 1.1: Move `StoreEngine::begin_register_artifact` logic into ARM’s `Begin`, reusing helper functions (`sum_view_write_bytes`, canonical range merging) lifted from `store_engine.cc`.
@@ -59,7 +59,7 @@ Extract the RFC-0006 registration lifecycle from `StoreEngine` into `components:
 # Acceptance / Validation
 
 - **Build smoke:** `bazel build //core/store:store_engine` (latest run from this change to ensure the new component integrates cleanly).
-- Unit tests: `bazel test //core/store/components/registration:artifact_registration_manager_test`.
+- Unit tests: `bazel test //core/store/components/registration:registration_facade_test`.
 - Integration tests: `bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=true` and `bazel test //core/store:store_engine_test`.
 - Python/API regression (optional sanity): `uv run pytest tests/python/test_store_session_api.py -k register`.
 - Manual verification: stress register/unregister flows on a dev node, confirm TTL expiry metrics and Global Store updates behave as before.

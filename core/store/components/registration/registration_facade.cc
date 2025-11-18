@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/registration/artifact_registration_manager.h"
+#include "core/store/components/registration/registration_facade.h"
 
 #include <unistd.h>
 
@@ -84,7 +84,7 @@ std::string make_registration_id() {
 
 } // namespace
 
-struct ArtifactRegistrationManager::PendingRegistrationContext {
+struct RegistrationFacade::PendingRegistrationContext {
   enum class Plan : uint8_t { kCoalesced = 0, kCpu = 1 };
 
   std::string registration_id;
@@ -117,11 +117,12 @@ struct ArtifactRegistrationManager::PendingRegistrationContext {
   std::unique_ptr<ViewState> view_state;
 };
 
-ArtifactRegistrationManager::ArtifactRegistrationManager(
+RegistrationFacade::RegistrationFacade(
     RegistrationResources resources,
     ReplicaFactory replica_factory,
     size_t artifact_chunk_bytes,
-    std::chrono::milliseconds pinned_memory_timeout)
+    std::chrono::milliseconds pinned_memory_timeout,
+    components::runtime::GlobalStorePublisher* global_store_publisher)
     : device_manager_(resources.device_manager),
       replica_registry_(resources.replica_registry),
       metrics_collector_(resources.metrics_collector),
@@ -130,27 +131,11 @@ ArtifactRegistrationManager::ArtifactRegistrationManager(
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       communication_manager_(std::move(resources.communication_manager)),
-      global_store_client_(std::move(resources.global_store_client)) {
+      global_store_publisher_(global_store_publisher) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
 }
 
-void ArtifactRegistrationManager::set_worker_identity(WorkerIdentity identity) {
-  worker_identity_ = std::move(identity);
-  if (global_store_client_) {
-    global_store_client_->update_local_endpoint(
-        worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
-  }
-}
-
-void ArtifactRegistrationManager::set_global_store_client(std::shared_ptr<IGlobalStoreClient> client) {
-  global_store_client_ = std::move(client);
-  if (global_store_client_) {
-    global_store_client_->update_local_endpoint(
-        worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
-  }
-}
-
-absl::StatusOr<RegistrationBeginResult> ArtifactRegistrationManager::begin(const ArtifactRegistration& reg) {
+absl::StatusOr<RegistrationBeginResult> RegistrationFacade::begin(const ArtifactRegistration& reg) {
   std::string trace_request_id = reg.tensor_index_key;
   if (trace_request_id.empty()) {
     trace_request_id = reg.artifact_id;
@@ -341,7 +326,7 @@ absl::StatusOr<RegistrationBeginResult> ArtifactRegistrationManager::begin(const
   return out;
 }
 
-absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std::string_view registration_id) {
+absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_view registration_id) {
   std::string request_id(registration_id);
   if (request_id.empty()) {
     request_id = "registration";
@@ -592,41 +577,39 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
     }
   }
 
-  if (global_store_client_ && global_store_client_->is_connected()) {
-    DeviceKey device{
-        .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
-        .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
-        .uuid = ""};
-    const std::string wid = worker_identity_.worker_id.empty() ? std::string("local") : worker_identity_.worker_id;
-    std::optional<std::string> verification_json;
-    if (!remote_keys.empty()) {
-      std::vector<void*> data_ptrs =
-          entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
-      if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
-        std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
-        auto info_or = common::ArtifactVerifier::generate_verification_info(
-            data_ptrs, data_sizes, entry->device_id, common::VerificationLevel::KEY_POINTS);
-        if (info_or.ok()) {
-          verification_json = info_or->to_json();
-        }
+  DeviceKey device{
+      .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
+      .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
+      .uuid = ""};
+  std::optional<std::string> verification_json;
+  if (!remote_keys.empty()) {
+    std::vector<void*> data_ptrs =
+        entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
+    if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
+      std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
+      auto info_or = common::ArtifactVerifier::generate_verification_info(
+          data_ptrs, data_sizes, entry->device_id, common::VerificationLevel::KEY_POINTS);
+      if (info_or.ok()) {
+        verification_json = info_or->to_json();
       }
     }
+  }
 
-    auto reg_or = global_store_client_->register_memory_replica(
-        entry->artifact_id,
-        /*worker_id=*/wid,
-        device,
-        entry->size_bytes,
-        entry->tensor_index_key,
-        remote_keys,
-        buffer_sizes,
-        entry->tensor_index_data,
-        entry->encoding,
-        entry->schema_version,
-        /*max_concurrency=*/1,
-        verification_json);
-    if (!reg_or.ok()) {
-      return reg_or.status();
+  if (global_store_publisher_) {
+    components::runtime::GlobalStorePublisher::RegistrationPublication publication{
+        .artifact_id = entry->artifact_id,
+        .device = device,
+        .size_bytes = entry->size_bytes,
+        .tensor_index_key = entry->tensor_index_key,
+        .remote_memory_keys = remote_keys,
+        .buffer_sizes = buffer_sizes,
+        .tensor_index_data = entry->tensor_index_data,
+        .encoding = entry->encoding,
+        .schema_version = entry->schema_version,
+        .verification_json = verification_json};
+    absl::Status registration_status = global_store_publisher_->publish_registration(publication);
+    if (!registration_status.ok()) {
+      return registration_status;
     }
   }
 
@@ -762,8 +745,7 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
     }
   }
 
-  if (entry->view_state && global_store_client_ && global_store_client_->is_connected() &&
-      !entry->view_state->options.view_id.empty()) {
+  if (entry->view_state && !entry->view_state->options.view_id.empty() && global_store_publisher_) {
     components::VariantViewUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
@@ -774,7 +756,7 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
     update.canonical_size_bytes = entry->size_bytes;
     update.canonical_bytes_covered = covered_bytes;
     update.leaf_writes = std::move(leaf_writes);
-    absl::Status update_status = global_store_client_->update_artifact_view_state(update);
+    absl::Status update_status = global_store_publisher_->update_variant_view(update);
     if (!update_status.ok()) {
       LOG(WARNING) << "UpdateArtifactViewState failed for artifact " << entry->artifact_id
                    << " view_id=" << entry->view_state->options.view_id << ": " << update_status;
@@ -784,7 +766,7 @@ absl::StatusOr<RegistrationCommitResult> ArtifactRegistrationManager::commit(std
   return result;
 }
 
-absl::Status ArtifactRegistrationManager::ingest_view_chunk(
+absl::Status RegistrationFacade::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
     absl::Span<const std::byte> data) {
@@ -823,7 +805,7 @@ absl::Status ArtifactRegistrationManager::ingest_view_chunk(
   return absl::OkStatus();
 }
 
-absl::StatusOr<uint64_t> ArtifactRegistrationManager::get_view_ingested_bytes(std::string_view registration_id) const {
+absl::StatusOr<uint64_t> RegistrationFacade::get_view_ingested_bytes(std::string_view registration_id) const {
   auto entry = lookup_pending(registration_id);
   if (!entry) {
     return absl::NotFoundError("registration_id not found");
@@ -837,7 +819,7 @@ absl::StatusOr<uint64_t> ArtifactRegistrationManager::get_view_ingested_bytes(st
   return entry->view_state->expected_view_bytes;
 }
 
-absl::Status ArtifactRegistrationManager::abort(std::string_view registration_id) {
+absl::Status RegistrationFacade::abort(std::string_view registration_id) {
   size_t pending_size_after = 0;
   auto entry = erase_pending(registration_id, &pending_size_after);
   if (!entry) {
@@ -851,7 +833,7 @@ absl::Status ArtifactRegistrationManager::abort(std::string_view registration_id
   return absl::OkStatus();
 }
 
-absl::Status ArtifactRegistrationManager::keep_alive(std::string_view registration_id, uint32_t ttl_ms) {
+absl::Status RegistrationFacade::keep_alive(std::string_view registration_id, uint32_t ttl_ms) {
   if (ttl_ms == 0) {
     return absl::OkStatus();
   }
@@ -864,7 +846,7 @@ absl::Status ArtifactRegistrationManager::keep_alive(std::string_view registrati
   return absl::OkStatus();
 }
 
-std::shared_ptr<ArtifactRegistrationManager::PendingRegistrationContext> ArtifactRegistrationManager::erase_pending(
+std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFacade::erase_pending(
     std::string_view registration_id,
     size_t* pending_size_after) {
   std::shared_ptr<PendingRegistrationContext> entry;
@@ -886,7 +868,7 @@ std::shared_ptr<ArtifactRegistrationManager::PendingRegistrationContext> Artifac
   return entry;
 }
 
-std::shared_ptr<ArtifactRegistrationManager::PendingRegistrationContext> ArtifactRegistrationManager::lookup_pending(
+std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFacade::lookup_pending(
     std::string_view registration_id) const {
   std::lock_guard<std::mutex> lock(pending_mutex_);
   auto it = pending_regs_.find(std::string(registration_id));
@@ -896,7 +878,7 @@ std::shared_ptr<ArtifactRegistrationManager::PendingRegistrationContext> Artifac
   return it->second;
 }
 
-void ArtifactRegistrationManager::release_replica_memory(
+void RegistrationFacade::release_replica_memory(
     const std::shared_ptr<replica::Replica>& replica,
     common::memory::MemoryLocation location) {
   if (!replica) {
@@ -908,12 +890,11 @@ void ArtifactRegistrationManager::release_replica_memory(
   }
 }
 
-void ArtifactRegistrationManager::record_pending_gauge(size_t pending_count) const {
+void RegistrationFacade::record_pending_gauge(size_t pending_count) const {
   metrics_collector_->record_registration_pending(pending_count);
 }
 
-void ArtifactRegistrationManager::record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status)
-    const {
+void RegistrationFacade::record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status) const {
   if (ctx.begin_time.time_since_epoch().count() == 0) {
     return;
   }

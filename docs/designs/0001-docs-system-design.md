@@ -62,6 +62,7 @@ Design (docs/designs/<slug>.md)
 - Interfaces and schemas (include diffs against `schema.sql` when applicable)
 - Invariants and error model
 - Alternatives and rationale
+- Any new interface/API proposed in a design (or its paired plan) must document how it adheres to the repository’s language‑specific style guides (C++ rules in `AGENTS.md` and `core/` READMEs, Python rules in `tensorcast/` docs). Do not introduce interfaces whose naming, error handling, or packaging violates those standards.
 - Risks, success criteria, and compatibility
 - Cross‑links: owning code, related plans, and guides
  - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).

@@ -23,6 +23,9 @@ Key files:
   - VerificationService: core/store/materialization/dataplane/verification/verification_utils.{h,cc}
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
+  - Runtime catalog + services:
+    - ComponentCatalog: core/store/components/runtime/component_catalog.{h,cc} (bootstraps DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, PinnedBufferPool, and the optional Global Store client with a single lifecycle).
+    - ReplicaService: core/store/components/runtime/replica_service.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, and remote access toggles; StoreEngine now queries replicas exclusively through this facade).
 - Components: core/store/components/*
 - Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
@@ -86,6 +89,7 @@ graph TB
   TS --> PUMP
 ```
 
+Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime facade. Construction now builds a `components::runtime::ComponentCatalog`, which sequentially validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `components::runtime::ReplicaService`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `components::runtime::GlobalStorePublisher` is the sole component that talks to Global Store; `StoreEngine`, the ingestion pipeline, and the registration facade emit events and the publisher translates them into register/unregister/key-mapping RPCs. `components::runtime::TelemetryService` consumes the same events and the replica service snapshots to keep metrics and daemon-facing queries consistent without duplicating logic in the facade. This keeps the ingestion/materialization logic focused on orchestration while the catalog/services encapsulate ownership and telemetry.
 ## UMA V3 Cutover (single ledger)
 
 - Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
@@ -109,6 +113,7 @@ graph TB
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
+  - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
   Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (derived from key mapping). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 
@@ -118,7 +123,7 @@ graph TB
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
     - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, and registers with Global Store.
   - `abort_registered_artifact(string_view registration_id)`
-  - Implementation is provided by `components::ArtifactRegistrationManager`, which owns pending registration state, TTL enforcement, view ingestion, and Global Store publication so `StoreEngine` only orchestrates dependencies.
+  - Implementation is provided by `components::RegistrationFacade`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events. Global Store publication is delegated to `components::runtime::GlobalStorePublisher` so the facade never reaches into the Global Store client directly.
 
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
@@ -142,7 +147,7 @@ graph TB
 
 - `StoreEngine::compute_view_plan(canonical_index_json, ViewSpec)` constructs a deterministic `ViewPlan` by delegating to the loader `ViewPlanner`. v1 supports single-dimension `narrow` (slice) operations.
 - `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when (and only when) the selection is contiguous, segment-aligned, and no transforms are required.
-- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` streams the canonical byte space through a loader `ViewPlanSource`, materializes the view in CPU memory when transforms are present, and computes the variant `view_data_hash` using the standard TreeHash pipeline.
+- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the variant `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
 
 These helpers intentionally operate on generic `SeekableSource` instances; the daemon sends either a GPU-backed `LinearizedGpuPlanSource` or a disk-backed source to the hash helper, which keeps verification logic unified across transports.
 
@@ -402,7 +407,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 ## Test Coverage (selected)
 
 - Disk → GPU: core/store/store_engine_test.cc
-- P2P (TCP) → GPU with communicator: core/store/store_engine_p2p_loader_test.cc
+- P2P (TCP) → GPU with communicator: core/store/materialization/runtime/pipeline/tests/p2p_ingestion_test.cc and p2p_verification_fail_test.cc
 - Streaming and sinks: core/store/materialization/dataplane/**/tests/*_test.cc
 - UMA/VS chunk semantics and locking: exercised through ReplicaLoadController and loaders
 
@@ -415,7 +420,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - Variant replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_variant_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
-- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; the backend `ingest_from_p2p()` path (StoreEngine delegates to `ingest_from_p2p_internal()`) parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
+- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; the backend `ingest_from_p2p()` path now flows through the runtime pipeline, which performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
 - Debug visibility: enabling `--v=1` (or higher) now emits the key-point triplet and artifact size whenever verification metadata is regenerated or reused. These logs include the active CUDA device id so stale metadata vs. stale GPU residency issues can be distinguished quickly when diagnosing DataLoss failures.
 ## Granularity Terminology and Invariants
 
