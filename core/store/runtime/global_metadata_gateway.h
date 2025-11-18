@@ -10,19 +10,21 @@
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/ingestion_events.h"
-#include "core/store/components/runtime/replica_service.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/ingestion_events.h"
+#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/runtime_event_hub.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
-class GlobalStorePublisher {
+class GlobalMetadataGateway {
  public:
   struct Config {
     ComponentCatalog* component_catalog;
-    ReplicaService* replica_service;
+    ReplicaRuntime* replica_runtime;
+    RuntimeEventHub* event_hub = nullptr;
   };
 
   struct RegistrationPublication {
@@ -38,7 +40,7 @@ class GlobalStorePublisher {
     std::optional<std::string> verification_json;
   };
 
-  explicit GlobalStorePublisher(Config config);
+  explicit GlobalMetadataGateway(Config config);
 
   [[nodiscard]] bool is_connected() const;
   void set_client_override(std::shared_ptr<components::IGlobalStoreClient> client);
@@ -66,8 +68,10 @@ class GlobalStorePublisher {
   absl::StatusOr<std::shared_ptr<components::IGlobalStoreClient>> get_connected_client() const;
 
   gsl::not_null<ComponentCatalog*> component_catalog_;
-  gsl::not_null<ReplicaService*> replica_service_;
+  gsl::not_null<ReplicaRuntime*> replica_runtime_;
+  RuntimeEventHub* event_hub_{nullptr};
+  std::unique_ptr<RuntimeEventHub::Subscription> ingress_subscription_;
   std::shared_ptr<components::IGlobalStoreClient> override_client_;
 };
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime

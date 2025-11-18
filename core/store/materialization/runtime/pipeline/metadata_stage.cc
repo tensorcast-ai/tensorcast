@@ -21,7 +21,7 @@ namespace tensorcast::store::materialization::runtime::pipeline {
 namespace {
 
 absl::StatusOr<std::string> fetch_canonical_index(
-    components::runtime::ComponentCatalog& catalog,
+    tensorcast::store::runtime::ComponentCatalog& catalog,
     std::string_view artifact_id) {
   auto client = catalog.global_store_client();
   if (!client || !client->is_connected()) {

@@ -12,10 +12,10 @@
 namespace tensorcast::store::materialization::control {
 
 MaterializationCoordinator::MaterializationCoordinator(Config config)
-    : config_(std::move(config)), materialization_service_(MakeDeps()) {}
+    : config_(std::move(config)), materialization_service_(make_deps()) {}
 
-MaterializationDeps MaterializationCoordinator::MakeDeps() const {
-  auto& registry = config_.replica_service->registry();
+MaterializationDeps MaterializationCoordinator::make_deps() const {
+  auto& registry = config_.replica_runtime->registry();
   auto pool = config_.component_catalog->pinned_buffer_pool();
   auto* backend = const_cast<MaterializationCoordinator*>(this);
   MaterializationDeps deps(
@@ -45,12 +45,12 @@ MaterializationDeps MaterializationCoordinator::MakeDeps() const {
   return deps;
 }
 
-absl::StatusOr<loading::ReplicaHandle> MaterializationCoordinator::Materialize(
+absl::StatusOr<loading::ReplicaHandle> MaterializationCoordinator::materialize(
     const DeviceKey& target_device,
     loading::MaterializeMode mode,
     const loading::MaterializeHints& hints) {
   auto request_or =
-      loading::MaterializationRequest::Create(target_device, mode, hints, config_.replica_service->device_manager());
+      loading::MaterializationRequest::Create(target_device, mode, hints, config_.replica_runtime->device_manager());
   if (!request_or.ok()) {
     return request_or.status();
   }
@@ -78,10 +78,10 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationCoordinator::ingest_from_d
 absl::Status MaterializationCoordinator::register_replica_with_global_store(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override) {
-  if (config_.global_store_publisher == nullptr) {
-    return absl::FailedPreconditionError("GlobalStorePublisher not initialized");
+  if (config_.metadata_gateway == nullptr) {
+    return absl::FailedPreconditionError("GlobalMetadataGateway not initialized");
   }
-  return config_.global_store_publisher->register_replica(key, artifact_id_override);
+  return config_.metadata_gateway->register_replica(key, artifact_id_override);
 }
 
 } // namespace tensorcast::store::materialization::control

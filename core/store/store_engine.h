@@ -14,28 +14,19 @@
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/registration/registration_facade.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/global_store_publisher.h"
-#include "core/store/components/runtime/replica_info.h"
-#include "core/store/components/runtime/replica_service.h"
-#include "core/store/components/runtime/telemetry_service.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
-#include "core/store/materialization/control/materialization_coordinator.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
+#include "core/store/runtime/artifact_ingress_manager.h"
+#include "core/store/runtime/global_metadata_gateway.h"
+#include "core/store/runtime/replica_info.h"
+#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/runtime_env.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store {
-
-namespace materialization::control {
-struct MaterializationDeps;
-} // namespace materialization::control
-
-namespace materialization::runtime::pipeline {
-class IngestionPipeline;
-} // namespace materialization::runtime::pipeline
 
 class StoreEngine {
  public:
@@ -46,7 +37,7 @@ class StoreEngine {
   // Legacy AsyncLoadResult and load() interface have been fully removed;
   // callers should use ReplicaHandle returned from materialize_replica().
 
-  using ReplicaInfo = components::runtime::ReplicaInfo;
+  using ReplicaInfo = runtime::ReplicaInfo;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
@@ -248,7 +239,7 @@ class StoreEngine {
 
   // GPU device queries (for status/health reporting)
   [[nodiscard]] int get_num_gpus() const {
-    return replica_service_->device_manager().get_num_gpus();
+    return replica_runtime_->device_manager().get_num_gpus();
   }
 
   [[nodiscard]] absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
@@ -294,25 +285,15 @@ class StoreEngine {
   // Core Components
   // ═══════════════════════════════════════════════════════════════════════════
 
-  std::unique_ptr<components::runtime::ComponentCatalog> component_catalog_;
-  std::unique_ptr<components::runtime::ReplicaService> replica_service_;
-  std::unique_ptr<components::runtime::GlobalStorePublisher> global_store_publisher_;
-  std::unique_ptr<components::runtime::TelemetryService> telemetry_service_;
+  std::unique_ptr<runtime::RuntimeEnv> runtime_env_;
+  std::unique_ptr<runtime::ReplicaRuntime> replica_runtime_;
+  std::unique_ptr<runtime::GlobalMetadataGateway> metadata_gateway_;
+  std::unique_ptr<runtime::ArtifactIngressManager> ingress_manager_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
-  std::unique_ptr<components::RegistrationFacade> registration_facade_;
-  std::unique_ptr<materialization::runtime::pipeline::IngestionPipeline> ingestion_pipeline_;
-  std::unique_ptr<materialization::control::MaterializationCoordinator> materialization_coordinator_;
-
-  // Worker identity (for Global Store registrations)
-  std::string worker_id_;
-  std::string node_id_;
-  std::string node_address_;
-  uint32_t grpc_port_{0};
-  uint32_t p2p_port_{0};
 
  public:
   // Inject worker identity after successful registration with Global Store
@@ -322,24 +303,12 @@ class StoreEngine {
       std::string node_address,
       uint32_t grpc_port,
       uint32_t p2p_port) {
-    worker_id_ = std::move(worker_id);
-    node_id_ = std::move(node_id);
-    node_address_ = std::move(node_address);
-    grpc_port_ = grpc_port;
-    p2p_port_ = p2p_port;
-    component_catalog_->set_worker_identity(
-        components::WorkerIdentity{
-            .worker_id = worker_id_,
-            .node_id = node_id_,
-            .node_address = node_address_,
-            .grpc_port = grpc_port_,
-            .p2p_port = p2p_port_});
-    auto global_store_client = component_catalog_->global_store_client();
-    if (global_store_client) {
-      global_store_client->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
+    if (runtime_env_) {
+      runtime_env_->UpdateWorkerIdentity(
+          std::move(worker_id), std::move(node_id), std::move(node_address), grpc_port, p2p_port);
     }
-    if (global_store_publisher_) {
-      global_store_publisher_->refresh_override_endpoint();
+    if (metadata_gateway_) {
+      metadata_gateway_->refresh_override_endpoint();
     }
   }
 };

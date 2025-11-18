@@ -6,7 +6,6 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <optional>
 
 #include "absl/status/statusor.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -30,7 +29,7 @@ using tensorcast::store::loading::ReplicaTarget;
 struct MaterializationDeps {
   MaterializationDeps(
       gsl::not_null<components::ReplicaRegistry*> registry,
-      gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool)
+      const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pool)
       : replica_registry(registry), memory_pool(pool) {}
 
   gsl::not_null<components::ReplicaRegistry*> replica_registry;

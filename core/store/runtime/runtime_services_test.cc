@@ -9,10 +9,11 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/device_types.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/replica_service.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/replica_config.h"
+#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/runtime_event_hub.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 #include "gsl/pointers"
@@ -20,11 +21,12 @@
 using tensorcast::DeviceType;
 using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::StoreEngineOptions;
-using tensorcast::store::components::runtime::ComponentCatalog;
-using tensorcast::store::components::runtime::ReplicaService;
 using tensorcast::store::loading::InlineBufferSource;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::replica::ReplicaConfig;
+using tensorcast::store::runtime::ComponentCatalog;
+using tensorcast::store::runtime::ReplicaRuntime;
+using tensorcast::store::runtime::RuntimeEventHub;
 
 namespace {
 
@@ -62,12 +64,13 @@ TEST_CASE("ComponentCatalog start/stop preserves pinned pool", "[component_catal
   REQUIRE(catalog.communication_manager() == nullptr);
 }
 
-TEST_CASE("ReplicaService handles inline CPU replicas", "[replica_service]") {
+TEST_CASE("ReplicaRuntime handles inline CPU replicas", "[replica_runtime]") {
   SKIP_IF_NO_CUDA();
   auto opts = MakeTestOptions();
   ComponentCatalog catalog(opts);
   CHECK_OK(catalog.start());
-  ReplicaService service(&catalog);
+  RuntimeEventHub event_hub;
+  ReplicaRuntime service(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &event_hub});
 
   constexpr size_t kBufferBytes = 8 * 1024;
   auto backing = std::make_shared<std::vector<uint8_t>>(kBufferBytes, 0xAB);

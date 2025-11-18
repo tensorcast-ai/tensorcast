@@ -122,7 +122,7 @@ RegistrationFacade::RegistrationFacade(
     ReplicaFactory replica_factory,
     size_t artifact_chunk_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
-    components::runtime::GlobalStorePublisher* global_store_publisher)
+    runtime::GlobalMetadataGateway* metadata_gateway)
     : device_manager_(resources.device_manager),
       replica_registry_(resources.replica_registry),
       metrics_collector_(resources.metrics_collector),
@@ -131,7 +131,7 @@ RegistrationFacade::RegistrationFacade(
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       communication_manager_(std::move(resources.communication_manager)),
-      global_store_publisher_(global_store_publisher) {
+      metadata_gateway_(metadata_gateway) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
 }
 
@@ -550,6 +550,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     result.registration_id = std::string(registration_id);
     result.artifact_id = entry->artifact_id;
     result.device_id = entry->device_id;
+    result.device = dev_key;
     result.size_bytes = entry->size_bytes;
     result.existed = true;
     result.index_multihash = index_multihash;
@@ -595,8 +596,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     }
   }
 
-  if (global_store_publisher_) {
-    components::runtime::GlobalStorePublisher::RegistrationPublication publication{
+  if (metadata_gateway_) {
+    runtime::GlobalMetadataGateway::RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,
         .size_bytes = entry->size_bytes,
@@ -607,7 +608,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
         .encoding = entry->encoding,
         .schema_version = entry->schema_version,
         .verification_json = verification_json};
-    absl::Status registration_status = global_store_publisher_->publish_registration(publication);
+    absl::Status registration_status = metadata_gateway_->publish_registration(publication);
     if (!registration_status.ok()) {
       return registration_status;
     }
@@ -720,6 +721,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
   result.registration_id = std::string(registration_id);
   result.artifact_id = entry->artifact_id;
   result.device_id = entry->device_id;
+  result.device = device;
   result.size_bytes = entry->size_bytes;
   result.existed = false;
   result.index_multihash = index_multihash;
@@ -745,7 +747,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     }
   }
 
-  if (entry->view_state && !entry->view_state->options.view_id.empty() && global_store_publisher_) {
+  if (entry->view_state && !entry->view_state->options.view_id.empty() && metadata_gateway_) {
     components::VariantViewUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
@@ -756,7 +758,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     update.canonical_size_bytes = entry->size_bytes;
     update.canonical_bytes_covered = covered_bytes;
     update.leaf_writes = std::move(leaf_writes);
-    absl::Status update_status = global_store_publisher_->update_variant_view(update);
+    absl::Status update_status = metadata_gateway_->update_variant_view(update);
     if (!update_status.ok()) {
       LOG(WARNING) << "UpdateArtifactViewState failed for artifact " << entry->artifact_id
                    << " view_id=" << entry->view_state->options.view_id << ": " << update_status;

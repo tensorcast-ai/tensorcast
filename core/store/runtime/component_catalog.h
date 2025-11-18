@@ -15,7 +15,7 @@
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/store_engine_options.h"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
 class ComponentCatalog {
  public:
@@ -28,11 +28,11 @@ class ComponentCatalog {
   absl::Status start();
   void shutdown();
 
-  DeviceManager& device_manager();
-  ReplicaRegistry& replica_registry();
-  MetricsCollector& metrics_collector();
+  components::DeviceManager& device_manager();
+  components::ReplicaRegistry& replica_registry();
+  components::MetricsCollector& metrics_collector();
 
-  [[nodiscard]] std::shared_ptr<CommunicationManager> communication_manager() const {
+  [[nodiscard]] std::shared_ptr<components::CommunicationManager> communication_manager() const {
     return comm_manager_;
   }
 
@@ -40,7 +40,7 @@ class ComponentCatalog {
     return memory_pool_;
   }
 
-  [[nodiscard]] std::shared_ptr<IGlobalStoreClient> global_store_client() const {
+  [[nodiscard]] std::shared_ptr<components::IGlobalStoreClient> global_store_client() const {
     return global_store_client_;
   }
 
@@ -48,7 +48,7 @@ class ComponentCatalog {
     return view_hash_computer_;
   }
 
-  void set_global_store_client_for_testing(std::shared_ptr<IGlobalStoreClient> client);
+  void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
 
   [[nodiscard]] size_t artifact_chunk_bytes() const {
     return artifact_chunk_bytes_;
@@ -66,9 +66,9 @@ class ComponentCatalog {
     return options_;
   }
 
-  void set_worker_identity(WorkerIdentity identity);
+  void set_worker_identity(components::WorkerIdentity identity);
 
-  [[nodiscard]] const WorkerIdentity& worker_identity() const {
+  [[nodiscard]] const components::WorkerIdentity& worker_identity() const {
     return worker_identity_;
   }
 
@@ -81,14 +81,14 @@ class ComponentCatalog {
   StoreEngineOptions options_;
   size_t artifact_chunk_bytes_{0};
   std::shared_ptr<common::memory::PinnedBufferPool> memory_pool_;
-  std::unique_ptr<DeviceManager> device_manager_;
-  std::unique_ptr<ReplicaRegistry> replica_registry_;
-  std::unique_ptr<MetricsCollector> metrics_collector_;
-  std::shared_ptr<CommunicationManager> comm_manager_;
-  std::shared_ptr<IGlobalStoreClient> global_store_client_;
+  std::unique_ptr<components::DeviceManager> device_manager_;
+  std::unique_ptr<components::ReplicaRegistry> replica_registry_;
+  std::unique_ptr<components::MetricsCollector> metrics_collector_;
+  std::shared_ptr<components::CommunicationManager> comm_manager_;
+  std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
-  WorkerIdentity worker_identity_;
+  components::WorkerIdentity worker_identity_;
   bool started_{false};
 };
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime
