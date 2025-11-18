@@ -77,61 +77,61 @@ class PartitionTensor {
   }
 
   [[nodiscard]] bool has_registered_mr(net_dev_t dev) const {
-    return registered_[dev->get_name()]->load() && mrs_[dev->get_name()] != nullptr) {
+    return registered_[dev->get_name()]->load() && mrs_[dev->get_name()];
   }
 
-    template <class T>
-    T* get_addr() {
-      return reinterpret_cast<T*>(addr_);
-    }
+  template <class T>
+  T* get_addr() {
+    return reinterpret_cast<T*>(addr_);
+  }
 
-    // Get device ID (for GPU tensors)
-    [[nodiscard]] int get_device_id() const {
-      return device_id_;
-    }
+  // Get device ID (for GPU tensors)
+  [[nodiscard]] int get_device_id() const {
+    return device_id_;
+  }
 
-    void set_device_id(int id) {
-      device_id_ = id;
-    }
+  void set_device_id(int id) {
+    device_id_ = id;
+  }
 
-   private:
-    std::string tensor_key_;
+ private:
+  std::string tensor_key_;
 
-    uint64_t addr_;
-    uint64_t bytes_;
-    absl::flat_hash_map<std::string, std::shared_ptr<std::atomic_bool>> registered_;
-    std::atomic_bool ready_;
-    absl::flat_hash_map<std::string, struct ibv_mr*> mrs_;
-    std::vector<net_dev_t> devs_;
-    absl::flat_hash_map<std::string, uint64_t> regmr_costs_;
-    int mem_type_;
-    bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
-    int device_id_ = -1; // GPU device ID (-1 for CPU)
-    std::atomic_bool direct_rdma_enabled_{false};
-  };
+  uint64_t addr_;
+  uint64_t bytes_;
+  absl::flat_hash_map<std::string, std::shared_ptr<std::atomic_bool>> registered_;
+  std::atomic_bool ready_;
+  absl::flat_hash_map<std::string, struct ibv_mr*> mrs_;
+  std::vector<net_dev_t> devs_;
+  absl::flat_hash_map<std::string, uint64_t> regmr_costs_;
+  int mem_type_;
+  bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
+  int device_id_ = -1; // GPU device ID (-1 for CPU)
+  std::atomic_bool direct_rdma_enabled_{false};
+};
 
-  typedef std::shared_ptr<PartitionTensor> tensor_t;
+typedef std::shared_ptr<PartitionTensor> tensor_t;
 
-  class RemotePartitionTensor {
-   public:
-    RemotePartitionTensor(std::string tensor_key, std::string net_dev, uint64_t addr, uint64_t bytes, uint32_t rkey);
-    ~RemotePartitionTensor() = default;
-    std::string get_key() const;
-    uint64_t get_bytes() const;
-    uint32_t get_rkey() const;
-    std::string get_net_dev() const;
-    uint64_t get_uint64_addr() const;
+class RemotePartitionTensor {
+ public:
+  RemotePartitionTensor(std::string tensor_key, std::string net_dev, uint64_t addr, uint64_t bytes, uint32_t rkey);
+  ~RemotePartitionTensor() = default;
+  std::string get_key() const;
+  uint64_t get_bytes() const;
+  uint32_t get_rkey() const;
+  std::string get_net_dev() const;
+  uint64_t get_uint64_addr() const;
 
-   private:
-    std::string tensor_key_;
-    std::string net_dev_;
+ private:
+  std::string tensor_key_;
+  std::string net_dev_;
 
-    uint64_t addr_;
-    uint64_t bytes_;
-    uint32_t rkey_;
-  };
+  uint64_t addr_;
+  uint64_t bytes_;
+  uint32_t rkey_;
+};
 
-  typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
+typedef std::shared_ptr<RemotePartitionTensor> remote_tensor_t;
 
 } // namespace tensorcast::communicator::transport
 
