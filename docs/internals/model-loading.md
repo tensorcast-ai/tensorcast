@@ -166,7 +166,7 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
 - `StoreEngine` now exposes static helpers:
   - `compute_view_plan(...)` → Loader-backed planning entry point surfaced to the daemon.
   - `view_plan_allows_alias(plan)` → Returns `true` when the selection is contiguous and segment-aligned so the engine can hand out zero-copy aliases.
-  - `compute_view_data_hash_from_source(source, plan, leaf_bytes)` → Reuses the existing TreeHash pipeline to verify variant byte spaces by composing `ViewPlanSource` with canonical GPU/disk sources.
+  - `compute_view_data_hash_from_source(source, plan, leaf_bytes)` → Delegates to `ViewHashComputer`, which reuses the TreeHash pipeline to verify variant byte spaces across disk, GPU, and replica-resident sources.
 
 These APIs keep view normalization, selection, and hashing anchored in the C++ core so the Python daemon and SDK share a single implementation.
 - Join/Lease semantics for duplicates: when `existed=true`, the daemon also joins a lightweight reference for the caller’s PID. If a TTL was provided at `BeginRegisterArtifact`, `KeepAliveRegisterArtifact` can extend the TTL, and the unified `SessionLifecycleTask` drops the joined reference when the TTL expires. This mirrors the lifecycle of a self-created replica.

@@ -36,8 +36,17 @@ struct StoreEngineOptions {
   // Timeout for pinned-memory allocations.
   std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds{30000}}; // 30 s
 
+  // Host/interface used by the Communicator listener. Empty string falls back
+  // to loopback, while "0.0.0.0" exposes the port on all interfaces.
+  std::string p2p_listen_host{"127.0.0.1"};
+
   // Port used by Communicator for P2P transfers.
   uint16_t p2p_port{9090};
+
+  // Toggle RDMA support for the Communicator. When true the communicator will
+  // attempt to register RDMA transports; otherwise it operates in TCP-only
+  // mode with staging buffers for GPU memory.
+  bool enable_rdma{false};
 
   // Address of the Global Store gRPC service ("host:port").  Empty string means
   // the StoreEngine will operate in standalone mode without remote

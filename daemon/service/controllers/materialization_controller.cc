@@ -1,7 +1,5 @@
 // Copyright (c) 2025, TensorCast Team.
 
-// Implementation of MaterializationController
-
 #include "daemon/service/controllers/materialization_controller.h"
 
 #include <future>
@@ -11,11 +9,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "absl/time/time.h"
+#include "opentelemetry/metrics/provider.h"
+
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
-#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
 
@@ -28,7 +26,7 @@ namespace {
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
 
-absl::StatusOr<ViewSpec> ConvertViewSpec(const v1::ViewSpec& proto) {
+absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
   ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : proto.tensors()) {
     store::loader::TensorViewOps ops;
@@ -62,7 +60,7 @@ absl::StatusOr<ViewSpec> ConvertViewSpec(const v1::ViewSpec& proto) {
   return spec;
 }
 
-bool SpecIncludesTranspose(const ViewSpec& spec) {
+bool spec_includes_transpose(const ViewSpec& spec) {
   for (const auto& [_, ops] : spec.tensors) {
     for (const auto& op : ops.ops) {
       if (op.kind == ViewOp::Kind::kTranspose) {
@@ -73,7 +71,7 @@ bool SpecIncludesTranspose(const ViewSpec& spec) {
   return false;
 }
 
-store::loading::TransformPlacement ResolvePlacement(
+store::loading::TransformPlacement resolve_placement(
     const v1::MaterializeReplicaRequest& req,
     const std::optional<ViewSpec>& spec) {
   switch (req.placement()) {
@@ -85,7 +83,7 @@ store::loading::TransformPlacement ResolvePlacement(
     default:
       break;
   }
-  if (spec.has_value() && SpecIncludesTranspose(*spec)) {
+  if (spec.has_value() && spec_includes_transpose(*spec)) {
     return store::loading::TransformPlacement::kClient;
   }
   return store::loading::TransformPlacement::kServer;
@@ -135,7 +133,7 @@ grpc::Status MaterializationController::materialize_replica(
       if (!has_artifact) {
         return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id for canonical planning"};
       }
-      auto spec_or = ConvertViewSpec(req.view());
+      auto spec_or = convert_view_spec(req.view());
       if (!spec_or.ok()) {
         return to_grpc_status(spec_or.status());
       }
@@ -210,11 +208,12 @@ grpc::Status MaterializationController::materialize_replica(
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
-      // Same-device denial or copy failure: set FAILED for parity and propagate as gRPC error
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(satisfied.status());
-    }
-    if (*satisfied) {
+      // Same-device denial should fall back to the engine path just like MaterializeByKey.
+      if (!absl::IsFailedPrecondition(satisfied.status())) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return to_grpc_status(satisfied.status());
+      }
+    } else if (*satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       rctx.mark_success();
       return Status::OK;
@@ -247,7 +246,7 @@ grpc::Status MaterializationController::materialize_replica(
     if (request_view_id.has_value()) {
       variant.view_id = request_view_id;
     }
-    variant.placement = ResolvePlacement(req, view_spec);
+    variant.placement = resolve_placement(req, view_spec);
     hints.variant = std::move(variant);
   }
   const auto mode =

@@ -100,10 +100,6 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       if (!comp_status.ok()) {
         LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
       }
-
-      // Register replica with Global Store using the engine's worker identity
-      // and computed key. This avoids placeholder worker IDs and keeps
-      // registrations consistent with WorkerLifecycleManager.
       const auto& handle = *load_or;
       absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
       if (!reg_status.ok()) {
@@ -148,8 +144,6 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   auto disk_or = backend_->ingest_from_disk(std::string(artifact_id), disk_src, target, hints);
   if (disk_or.ok()) {
-    // Register with Global Store using the engine helper, overriding the
-    // canonical artifact id for downstream discovery.
     const auto& handle = *disk_or;
     absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
     if (!reg_status.ok()) {

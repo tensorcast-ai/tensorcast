@@ -2,7 +2,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
 #include "absl/status/status.h"
@@ -50,8 +53,78 @@ class InlineBufferLoader : public IArtifactLoader {
   }
 
   absl::StatusOr<std::unique_ptr<loader::SeekableSource>> open_source() override {
-    // This loader is size-only; no streaming source is provided.
-    return absl::UnimplementedError("InlineBufferLoader does not provide a streaming source");
+    absl::MutexLock lock(&mutex_);
+    if (!initialized_) {
+      return absl::FailedPreconditionError("InlineBufferLoader not initialized");
+    }
+    if (!source_.data) {
+      return absl::FailedPreconditionError("InlineBufferSource does not contain inline data");
+    }
+    if (source_.size_bytes == 0) {
+      return absl::FailedPreconditionError("InlineBufferSource size_bytes is 0");
+    }
+
+    class InlineSeekableSource final : public loader::SeekableSource {
+     public:
+      InlineSeekableSource(std::shared_ptr<const void> data, uint64_t size)
+          : data_(std::move(data)), size_(size), cursor_(0) {}
+
+      absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+        auto bytes_or = read_at(cursor_, dst, max_bytes);
+        if (!bytes_or.ok()) {
+          return bytes_or.status();
+        }
+        cursor_ += bytes_or.value();
+        return bytes_or;
+      }
+
+      absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+        if (offset >= size_ || bytes == 0) {
+          return static_cast<size_t>(0);
+        }
+        const uint64_t remaining = size_ - offset;
+        const auto to_copy = static_cast<size_t>(std::min<uint64_t>(remaining, bytes));
+        const auto* src = static_cast<const std::byte*>(data_.get()) + offset;
+        std::memcpy(dst, src, to_copy);
+        return to_copy;
+      }
+
+      [[nodiscard]] bool supports_direct_write() const override {
+        return true;
+      }
+
+      absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
+        if (bytes == 0) {
+          return static_cast<size_t>(0);
+        }
+        if (dest_va_offset + bytes > size_) {
+          return absl::OutOfRangeError("Inline buffer read exceeds source bounds");
+        }
+        const DirectWriteGrant::Window* target = nullptr;
+        for (const auto& window : grant.windows) {
+          if (dest_va_offset >= window.va_offset && dest_va_offset + bytes <= window.va_offset + window.length) {
+            target = &window;
+            break;
+          }
+        }
+        if (target == nullptr) {
+          return absl::InvalidArgumentError("No direct-write window covers requested inline range");
+        }
+        auto window_offset = dest_va_offset - target->va_offset;
+        auto* dst = reinterpret_cast<void*>(target->local_addr + window_offset);
+        const auto* src = static_cast<const std::byte*>(data_.get()) + dest_va_offset;
+        std::memcpy(dst, src, bytes);
+        return bytes;
+      }
+
+     private:
+      std::shared_ptr<const void> data_;
+      uint64_t size_;
+      uint64_t cursor_;
+    };
+
+    return std::unique_ptr<loader::SeekableSource>(
+        std::make_unique<InlineSeekableSource>(source_.data, source_.size_bytes));
   }
 
  private:

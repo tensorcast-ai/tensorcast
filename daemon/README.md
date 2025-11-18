@@ -69,6 +69,7 @@ flowchart TB
 Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
+- `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 
 ### Variant Views (v1)

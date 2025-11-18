@@ -146,3 +146,18 @@ struct ReplicaHandle {
 };
 
 } // namespace tensorcast::store::loading
+
+inline absl::Status tensorcast::store::loading::ReplicaHandle::wait_ready(std::chrono::milliseconds timeout) {
+  if (!ready_future.valid()) {
+    return absl::OkStatus();
+  }
+  if (timeout.count() > 0) {
+    const auto wait_status = ready_future.wait_for(timeout);
+    if (wait_status != std::future_status::ready) {
+      return absl::DeadlineExceededError("replica did not reach ready state before timeout");
+    }
+  } else {
+    ready_future.wait();
+  }
+  return ready_future.get();
+}

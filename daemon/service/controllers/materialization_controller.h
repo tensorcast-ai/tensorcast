@@ -13,7 +13,6 @@
 #include "daemon/rpc_context.h"
 #include "daemon/session_lifecycle.h"
 #include "daemon/sessions_service.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 

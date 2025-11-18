@@ -23,9 +23,9 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
-#include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/runtime/global_store_publisher.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
@@ -85,38 +85,27 @@ struct RegistrationCommitResult {
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
 };
 
-struct WorkerIdentity {
-  std::string worker_id;
-  std::string node_id;
-  std::string node_address;
-  uint32_t grpc_port{0};
-  uint32_t p2p_port{0};
-};
-
 struct RegistrationResources {
   gsl::not_null<DeviceManager*> device_manager;
   gsl::not_null<ReplicaRegistry*> replica_registry;
   gsl::not_null<MetricsCollector*> metrics_collector;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
   std::shared_ptr<CommunicationManager> communication_manager;
-  std::shared_ptr<IGlobalStoreClient> global_store_client;
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;
 
-class ArtifactRegistrationManager {
+class RegistrationFacade {
  public:
-  ArtifactRegistrationManager(
+  RegistrationFacade(
       RegistrationResources resources,
       ReplicaFactory replica_factory,
       size_t artifact_chunk_bytes,
-      std::chrono::milliseconds pinned_memory_timeout);
+      std::chrono::milliseconds pinned_memory_timeout,
+      components::runtime::GlobalStorePublisher* global_store_publisher);
 
-  ArtifactRegistrationManager(const ArtifactRegistrationManager&) = delete;
-  ArtifactRegistrationManager& operator=(const ArtifactRegistrationManager&) = delete;
-
-  void set_worker_identity(WorkerIdentity identity);
-  void set_global_store_client(std::shared_ptr<IGlobalStoreClient> client);
+  RegistrationFacade(const RegistrationFacade&) = delete;
+  RegistrationFacade& operator=(const RegistrationFacade&) = delete;
 
   absl::StatusOr<RegistrationBeginResult> begin(const ArtifactRegistration& reg);
   absl::StatusOr<RegistrationCommitResult> commit(std::string_view registration_id);
@@ -149,8 +138,7 @@ class ArtifactRegistrationManager {
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};
   std::shared_ptr<CommunicationManager> communication_manager_;
-  std::shared_ptr<IGlobalStoreClient> global_store_client_;
-  WorkerIdentity worker_identity_;
+  components::runtime::GlobalStorePublisher* global_store_publisher_;
 
   mutable std::mutex pending_mutex_;
   absl::flat_hash_map<std::string, std::shared_ptr<PendingRegistrationContext>> pending_regs_;
