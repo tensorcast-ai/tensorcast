@@ -8,6 +8,8 @@ This document explains the internal implementation of the Global Store (central 
 - Storage: DuckDB (in-memory by default; optional persistent file).
 - Interface: gRPC (unary-unary RPCs) with Prometheus metrics export.
 - Runtime: Background maintenance thread (cleanup + VACUUM), batched heartbeats.
+- Artifact identity kinds: supports both MI2 (content-addressed) and CGID
+  (client-supplied, hashless) descriptors.
 
 ## Configuration
 

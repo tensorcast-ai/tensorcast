@@ -82,6 +82,7 @@ Design (docs/designs/<slug>.md)
       ```
 
 Plan (docs/plans/<slug>.md)
+- Grounding: summarize current state and link concrete code references; declare baseline
 - Phases/milestones and tasks
 - Acceptance checks, test plan, rollout/backout
 - Risk tracking and owner checklist
@@ -165,6 +166,11 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Link each milestone to owning code/tests where applicable.
 - Keep tasks small, actionable, and verifiable.
 
+- Plans must be deeply grounded in the project’s current state (code, data, infra). Do a brief discovery pass first: read owning README/AGENTS.md, key modules, and tests.
+- Be targeted: map each phase and milestone to concrete code locations or tests; add code references using the repository’s code‑reference format.
+- Capture a short "Current State" summary: constraints, feature flags, tech debt, active migrations, and relevant configurations with links to code/docs.
+- Treat the plan as a living document: adjust during execution as you learn. Record meaningful changes, keep acceptance criteria aligned with the design, and update the design when intent materially changes.
+
 # Templates (Authoring Aids)
 
 Design (minimal)
@@ -200,6 +206,10 @@ links:
 ---
 
 # Objective
+
+# Current State & Grounding
+- Key constraints observed in current code/data
+- Code references to owning modules/tests/docs
 
 # Phases & Milestones
 

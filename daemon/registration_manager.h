@@ -34,6 +34,8 @@ class RegistrationManager {
     bool lease_in_place{false};
     std::string index_key_hex;
     std::string index_data;
+    tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
+    std::string client_artifact_id;
     bool view_registration{false};
     store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
     std::string view_id;
@@ -48,6 +50,7 @@ class RegistrationManager {
     std::string artifact_id_mi2;
     // Lease ID for TTL UseLease created on commit when joining existing GPU replica.
     uint64_t use_lease_id{0};
+    absl::flat_hash_map<std::string, uint32_t> region_refcounts;
   };
 
   RegistrationManager() = default;
@@ -96,6 +99,16 @@ class RegistrationManager {
       bucket.push_back(std::move(a));
   }
 
+  void add_region_reference(const std::string& reg_id, const std::string& region_id, uint32_t count = 1) {
+    if (count == 0)
+      return;
+    absl::MutexLock l(&mu_);
+    auto it = reg_meta_.find(reg_id);
+    if (it == reg_meta_.end())
+      return;
+    it->second.region_refcounts[region_id] += count;
+  }
+
   void update_view_ingested_bytes(const std::string& reg_id, uint64_t bytes) {
     absl::MutexLock l(&mu_);
     auto it = reg_meta_.find(reg_id);
@@ -133,14 +146,20 @@ class RegistrationManager {
     reg_leases_.erase(reg_id);
   }
 
-  // Returns true if meta existed and was expired (and erased)
-  bool expire_if_ttl_elapsed(const std::string& reg_id) {
+  // Returns true if meta existed and was expired (and erased). When expired,
+  // optionally returns region reference counts to caller via |released_refs|.
+  bool expire_if_ttl_elapsed(
+      const std::string& reg_id,
+      absl::flat_hash_map<std::string, uint32_t>* released_refs = nullptr) {
     absl::MutexLock l(&mu_);
     auto it = reg_meta_.find(reg_id);
     if (it == reg_meta_.end())
       return false;
     const auto now = std::chrono::steady_clock::now();
     if (it->second.expiry.time_since_epoch().count() > 0 && now > it->second.expiry) {
+      if (released_refs) {
+        *released_refs = it->second.region_refcounts;
+      }
       reg_meta_.erase(it);
       reg_leases_.erase(reg_id);
       reg_storages_.erase(reg_id);
@@ -195,12 +214,18 @@ class RegistrationManager {
     return absl::OkStatus();
   }
 
-  void erase_all_for(const std::string& reg_id) {
+  absl::flat_hash_map<std::string, uint32_t> erase_all_for(const std::string& reg_id) {
     absl::MutexLock l(&mu_);
-    reg_meta_.erase(reg_id);
+    absl::flat_hash_map<std::string, uint32_t> refs;
+    auto meta_it = reg_meta_.find(reg_id);
+    if (meta_it != reg_meta_.end()) {
+      refs = meta_it->second.region_refcounts;
+      reg_meta_.erase(meta_it);
+    }
     reg_leases_.erase(reg_id);
     reg_storages_.erase(reg_id);
     reg_aliases_.erase(reg_id);
+    return refs;
   }
 
   // Enumerate registration ids (for TTL sweeping and tests)

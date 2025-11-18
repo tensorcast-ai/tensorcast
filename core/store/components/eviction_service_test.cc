@@ -8,7 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 
 using tensorcast::DeviceType;

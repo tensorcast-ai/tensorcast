@@ -16,7 +16,7 @@
 #include "core/common/artifact_verification.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 

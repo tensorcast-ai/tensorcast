@@ -286,6 +286,7 @@ sequenceDiagram
 Key characteristics:
 - Multi-buffer pipelining: `buffers_per_flow` from config controls how many chunks `StreamingPinnedBuffer` rotates.
 - Chunk sizing: `stage_chunk_mb_gpu` and `stage_chunk_mb_cpu` define per-stager slice sizes; GPU defaults to 16 MiB, CPU to 4 MiB.
+- Zero-copy window sizing: `direct_chunk_mb` sets the per-window RDMA segment size when zero-copy is active (defaults to the GPU chunk size).
 - Pool reuse: a single `PinnedBufferPool` services both staging paths (NUMA-specific pools are created when `simple_numa` is enabled).
 - Explicit release: MTCP senders free staged buffers once their socket writes complete, while RDMA paths rely on `RDMA_READ_DONE_EX` to release the corresponding `StageLease` entries in the registry.
 - GPU staging slots now use `StreamingChunkGuard` to acquire, promote, and hand buffers to async consumers, ensuring `StreamingPinnedBuffer` state transitions stay consistent while still aborting to the free queue if staging or copy submission fails.
@@ -370,6 +371,7 @@ flowchart TB
 Use `CommunicatorConfig` fields instead of env vars:
 
 - stager.stage_chunk_mb_gpu: size of each staging chunk (MB). Default: 16.
+- stager.direct_chunk_mb: per-window zero-copy RDMA chunk size (MB). Default: stage_chunk_mb_gpu.
 - stager.stage_chunk_mb_cpu: CPU chunk size (MB). Default: 4.
 - stager.buffers_per_flow: number of buffers per flow. Default: 4.
 - stager.expected_gpu_channels: optional cap on concurrent GPU MTCP transports. Default: 0 (auto).
@@ -397,6 +399,7 @@ Key behaviors:
 - Clients send `RDMA_READ_DONE_EX` after all segments complete. The server looks up the lease, deregisters when required, returns the buffer to the originating stager, and credits the `FlowCreditLedger`.
 - `ack_ttl_ms` (configurable, default 30 s) guards against leaked ACKs by reaping overdue registry entries in the GC loop.
 - QP attributes (`traffic_class`, `qp_timeout`, `qp_retry`) and outstanding WR limits are derived from `CommunicatorConfig`.
+- Observability: zero-copy transfers increment `tc_rdma_direct_segments_total{device_id}` and `tc_rdma_direct_bytes_total{device_id}`, window sizes land in `tc_rdma_direct_window_bytes`, and fallbacks attributed by reason hit `tc_rdma_direct_fallback_total{reason}`.
 
 ```mermaid
 stateDiagram-v2

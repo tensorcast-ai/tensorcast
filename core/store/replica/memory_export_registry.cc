@@ -44,10 +44,8 @@ void MemoryExportRegistry::keepalive_gauge_callback(
   obs->Observe(count, {{"location", opentelemetry::common::AttributeValue("cpu")}});
 }
 
-MemoryExportRegistry::MemoryExportRegistry(
-    gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma,
-    gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space)
-    : uma_(std::move(uma)), va_space_(std::move(virtual_addr_space)) {
+MemoryExportRegistry::MemoryExportRegistry(gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma)
+    : uma_(std::move(uma)) {
   meter_ = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   ex_reg_total_ = meter_->CreateDoubleCounter("tc_ex_registrations_total");
   ex_keepalive_gauge_ = meter_->CreateDoubleObservableGauge("tc_ex_keepalive_gauge");
@@ -115,7 +113,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     ranges = reg_or->chunk_ranges;
     rec.uma_keepalive = reg_or->keepalive; // Hold VS pin leases across registration lifetime
     // Derive chunk size from UMA layout to ensure alignment across VS/UMA
-    uint64_t kChunk = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
+    uint64_t kChunk = static_cast<uint64_t>(uma_->get_artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {
       kChunk = static_cast<uint64_t>(layout_or->artifact_chunk_bytes);
     }
@@ -190,7 +188,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       return reg_or.status();
     }
     ranges = reg_or->chunk_ranges;
-    uint64_t kChunk = static_cast<uint64_t>(va_space_->artifact_chunk_bytes());
+    uint64_t kChunk = static_cast<uint64_t>(uma_->get_artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {
       kChunk = static_cast<uint64_t>(layout_or->artifact_chunk_bytes);
     }
@@ -214,6 +212,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       opts.needs_staging =
           (!comm_engine.is_rdma_enabled() && info.comm_dev_type == communicator::base::COMMUNICATE_ENGINE_DEV_GPU);
       opts.async = false;
+      opts.direct_rdma_enabled = comm_engine.is_rdma_enabled() && !opts.needs_staging;
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
         return absl::InternalError("Failed to register GPU chunk-range tensor");

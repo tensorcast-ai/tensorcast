@@ -4,6 +4,7 @@
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/communicator/misc/metric.h"
 
+#include <thread>
 #include <utility>
 
 namespace tensorcast::communicator::transport {
@@ -23,9 +24,12 @@ PartitionTensor::PartitionTensor(std::string tensor_key, uint64_t addr, uint64_t
 }
 
 PartitionTensor::~PartitionTensor() {
+
   for (auto dev : devs_) {
     if (registered_[dev->get_name()]->load()) {
-      CHECK_WARN(misc::wrap_ibv_dereg_mr(mrs_[dev->get_name()]), "failed to dereg mr");
+      if(mrs_[dev->get_name()] != nullptr) {
+        CHECK_WARN(misc::wrap_ibv_dereg_mr(mrs_[dev->get_name()]), "failed to dereg mr");
+      }
       registered_[dev->get_name()]->store(false);
       ready_.store(false);
     }
@@ -46,6 +50,7 @@ void PartitionTensor::add_dev(const net_dev_t& dev) {
 void PartitionTensor::add_dev_list(const std::vector<net_dev_t>& devs) {
   for (const auto& dev : devs) {
     add_dev(dev);
+
   }
 }
 
@@ -59,6 +64,12 @@ void PartitionTensor::set_read_unready() {
 
 void PartitionTensor::wait_read_ready() {
   while (!ready_.load()) {
+    std::this_thread::yield();
+  }
+}
+
+void PartitionTensor::wait_mr_ready() {
+  while (!registered_.load()) {
     std::this_thread::yield();
   }
 }
@@ -133,10 +144,15 @@ void PartitionTensor::register_mr(const NetDev* dev) {
   int flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
   auto addr = get_addr<void>();
   auto nb_bytes = get_bytes();
-  CHECK_WARN(dev->reg_mr(&mrs_[dev->get_name()], addr, nb_bytes, flags), "failed to register mr");
-
+  misc::result_t res = dev->reg_mr(&mrs_[dev->get_name()], addr, nb_bytes, flags);
+  
+  if (res != misc::SUCCESS) {
+    LOG(WARNING) << __FILE__ << ":" << __LINE__ << " " << res << " failed to register mr";
+    mrs_[dev->get_name()] = nullptr;
+  } else {
+    regmr_costs_[dev->get_name()] = timer.record();
+  }
   registered_[dev->get_name()]->store(true);
-  regmr_costs_[dev->get_name()] = timer.record();
 }
 
 RemotePartitionTensor::RemotePartitionTensor(

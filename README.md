@@ -188,7 +188,7 @@ manual revoke/abort), use the `Store.register_async` path or the low-level SDK h
 Python context manager. When `ttl_ms` is provided, the Store’s lease manager refreshes TTL every
 TTL/2 until commit/close.
 
-Note: SDK examples have been aligned to UMA V3 final naming; CPU streaming uses the VirtualAddressSpace (VS) path with UMA-managed leases and commit. Refer to tensorcast.api helpers for current usage.
+Note: SDK examples have been aligned to UMA V3 final naming; CPU streaming now uses UMA-owned direct-write grants and ledger updates. Refer to `tensorcast.api` helpers for current usage.
 
 Notes:
 - For VRAM lease (FDML), begin with `LeasePlan(kind="lease", ...)` and feed `LeaseSegment` items using IPC handles exported from unique CUDA storage blocks. Each `LeaseSegment` includes `dst_offset` so segment order is irrelevant; the daemon zero-fills PAD and places bytes at the specified destination offsets.

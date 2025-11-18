@@ -24,6 +24,7 @@ from tensorcast._C import (
     get_cuda_memory_ptr,
     restore_tensors,
 )
+from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storage_graph
 
 if TYPE_CHECKING:  # for static type checkers only
@@ -46,6 +47,7 @@ from tensorcast.api._indices import (
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
+from tensorcast.common.identity import ArtifactIdKind, validate_client_generated_id
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.types import (
@@ -901,25 +903,55 @@ class _LeaseUploader:
                     f"Storage '{storage_id}' device mismatch: expected cuda:{ctx.device_id}, got {entry.device_id}"
                 )
             dst_offset = storage_to_dst[storage_id]
-            handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
             length_bytes = int(entry.size_bytes)
-            segments.append(
-                LeaseSegment(
-                    device_id=int(ctx.device_id),
-                    cuda_ipc_handle=handle_bytes,
-                    base_addr=0,
-                    length=length_bytes,
-                    dst_offset=int(dst_offset),
-                )
+            # Prefer region-backed registration when the storage is fully covered
+            # by a pre-registered VRAM region for this device.
+            rec = region_cache.find_region_for(
+                int(ctx.device_id), int(entry.base_ptr), int(entry.size_bytes)
             )
-            storages_payload.append(
-                RegisterStorage(
-                    storage_id=storage_id,
-                    device_id=int(ctx.device_id),
-                    cuda_ipc_handle=handle_bytes,
-                    storage_length=length_bytes,
+            if rec is not None:
+                # Emit a region-referenced storage entry; drop redundant handle export.
+                base_offset = int(entry.base_ptr) - int(rec.base_ptr)
+                segments.append(
+                    LeaseSegment(
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=None,
+                        base_addr=0,
+                        length=length_bytes,
+                        dst_offset=int(dst_offset),
+                        storage_id=storage_id,
+                    )
                 )
-            )
+                storages_payload.append(
+                    RegisterStorage(
+                        storage_id=storage_id,
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=None,
+                        storage_length=length_bytes,
+                        vram_region_id=rec.region_id,
+                        region_base_offset=int(base_offset),
+                    )
+                )
+            else:
+                # Fallback to legacy handle-based path.
+                handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
+                segments.append(
+                    LeaseSegment(
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=handle_bytes,
+                        base_addr=0,
+                        length=length_bytes,
+                        dst_offset=int(dst_offset),
+                    )
+                )
+                storages_payload.append(
+                    RegisterStorage(
+                        storage_id=storage_id,
+                        device_id=int(ctx.device_id),
+                        cuda_ipc_handle=handle_bytes,
+                        storage_length=length_bytes,
+                    )
+                )
         if not storages_payload:
             raise TensorCastError(
                 "No storage entries resolved during lease registration; artifact tensors must supply shared storage metadata"
@@ -954,6 +986,7 @@ def _register_artifact_core(
     options: RegisterArtifactOptions,
     device_id: int | torch.device | None,
     ttl_ms: int | None,
+    client_artifact_id: str | None = None,
     force_lease_in_place: bool = False,
     prevalidate_disk: bool = True,
     client: DaemonCtl | None = None,
@@ -979,6 +1012,20 @@ def _register_artifact_core(
         target_device_id = resolve_device(device_id)
     elif isinstance(device_id, int):
         target_device_id = int(device_id)
+
+    normalized_artifact_id: str | None = None
+    identity_kind = ArtifactIdKind.MI2
+    if client_artifact_id:
+        candidate = client_artifact_id.strip()
+        if candidate:
+            try:
+                validate_client_generated_id(candidate)
+            except ValueError as exc:
+                raise TensorCastError(str(exc)) from exc
+            normalized_artifact_id = candidate
+            identity_kind = ArtifactIdKind.CGID
+        else:
+            normalized_artifact_id = None
 
     if view is None:
         ctx, layout, index_bytes = _prepare_build(artifact, device_id)
@@ -1034,6 +1081,10 @@ def _register_artifact_core(
     }
 
     with tracer.start_as_current_span(span_names[plan_type], kind=SpanKind.INTERNAL):
+        span = trace.get_current_span()
+        span.set_attribute("tc.artifact.identity_kind", identity_kind.value)
+        if normalized_artifact_id:
+            span.set_attribute("tc.artifact.client_artifact_id", normalized_artifact_id)
         begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
             total_size_bytes=layout.total_size,
@@ -1041,6 +1092,7 @@ def _register_artifact_core(
             tensor_index_data=index_bytes,
             encoding="json",
             schema_version="v3",
+            client_artifact_id=normalized_artifact_id,
             plan=plan_model,
             view=view.view_options if view is not None else None,
             timeout_s=60.0,

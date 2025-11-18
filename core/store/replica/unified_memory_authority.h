@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -18,10 +19,9 @@
 
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/memory_location.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/device_types.h"
-#include "core/store/loading/loading_spec.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/replica/chunk_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 
 namespace tensorcast::store::replica {
@@ -71,8 +71,19 @@ class UnifiedMemoryAuthority {
     std::string remote_node; // For REMOTE_P2P sources
   };
 
-  explicit UnifiedMemoryAuthority(
-      gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> virtual_addr_space);
+  struct ChunkRecordView {
+    uint32_t chunk_idx{0};
+    ChunkState cpu{ChunkState::COLD};
+    bool exported_cpu{false};
+    uint32_t pin_refcnt{0};
+    uint64_t last_access_ns{0};
+    uint64_t version{0};
+  };
+
+  // Snapshot helpers for telemetry dashboards (immutable views)
+  std::vector<ChunkRecordView> snapshot_cpu_chunks(const loading::ReplicaKey& key) const;
+
+  explicit UnifiedMemoryAuthority(size_t artifact_chunk_bytes);
   ~UnifiedMemoryAuthority() = default;
 
   // Disable copy/move
@@ -153,7 +164,7 @@ class UnifiedMemoryAuthority {
   bool has_allocation(const loading::ReplicaKey& key) const;
 
   /**
-   * @brief Convenience: return the UMA/VS artifact chunk size (bytes).
+   * @brief Convenience: return the UMA artifact chunk size (bytes).
    */
   size_t get_artifact_chunk_bytes() const;
 
@@ -190,7 +201,7 @@ class UnifiedMemoryAuthority {
   struct ExportRegistration {
     // Coalesced chunk ranges [start_idx, end_idx] (inclusive)
     std::vector<std::pair<uint32_t, uint32_t>> chunk_ranges;
-    // Opaque keepalive for CPU VS pin leases (nullptr for GPU)
+    // Opaque keepalive for UMA-managed CPU pin leases (nullptr for GPU)
     std::shared_ptr<void> keepalive;
   };
 
@@ -203,15 +214,11 @@ class UnifiedMemoryAuthority {
       bool on);
 
   /**
-   * @brief Mark a ratio of CPU chunks as PREEMPTIBLE.
+   * @brief Mark a ratio of CPU chunks as PREEMPTIBLE via UMA-owned arena.
    *
-   * Relies on VS's mark_preemptible implementation. The number of
-   * chunks selected is `ratio * total_chunks`, rounded down. Selection
-   * order is from the beginning of the replica (lowest indices first)
+   * The number of chunks selected is `ratio * total_chunks`, rounded down.
+   * Selection order is from the beginning of the replica (lowest indices first)
    * which matches the existing test expectations.
-   *
-   * @param key   Replica instance key.
-   * @param ratio Fraction \([0,1]\] of chunks to mark.
    */
   absl::Status mark_cpu_chunks_preemptible(const loading::ReplicaKey& key, float ratio);
 
@@ -292,7 +299,12 @@ class UnifiedMemoryAuthority {
    */
   absl::Status post_gpu_load_policy(const loading::ReplicaKey& key, size_t bytes, PostGpuLoadPolicy policy);
 
-  // UMA-side telemetry for CPU writes via VS write hook
+  /**
+   * @brief Direct CPU write helper used by sinks and GPU→CPU copies.
+   */
+  absl::Status write_cpu_span(const loading::ReplicaKey& key, uint64_t va_offset, const void* src, size_t bytes);
+
+  // UMA-side telemetry for CPU writes (invoked after memcpy/mmap)
   void record_cpu_write(const loading::ReplicaKey& key, uint64_t va_offset, uint64_t bytes);
 
  private:
@@ -308,15 +320,20 @@ class UnifiedMemoryAuthority {
     common::memory::MemoryLocation target;
     std::optional<int> device_id;
     std::vector<uint32_t> chunks;
-    // RAII: pin leases for CPU ranges held during session
-    std::vector<common::memory::VirtualAddressSpace::CpuPinLease> cpu_leases;
+    // RAII: UMA-managed pin keepalives for CPU ranges held during session
+    std::vector<std::shared_ptr<void>> cpu_keepalives;
   };
 
   static std::vector<std::pair<uint32_t, uint32_t>> coalesce_runs_(absl::Span<const uint32_t> sorted);
 
   struct ReplicaAllocation {
-    // DRAM allocation info from VS
-    tensorcast::common::memory::VirtualAddressSpace::VirtualRegion dram_region;
+    struct CpuRegion {
+      void* base{nullptr};
+      size_t bytes{0};
+    };
+
+    CpuRegion cpu_region;
+    std::vector<uint32_t> mlock_refcnt; // tracks successful mlock calls per chunk
 
     // GPU allocations per device (lazy creation)
     std::unordered_map<DeviceKey, std::shared_ptr<common::memory::GpuDeviceMemory>, DeviceKeyHash> gpu_allocations;
@@ -332,7 +349,7 @@ class UnifiedMemoryAuthority {
       // Export flags
       bool exported_cpu{false};
       std::unordered_map<DeviceKey, bool, DeviceKeyHash> exported_gpu;
-      // UMA-level pin refcount placeholder (VS manages actual page pins)
+      // UMA-managed CPU pin refcount for this chunk
       uint32_t pin_refcnt{0};
       // Last access timestamp (ns since steady_clock epoch)
       uint64_t last_access_ns{0};
@@ -351,8 +368,43 @@ class UnifiedMemoryAuthority {
     std::unordered_map<DeviceKey, size_t, DeviceKeyHash> loaded_chunk_counts;
   };
 
+  void record_cpu_write_locked_(ReplicaAllocation& alloc, uint64_t va_offset, uint64_t bytes);
+
+  class CpuArena {
+   public:
+    explicit CpuArena(size_t chunk_bytes);
+
+    absl::Status allocate_region(ReplicaAllocation& alloc, size_t bytes) const;
+    void release_region(ReplicaAllocation& alloc) const;
+    absl::Status write_span(ReplicaAllocation& alloc, uint64_t va_offset, const void* src, size_t bytes) const;
+    absl::Status mark_preemptible(ReplicaAllocation& alloc, absl::Span<const uint32_t> idx) const;
+    size_t evict_tail_bytes(ReplicaAllocation& alloc, size_t bytes) const;
+    absl::StatusOr<std::shared_ptr<void>> pin_chunks(
+        ReplicaAllocation& alloc,
+        absl::Span<const uint32_t> chunk_indices,
+        std::string_view reason,
+        std::optional<std::chrono::milliseconds> timeout) const;
+
+    [[nodiscard]] size_t chunk_bytes() const {
+      return chunk_bytes_;
+    }
+
+   private:
+    struct PinHandle {
+      const CpuArena* arena{nullptr};
+      ReplicaAllocation* alloc{nullptr};
+      std::vector<uint32_t> chunks;
+      ~PinHandle();
+    };
+
+    absl::Status ensure_bounds(const ReplicaAllocation& alloc, uint64_t va_offset, size_t bytes) const;
+    void release_pins(ReplicaAllocation& alloc, absl::Span<const uint32_t> chunk_indices) const;
+    size_t chunk_bytes_{0};
+  };
+
   mutable std::mutex mutex_;
-  gsl::not_null<std::shared_ptr<tensorcast::common::memory::VirtualAddressSpace>> va_space_;
+  size_t chunk_size_bytes_;
+  CpuArena cpu_arena_;
   std::unordered_map<loading::ReplicaKey, ReplicaAllocation, loading::ReplicaKeyHash> allocations_;
 
   // Sessions for plan/commit/abort

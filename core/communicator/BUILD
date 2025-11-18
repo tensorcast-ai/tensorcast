@@ -381,6 +381,7 @@ sc_cc_library(
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
+        "@opentelemetry-cpp//api:api",
     ] + select({
         ":use_fake_cuda": [],
         "//conditions:default": ["@cudart"],
@@ -435,7 +436,9 @@ cc_test(
     name = "staging_flow_controller_test",
     srcs = ["engine/staging_flow_controller_test.cc"],
     deps = [
+        ":constants_lib",
         ":memory_stager_lib",
+        ":partition_tensor_lib",
         ":staging_flow_controller_lib",
         "//core/testing:catch_main",
         "@abseil-cpp//absl/status",

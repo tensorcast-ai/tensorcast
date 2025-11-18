@@ -13,7 +13,7 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
@@ -122,6 +122,14 @@ class RecordingViewGlobalStoreClient final : public tensorcast::store::component
 
   absl::Status unregister_replica(std::string_view, std::string_view) override {
     return absl::UnimplementedError("unregister_replica not supported in test stub");
+  }
+
+  absl::Status unregister_replica_by_worker(
+      std::string_view,
+      std::string_view,
+      std::optional<tensorcast::common::memory::MemoryLocation>,
+      std::optional<uint32_t>) override {
+    return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
   }
 
   absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate& update) override {

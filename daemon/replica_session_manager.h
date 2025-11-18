@@ -8,7 +8,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 
 namespace tensorcast::daemon {
 
@@ -77,6 +77,7 @@ class ReplicaSessionManager {
   static std::chrono::steady_clock::time_point now() {
     return std::chrono::steady_clock::now();
   }
+
   static bool expired(const SessionEntry& e) {
     return now() >= e.expiry;
   }

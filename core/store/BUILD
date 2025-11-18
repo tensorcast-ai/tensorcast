@@ -72,17 +72,10 @@ sc_header_only_library(
 
 # ========== Loading specifications ==========
 
-sc_header_only_library(
+alias(
     name = "loading_spec",
-    hdrs = ["loading/loading_spec.h"],
+    actual = "//core/store/materialization/contracts:loading_spec",
     visibility = ["//visibility:public"],
-    deps = [
-        ":communication_types",
-        ":device_types",
-        "//core/store/loader:view_planner",
-        "//core/store/replica:memory_state",
-        "@abseil-cpp//absl/hash",
-    ],
 )
 
 # ========== Components subdirectory ==========
@@ -97,7 +90,7 @@ sc_cc_library(
         "//core/common:memory_location_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/communicator:utils_lib",
-        "//core/store/replica:chunk_meta",
+        "//core/store/replica:chunk_state",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
         "@abseil-cpp//absl/strings:str_format",
@@ -162,6 +155,68 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "artifact_registration_manager",
+    srcs = ["components/registration/artifact_registration_manager.cc"],
+    hdrs = ["components/registration/artifact_registration_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":communication_manager",
+        ":device_manager",
+        ":eviction_service",
+        ":global_store_client",
+        ":metrics_collector",
+        ":replica_registry",
+        ":view_utils",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
+        "//core/common:artifact_verification_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:trace_macros_lib",
+        "//core/store:device_types",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:segment_plan_source",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:verification_utils",
+        "//core/store/materialization/dataplane:view_ingest_executor",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/materialization/dataplane:view_planner",
+        "//core/store/replica",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+cc_test(
+    name = "artifact_registration_manager_test",
+    srcs = ["components/registration/artifact_registration_manager_test.cc"],
+    deps = [
+        ":artifact_registration_manager",
+        ":device_manager",
+        ":metrics_collector",
+        ":replica_registry",
+        "//core/common:artifact_hash_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:view_planner",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:string_view",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
     name = "eviction_service",
     srcs = ["components/eviction_service.cc"],
     hdrs = ["components/eviction_service.h"],
@@ -194,45 +249,9 @@ cc_test(
     name = "multi_gpu_verification_race_test",
     srcs = ["multi_gpu_verification_race_test.cc"],
     deps = [
-        "//core/store/loader:verification_utils",
+        "//core/store/materialization/dataplane:verification_utils",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
-    ],
-)
-
-# ========== Loading orchestration ==========
-
-# materialize_orchestrator is now part of store_engine target to avoid circular dependency
-
-sc_cc_library(
-    name = "chunk_aware_loading_strategy",
-    srcs = ["loading/chunk_aware_loading_strategy.cc"],
-    hdrs = ["loading/chunk_aware_loading_strategy.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":global_store_client",
-        ":loading_spec",
-        "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
-        "//core/store/loader:disk_loader",
-        "//core/store/loader:p2p_loader",
-        "//core/store/replica:chunk_meta",
-        "//core/store/replica:replica_load_controller",
-        "//core/store/replica:unified_memory_authority",
-        "@gsl",
-        "@opentelemetry-cpp//api:api",
-    ],
-)
-
-sc_cc_library(
-    name = "replica_registration_helper",
-    srcs = ["loading/replica_registration_helper.cc"],
-    hdrs = ["loading/replica_registration_helper.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_types",
-        ":global_store_client",
-        "@gsl",
     ],
 )
 
@@ -242,7 +261,7 @@ sc_cc_library(
     hdrs = ["view_utils.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
@@ -253,16 +272,11 @@ sc_cc_library(
 
 sc_cc_library(
     name = "store_engine",
-    srcs = [
-        "loading/materialize_orchestrator.cc",
-        "store_engine.cc",
-    ],
-    hdrs = [
-        "loading/materialize_orchestrator.h",
-        "store_engine.h",
-    ],
+    srcs = ["store_engine.cc"],
+    hdrs = ["store_engine.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":artifact_registration_manager",
         ":communication_manager",
         ":communication_types",
         ":device_manager",
@@ -270,31 +284,35 @@ sc_cc_library(
         ":device_types",
         ":eviction_service",
         ":global_store_client",
-        ":loading_spec",
         ":metrics_collector",
-        ":replica_registration_helper",
         ":replica_registry",
         ":store_engine_options",
         ":view_utils",
         "//core/checkpoint:checkpoint_lib",
         "//core/common:artifact_hash_lib",
+        "//core/common:artifact_identity_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
-        "//core/common:virtual_address_space_lib",
-        "//core/store/loader",
-        "//core/store/loader:canonical_index",
-        "//core/store/loader:disk_loader",
-        "//core/store/loader:index_reader",
-        "//core/store/loader:p2p_loader",
-        "//core/store/loader:segment_plan_source",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:verification_utils",
-        "//core/store/loader:view_ingest_executor",
-        "//core/store/loader:view_plan_source",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/contracts:materialization_request",
+        "//core/store/materialization/control:materialization_backend",
+        "//core/store/materialization/control:materialization_service",
+        "//core/store/materialization/control:materialize_orchestrator",
+        "//core/store/materialization/control:replica_registration_helper",
+        "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:disk_loader",
+        "//core/store/materialization/dataplane:index_reader",
+        "//core/store/materialization/dataplane:loader",
+        "//core/store/materialization/dataplane:p2p_loader",
+        "//core/store/materialization/dataplane:segment_plan_source",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:verification_utils",
+        "//core/store/materialization/dataplane:view_ingest_executor",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/store/replica",
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
@@ -337,8 +355,8 @@ cc_test(
     deps = [
         ":store_engine",
         "//core/common",
-        "//core/store/loader:source_hash",
-        "//core/store/loader:view_planner",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:view_planner",
         "//core/testing:catch_main",
         "//core/testing:common",
         "@catch2//:catch2_main",

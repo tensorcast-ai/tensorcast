@@ -9,7 +9,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "daemon/lip_manager.h"
 #include "tensorcast/daemon/v1/store_daemon.pb.h"
 

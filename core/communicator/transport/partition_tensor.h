@@ -3,6 +3,7 @@
 #ifndef COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 #define COMMUNICATOR_TRANSPORT_PARTITION_TENSOR_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ class PartitionTensor {
   void set_read_ready();
   void set_read_unready();
   void wait_read_ready();
+  void wait_mr_ready();
 
   bool is_registered(const net_dev_t& dev);
   uint64_t get_regmr_cost(const net_dev_t& dev);
@@ -52,6 +54,18 @@ class PartitionTensor {
 
   void set_needs_staging(bool value) {
     needs_staging_ = value;
+  }
+
+  void set_direct_rdma_enabled(bool value) {
+    direct_rdma_enabled_.store(value, std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] bool direct_rdma_enabled() const {
+    return direct_rdma_enabled_.load(std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] bool has_registered_mr() const {
+    return registered_.load(std::memory_order_acquire) && mr_ != nullptr;
   }
 
   template <class T>
@@ -81,6 +95,7 @@ class PartitionTensor {
   int mem_type_;
   bool needs_staging_ = false; // Whether GPU->CPU staging is needed for TCP transport
   int device_id_ = -1; // GPU device ID (-1 for CPU)
+  std::atomic_bool direct_rdma_enabled_{false};
 };
 
 typedef std::shared_ptr<PartitionTensor> tensor_t;

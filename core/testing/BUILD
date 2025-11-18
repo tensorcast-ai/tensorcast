@@ -21,7 +21,7 @@ sc_cc_library(
     deps = [
         ":test_helpers",
         "//core/common:cuda_api_lib",
-        "//core/store/loader:disk_dir_hash",
+        "//core/store/materialization/dataplane:disk_dir_hash",
         "@nlohmann_json//:json",
     ],
 )

@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
-#include "core/store/loader/source_hash.h"
-#include "core/store/loader/view_planner.h"
+#include "core/store/materialization/dataplane/metadata/source_hash.h"
+#include "core/store/materialization/dataplane/view/view_planner.h"
 #include "gsl/pointers"
 #include "nlohmann/json.hpp"
 

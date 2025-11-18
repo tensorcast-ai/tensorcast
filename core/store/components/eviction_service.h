@@ -7,7 +7,7 @@
 
 #include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 
 namespace tensorcast::common::memory {
 class PinnedBufferPool;

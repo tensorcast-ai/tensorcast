@@ -84,6 +84,7 @@ class Communicator {
     bool register_mr = true; // Skip MR registration when false
     bool needs_staging = false; // Hint for transports that staging is required
     bool async = false; // Async MR registration when applicable
+    bool direct_rdma_enabled = false; // Allow zero-copy RDMA when preconditions hold
   };
 
   // Extended registration with options.
@@ -230,6 +231,7 @@ class Communicator {
   uint64_t channel_expire_;
   int buffers_per_flow_ = 4;
   uint32_t max_window_segments_ = 0;
+  uint64_t direct_rdma_chunk_bytes_ = 0;
 
   // GPU->CPU staging uses unified GPU MemoryStager only
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;

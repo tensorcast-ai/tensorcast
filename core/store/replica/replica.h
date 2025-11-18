@@ -18,7 +18,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
-#include "core/store/loader/loader.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica_config.h"
 #include "core/store/replica/replica_load_controller.h"

@@ -41,7 +41,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 ```
 
 ### Core Components
-- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine uses a UnifiedMemoryAuthority (UMA) single-ledger memory model, replica lifecycle helpers, loaders (disk and P2P), and CUDA IPC export for clients.
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; exposes gRPC APIs and Prometheus metrics.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
@@ -119,7 +119,7 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 # Examples:
 bazel test //core/store:store_engine_test
 bazel test //core/communicator/engine:tcp_engine_test
-bazel test //core/store/loader:disk_loader_streaming_buffer_test
+bazel test //core/store/materialization/dataplane:disk_loader_streaming_buffer_test
 ```
 
 #### Bazel Quiet / Reduced Output

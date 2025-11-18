@@ -22,12 +22,11 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
-#include "core/store/loader/source.h"
-#include "core/store/loading/loading_spec.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 #include "core/store/replica/unified_memory_authority.h"
@@ -48,20 +47,19 @@ class ReplicaLoadController {
    * @param artifact_identifier A unique name for the replica, used for logging.
    * @param local_device_id The target local GPU device ID.
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
-   * @param virtual_addr_space Shared Virtual Address Space (VS).
+   * @param artifact_chunk_bytes UMA chunk granularity for this replica.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
    * @param pinned_memory_timeout Timeout for pinned memory allocation operations.
    * @param artifact_size Total artifact size in bytes. Must be non-zero.
    *
-   * Note: UMA (VS-managed virtual memory) is allocated eagerly during
-   * construction. This does not consume physical memory and simplifies later
-   * code paths by avoiding conditional UMA allocation.
+   * Note: UMA CPU memory is allocated eagerly during construction. This does not consume
+   * physical memory up front and simplifies later code paths by avoiding conditional allocation.
    */
   ReplicaLoadController(
       std::string artifact_identifier,
       int local_device_id,
       const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
-      const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
+      size_t artifact_chunk_bytes,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
       uint64_t artifact_size,
@@ -246,21 +244,10 @@ class ReplicaLoadController {
       absl::Span<const uint32_t> chunks,
       tensorcast::communicator::engine::Communicator& comm_engine) ABSL_LOCKS_EXCLUDED(mutex_);
 
-  // --- VA Space accessors ---------------------------------------------------
+  // --- UMA accessors ---------------------------------------------------
   /**
-   * @brief Exposes the underlying VirtualAddressSpace instance. Loaders can
-   *        use this to allocate/map/pin ranges in the CPU VA region.
+   * @brief UMA owns the CPU arena; external callers interact via UMA APIs.
    */
-  [[nodiscard]] gsl::not_null<common::memory::VirtualAddressSpace*> get_va_space() ABSL_LOCKS_EXCLUDED(mutex_);
-  [[nodiscard]] gsl::not_null<const common::memory::VirtualAddressSpace*> get_va_space() const
-      ABSL_LOCKS_EXCLUDED(mutex_);
-
-  /**
-   * @brief Returns an immutable snapshot view of VS ChunkMeta for telemetry.
-   *        Empty span if VS not available or replica not allocated.
-   *        UMA is authoritative; prefer UMA-based getters for state.
-   */
-  [[nodiscard]] absl::Span<const ChunkMeta> chunk_telemetry_snapshot() const noexcept ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Globally-unique key identifying this replica replica (artifact_id + device + replica).
   loading::ReplicaKey replica_key_;
@@ -353,8 +340,6 @@ class ReplicaLoadController {
   // --- Internal copy refactor helpers (no behavior change) ---------------
   struct CopyLaunchParams {
     std::shared_ptr<common::memory::StreamingPinnedBuffer> streaming_buffer;
-    std::shared_ptr<common::memory::VirtualAddressSpace> virtual_addr_space;
-    void* va_space_base = nullptr;
     std::shared_ptr<common::memory::GpuDeviceMemory> cuda_mem;
     size_t total_size = 0;
     cudaStream_t stream = nullptr;
@@ -393,7 +378,7 @@ class ReplicaLoadController {
     absl::CondVar cond;
     bool comm_registered = false;
     ExportRegistration comm_registration_info;
-    // VS base pointer is managed by UMA; no local cache here
+    // CPU base pointer is managed by UMA; no local cache here
     // Last failure reason for observability
     std::string last_error;
     uint64_t load_epoch = 0;
@@ -431,10 +416,7 @@ class ReplicaLoadController {
   // Pinned memory allocation timeout
   const std::chrono::milliseconds pinned_memory_timeout_;
 
-  // Whether to fail transfer if VS chunk locking fails (unused in final UMA V3)
-  // [[maybe_unused]] const bool require_va_space_lock_success_;
-
-  const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_;
+  const size_t artifact_chunk_bytes_;
 
   // Unified memory management instance
   const gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> memory_coordinator_;

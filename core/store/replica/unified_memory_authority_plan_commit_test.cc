@@ -10,8 +10,8 @@
 #include <optional>
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/memory/virtual_address_space.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/common/const/granularity.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 
 namespace tensorcast::store::replica {
 using ::tensorcast::DeviceType;
@@ -20,50 +20,11 @@ using tensorcast::store::DeviceKey;
 using tensorcast::store::loading::ReplicaKey;
 
 namespace {
-
-// Mock implementation of VirtualAddressSpace for testing
-class MockVirtualAddressSpace : public common::memory::VirtualAddressSpace {
- public:
-  // === Configurable state ===
-  VirtualRegion test_region_{};
-  absl::Status allocate_status_ = absl::OkStatus();
-  absl::Status mark_preemptible_status_ = absl::OkStatus();
-  std::vector<ChunkState> chunk_states_;
-
-  // === Tracking ===
-  std::vector<uint32_t> last_preemptible_chunks_;
-
-  // === Overrides ===
-  absl::StatusOr<VirtualRegion> allocate(std::string_view /*artifact_id*/, size_t bytes, int /*numa*/) override {
-    if (!allocate_status_.ok()) {
-      return allocate_status_;
-    }
-    if (test_region_.bytes == 0) {
-      test_region_.bytes = bytes;
-      test_region_.cpu_base = reinterpret_cast<void*>(0x1000000);
-    }
-    return test_region_;
-  }
-
-  absl::Status mark_preemptible(std::string_view /*artifact_id*/, absl::Span<const uint32_t> idx) override {
-    last_preemptible_chunks_.assign(idx.begin(), idx.end());
-    return mark_preemptible_status_;
-  }
-
-  absl::Span<const ChunkMeta> chunk_telemetry_snapshot(std::string_view /*artifact_id*/) const noexcept override {
-    static std::vector<ChunkMeta> meta_cache;
-    std::vector<ChunkMeta> local(chunk_states_.size());
-    for (size_t i = 0; i < chunk_states_.size(); ++i) {
-      local[i].state.store(chunk_states_[i]);
-    }
-    meta_cache.swap(local);
-    return absl::MakeConstSpan(meta_cache);
-  }
-};
+constexpr size_t kTestChunkBytes = tensorcast::common::consts::kArtifactChunkDefault;
+}
 
 TEST_CASE("UnifiedMemoryAuthority allocation", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   SECTION("successful allocation") {
     ReplicaKey key{
@@ -83,22 +44,21 @@ TEST_CASE("UnifiedMemoryAuthority allocation", "[unified_memory]") {
         (size + unified_memory.get_artifact_chunk_bytes() - 1) / unified_memory.get_artifact_chunk_bytes());
   }
 
-  SECTION("allocation failure") {
+  SECTION("duplicate allocation fails") {
     ReplicaKey key{
         .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
     size_t size = size_t(1024) * 1024 * 1024;
 
-    mock_vs->allocate_status_ = absl::ResourceExhaustedError("Out of memory");
+    REQUIRE(unified_memory.allocate(key, size).ok());
 
     auto status = unified_memory.allocate(key, size);
     REQUIRE(!status.ok());
-    REQUIRE(status.code() == absl::StatusCode::kResourceExhausted);
+    REQUIRE(status.code() == absl::StatusCode::kAlreadyExists);
   }
 }
 
 TEST_CASE("UnifiedMemoryAuthority get missing chunks", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -128,8 +88,7 @@ TEST_CASE("UnifiedMemoryAuthority get missing chunks", "[unified_memory]") {
 }
 
 TEST_CASE("UnifiedMemoryAuthority lock chunks for transfer", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -149,8 +108,7 @@ TEST_CASE("UnifiedMemoryAuthority lock chunks for transfer", "[unified_memory]")
 }
 
 TEST_CASE("UnifiedMemoryAuthority update chunk states", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -186,8 +144,7 @@ TEST_CASE("UnifiedMemoryAuthority update chunk states", "[unified_memory]") {
 }
 
 TEST_CASE("UnifiedMemoryAuthority GPU allocation management", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -216,8 +173,7 @@ TEST_CASE("UnifiedMemoryAuthority GPU allocation management", "[unified_memory]"
 }
 
 TEST_CASE("UnifiedMemoryAuthority mark CPU chunks preemptible", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -225,40 +181,30 @@ TEST_CASE("UnifiedMemoryAuthority mark CPU chunks preemptible", "[unified_memory
 
   REQUIRE(unified_memory.allocate(key, size).ok());
 
+  auto count_preemptible = [&]() {
+    auto snapshot = unified_memory.snapshot_cpu_chunks(key);
+    return std::count_if(
+        snapshot.begin(), snapshot.end(), [](const auto& rec) { return rec.cpu == ChunkState::PREEMPTIBLE; });
+  };
+
   SECTION("mark 50% preemptible") {
-    // Mock VS returning virtual memory for the replica
-    mock_vs->test_region_.bytes = size;
-
     REQUIRE(unified_memory.mark_cpu_chunks_preemptible(key, 0.5F).ok());
-
-    // Should mark first 2 of 4 chunks
-    REQUIRE(mock_vs->last_preemptible_chunks_.size() == 2);
-    REQUIRE(mock_vs->last_preemptible_chunks_[0] == 0);
-    REQUIRE(mock_vs->last_preemptible_chunks_[1] == 1);
+    REQUIRE(count_preemptible() == 2);
   }
 
   SECTION("mark all preemptible") {
-    mock_vs->test_region_.bytes = size;
-
     REQUIRE(unified_memory.mark_cpu_chunks_preemptible(key, 1.0F).ok());
-
-    // Should mark all 4 chunks
-    REQUIRE(mock_vs->last_preemptible_chunks_.size() == 4);
+    REQUIRE(count_preemptible() == 4);
   }
 
   SECTION("mark none preemptible") {
-    mock_vs->test_region_.bytes = size;
-
     REQUIRE(unified_memory.mark_cpu_chunks_preemptible(key, 0.0F).ok());
-
-    // Should mark no chunks
-    REQUIRE(mock_vs->last_preemptible_chunks_.empty());
+    REQUIRE(count_preemptible() == 0);
   }
 }
 
 TEST_CASE("UnifiedMemoryAuthority chunk calculations", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   // Test chunk size
   size_t chunk_size = unified_memory.get_artifact_chunk_bytes();
@@ -286,9 +232,7 @@ TEST_CASE("UnifiedMemoryAuthority chunk calculations", "[unified_memory]") {
             .device = DeviceKey{DeviceType::GPU, 0, ""},
             .replica = 0};
 
-        // Reset mock for each test
-        mock_vs->test_region_.bytes = 0;
-        UnifiedMemoryAuthority local_um(mock_vs);
+        UnifiedMemoryAuthority local_um(kTestChunkBytes);
 
         REQUIRE(local_um.allocate(key, tc.artifact_size).ok());
         auto layout_or = local_um.get_layout(key);
@@ -302,8 +246,7 @@ TEST_CASE("UnifiedMemoryAuthority chunk calculations", "[unified_memory]") {
 }
 
 TEST_CASE("UnifiedMemoryAuthority multi-GPU state tracking", "[unified_memory]") {
-  auto mock_vs = std::make_shared<MockVirtualAddressSpace>();
-  UnifiedMemoryAuthority unified_memory(mock_vs);
+  UnifiedMemoryAuthority unified_memory(kTestChunkBytes);
 
   ReplicaKey key{
       .artifact_id = "model1", .view_id = std::nullopt, .device = DeviceKey{DeviceType::GPU, 0, ""}, .replica = 0};
@@ -336,6 +279,4 @@ TEST_CASE("UnifiedMemoryAuthority multi-GPU state tracking", "[unified_memory]")
   REQUIRE(std::find(missing_gpu0.begin(), missing_gpu0.end(), 1) != missing_gpu0.end());
   REQUIRE(std::find(missing_gpu1.begin(), missing_gpu1.end(), 1) == missing_gpu1.end());
 }
-
-} // namespace
 } // namespace tensorcast::store::replica

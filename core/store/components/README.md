@@ -34,6 +34,15 @@ StoreEngine (Main API)
 - Updates memory pool, replica, and GPU metrics
 - Records operation latencies and counters
 - Tracks P2P transfers and memory evictions
+- Provides registration observability consumed by ArtifactRegistrationManager (`tc_register_pending_gauge`,
+  `tc_register_commit_seconds{result=...}`) so daemon dashboards can monitor in-flight registrations and commit latency.
+
+### ArtifactRegistrationManager (`registration/artifact_registration_manager.h/cc`)
+- Owns the RFC-0006 lifecycle (begin → ingest → keepalive → commit/abort) outside of `StoreEngine`.
+- Maintains `PendingRegistrationContext` instances with TTL metadata, CUDA IPC handles, replicas, and view planners.
+- Delegates GPU memory allocation/eviction through `DeviceManager`, replica creation via `ReplicaFactory`, and publishes state to Global Store.
+- Emits structured metrics (`tc_register_pending_gauge`, `tc_register_commit_seconds{result=...}`) and wraps Begin/Commit in
+  `SC_TRACE_INIT_GUARD` spans for distributed tracing.
 
 ### CommunicationManager (`communication_manager.h/cc`)
 - Wraps the communication engine for P2P transfers

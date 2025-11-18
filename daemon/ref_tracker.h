@@ -8,7 +8,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
-#include "core/store/loading/loading_spec.h" // ReplicaKey
+#include "core/store/materialization/contracts/loading_spec.h" // ReplicaKey
 
 namespace tensorcast::daemon {
 

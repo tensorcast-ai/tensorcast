@@ -86,6 +86,13 @@ class DeviceManager {
    */
   absl::StatusOr<size_t> get_free_memory(int device_id);
 
+  // ------------------------------------------------------------------
+  // Testing helpers
+  // ------------------------------------------------------------------
+  void set_num_gpus_for_testing(int num_gpus) {
+    num_gpus_ = num_gpus;
+  }
+
  private:
   int num_gpus_ = 0;
   std::unordered_map<int, GpuInfo> gpu_info_map_;

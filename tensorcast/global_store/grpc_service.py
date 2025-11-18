@@ -19,6 +19,7 @@ import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type ch
 import grpc
 from google.protobuf import timestamp_pb2
 
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
 from tensorcast.global_store.exceptions import (
@@ -612,28 +613,41 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             # Parse `mi2:` artifact_id and extract index/data multihash when present. If the
             # upstream StoreDaemon later extends the proto to include descriptor, prefer that.
             artifact_id = registered.artifact_id
-            if artifact_id and artifact_id.startswith("mi2:"):
-                # Expected format: mi2:<index_multihash>:<data_multihash>
+            kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
+            if artifact_id and kind is ArtifactIdKind.MI2:
                 parts = artifact_id.split(":", 2)
-                if len(parts) == 3 and parts[1] and parts[2]:
-                    index_mh = parts[1]
-                    data_mh = parts[2]
-                    # Best-effort encoding/schema; can be refined when descriptor is carried in proto
-                    encoding = "json"
-                    try:
-                        self.artifacts_repo.upsert_artifact(
-                            artifact_id=artifact_id,
-                            index_multihash=index_mh,
-                            data_multihash=data_mh,
-                            schema_version=schema_version_value,
-                            encoding=encoding,
-                            hash_params_json=None,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        # Do not fail the registration if descriptor persistence fails
-                        logger.warning(
-                            f"Failed to upsert artifacts entry for {artifact_id}: {e}"
-                        )
+                index_mh = parts[1] if len(parts) == 3 else None
+                data_mh = parts[2] if len(parts) == 3 else None
+                encoding = "json"
+                try:
+                    self.artifacts_repo.upsert_artifact(
+                        artifact_id=artifact_id,
+                        index_multihash=index_mh,
+                        data_multihash=data_mh,
+                        schema_version=schema_version_value,
+                        encoding=encoding,
+                        hash_params_json=None,
+                        id_kind="MI2",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to upsert artifacts entry for {artifact_id}: {e}"
+                    )
+            elif artifact_id and kind is ArtifactIdKind.CGID:
+                try:
+                    self.artifacts_repo.upsert_artifact(
+                        artifact_id=artifact_id,
+                        index_multihash=None,
+                        data_multihash=None,
+                        schema_version=schema_version_value,
+                        encoding="json",
+                        hash_params_json=None,
+                        id_kind="CGID",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to upsert CGID artifact entry for {artifact_id}: {e}"
+                    )
 
             # If canonical index data is provided, store it for de-duplication
             if request.HasField("tensor_index_data") and request.tensor_index_data:
@@ -737,6 +751,60 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.UnregisterReplicaResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def UnregisterReplicaByWorker(
+        self,
+        request: global_store_pb2.UnregisterReplicaByWorkerRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UnregisterReplicaByWorkerResponse:
+        """Unregister a replica by (artifact_id, worker_id[, device_id, memory_type])."""
+        try:
+            artifact_id = request.artifact_id
+            worker_id = request.worker_id
+            if not artifact_id or not worker_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("artifact_id and worker_id are required")
+                return global_store_pb2.UnregisterReplicaByWorkerResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
+            mem_type = None
+            if request.HasField("memory_type"):
+                # Map proto enum to domain enum
+                from tensorcast.global_store.models import MemoryType
+
+                mt = request.memory_type
+                mem_type = (
+                    MemoryType.GPU
+                    if mt == common_pb2.MEMORY_TYPE_GPU
+                    else MemoryType.RAM
+                    if mt == common_pb2.MEMORY_TYPE_RAM
+                    else MemoryType.DISK
+                )
+
+            device_id = request.device_id if request.HasField("device_id") else None
+
+            success = self.artifact_service.unregister_by_worker(
+                worker_id=worker_id,
+                artifact_id=artifact_id,
+                memory_type=mem_type,
+                device_id=device_id,
+            )
+
+            status = (
+                global_store_pb2.Status.STATUS_OK
+                if success
+                else global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+            return global_store_pb2.UnregisterReplicaByWorkerResponse(status=status)
+
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in UnregisterReplicaByWorker")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.UnregisterReplicaByWorkerResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 

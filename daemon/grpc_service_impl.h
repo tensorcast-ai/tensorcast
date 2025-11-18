@@ -12,6 +12,7 @@
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/device_resolver.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
@@ -28,6 +29,7 @@
 #include "daemon/types.h"
 #include "daemon/verification_tracker.h"
 #include "grpcpp/grpcpp.h"
+#include "gsl/pointers"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
@@ -42,11 +44,16 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     std::chrono::milliseconds locks_sweep_interval{std::chrono::milliseconds(10000)};
     std::chrono::milliseconds verification_sweep_interval{std::chrono::milliseconds(500)};
     std::chrono::milliseconds proc_check_interval{std::chrono::milliseconds(5000)};
+    std::chrono::milliseconds region_sweep_interval{std::chrono::milliseconds(5000)};
 
     // Eviction policy
     bool enable_periodic_eviction{false};
     double gpu_memory_limit_fraction{0.90};
     std::chrono::milliseconds eviction_check_interval{std::chrono::milliseconds(1000)};
+
+    // Region registry limits
+    size_t max_vram_regions{2048};
+    absl::Duration max_region_ttl{absl::Minutes(10)};
 
     // Observability
     bool allow_high_card_attrs{false};
@@ -62,10 +69,18 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       : StoreDaemonServiceImpl(std::move(engine), Options{}) {}
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine, Options opts)
-      : engine_(std::move(engine)), sessions_(opts.sessions_ttl), locks_(opts.locks_ttl), opts_(opts) {
-    lip_mgr_ = std::make_unique<LipManager>(engine_);
-    reg_mgr_ = std::make_unique<RegistrationManager>();
-    verif_tracker_ = std::make_unique<VerificationTracker>();
+      : engine_(gsl::not_null<std::shared_ptr<store::StoreEngine>>(std::move(engine))),
+        sessions_(opts.sessions_ttl),
+        locks_(opts.locks_ttl),
+        region_registry_(
+            gsl::not_null<std::unique_ptr<IpcRegionRegistry>>(std::make_unique<IpcRegionRegistry>(
+                IpcRegionRegistry::Options{.capacity = opts.max_vram_regions, .max_ttl = opts.max_region_ttl}))),
+        lip_mgr_(
+            gsl::not_null<std::unique_ptr<LipManager>>(
+                std::make_unique<LipManager>(engine_.get(), region_registry_.get().get()))),
+        verif_tracker_(gsl::not_null<std::unique_ptr<VerificationTracker>>(std::make_unique<VerificationTracker>())),
+        reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
+        opts_(opts) {
     start_sweepers();
     // Wire helper services and controllers (post-scheduler construction)
     sessions_svc_ = std::make_unique<SessionsService>(
@@ -81,7 +96,12 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .lifecycle = lifecycle_mgr_.get()};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
-        .engine = *engine_, .reg = *reg_mgr_, .lip = *lip_mgr_, .refs = refs_, .lifecycle = lifecycle_mgr_.get()};
+        .engine = *engine_,
+        .reg = *reg_mgr_,
+        .lip = *lip_mgr_,
+        .refs = refs_,
+        .lifecycle = lifecycle_mgr_.get(),
+        .regions = *region_registry_};
     registration_controller_ = std::make_unique<RegistrationController>(rdep);
     TransportController::Dep tdep{.engine = *engine_, .locks = locks_, .lip = *lip_mgr_};
     transport_controller_ = std::make_unique<TransportController>(tdep);
@@ -160,6 +180,21 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::LockTransportChunksRequest* req,
       v1::LockTransportChunksResponse* resp) override;
 
+  grpc::Status RegisterVramRegion(
+      grpc::ServerContext* ctx,
+      const v1::RegisterVramRegionRequest* req,
+      v1::RegisterVramRegionResponse* resp) override;
+
+  grpc::Status UnregisterVramRegion(
+      grpc::ServerContext* ctx,
+      const v1::UnregisterVramRegionRequest* req,
+      v1::UnregisterVramRegionResponse* resp) override;
+
+  grpc::Status DeregisterArtifact(
+      grpc::ServerContext* ctx,
+      const v1::DeregisterArtifactRequest* req,
+      v1::DeregisterArtifactResponse* resp) override;
+
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
       const v1::UnlockTransportChunksRequest* req,
@@ -168,7 +203,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
       const v1::BeginRegisterArtifactRequest* req,
-      v1::BeginRegisterArtifactResponse* resp);
+      v1::BeginRegisterArtifactResponse* resp) override;
 
   grpc::Status CommitRegisteredArtifact(
       grpc::ServerContext* ctx,
@@ -242,11 +277,12 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   }
 
  private:
-  std::shared_ptr<store::StoreEngine> engine_;
+  gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   ReplicaSessionManager sessions_;
   TransportLockManager locks_;
   RefTracker refs_;
-  std::unique_ptr<LipManager> lip_mgr_;
+  gsl::not_null<std::unique_ptr<IpcRegionRegistry>> region_registry_;
+  gsl::not_null<std::unique_ptr<LipManager>> lip_mgr_;
 
   // Background sweepers (scheduler-driven)
   std::unique_ptr<BackgroundScheduler> scheduler_;
@@ -268,14 +304,14 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::string worker_id_ ABSL_GUARDED_BY(worker_mu_);
 
   // Verification tracker extracted to its own component
-  std::unique_ptr<VerificationTracker> verif_tracker_;
+  gsl::not_null<std::unique_ptr<VerificationTracker>> verif_tracker_;
 
   // Background task queue for auto-registration only (verification queue moved)
   absl::Mutex bg_tasks_mu_;
   std::deque<AutoRegTask> auto_reg_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
 
   // Registration lifecycle state manager (Begin/Feed/KeepAlive/Commit)
-  std::unique_ptr<RegistrationManager> reg_mgr_;
+  gsl::not_null<std::unique_ptr<RegistrationManager>> reg_mgr_;
 
   // LIP registry moved into LipManager
 

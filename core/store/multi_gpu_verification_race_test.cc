@@ -14,7 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/common/artifact_verification.h"
-#include "core/store/loader/verification_utils.h"
+#include "core/store/materialization/dataplane/verification/verification_utils.h"
 
 namespace fs = std::filesystem;
 

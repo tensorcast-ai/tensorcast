@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "absl/base/call_once.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -28,6 +30,11 @@
 #include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
+#include "opentelemetry/metrics/meter.h"
+#include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::communicator::engine {
 
@@ -54,6 +61,7 @@ struct RdmaReadSession {
   net_dev_t dev;
   tcp_transport_t control_transport;
   std::unique_ptr<StagingWindow> window;
+  bool zero_copy = false;
 };
 
 struct Communicator::GpuChannelLease {
@@ -77,6 +85,171 @@ struct RdmaDriveResult {
 };
 
 // TODO: Is rdma really need this application layer windows control?
+enum class DirectFallbackReason {
+  kNone = 0,
+  kNotGpu,
+  kNeedsStaging,
+  kMrUnavailable,
+  kOutOfRange,
+};
+
+const char* DirectFallbackReasonToString(DirectFallbackReason reason) {
+  switch (reason) {
+    case DirectFallbackReason::kNone:
+      return "none";
+    case DirectFallbackReason::kNotGpu:
+      return "non_gpu";
+    case DirectFallbackReason::kNeedsStaging:
+      return "requires_staging";
+    case DirectFallbackReason::kMrUnavailable:
+      return "mr_unavailable";
+    case DirectFallbackReason::kOutOfRange:
+      return "out_of_range";
+  }
+  return "unknown";
+}
+
+StagingWindow::StageFn MakeStageFunction(
+    const std::shared_ptr<PartitionTensor>& tensor,
+    FlowCreditLedger* ledger,
+    const std::shared_ptr<MemoryStager>& stager,
+    const net_dev_t& dev,
+    MrCache* mr_cache,
+    std::string tensor_key,
+    bool use_direct,
+    ibv_mr* direct_mr) {
+  if (use_direct) {
+    const uint64_t base_addr = tensor->get_uint64_addr();
+    const uint64_t tensor_bytes = tensor->get_bytes();
+    return [tensor, ledger, tensor_key = std::move(tensor_key), base_addr, tensor_bytes, direct_mr](
+               uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
+      if (offset + bytes > tensor_bytes) {
+        return absl::OutOfRangeError("direct RDMA stage exceeded tensor bounds");
+      }
+      void* device_ptr = reinterpret_cast<void*>(base_addr + offset);
+      StageLease::Metadata metadata;
+      metadata.transport = StageTransport::kRdma;
+      metadata.request_key = transport::get_request_key(tensor_key, offset);
+      metadata.offset = offset;
+      metadata.bytes = bytes;
+      metadata.zero_copy = true;
+      return StageLease(
+          /*stager=*/nullptr,
+          ledger,
+          device_ptr,
+          bytes,
+          direct_mr,
+          /*deregister_mr=*/false,
+          metadata);
+    };
+  }
+
+  auto fallback_stager = stager;
+  return [fallback_stager, tensor, dev, ledger, mr_cache, tensor_key = std::move(tensor_key)](
+             uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
+    constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+    auto staged_or = fallback_stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
+    if (!staged_or.ok()) {
+      return staged_or.status();
+    }
+    void* host_ptr = *staged_or;
+    ibv_mr* staged_mr = nullptr;
+    bool deregister_mr = false;
+
+    gsl::not_null<void*> host_ptr_nn{host_ptr};
+    if (mr_cache) {
+      staged_mr = mr_cache->get_or_register(dev->get_pd(), host_ptr_nn, bytes, kAccess);
+      if (staged_mr == nullptr) {
+        auto release_status = fallback_stager->release_staged_buffer(host_ptr_nn);
+        if (!release_status.ok()) {
+          LOG(WARNING) << "Failed to release staged buffer after MR cache failure: " << release_status;
+        }
+        return absl::InternalError("failed to register MR via cache");
+      }
+    } else {
+      if (dev->reg_mr(&staged_mr, host_ptr, bytes, kAccess) != SUCCESS) {
+        auto release_status = fallback_stager->release_staged_buffer(host_ptr_nn);
+        if (!release_status.ok()) {
+          LOG(WARNING) << "Failed to release staged buffer after MR registration failure: " << release_status;
+        }
+        return absl::InternalError("failed to register staged MR");
+      }
+      deregister_mr = true;
+    }
+
+    StageLease::Metadata metadata;
+    metadata.transport = StageTransport::kRdma;
+    metadata.request_key = transport::get_request_key(tensor_key, offset);
+    metadata.offset = offset;
+    metadata.bytes = bytes;
+    metadata.zero_copy = false;
+
+    return StageLease(fallback_stager, ledger, host_ptr, bytes, staged_mr, deregister_mr, metadata);
+  };
+}
+
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> g_comm_meter;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_segments_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_bytes_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_fallback_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_rdma_direct_window_bytes_hist;
+
+absl::once_flag g_comm_meter_once;
+absl::once_flag g_rdma_direct_window_metrics_once;
+absl::once_flag g_rdma_direct_fallback_metric_once;
+
+inline void ensure_communicator_meter() {
+  absl::call_once(g_comm_meter_once, []() {
+    g_comm_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.communicator", "1.0.0");
+  });
+}
+
+inline void ensure_rdma_direct_window_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_direct_window_metrics_once, []() {
+    g_rdma_direct_segments_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_segments_total");
+    g_rdma_direct_bytes_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_bytes_total");
+    g_rdma_direct_window_bytes_hist = g_comm_meter->CreateDoubleHistogram("tc_rdma_direct_window_bytes");
+  });
+}
+
+inline void ensure_rdma_direct_fallback_metric() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_direct_fallback_metric_once, []() {
+    g_rdma_direct_fallback_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_fallback_total");
+  });
+}
+
+void record_direct_window_metrics(int device_id, uint64_t segments, uint64_t bytes) {
+  if (segments == 0 && bytes == 0) {
+    return;
+  }
+  ensure_rdma_direct_window_metrics();
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("device_id", opentelemetry::common::AttributeValue(device_id));
+  auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+  auto ctx = opentelemetry::context::Context{};
+  if (segments > 0) {
+    g_rdma_direct_segments_total->Add(static_cast<double>(segments), attr_view, ctx);
+  }
+  if (bytes > 0) {
+    const double bytes_double = static_cast<double>(bytes);
+    g_rdma_direct_bytes_total->Add(bytes_double, attr_view, ctx);
+    g_rdma_direct_window_bytes_hist->Record(bytes_double, attr_view, ctx);
+  }
+}
+
+void record_direct_fallback_metric(DirectFallbackReason reason) {
+  if (reason == DirectFallbackReason::kNone) {
+    return;
+  }
+  ensure_rdma_direct_fallback_metric();
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("reason", opentelemetry::common::AttributeValue(DirectFallbackReasonToString(reason)));
+  auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+  g_rdma_direct_fallback_total->Add(1.0, attr_view, opentelemetry::context::Context{});
+}
+
 RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession& session) {
   RdmaDriveResult result;
   while (true) {
@@ -96,6 +269,19 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
       // No staged segments implies no credit; propagate as unavailable for the caller to retry later.
       result.status = absl::UnavailableError("staging produced no segments");
       return result;
+    }
+
+    uint64_t zero_copy_segments = 0;
+    uint64_t zero_copy_bytes = 0;
+    for (const auto& segment : staged_window.segments) {
+      if (segment.lease.metadata().zero_copy) {
+        ++zero_copy_segments;
+        zero_copy_bytes += segment.bytes;
+      }
+    }
+    if (zero_copy_segments > 0) {
+      const int device_id = session.tensor ? session.tensor->get_device_id() : -1;
+      record_direct_window_metrics(device_id, zero_copy_segments, zero_copy_bytes);
     }
 
     result.made_progress = true;
@@ -221,10 +407,6 @@ void log_handshake_transition(
 
 } // namespace
 
-// Engine is fully typed-config driven; no environment-variable reads here.
-
-// No legacy constructors; typed CommunicatorConfig is required.
-
 Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
     : stop_(false),
       inited_(false),
@@ -264,6 +446,13 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   const size_t cpu_chunk_size = static_cast<size_t>(config_.stager().stage_chunk_mb_cpu()) * 1024ULL * 1024ULL;
   const size_t num_buffers = static_cast<size_t>(config_.stager().buffers_per_flow());
   buffers_per_flow_ = static_cast<int>(num_buffers);
+  direct_rdma_chunk_bytes_ = gpu_chunk_size;
+  if (config_.stager().direct_chunk_mb() > 0) {
+    direct_rdma_chunk_bytes_ = static_cast<uint64_t>(config_.stager().direct_chunk_mb()) * 1024ULL * 1024ULL;
+  }
+  if (direct_rdma_chunk_bytes_ == 0) {
+    LOG(FATAL) << "stager.direct_chunk_mb must be > 0 (MB)";
+  }
   const uint32_t configured_max_window = config_.stager().max_window_segments();
   if (configured_max_window == 0) {
     max_window_segments_ = static_cast<uint32_t>(num_buffers);
@@ -840,6 +1029,9 @@ absl::Status Communicator::register_tensor_ex(
   if (opts.needs_staging) {
     tensor->set_needs_staging(true);
   }
+  if (opts.direct_rdma_enabled) {
+    tensor->set_direct_rdma_enabled(true);
+  }
 
   if (enable_rdma_ && opts.register_mr) {
     net_dev->reg_async(tensor);
@@ -908,11 +1100,7 @@ absl::Status Communicator::handle_rdma_read_request(
   if (!stager) {
     stager = tensor_on_cpu ? memory_stager_ : gpu_memory_stager_;
   }
-  if (!stager) {
-    return absl::FailedPreconditionError("no staging backend available for tensor");
-  }
 
-  const uint64_t chunk_size = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes;
   const uint64_t total_bytes = request.bytes;
   const uint64_t start_offset = request.offset;
   const std::string tensor_key(reinterpret_cast<const char*>(request.tensor_key));
@@ -920,47 +1108,47 @@ absl::Status Communicator::handle_rdma_read_request(
   FlowCreditLedger* ledger_ptr = &flow_state->ledger;
   MrCache* mr_cache_ptr = meta_mr_cache_.get();
 
-  LOG(INFO) << "handle_rdma_read_request: request_key=" << request_key << " offset=" << start_offset
-            << " bytes=" << total_bytes << " dev=" << dev->get_name() << " rail_id=" << dev->get_rail_id();
-  auto stage_fn = [stager, tensor, dev, ledger_ptr, mr_cache_ptr, tensor_key](
-                      uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
-    constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-    auto staged_or = stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
-    if (!staged_or.ok()) {
-      return staged_or.status();
-    }
-    void* host_ptr = *staged_or;
-    ibv_mr* staged_mr = nullptr;
-    bool deregister_mr = false;
-    gsl::not_null<void*> host_ptr_nn{host_ptr};
-    if (mr_cache_ptr) {
-      staged_mr = mr_cache_ptr->get_or_register(dev->get_pd(), host_ptr_nn, bytes, kAccess);
-      if (staged_mr == nullptr) {
-        auto release_status = stager->release_staged_buffer(host_ptr_nn);
-        if (!release_status.ok()) {
-          LOG(WARNING) << "Failed to release staged buffer after MR cache failure: " << release_status;
-        }
-        return absl::InternalError("failed to register MR via cache");
-      }
+
+  const bool direct_requested = tensor->direct_rdma_enabled();
+  bool use_direct = false;
+  ibv_mr* direct_mr = nullptr;
+  DirectFallbackReason fallback_reason = DirectFallbackReason::kNone;
+
+  if (direct_requested) {
+    if (tensor_on_cpu || tensor->get_mem_type() != COMMUNICATE_ENGINE_DEV_GPU) {
+      fallback_reason = DirectFallbackReason::kNotGpu;
+    } else if (tensor->needs_staging()) {
+      fallback_reason = DirectFallbackReason::kNeedsStaging;
     } else {
-      if (dev->reg_mr(&staged_mr, host_ptr, bytes, kAccess) != SUCCESS) {
-        auto release_status = stager->release_staged_buffer(host_ptr_nn);
-        if (!release_status.ok()) {
-          LOG(WARNING) << "Failed to release staged buffer after MR registration failure: " << release_status;
+      const uint64_t tensor_bytes = tensor->get_bytes();
+      if (start_offset > tensor_bytes || total_bytes > (tensor_bytes - start_offset)) {
+        fallback_reason = DirectFallbackReason::kOutOfRange;
+      } else {
+        tensor->wait_mr_ready();
+        direct_mr = tensor->get_mr(dev);
+        if (direct_mr == nullptr || !tensor->has_registered_mr()) {
+          fallback_reason = DirectFallbackReason::kMrUnavailable;
+        } else {
+          use_direct = true;
         }
-        return absl::InternalError("failed to register staged MR");
       }
-      deregister_mr = true;
     }
+  }
 
-    StageLease::Metadata metadata;
-    metadata.transport = StageTransport::kRdma;
-    metadata.request_key = transport::get_request_key(tensor_key, offset);
-    metadata.offset = offset;
-    metadata.bytes = bytes;
+  if (!use_direct && !stager) {
+    return absl::FailedPreconditionError("no staging backend available for tensor");
+  }
+  if (direct_requested && !use_direct && fallback_reason != DirectFallbackReason::kNone) {
+    LOG_FIRST_N(WARNING, 1) << "RDMA zero-copy fallback for tensor=" << tensor_key
+                            << " reason=" << DirectFallbackReasonToString(fallback_reason);
+    record_direct_fallback_metric(fallback_reason);
+  }
 
-    return StageLease(stager, ledger_ptr, host_ptr, bytes, staged_mr, deregister_mr, metadata);
-  };
+  const uint64_t chunk_size = use_direct
+      ? (direct_rdma_chunk_bytes_ > 0 ? direct_rdma_chunk_bytes_ : request.bytes)
+      : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes);
+
+  auto stage_fn = MakeStageFunction(tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, use_direct, direct_mr);
 
   auto session = std::make_shared<RdmaReadSession>();
   session->request = request;
@@ -970,6 +1158,7 @@ absl::Status Communicator::handle_rdma_read_request(
   session->stager = stager;
   session->dev = dev;
   session->control_transport = control_transport;
+  session->zero_copy = use_direct;
   session->window = std::make_unique<StagingWindow>(
       flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
 
