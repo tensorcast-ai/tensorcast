@@ -1108,7 +1108,6 @@ absl::Status Communicator::handle_rdma_read_request(
   FlowCreditLedger* ledger_ptr = &flow_state->ledger;
   MrCache* mr_cache_ptr = meta_mr_cache_.get();
 
-
   const bool direct_requested = tensor->direct_rdma_enabled();
   bool use_direct = false;
   ibv_mr* direct_mr = nullptr;
@@ -1126,7 +1125,7 @@ absl::Status Communicator::handle_rdma_read_request(
       } else {
         tensor->wait_mr_ready();
         direct_mr = tensor->get_mr(dev);
-        if (direct_mr == nullptr || !tensor->has_registered_mr()) {
+        if (direct_mr == nullptr || !tensor->has_registered_mr(dev)) {
           fallback_reason = DirectFallbackReason::kMrUnavailable;
         } else {
           use_direct = true;
