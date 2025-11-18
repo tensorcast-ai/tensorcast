@@ -62,7 +62,7 @@ Design (docs/designs/<slug>.md)
 - Interfaces and schemas (include diffs against `schema.sql` when applicable)
 - Invariants and error model
 - Alternatives and rationale
-- Any new interface/API proposed in a design (or its paired plan) must document how it adheres to the repository’s language‑specific style guides (C++ rules in `AGENTS.md` and `core/` READMEs, Python rules in `tensorcast/` docs). Do not introduce interfaces whose naming, error handling, or packaging violates those standards.
+- Any new interface/API proposed in a design (or its paired plan) must document how it adheres to the repository’s language-specific style guides (C++ rules in `AGENTS.md` and `core/` READMEs, Python rules in `tensorcast/` docs). For C++ APIs, include a short `Naming Compliance` call-out (table or bullet list) that explicitly proves each function/method is `snake_case`, each class/struct is `PascalCase`, and constants/macros are `ALL_CAPS`. Designs that skip this check or knowingly violate the conventions must be rejected. Do not introduce interfaces whose naming, error handling, or packaging violates those standards.
 - Risks, success criteria, and compatibility
 - Cross‑links: owning code, related plans, and guides
  - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).
@@ -232,4 +232,3 @@ links:
 - Should we add an `internal: true|false` flag in frontmatter for possible external publishing later?
 - Do we want a repo script to auto‑generate design/plan indexes and badges by status?
 - What’s the exact ownership for `schema.sql` across teams (single team, or joint ownership with codeowners by table)?
-

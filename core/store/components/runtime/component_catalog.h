@@ -3,7 +3,6 @@
 #pragma once
 
 #include <memory>
-#include <utility>
 
 #include "absl/status/status.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -33,50 +32,50 @@ class ComponentCatalog {
   ReplicaRegistry& replica_registry();
   MetricsCollector& metrics_collector();
 
-  std::shared_ptr<CommunicationManager> communication_manager() const {
+  [[nodiscard]] std::shared_ptr<CommunicationManager> communication_manager() const {
     return comm_manager_;
   }
 
-  std::shared_ptr<common::memory::PinnedBufferPool> pinned_buffer_pool() const {
+  [[nodiscard]] std::shared_ptr<common::memory::PinnedBufferPool> pinned_buffer_pool() const {
     return memory_pool_;
   }
 
-  std::shared_ptr<IGlobalStoreClient> global_store_client() const {
+  [[nodiscard]] std::shared_ptr<IGlobalStoreClient> global_store_client() const {
     return global_store_client_;
   }
 
-  std::shared_ptr<ViewHashComputer> view_hash_computer() const {
+  [[nodiscard]] std::shared_ptr<ViewHashComputer> view_hash_computer() const {
     return view_hash_computer_;
   }
 
   void set_global_store_client_for_testing(std::shared_ptr<IGlobalStoreClient> client);
 
-  size_t artifact_chunk_bytes() const {
+  [[nodiscard]] size_t artifact_chunk_bytes() const {
     return artifact_chunk_bytes_;
   }
 
-  size_t memory_pool_size() const {
+  [[nodiscard]] size_t memory_pool_size() const {
     return options_.memory_pool_size;
   }
 
-  size_t tx_slice_bytes() const {
+  [[nodiscard]] size_t tx_slice_bytes() const {
     return options_.tx_slice_bytes;
   }
 
-  const StoreEngineOptions& options() const {
+  [[nodiscard]] const StoreEngineOptions& options() const {
     return options_;
   }
 
   void set_worker_identity(WorkerIdentity identity);
 
-  const WorkerIdentity& worker_identity() const {
+  [[nodiscard]] const WorkerIdentity& worker_identity() const {
     return worker_identity_;
   }
 
  private:
   void validate_options() const;
   absl::Status initialize_device_manager();
-  void initialize_communication_manager();
+  absl::Status initialize_communication_manager();
   absl::Status initialize_global_store_client();
 
   StoreEngineOptions options_;

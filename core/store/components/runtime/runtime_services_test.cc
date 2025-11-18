@@ -36,6 +36,9 @@ StoreEngineOptions MakeTestOptions() {
   opts.artifact_chunk_bytes = opts.tx_slice_bytes * 2;
   opts.num_thread = 1;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  opts.p2p_listen_host = "127.0.0.1";
+  opts.p2p_port = 0; // let the OS pick an ephemeral port during tests
+  opts.enable_rdma = false;
   return opts;
 }
 
@@ -52,6 +55,8 @@ TEST_CASE("ComponentCatalog start/stop preserves pinned pool", "[component_catal
   auto pool_after = catalog.pinned_buffer_pool();
   REQUIRE(pool_after == pool_before);
   REQUIRE(catalog.communication_manager() != nullptr);
+  REQUIRE(catalog.communication_manager()->is_enabled());
+  REQUIRE(catalog.options().p2p_port != 0);
 
   catalog.shutdown();
   REQUIRE(catalog.communication_manager() == nullptr);

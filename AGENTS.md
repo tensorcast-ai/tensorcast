@@ -245,6 +245,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **Classes/Structs**: `PascalCase`
 - **Constants/Macros**: `ALL_CAPS`
 - **Files/Directories**: `snake_case`
+- Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`

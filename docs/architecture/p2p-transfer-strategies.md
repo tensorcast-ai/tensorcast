@@ -378,6 +378,7 @@ max_workers: 10                          # Max gRPC worker threads
 enable_p2p_access: true                  # Require artifact registration before load
 enable_p2p_engine: true                  # Enable communication manager
 enable_rdma: false                       # Toggle RDMA support independently
+p2p_listen_host: 0.0.0.0                # Interface advertised via StoreEngineOptions::p2p_listen_host
 p2p_port: 9090                          # RDMA/TCP communication port (must be non-zero)
 grpc_port: 50052                        # Local gRPC port
 

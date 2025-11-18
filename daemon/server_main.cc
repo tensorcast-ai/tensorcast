@@ -105,6 +105,8 @@ int main(int argc, char** argv) {
     }
   }
   opts.p2p_port = p2p_port;
+  opts.p2p_listen_host = p2p_host;
+  opts.enable_rdma = cfg.communicator().enable_rdma();
 
   if (cfg.high_availability().enabled() && p2p_port == 0) {
     LOG(ERROR) << "Global Store high availability requires server.p2p_listen.port to be non-zero;"
