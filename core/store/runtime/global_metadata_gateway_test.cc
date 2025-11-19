@@ -10,6 +10,7 @@
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/time/time.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/global_store_client.h"
@@ -58,12 +59,45 @@ class FakeGlobalStoreClient : public IGlobalStoreClient {
     uint64_t memory_size{0};
   };
 
+  struct KeyMappingCall {
+    std::string key;
+    std::string artifact_id;
+    std::string disk_path;
+    absl::Duration ttl;
+  };
+
+  struct UnregisterCall {
+    std::string artifact_id;
+    std::string worker_id;
+    std::optional<MemoryLocation> location;
+    std::optional<uint32_t> device;
+  };
+
+  struct Endpoint {
+    std::string node_id;
+    std::string node_address;
+    uint32_t grpc_port{0};
+    uint32_t p2p_port{0};
+  };
+
   void set_connected(bool connected) {
     connected_ = connected;
   }
 
   const std::vector<RegisterCall>& register_calls() const {
     return register_calls_;
+  }
+
+  const std::vector<KeyMappingCall>& key_mapping_calls() const {
+    return key_mapping_calls_;
+  }
+
+  const std::vector<UnregisterCall>& unregister_calls() const {
+    return unregister_calls_;
+  }
+
+  const std::optional<Endpoint>& last_endpoint() const {
+    return last_endpoint_;
   }
 
   ~FakeGlobalStoreClient() override = default;
@@ -148,11 +182,18 @@ class FakeGlobalStoreClient : public IGlobalStoreClient {
   }
 
   absl::Status unregister_replica_by_worker(
-      std::string_view,
-      std::string_view,
-      std::optional<MemoryLocation>,
-      std::optional<uint32_t>) override {
-    return absl::UnimplementedError("unregister_replica_by_worker not used");
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      std::optional<MemoryLocation> location,
+      std::optional<uint32_t> device_id) override {
+    unregister_calls_.push_back(
+        UnregisterCall{
+            .artifact_id = std::string(artifact_id),
+            .worker_id = std::string(worker_id),
+            .location = location,
+            .device = device_id,
+        });
+    return absl::OkStatus();
   }
 
   absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
@@ -220,8 +261,19 @@ class FakeGlobalStoreClient : public IGlobalStoreClient {
     return absl::UnimplementedError("get_artifact_index_by_id not used");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
-    return absl::UnimplementedError("upsert_key_mapping not used");
+  absl::Status upsert_key_mapping(
+      std::string_view key,
+      std::string_view artifact_id,
+      std::string_view disk_path,
+      absl::Duration ttl) override {
+    key_mapping_calls_.push_back(
+        KeyMappingCall{
+            .key = std::string(key),
+            .artifact_id = std::string(artifact_id),
+            .disk_path = std::string(disk_path),
+            .ttl = ttl,
+        });
+    return absl::OkStatus();
   }
 
   absl::Status revoke_key_mapping(std::string_view) override {
@@ -242,17 +294,11 @@ class FakeGlobalStoreClient : public IGlobalStoreClient {
     return absl::UnimplementedError("update_artifact_view_state not used");
   }
 
- private:
-  struct Endpoint {
-    std::string node_id;
-    std::string node_address;
-    uint32_t grpc_port{0};
-    uint32_t p2p_port{0};
-  };
-
   bool connected_{false};
   std::vector<RegisterCall> register_calls_;
-  Endpoint last_endpoint_;
+  std::vector<KeyMappingCall> key_mapping_calls_;
+  std::vector<UnregisterCall> unregister_calls_;
+  std::optional<Endpoint> last_endpoint_;
 };
 
 ReplicaKey MakeCpuReplicaKey(std::string artifact_id) {
@@ -266,10 +312,7 @@ ReplicaKey MakeCpuReplicaKey(std::string artifact_id) {
   return key;
 }
 
-} // namespace
-
-TEST_CASE("GlobalMetadataGateway registers replicas via RuntimeEventHub", "[runtime][metadata]") {
-  SKIP_IF_NO_CUDA();
+StoreEngineOptions MakeGatewayOptions() {
   StoreEngineOptions opts;
   opts.storage_path = "";
   opts.memory_pool_size = 32ull * 1024 * 1024;
@@ -277,7 +320,14 @@ TEST_CASE("GlobalMetadataGateway registers replicas via RuntimeEventHub", "[runt
   opts.artifact_chunk_bytes = opts.tx_slice_bytes * 2;
   opts.num_thread = 1;
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  return opts;
+}
 
+} // namespace
+
+TEST_CASE("GlobalMetadataGateway registers replicas via RuntimeEventHub", "[runtime][metadata]") {
+  SKIP_IF_NO_CUDA();
+  StoreEngineOptions opts = MakeGatewayOptions();
   ComponentCatalog catalog(opts);
   CHECK_OK(catalog.start());
   tensorcast::store::components::WorkerIdentity identity{
@@ -347,5 +397,89 @@ TEST_CASE("GlobalMetadataGateway registers replicas via RuntimeEventHub", "[runt
   REQUIRE(call.memory_size == kBytes);
 
   runtime.clear_mem();
+  catalog.shutdown();
+}
+
+TEST_CASE("GlobalMetadataGateway enforces canonical overrides and TTL propagation", "[runtime][metadata]") {
+  SKIP_IF_NO_CUDA();
+  StoreEngineOptions opts = MakeGatewayOptions();
+
+  ComponentCatalog catalog(opts);
+  CHECK_OK(catalog.start());
+  tensorcast::store::components::WorkerIdentity identity{
+      .worker_id = "worker-alias",
+      .node_id = "node-alias",
+      .node_address = "127.0.0.2",
+      .grpc_port = 50061,
+      .p2p_port = 50062,
+  };
+  catalog.set_worker_identity(identity);
+
+  RuntimeEventHub event_hub;
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &event_hub});
+  GlobalMetadataGateway gateway(
+      GlobalMetadataGateway::Config{
+          .component_catalog = &catalog,
+          .replica_runtime = &runtime,
+          .event_hub = &event_hub,
+      });
+
+  auto override_client = std::make_shared<FakeGlobalStoreClient>();
+  override_client->set_connected(true);
+  gateway.set_client_override(override_client);
+
+  REQUIRE(override_client->last_endpoint().has_value());
+  const auto& endpoint = override_client->last_endpoint().value();
+  CHECK(endpoint.node_id == identity.node_id);
+  CHECK(endpoint.grpc_port == identity.grpc_port);
+  CHECK(endpoint.p2p_port == identity.p2p_port);
+
+  constexpr size_t kBytes = 4 * 1024;
+  auto backing = std::make_shared<std::vector<uint8_t>>(kBytes, 0x3C);
+  auto data_view = std::shared_ptr<const void>(backing, static_cast<const void*>(backing->data()));
+  InlineBufferSource source{.data = data_view, .size_bytes = kBytes};
+  ReplicaConfig config{
+      .source = source,
+      .artifact_identifier = "alias_artifact",
+      .device_type = DeviceType::CPU,
+      .local_device_id = -1,
+      .pinned_buffer_pool =
+          gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{catalog.pinned_buffer_pool()},
+      .artifact_chunk_bytes = catalog.artifact_chunk_bytes(),
+      .expected_artifact_size = kBytes};
+  config.max_buffer_bytes = kBytes;
+  config.pinned_memory_timeout = std::chrono::milliseconds(0);
+
+  auto replica = runtime.get_or_create_replica("alias_artifact", config);
+  REQUIRE(replica != nullptr);
+  ReplicaKey key = MakeCpuReplicaKey("alias_artifact");
+
+  auto invalid_status = gateway.register_replica(key, "not-a-canonical-id");
+  CHECK(absl::IsInvalidArgument(invalid_status));
+
+  auto valid_status = gateway.register_replica(key, "mi2:alias-artifact");
+  CHECK(valid_status.ok());
+  REQUIRE(override_client->register_calls().size() == 1);
+  CHECK(override_client->register_calls().front().artifact_id == "mi2:alias-artifact");
+
+  CHECK_OK(gateway.upsert_key_mapping("alias-key", "mi2:alias-artifact", "/tmp/alias", absl::Seconds(30)));
+  REQUIRE(override_client->key_mapping_calls().size() == 1);
+  const auto& key_call = override_client->key_mapping_calls().front();
+  CHECK(key_call.key == "alias-key");
+  CHECK(key_call.artifact_id == "mi2:alias-artifact");
+  CHECK(key_call.disk_path == "/tmp/alias");
+  CHECK(absl::ToInt64Seconds(key_call.ttl) == 30);
+
+  CHECK_OK(gateway.unregister_replica("alias_artifact", 0));
+  REQUIRE(override_client->unregister_calls().size() == 1);
+  const auto& unregister_call = override_client->unregister_calls().front();
+  CHECK(unregister_call.artifact_id == "alias_artifact");
+  CHECK(unregister_call.worker_id == identity.worker_id);
+  REQUIRE(unregister_call.location.has_value());
+  CHECK(unregister_call.location.value() == MemoryLocation::GPU);
+  REQUIRE(unregister_call.device.has_value());
+  CHECK(unregister_call.device.value() == 0);
+
+  CHECK(runtime.clear_mem() == 0);
   catalog.shutdown();
 }

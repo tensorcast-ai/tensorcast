@@ -152,6 +152,26 @@ cc_test(
 )
 
 cc_test(
+    name = "replica_runtime_test",
+    srcs = ["replica_runtime_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":component_catalog",
+        ":replica_runtime",
+        ":runtime_event_hub",
+        "//core/store:device_types",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@abseil-cpp//absl/status:status",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
+
+cc_test(
     name = "global_metadata_gateway_test",
     srcs = ["global_metadata_gateway_test.cc"],
     tags = ["requires_cuda"],
